@@ -85,6 +85,8 @@ contracts! {
     SteerTurn, "turn/steer" => (op::SteerTurn, m::Empty) [clone],
     QueueTurn, "thread/queue/add" => (op::QueueTurn, op::QueuedTurn) [clone, op::QueueTurn::validate],
     Interrupt, "turn/interrupt" => (op::Interrupt, m::Empty) [clone],
+    ReadPermissionSettings, "host/permissions/read" => (crate::permissions::ReadPermissionSettings, crate::permissions::PermissionSettings) [clone],
+    UpdatePermissionSettings, "host/permissions/update" => (crate::permissions::UpdatePermissionSettings, crate::permissions::PermissionSettings) [clone],
     ComposerCatalog, "host/composer/catalog" => (op::LoadComposerCatalog, crate::composer::ComposerCatalog) [clone],
     ListModels, "model/list" => (op::ListModels, op::ModelPage) [clone],
     Transcribe, "host/dictation/transcribe" => (op::Transcribe, op::Transcription),

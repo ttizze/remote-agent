@@ -3,6 +3,7 @@
 
 mod codex;
 mod composer;
+mod permissions;
 pub(crate) mod routing;
 mod service;
 mod session_actor;

@@ -1,6 +1,7 @@
 //! ABI converters for wire records; the protocol crate has no UniFFI dependency.
 
 use crate::{models::*, session::*};
+use agent_protocol::permissions::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -427,4 +428,21 @@ struct RemoveRemoteHost {
 #[uniffi::remote(Record)]
 struct RevokeDevice {
     pub id: String,
+}
+
+#[uniffi::remote(Enum)]
+enum PermissionMode {
+    Ask,
+    Auto,
+    FullAccess,
+}
+#[uniffi::remote(Record)]
+struct ReadPermissionSettings {
+    pub provider: ProviderKind,
+}
+#[uniffi::remote(Record)]
+struct UpdatePermissionSettings {
+    pub provider: ProviderKind,
+    pub mode: PermissionMode,
+    pub version: String,
 }

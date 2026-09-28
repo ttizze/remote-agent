@@ -2,6 +2,7 @@ mod composer;
 mod conversation;
 mod media;
 mod model_settings;
+mod permissions;
 mod settings;
 mod sidebar;
 mod workbench;

@@ -589,6 +589,7 @@ fn publish_locked(
 ) -> (Vec<Effect>, bool) {
     // No `..`: adding a Snapshot field must update the publication contract.
     let Snapshot {
+        permission_settings,
         composer_catalog,
         host_name,
         storage_scope,
@@ -619,6 +620,7 @@ fn publish_locked(
         _ => false,
     };
     if current.host_name == *host_name
+        && current.permission_settings == *permission_settings
         && current.composer_catalog == *composer_catalog
         && current.storage_scope == *storage_scope
         && Arc::ptr_eq(&current.archived_scopes, archived_scopes)
@@ -1190,6 +1192,14 @@ mod tests {
     fn every_snapshot_field_notifies_subscribers_independently() {
         type Change = fn(&mut Snapshot);
         let changes: &[(&str, Change)] = &[
+            ("permission_settings", |snapshot| {
+                snapshot.permission_settings = Some(Arc::new(
+                    crate::state::operations::PermissionSettingsState {
+                        provider: agent_protocol::session::ProviderKind::Codex,
+                        result: None,
+                    },
+                ));
+            }),
             ("account", |snapshot| snapshot.account = Arc::default()),
             ("terminals", |snapshot| snapshot.terminals = Arc::default()),
             ("conversations", |snapshot| {

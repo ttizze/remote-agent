@@ -144,6 +144,8 @@ pub struct TerminalView {
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
     #[serde(skip)]
+    pub permission_settings: Option<Arc<op::PermissionSettingsState>>,
+    #[serde(skip)]
     pub composer_catalog: Option<Arc<agent_protocol::composer::ComposerCatalog>>,
     #[serde(skip)]
     pub host_name: Option<String>,
@@ -282,6 +284,7 @@ macro_rules! prepare_operations {
 fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     prepare_operations!(intent, previous, next, [
+        ReadPermissionSettings, UpdatePermissionSettings,
         ListAccounts, SelectAccount, SelectAccountForDraft, LogoutAccount, StartAccountLogin,
         ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkThread,
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
@@ -693,6 +696,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
 /// Pending submissions are persisted only to recover dictation after a crash.
 fn reset_session(snapshot: &mut Snapshot) {
     snapshot.composer_catalog = None;
+    snapshot.permission_settings = None;
     snapshot.subscriptions = Arc::default();
     for thread in Arc::make_mut(&mut snapshot.conversations).values_mut() {
         if !thread.requests.is_empty() || !thread.submissions.is_empty() {

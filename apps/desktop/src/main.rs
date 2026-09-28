@@ -27,6 +27,7 @@ impl AssetSource for DesktopAssets {
             "bex/anthropic.svg" => include_bytes!(
                 "../../mobile/iosApp/Bex/Assets.xcassets/anthropic.imageset/anthropic.svg"
             ),
+            "bex/shield.svg" => include_bytes!("../assets/shield.svg"),
             "bex/bolt.svg" => include_bytes!("../assets/bolt.svg"),
             "bex/microphone.svg" => include_bytes!("../assets/microphone.svg"),
             "bex/merge.svg" => include_bytes!("../assets/merge.svg"),
@@ -43,6 +44,7 @@ impl AssetSource for DesktopAssets {
             [
                 "bex/openai.svg",
                 "bex/anthropic.svg",
+                "bex/shield.svg",
                 "bex/bolt.svg",
                 "bex/microphone.svg",
                 "bex/stop.svg",

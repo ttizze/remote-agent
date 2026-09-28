@@ -25,6 +25,8 @@ macro_rules! rpc_operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    ReadPermissionSettings(ReadPermissionSettings),
+    UpdatePermissionSettings(UpdatePermissionSettings),
     ListAccounts(ListAccounts),
     SelectAccount(SelectAccount),
     SelectAccountForDraft(SelectAccountForDraft),
@@ -195,6 +197,8 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     }
 }
 
+mod permissions;
+pub use permissions::*;
 mod composer;
 pub use composer::*;
 mod accounts;

@@ -5,6 +5,7 @@
 pub mod diff;
 pub mod error;
 pub mod model_settings;
+pub mod permissions;
 
 use crate::models::{Item, Turn};
 use serde::Serialize;

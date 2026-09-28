@@ -95,6 +95,7 @@ results! {
     Opened(crate::session::OpenedSession), Item(crate::operations::ItemResponse),
     Thread(crate::models::ThreadResponse), Threads(crate::models::ThreadList),
     ComposerCatalog(crate::composer::ComposerCatalog),
+    PermissionSettings(crate::permissions::PermissionSettings),
     Models(crate::operations::ModelPage), WorktreeSettings(crate::models::WorktreeSettings),
     Worktrees(Vec<crate::models::Worktree>), Review(crate::models::WorkspaceReview),
     Session(crate::session::SessionRef), Empty(crate::models::Empty),

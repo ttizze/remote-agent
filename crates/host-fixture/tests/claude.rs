@@ -1561,3 +1561,46 @@ async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
     endpoint.close().await;
     fixture.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn permission_settings_edit_native_claude_defaults_without_own_storage() {
+    use agent_protocol::{permissions::*, session::ProviderKind};
+    let root = tempfile::tempdir().unwrap();
+    let memory = Arc::new(Memory::default());
+    let fixture = host(root.path(), memory.clone(), fixture_program()).await;
+    let local = fixture.local().await.unwrap();
+    let read = ReadPermissionSettings {
+        provider: ProviderKind::Claude,
+    };
+    let mut settings = local.peer.call(&read).await.unwrap();
+    assert_eq!(settings.mode, None);
+    let path = root.path().join("claude-native/settings.json");
+    for (mode, native_mode) in [
+        (PermissionMode::FullAccess, "bypassPermissions"),
+        (PermissionMode::Ask, "default"),
+        (PermissionMode::Auto, "auto"),
+    ] {
+        settings = local
+            .peer
+            .call(&UpdatePermissionSettings {
+                provider: read.provider,
+                mode,
+                version: settings.version,
+            })
+            .await
+            .unwrap();
+        assert_eq!(settings.mode, Some(mode));
+        let native: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(native, json!({"permissions":{"defaultMode":native_mode}}));
+    }
+    local.endpoint.close().await;
+    fixture.close().await.unwrap();
+    let restarted = host(root.path(), memory, fixture_program()).await;
+    let local = restarted.local().await.unwrap();
+    assert_eq!(
+        local.peer.call(&read).await.unwrap().mode,
+        Some(PermissionMode::Auto)
+    );
+    local.endpoint.close().await;
+    restarted.close().await.unwrap();
+}

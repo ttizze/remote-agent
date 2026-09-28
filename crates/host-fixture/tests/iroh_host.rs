@@ -3027,3 +3027,68 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
     .await
     .expect("Host submission routing stalled");
 }
+
+#[tokio::test]
+async fn permission_settings_edit_native_codex_defaults_and_detect_external_changes() {
+    use agent_protocol::{permissions::*, session::ProviderKind};
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("fixture-native-config.json");
+    std::fs::write(&path, r#"{"model":"preserve-me","approval_policy":"on-request","sandbox_mode":"workspace-write"}"#).unwrap();
+    let fixture = start_host(root.path()).await;
+    let local = fixture.local().await.unwrap();
+    let read = ReadPermissionSettings {
+        provider: ProviderKind::Codex,
+    };
+    let mut settings = local.peer.call(&read).await.unwrap();
+    assert_eq!(settings.mode, Some(PermissionMode::Ask));
+    for (mode, approval, reviewer, sandbox) in [
+        (
+            PermissionMode::Auto,
+            "on-request",
+            "auto_review",
+            "workspace-write",
+        ),
+        (
+            PermissionMode::FullAccess,
+            "never",
+            "user",
+            "danger-full-access",
+        ),
+        (PermissionMode::Ask, "on-request", "user", "workspace-write"),
+    ] {
+        settings = local
+            .peer
+            .call(&UpdatePermissionSettings {
+                provider: read.provider,
+                mode,
+                version: settings.version,
+            })
+            .await
+            .unwrap();
+        assert_eq!(settings.mode, Some(mode));
+        let native: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            native,
+            json!({"model":"preserve-me","approval_policy":approval,"approvals_reviewer":reviewer,"sandbox_mode":sandbox})
+        );
+    }
+    std::fs::write(
+        &path,
+        r#"{"approval_policy":"untrusted","sandbox_mode":"read-only"}"#,
+    )
+    .unwrap();
+    assert!(
+        local
+            .peer
+            .call(&UpdatePermissionSettings {
+                provider: read.provider,
+                mode: PermissionMode::FullAccess,
+                version: settings.version
+            })
+            .await
+            .is_err()
+    );
+    assert_eq!(local.peer.call(&read).await.unwrap().mode, None);
+    local.endpoint.close().await;
+    fixture.close().await.unwrap();
+}

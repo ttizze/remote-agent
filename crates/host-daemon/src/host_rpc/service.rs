@@ -1,3 +1,4 @@
+use agent_protocol::session::ProviderKind;
 use anyhow::Context;
 use std::sync::{Arc, OnceLock};
 
@@ -123,6 +124,7 @@ struct ServiceInner {
     files: crate::workspace_files::WorkspaceFiles,
     worktrees: crate::worktrees::Worktrees,
     worktree_access: tokio::sync::RwLock<()>,
+    permission_settings_access: tokio::sync::Mutex<()>,
     terminals: crate::terminals::Terminals,
     dictation: crate::dictation::Dictation,
 }
@@ -142,6 +144,7 @@ impl HostRpcService {
                 codex: super::codex::Codex::new(codex),
                 worktrees: crate::worktrees::Worktrees::new(projects.path()),
                 worktree_access: tokio::sync::RwLock::new(()),
+                permission_settings_access: Default::default(),
                 terminals: Default::default(),
                 projects,
                 project_creation: Default::default(),
@@ -845,6 +848,45 @@ impl HostRpcService {
             ));
         }
         let response = match request {
+            Call::ReadPermissionSettings(params) => {
+                let _guard = self.inner.permission_settings_access.lock().await;
+                match params.provider {
+                    ProviderKind::Codex => self.inner.codex.read_permissions().await?,
+                    ProviderKind::Claude => super::permissions::read_claude_permissions(
+                        self.inner
+                            .claude
+                            .get()
+                            .ok_or_else(|| {
+                                Failure::new("claude_unavailable", "Claude が設定されていません。")
+                            })?
+                            .storage_directory(),
+                    )?,
+                }
+                .into()
+            }
+            Call::UpdatePermissionSettings(params) => {
+                let _guard = self.inner.permission_settings_access.lock().await;
+                match params.provider {
+                    ProviderKind::Codex => {
+                        self.inner
+                            .codex
+                            .update_permissions(params.mode, &params.version)
+                            .await?
+                    }
+                    ProviderKind::Claude => super::permissions::update_claude_permissions(
+                        self.inner
+                            .claude
+                            .get()
+                            .ok_or_else(|| {
+                                Failure::new("claude_unavailable", "Claude が設定されていません。")
+                            })?
+                            .storage_directory(),
+                        params.mode,
+                        &params.version,
+                    )?,
+                }
+                .into()
+            }
             Call::ComposerCatalog(params) => {
                 self.inner.codex.composer_catalog(&params.cwd).await.into()
             }

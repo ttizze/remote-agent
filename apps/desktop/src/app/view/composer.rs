@@ -371,6 +371,7 @@ impl Desktop {
                                 cx,
                                 |s, _, _| s.attach(),
                             )
+                            .debug_selector(|| "attach".into())
                             .w(px(40.))
                             .h(px(40.))
                             .large()
@@ -382,6 +383,7 @@ impl Desktop {
                                     || phase.is_some(),
                             ),
                         )
+                        .child(self.permission_menu(cx))
                         .child(div().flex_1())
                         .child(self.fast_control(cx))
                         .child(self.model_menu(cx))

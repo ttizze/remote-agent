@@ -337,6 +337,26 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                         {"id":"blocked@local","name":"blocked","installed":true,"enabled":true,"availability":"DISABLED_BY_ADMIN","interface":null}
                     ]}],"marketplaceLoadErrors":[]}))?;
                 }
+                "config/read" | "config/batchWrite" => {
+                    let path = context.home.join("fixture-native-config.json");
+                    let bytes = fs::read_to_string(&path).unwrap_or_else(|_| "{}".into());
+                    let mut config: Value = serde_json::from_str(&bytes)?;
+                    if method == "config/read" {
+                        context.respond(id, &json!({"config":config,"origins":{},"layers":[{
+                            "name":{"type":"user","file":path},"config":config,"version":bytes
+                        }]}))?;
+                    } else if params["expectedVersion"] != bytes || params["filePath"] != json!(path) || params["reloadUserConfig"] != false {
+                        context.error(id, -32602, "incorrect config write preconditions")?;
+                    } else {
+                        for edit in params["edits"].as_array().unwrap() {
+                            assert_eq!(edit["mergeStrategy"], "replace");
+                            config[edit["keyPath"].as_str().unwrap()] = edit["value"].clone();
+                        }
+                        let bytes = serde_json::to_string(&config)?;
+                        fs::write(&path, &bytes)?;
+                        context.respond(id, &json!({"filePath":path,"version":bytes,"status":"ok"}))?;
+                    }
+                }
                 "model/list" => {
                     let models = json!([{"id":"fixture-model","model":"fixture-model","displayName":"Fixture Model",
                             "defaultServiceTier":"default","serviceTiers":[{"id":"priority","name":"高速"}],
