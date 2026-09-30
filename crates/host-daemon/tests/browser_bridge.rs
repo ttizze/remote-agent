@@ -79,7 +79,7 @@ async fn installed_codex_exposes_the_same_browser_as_the_phone() {
     let server = codex_app_server::CodexAppServer::spawn(codex_app_server::AppServerConfig {
         program: std::env::var_os("BEX_CODEX_TEST_PROGRAM")
             .map(PathBuf::from)
-            .unwrap_or_else(|| "/Applications/ChatGPT.app/Contents/Resources/codex".into()),
+            .unwrap_or_else(|| codex_app_server::AppServerConfig::default().program),
         codex_home: Some(root.path().join("codex")),
         ..Default::default()
     })

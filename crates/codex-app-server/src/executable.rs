@@ -88,7 +88,9 @@ mod tests {
     #[test]
     fn resolves_explicit_then_bundled_then_path_and_reports_missing_candidates() {
         let root = tempfile::tempdir().unwrap();
-        let bundled = root.path().join("ChatGPT.app/Contents/Resources/codex");
+        let bundled = root
+            .path()
+            .join("ChatGPT.app/Contents/Resources/codex-cli/bin/codex");
         let path_directory = root.path().join("path");
         let explicit = root.path().join(executable_path(Path::new("custom-codex")));
         fs::create_dir_all(bundled.parent().unwrap()).unwrap();
