@@ -784,6 +784,12 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                     let fixture = start_host(&root).await;
                     let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
                     let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), None).await.unwrap();
+                    // Compare submission effects after asynchronous model defaults
+                    // have loaded, so catalog normalization cannot change the draft.
+                    let mut updates = store.subscribe();
+                    while updates.borrow_and_update().models.is_empty() {
+                        updates.changed().await.unwrap();
+                    }
                     store.dispatch(Intent::NewChat { cwd: if project { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
                     let mut thread_id = None;
                     let mut session_cwd = None;
