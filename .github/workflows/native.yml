@@ -64,6 +64,7 @@ jobs:
       - name: Check Android and build app and test APKs
         env:
           GRADLE_USER_HOME: ${{ runner.temp }}/gradle
+          ANDROID_USER_HOME: ${{ runner.temp }}/android
         run: >-
           nix develop . --command ./gradlew
           :apps:mobile:ktfmtCheck :apps:mobile:detekt
