@@ -354,3 +354,9 @@ assertion による検出には数えない。隔離された Host 監査では�
 通常の protocol/core テストには proptest を含む。core の state 27 件、Store 46 件と別途実行した
 120 秒の実転送テスト、Host service 10 件、Claude の unit test 4 件、Claude の結合テスト 17 件、
 iroh Host の結合テスト 35 件が成功し、影響する全 target の Clippy も成功した。
+
+
+カタログ entry の ID と送信用 ModelRef の ID は native 側で別の値を持てるため、両方を保持する。
+ページ統合は (provider, catalog ID) で更新し、別 provider の同じ catalog ID と、同じ送信用 model の
+別 alias entry を取りこぼさない。実際の Store の二ページ取得で三 entry の保持と更新を検証した。
+表示側は core の provider ごとの結果を使うため、独自の重複排除や ID の推測を追加しない。

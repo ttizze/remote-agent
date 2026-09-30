@@ -70,7 +70,9 @@ impl ClientExt for Client {
                 provider_errors.extend(errors);
             }
             for model in page.data {
-                if let Some(index) = models.iter().position(|previous| previous.id == model.id) {
+                if let Some(index) = models.iter().position(|previous| {
+                    previous.id == model.id && previous.model.provider == model.model.provider
+                }) {
                     models[index] = model;
                 } else {
                     models.push(model);

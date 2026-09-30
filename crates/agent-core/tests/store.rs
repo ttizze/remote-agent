@@ -3363,3 +3363,53 @@ fn item_text(item: &agent_protocol::items::Item) -> Option<&str> {
         _ => None,
     }
 }
+
+#[tokio::test]
+async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries() {
+    let (store, mut reader, writer) = connected(Snapshot::default()).await;
+    let mut pending = BTreeMap::new();
+    for _ in 0..3 {
+        let request = read(&mut reader).await;
+        pending.insert(request["method"].as_str().unwrap().to_owned(), request);
+    }
+    writer.reply(&pending["host/session/list"],json!({"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
+    writer
+        .reply(
+            &pending["host/account/list"],
+            json!({"result":{"accounts":[]}}),
+        )
+        .await
+        .unwrap();
+    let model = |provider: &str, id: &str, title: &str| json!({"id":id,"model":{"provider":provider,"id":"same-native-model"},"displayName":title,"defaultReasoningEffort":"","supportedReasoningEfforts":[],"isDefault":false});
+    writer.reply(&pending["model/list"],json!({"result":{"data":[model("codex","shared-entry","Original Codex"),model("claude","shared-entry","Claude")],"nextCursor":"next"}})).await.unwrap();
+    let next = read(&mut reader).await;
+    assert_eq!(next["method"], "model/list");
+    assert_eq!(next["params"]["cursor"], "next");
+    writer.reply(&next,json!({"result":{"data":[model("codex","shared-entry","Updated Codex"),model("codex","alias-entry","Codex alias")],"nextCursor":null}})).await.unwrap();
+    wait_for(&store, |state| {
+        state
+            .models
+            .iter()
+            .any(|model| model.display_name == "Updated Codex")
+    })
+    .await;
+    let state = store.snapshot();
+    assert_eq!(state.models.len(), 3);
+    assert_eq!(
+        state
+            .models
+            .iter()
+            .map(|model| (
+                model.model.provider,
+                model.id.as_str(),
+                model.display_name.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (ProviderKind::Codex, "shared-entry", "Updated Codex"),
+            (ProviderKind::Claude, "shared-entry", "Claude"),
+            (ProviderKind::Codex, "alias-entry", "Codex alias"),
+        ]
+    );
+    store.close().await.unwrap();
+}
