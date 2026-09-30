@@ -205,15 +205,15 @@ impl Desktop {
             initial: (source, encoded),
             selected: None,
             list: ListState::new(0, ListAlignment::Top, px(160.)),
-            loading: !self.selected().is_empty(),
+            loading: !self.selected().is_none(),
             saving: false,
             saved: false,
             error: String::new(),
         });
-        if !self.selected().is_empty() {
+        if !self.selected().is_none() {
             self.perform(
                 Intent::LoadSessionImages(op::LoadSessionImages {
-                    thread_id: self.selected().into(),
+                    thread_id: self.selected().expect("selected conversation").clone(),
                 }),
                 OperationCompletion::Gallery(id),
             );

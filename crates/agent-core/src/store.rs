@@ -21,10 +21,10 @@ pub enum Outcome {
     #[default]
     Applied,
     StartedThread {
-        id: String,
+        id: crate::session::SessionRef,
     },
     Submitted {
-        turn_id: Option<String>,
+        turn_id: Option<agent_protocol::ids::TurnId>,
     },
     RemoteHostPaired {
         id: String,
@@ -155,7 +155,7 @@ struct Completed {
     delivery_attempted: bool,
     epoch: u64,
     result: Result<Applied, PeerError>,
-    failed_submission: Option<String>,
+    failed_submission: Option<agent_protocol::ids::ClientInputId>,
     terminal: Option<String>,
     complete: Option<Receipt>,
 }
@@ -349,7 +349,7 @@ impl Store {
                 if let Some(id) = &snapshot.navigation.thread_id {
                     drop(self.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone()))));
                 }
-                drop(self.dispatch(Intent::ListThreads(op::ListThreads::new(
+                drop(self.dispatch(Intent::ListSessions(op::ListSessions::new(
                     (*snapshot.list_query).clone(),
                 ))));
                 drop(self.dispatch(Intent::LoadModels(op::LoadModels {})));
@@ -600,7 +600,6 @@ fn publish_locked(
         threads,
         models,
         model_errors,
-        requests,
         drafts,
         pending_submissions,
         file_drafts,
@@ -631,7 +630,6 @@ fn publish_locked(
         && same_threads
         && Arc::ptr_eq(&current.models, models)
         && Arc::ptr_eq(&current.model_errors, model_errors)
-        && Arc::ptr_eq(&current.requests, requests)
         && Arc::ptr_eq(&current.drafts, drafts)
         && Arc::ptr_eq(&current.pending_submissions, pending_submissions)
         && Arc::ptr_eq(&current.file_drafts, file_drafts)
@@ -1059,7 +1057,10 @@ async fn perform(
 ) -> Completed {
     let item_read = effect.0.item_read().cloned();
     let terminal = effect.0.terminal_handle().map(str::to_owned);
-    let failed_submission = effect.0.submission_id().map(str::to_owned);
+    let failed_submission = effect
+        .0
+        .submission_id()
+        .map(agent_protocol::ids::ClientInputId::from);
     let mut subscriptions = Vec::new();
     let result = async {
         let client =
@@ -1206,7 +1207,6 @@ mod tests {
                 snapshot.conversations = Arc::default()
             }),
             ("models", |snapshot| snapshot.models = Arc::default()),
-            ("requests", |snapshot| snapshot.requests = Arc::default()),
             ("drafts", |snapshot| snapshot.drafts = Arc::default()),
             ("pending_submissions", |snapshot| {
                 snapshot.pending_submissions = Arc::default()

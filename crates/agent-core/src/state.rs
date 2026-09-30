@@ -3,7 +3,7 @@ use crate::models::{
     FileContent, FileList, HostStatus, Invitation, Item, ListQuery, Model, RemoteHost, Thread,
     ThreadList, WorkspaceReview, WorktreeSettings,
 };
-use agent_protocol::operations::{Answer, ServerRequest};
+use agent_protocol::requests::{Answer, Request};
 use operations as op;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -19,7 +19,7 @@ pub struct Draft {
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub invocations: Vec<agent_protocol::composer::Invocation>,
-    pub model: Option<String>,
+    pub model: Option<crate::models::ModelRef>,
     pub effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
@@ -47,18 +47,56 @@ pub struct Workspace {
     pub settings: Option<Arc<WorktreeSettings>>,
     pub worktrees: Option<Arc<Vec<crate::models::Worktree>>>,
 }
+/// New drafts have a local identity; existing drafts use the complete session identity.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum DraftKey {
+    Session { session: crate::session::SessionRef },
+    Local { key: String },
+}
+impl Default for DraftKey {
+    fn default() -> Self {
+        Self::Local { key: String::new() }
+    }
+}
+impl From<String> for DraftKey {
+    fn from(key: String) -> Self {
+        Self::Local { key }
+    }
+}
+impl From<&str> for DraftKey {
+    fn from(value: &str) -> Self {
+        Self::from(value.to_owned())
+    }
+}
+impl From<crate::session::SessionRef> for DraftKey {
+    fn from(session: crate::session::SessionRef) -> Self {
+        Self::Session { session }
+    }
+}
+impl From<&crate::session::SessionRef> for DraftKey {
+    fn from(value: &crate::session::SessionRef) -> Self {
+        Self::from(value.clone())
+    }
+}
+impl DraftKey {
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Local { key } if key.is_empty())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Navigation {
-    pub thread_id: Option<String>,
+    pub thread_id: Option<crate::session::SessionRef>,
     pub cwd: String,
-    pub draft_key: String,
+    pub draft_key: DraftKey,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Activity {
     #[serde(skip)]
-    pub active: BTreeMap<String, bool>,
-    pub unread: BTreeSet<String>,
+    pub active: BTreeMap<crate::session::SessionRef, bool>,
+    pub unread: BTreeSet<crate::session::SessionRef>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HostManagement {
@@ -76,10 +114,10 @@ pub struct AccountState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingSubmission {
     pub sequence: u64,
-    pub draft_key: String,
+    pub draft_key: DraftKey,
     pub draft: Arc<Draft>,
-    pub turn_id: Option<String>,
-    pub after_item_id: Option<String>,
+    pub turn_id: Option<agent_protocol::ids::TurnId>,
+    pub after_item_id: Option<agent_protocol::ids::ItemId>,
     pub accepted: bool,
     pub delivery_unknown: bool,
 }
@@ -156,17 +194,18 @@ pub struct Snapshot {
     #[serde(skip)]
     pub terminals: Arc<BTreeMap<String, Arc<Terminal>>>,
     #[serde(default)]
-    pub conversations: Arc<BTreeMap<String, Arc<Thread>>>,
+    #[serde(with = "crate::persistence::entries")]
+    pub conversations: Arc<BTreeMap<crate::session::SessionRef, Arc<Thread>>>,
     #[serde(default)]
     pub threads: Option<Arc<ThreadList>>,
     #[serde(default)]
     pub models: Arc<Vec<Model>>,
     #[serde(default)]
     pub model_errors: Arc<Map<String, Value>>,
-    #[serde(skip)]
-    pub requests: Arc<BTreeMap<String, Arc<ServerRequest>>>,
-    pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
-    pub pending_submissions: Arc<BTreeMap<String, Arc<PendingSubmission>>>,
+    #[serde(with = "crate::persistence::entries")]
+    pub drafts: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
+    pub pending_submissions:
+        Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     pub file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
     #[serde(default)]
     pub workspace: Arc<Workspace>,
@@ -181,10 +220,24 @@ pub struct Snapshot {
     #[serde(skip)]
     pub connected: bool,
     #[serde(skip)]
-    pub subscriptions: Arc<BTreeMap<String, uuid::Uuid>>,
+    pub subscriptions: Arc<BTreeMap<crate::session::SessionRef, uuid::Uuid>>,
     #[serde(skip)]
     pub error: Option<String>,
 }
+impl Snapshot {
+    pub fn requests(&self) -> impl Iterator<Item = &Arc<Request>> {
+        self.conversations
+            .values()
+            .flat_map(|thread| thread.requests.values())
+    }
+
+    pub fn request(&self, id: &str) -> Option<&Arc<Request>> {
+        self.conversations
+            .values()
+            .find_map(|thread| thread.requests.get(id))
+    }
+}
+
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
     pub fn terminal_view(&self, handle: String) -> Option<TerminalView> {
@@ -231,8 +284,10 @@ use operations::add_attachment;
 /// it separate prevents storage switches from deleting or mixing user drafts.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScopedData {
-    pub drafts: Arc<BTreeMap<String, Arc<Draft>>>,
-    pub pending_submissions: Arc<BTreeMap<String, Arc<PendingSubmission>>>,
+    #[serde(with = "crate::persistence::entries")]
+    pub drafts: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
+    pub pending_submissions:
+        Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     pub file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
     pub navigation: Arc<Navigation>,
     pub activity: Arc<Activity>,
@@ -243,8 +298,8 @@ pub enum Event {
     StorageScope(String),
     TerminalFailed { handle: String, reason: String },
     Intent(Intent),
-    SubmissionFailed(String),
-    SubmissionUnknown(String),
+    SubmissionFailed(agent_protocol::ids::ClientInputId),
+    SubmissionUnknown(agent_protocol::ids::ClientInputId),
 
     Notification(crate::protocol::Notification),
     SessionUpdate(Box<crate::session::SessionUpdate>),
@@ -286,11 +341,11 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     prepare_operations!(intent, previous, next, [
         ReadPermissionSettings, UpdatePermissionSettings,
         ListAccounts, SelectAccount, SelectAccountForDraft, LogoutAccount, StartAccountLogin,
-        ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkThread,
+        ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkSession,
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
-        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListThreads, AddProject, StartThread,
+        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListSessions, AddProject, CreateSession,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
@@ -325,6 +380,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             let thread_id = thread_id.or_else(|| previous.navigation.thread_id.clone());
             let draft_key = thread_id
                 .clone()
+                .map(DraftKey::from)
                 .unwrap_or_else(|| previous.navigation.draft_key.clone());
             let draft = previous.drafts.get(&draft_key).cloned().unwrap_or_default();
             return submission(
@@ -375,7 +431,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 query.project_thread_limits.entry(id).or_insert(5)
             } else if projects { &mut query.project_limit } else { &mut query.chat_limit };
             *limit = limit.saturating_add(10);
-            return prepare(previous, next, operations::ListThreads { query });
+            return prepare(previous, next, operations::ListSessions { query });
         }
 
         Intent::ShowThreadList => {
@@ -385,12 +441,12 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         }
         Intent::NewChat { cwd } => {
             next.epoch += 1;
-            let key = format!("new:{cwd}");
+            let key = DraftKey::Local { key: cwd.clone() };
             if !previous.drafts.contains_key(&key) {
                 let draft = Draft::default();
                 let (model, effort, tier) = supported_settings(&draft, &previous.models, &previous.model_errors);
                 let draft = Draft {
-                    model: model.map(str::to_owned),
+                    model: model.cloned(),
                     effort: effort.map(str::to_owned),
                     service_tier: tier.map(str::to_owned),
                     ..draft
@@ -471,7 +527,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 .unwrap_or_default();
             let thread_id = match intent {
                 Intent::SelectModel { thread_id, model } => {
-                    if draft.model.as_deref() != Some(&model) {
+                    if draft.model.as_ref() != Some(&model) {
                         draft.effort = None;
                         draft.service_tier = None;
                     }
@@ -494,7 +550,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             if !previous.models.is_empty() {
                 let (model, effort, tier) = supported_settings(&draft, &previous.models, &previous.model_errors);
                 let settings = (
-                    model.map(str::to_owned),
+                    model.cloned(),
                     effort.map(str::to_owned),
                     tier.map(str::to_owned),
                 );
@@ -511,7 +567,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     });
     (next, Vec::new())
 }
-fn set_draft_text(snapshot: &mut Snapshot, thread_id: String, text: String) {
+fn set_draft_text(snapshot: &mut Snapshot, thread_id: DraftKey, text: String) {
     if snapshot
         .drafts
         .get(&thread_id)
@@ -650,7 +706,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             next.error = None;
             next.list_query = Arc::new((*next.list_query).clone().for_connection());
             let mut effects = vec![
-                Effect::execute(op::ListThreads::new((*next.list_query).clone())),
+                Effect::execute(op::ListSessions::new((*next.list_query).clone())),
                 Effect::execute(op::LoadModels {}),
                 Effect::execute(op::ListAccounts {}),
             ];
@@ -673,7 +729,6 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         Event::Disconnected(reason) => {
             reset_session(&mut next);
             next.connected = false;
-            next.requests = Arc::default();
             for terminal in Arc::make_mut(&mut next.terminals).values_mut() {
                 if matches!(
                     terminal.phase,
@@ -705,9 +760,6 @@ fn reset_session(snapshot: &mut Snapshot) {
             thread.submissions.clear();
         }
     }
-    if !snapshot.requests.is_empty() {
-        snapshot.requests = Arc::default();
-    }
     if !snapshot.activity.active.is_empty() {
         Arc::make_mut(&mut snapshot.activity).active.clear();
     }
@@ -735,27 +787,20 @@ fn reset_session(snapshot: &mut Snapshot) {
     }
 }
 fn has_session_status(thread: &Thread) -> bool {
-    thread
-        .status
-        .as_ref()
-        .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::Active)
+    thread.status == crate::models::SessionStatus::Running
         || thread
             .turns
             .iter()
             .flatten()
-            .any(|turn| turn.status.as_deref() == Some("inProgress"))
+            .any(|turn| turn.status == agent_protocol::execution::TurnStatus::Running)
 }
 fn clear_session_status(thread: &mut Thread) {
-    if thread
-        .status
-        .as_ref()
-        .is_some_and(|status| status.kind == crate::models::ThreadStatusKind::Active)
-    {
-        thread.status = None;
+    if thread.status == crate::models::SessionStatus::Running {
+        thread.status = crate::models::SessionStatus::Unknown;
     }
     for turn in thread.turns.iter_mut().flatten() {
-        if turn.status.as_deref() == Some("inProgress") {
-            Arc::make_mut(turn).status = None;
+        if turn.status == agent_protocol::execution::TurnStatus::Running {
+            Arc::make_mut(turn).status = crate::models::TurnStatus::Unknown;
         }
     }
 }
@@ -764,31 +809,35 @@ fn supported_settings<'a>(
     draft: &'a Draft,
     models: &'a [Model],
     errors: &Map<String, Value>,
-) -> (Option<&'a str>, Option<&'a str>, Option<&'a str>) {
+) -> (
+    Option<&'a crate::models::ModelRef>,
+    Option<&'a str>,
+    Option<&'a str>,
+) {
     // Absence in an incomplete catalog is not evidence that a saved choice was removed.
     if !errors.is_empty()
         && draft.model.is_some()
         && !models
             .iter()
-            .any(|model| Some(model.model.as_str()) == draft.model.as_deref())
+            .any(|model| Some(&model.model) == draft.model.as_ref())
     {
         return (
-            draft.model.as_deref(),
+            draft.model.as_ref(),
             draft.effort.as_deref(),
             draft.service_tier.as_deref(),
         );
     }
     let provider = draft
         .model
-        .as_deref()
-        .filter(|model| !model.is_empty())
-        .map(crate::models::model_provider);
-    let mut available = models.iter().filter(|model| {
-        provider.is_none_or(|provider| crate::models::model_provider(&model.model) == provider)
-    });
+        .as_ref()
+        .filter(|model| !model.id.is_empty())
+        .map(|model| model.provider);
+    let mut available = models
+        .iter()
+        .filter(|model| provider.is_none_or(|provider| model.model.provider == provider));
     let model = available
         .clone()
-        .find(|model| Some(model.model.as_str()) == draft.model.as_deref())
+        .find(|model| Some(&model.model) == draft.model.as_ref())
         .or_else(|| {
             available
                 .clone()
@@ -796,9 +845,9 @@ fn supported_settings<'a>(
         })
         .or_else(|| available.next());
     let Some(model) = model else {
-        return (draft.model.as_deref(), None, None);
+        return (draft.model.as_ref(), None, None);
     };
-    let changed = draft.model.as_deref() != Some(&model.model);
+    let changed = draft.model.as_ref() != Some(&model.model);
     let effort = model
         .supported_reasoning_efforts
         .iter()
@@ -837,27 +886,9 @@ fn supported_settings<'a>(
     )
 }
 
-/// Immutable lookup projection for native panels. Session.requests owns the
-/// state; this index only shares its request Arcs and is never persisted.
-fn project_requests(snapshot: &mut Snapshot) {
-    let requests: BTreeMap<_, _> = snapshot
-        .conversations
-        .values()
-        .flat_map(|thread| {
-            thread
-                .requests
-                .iter()
-                .map(|(id, request)| (id.clone(), request.clone()))
-        })
-        .collect();
-    if *snapshot.requests != requests {
-        snapshot.requests = Arc::new(requests);
-    }
-}
-
-fn shared_mut<'a, T: Clone>(
-    values: &'a mut Arc<BTreeMap<String, Arc<T>>>,
-    key: &str,
+fn shared_mut<'a, K: Ord + Clone + std::borrow::Borrow<Q>, Q: Ord + ?Sized, T: Clone>(
+    values: &'a mut Arc<BTreeMap<K, Arc<T>>>,
+    key: &Q,
 ) -> Option<&'a mut T> {
     if !values.contains_key(key) {
         return None;
@@ -865,19 +896,24 @@ fn shared_mut<'a, T: Clone>(
     Arc::make_mut(values).get_mut(key).map(Arc::make_mut)
 }
 
-fn upsert_item(previous: &Snapshot, thread_id: &str, turn_id: &str, item: Item) -> Snapshot {
+fn upsert_item(
+    previous: &Snapshot,
+    thread_id: &crate::session::SessionRef,
+    turn_id: &agent_protocol::ids::TurnId,
+    item: Item,
+) -> Snapshot {
     let mut next = previous.clone();
     if let Some(thread) = previous.conversations.get(thread_id) {
         match (crate::session::SessionChange::Item {
-            turn_id: turn_id.into(),
+            turn_id: turn_id.clone(),
             item: item.into(),
         })
         .apply(thread)
         {
             Ok(thread) => {
-                Arc::make_mut(&mut next.conversations).insert(thread_id.into(), Arc::new(thread));
+                Arc::make_mut(&mut next.conversations).insert(thread_id.clone(), Arc::new(thread));
             }
-            Err(error) => next.error = Some(error.into()),
+            Err(error) => next.error = Some(error.to_string()),
         }
     }
     next
@@ -885,10 +921,10 @@ fn upsert_item(previous: &Snapshot, thread_id: &str, turn_id: &str, item: Item) 
 
 fn submission(
     previous: &Snapshot,
-    thread_id: Option<String>,
-    draft_key: String,
+    thread_id: Option<crate::session::SessionRef>,
+    draft_key: DraftKey,
     draft: Arc<Draft>,
-    client_user_message_id: String,
+    client_user_message_id: agent_protocol::ids::ClientInputId,
     clear_draft: Option<Arc<Draft>>,
 ) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
@@ -939,6 +975,10 @@ fn submission(
             draft,
         }),
         None => Effect::execute(op::StartSubmission {
+            provider: crate::presentation::model_settings::draft_provider(
+                &draft_key,
+                draft.model.as_ref(),
+            ),
             draft_key,
             cwd: (!previous.navigation.cwd.trim().is_empty())
                 .then(|| previous.navigation.cwd.clone()),
@@ -960,7 +1000,7 @@ fn append_transcript(text: &mut String, transcript: &str) {
     text.push_str(transcript);
 }
 
-fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &str) {
+fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &crate::session::SessionRef) {
     if snapshot.pending_submissions.is_empty() {
         return;
     }
@@ -970,7 +1010,7 @@ fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &str) {
     let deliveries: Vec<_> = snapshot
         .pending_submissions
         .iter()
-        .filter(|(_, pending)| pending.draft_key == thread_id)
+        .filter(|(_, pending)| pending.draft_key == DraftKey::from(thread_id))
         .filter_map(|(id, _)| {
             thread
                 .submissions
@@ -1003,16 +1043,16 @@ fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &str) {
         }
     }
     let thread = &snapshot.conversations[thread_id];
-    let echoed = |id: &String, pending: &Arc<PendingSubmission>| {
-        pending.draft_key == thread_id
+    let echoed = |id: &agent_protocol::ids::ClientInputId, pending: &Arc<PendingSubmission>| {
+        pending.draft_key == DraftKey::from(thread_id)
             && thread
                 .turns
                 .iter()
                 .flatten()
                 .flat_map(|turn| turn.items.iter().flatten())
                 .any(|item| {
-                    item.kind.as_deref() == Some("userMessage")
-                        && item.client_id.as_ref() == Some(id)
+                    matches!(item.body(), crate::models::ItemBody::UserMessage { .. })
+                        && item.client_input_id.as_ref() == Some(id)
                 })
     };
     if snapshot

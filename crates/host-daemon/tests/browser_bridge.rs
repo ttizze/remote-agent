@@ -129,7 +129,10 @@ async fn installed_codex_exposes_the_same_browser_as_the_phone() {
         .request(
             "phone",
             &agent_protocol::browser::BrowserRequest {
-                thread_id: thread.into(),
+                thread_id: agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: thread.into(),
+                },
                 control_token: String::new(),
                 tab_id: String::new(),
                 image_id: String::new(),
@@ -170,7 +173,10 @@ async fn cancelled_mcp_wait_keeps_the_bridge_responsive() {
     let mut output = JsonlReader::new(child.stdout.take().unwrap());
     input.write_line(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bex_browser","arguments":{"action":"wait_for_user"}}}).to_string()).await.unwrap();
     let request = |frame: &BrowserFrame, action| BrowserRequest {
-        thread_id: "cancel-thread".into(),
+        thread_id: agent_protocol::session::SessionRef {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            id: "cancel-thread".into(),
+        },
         tab_id: frame.tab_id.clone(),
         control_token: frame.control_token.clone(),
         image_id: frame.image_id.clone(),

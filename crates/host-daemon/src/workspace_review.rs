@@ -15,7 +15,9 @@ pub async fn inspect_workspace(cwd: String) -> Result<WorkspaceReview> {
 }
 
 fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview> {
-    let review = review_existing_workspace(&cwd);
+    // A submission can replace a deleted worktree between Git commands. Retry
+    // a failed scan once; persistent repository errors still surface below.
+    let review = review_existing_workspace(&cwd).or_else(|_| review_existing_workspace(&cwd));
     // Deletion can race any Git command, not just the initial path lookup.
     if review.is_err()
         && matches!(std::fs::metadata(&cwd), Err(error) if error.kind() == std::io::ErrorKind::NotFound)

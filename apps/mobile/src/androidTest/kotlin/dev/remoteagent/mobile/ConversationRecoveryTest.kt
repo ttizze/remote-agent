@@ -8,9 +8,12 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import dev.remoteagent.core.DraftKey
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
+import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.ReadThread
+import dev.remoteagent.core.SessionRef
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
@@ -19,7 +22,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -63,10 +65,7 @@ class ConversationRecoveryTest {
                     perform(Intent.Submit(null, UUID.randomUUID().toString())).getOrThrow()
                     val id = requireNotNull(model.snapshot.navigation().threadId)
                     while (true) {
-                        val thread =
-                            JSONObject(model.snapshot.serialize().decodeToString())
-                                .getJSONObject("conversations")
-                                .getJSONObject(id)
+                        val thread = model.snapshot.threadJson(id)
                         val turns = thread.getJSONArray("turns")
                         if (
                             turns.length() > 0 &&
@@ -77,13 +76,20 @@ class ConversationRecoveryTest {
                         }
                         delay(10)
                     }
-                    assertEquals("", model.snapshot.draft(id).text)
-                    perform(Intent.SetDraftText(id, "preserved draft")).getOrThrow()
-                    assertTrue(perform(Intent.ReadThread(ReadThread("missing-thread", open = true))).isFailure)
+                    assertEquals("", model.snapshot.draft(DraftKey.Session(id)).text)
+                    perform(Intent.SetDraftText(DraftKey.Session(id), "preserved draft")).getOrThrow()
+                    assertTrue(
+                        perform(
+                                Intent.ReadThread(
+                                    ReadThread(SessionRef(ProviderKind.CODEX, "missing-thread"), open = true)
+                                )
+                            )
+                            .isFailure
+                    )
                     assertNotNull(model.snapshot.error())
                     perform(Intent.ReadThread(ReadThread(id, open = true))).getOrThrow()
                     assertNull(model.snapshot.error())
-                    assertEquals("preserved draft", model.snapshot.draft(id).text)
+                    assertEquals("preserved draft", model.snapshot.draft(DraftKey.Session(id)).text)
                     assertNull("The recovered core error must not remain as a local notice", model.notice)
                     model.notice = "local persistence failure"
                     perform(Intent.ReadThread(ReadThread(id, open = true))).getOrThrow()
@@ -94,12 +100,11 @@ class ConversationRecoveryTest {
                     while (model.busy) delay(10)
                     assertTrue(model.snapshot.connected())
                     assertEquals(id, model.snapshot.navigation().threadId)
-                    assertEquals("preserved draft", model.snapshot.draft(id).text)
+                    assertEquals("preserved draft", model.snapshot.draft(DraftKey.Session(id)).text)
                     assertNull(model.notice)
                     perform(Intent.Submit(id, UUID.randomUUID().toString())).getOrThrow()
                     while (true) {
-                        val thread = JSONObject(model.snapshot.serialize().decodeToString())
-                            .getJSONObject("conversations").getJSONObject(id)
+                        val thread = model.snapshot.threadJson(id)
                         val turns = thread.getJSONArray("turns")
                         if (turns.length() == 2 && turns.getJSONObject(1).getString("status") == "completed") {
                             assertTrue(turns.getJSONObject(1).toString().contains("preserved draft"))
@@ -107,7 +112,7 @@ class ConversationRecoveryTest {
                         }
                         delay(10)
                     }
-                    assertEquals("", model.snapshot.draft(id).text)
+                    assertEquals("", model.snapshot.draft(DraftKey.Session(id)).text)
                     assertNull(model.snapshot.error())
                     assertNull(model.notice)
                 } finally {

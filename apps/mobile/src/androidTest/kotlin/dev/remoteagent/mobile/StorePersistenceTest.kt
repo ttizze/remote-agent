@@ -8,7 +8,10 @@ import dev.remoteagent.core.AgentException
 import dev.remoteagent.core.AgentStore
 import dev.remoteagent.core.Attachment
 import dev.remoteagent.core.ConversationRowContent
+import dev.remoteagent.core.DraftKey
 import dev.remoteagent.core.Intent
+import dev.remoteagent.core.ProviderKind
+import dev.remoteagent.core.SessionRef
 import dev.remoteagent.core.Snapshot
 import java.io.File
 import java.util.UUID
@@ -16,6 +19,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -29,21 +33,37 @@ import org.junit.runner.RunWith
 class StorePersistenceTest {
     @Test
     fun projectionRetainsBothAnswersAndPublishedValuesAcrossDraftEdits() = runBlocking {
+        val session = SessionRef(ProviderKind.CODEX, "thread")
+        val key = DraftKey.Session(session)
+        val identity = JSONObject("""{"provider":"codex","id":"thread"}""")
         val persisted =
             JSONObject(Snapshot.empty().serialize().decodeToString())
-                .put("navigation", JSONObject("""{"thread_id":"thread","draft_key":"thread","cwd":"/fixture"}"""))
+                .put(
+                    "navigation",
+                    JSONObject()
+                        .put("thread_id", identity)
+                        .put("draft_key", JSONObject().put("Session", JSONObject().put("session", identity)))
+                        .put("cwd", "/fixture"),
+                )
                 .put(
                     "conversations",
-                    JSONObject(
-                        """{"thread":{"id":"thread","turns":[
-                {"id":"repeated","items":[{"id":"first","type":"agentMessage","text":"first answer"}]},
-                {"id":"repeated","items":[{"id":"second","type":"agentMessage","text":"second answer"}]}
-            ]}}"""
-                    ),
+                    JSONArray()
+                        .put(
+                            JSONArray()
+                                .put(identity)
+                                .put(
+                                    JSONObject(
+                                        """{"id":{"provider":"codex","id":"thread"},"turns":[
+                {"id":"repeated","items":[${messageItem("first", "first answer")}]},
+                {"id":"repeated","items":[${messageItem("second", "second answer")}]}
+            ]}"""
+                                    )
+                                )
+                        ),
                 )
         // History is an explicit projection input, not device storage.
         val fixture = Snapshot.restore(persisted.toString().encodeToByteArray())
-        val source = fixture.conversation("thread")
+        val source = fixture.conversation(session)
         val bytes = fixture.serializeLocalState()
         fixture.close()
         val store = AgentStore.offline(bytes, null)
@@ -55,10 +75,10 @@ class StorePersistenceTest {
                     (it.content as? ConversationRowContent.Response)?.item?.presentation()?.body
                 }
             assertEquals(listOf("first answer", "second answer"), answers(first))
-            val edit = store.dispatch(Intent.SetDraftText("thread", "new draft"))
+            val edit = store.dispatch(Intent.SetDraftText(key, "new draft"))
             val latest = store.snapshot()
-            assertEquals("new draft", latest.draft("thread").text)
-            assertEquals("", snapshot.draft("thread").text)
+            assertEquals("new draft", latest.draft(key).text)
+            assertEquals("", snapshot.draft(key).text)
             edit.wait()
             val second = projectConversationRows(latest, source, first)
             assertSame(first, second)

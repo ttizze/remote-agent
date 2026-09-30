@@ -34,9 +34,10 @@ internal class AndroidMobileRepository(context: Context) {
 
     fun diagnosticsDirectory(id: String): String =
         File(
-            directory,
-            "connection-diagnostics/${Base64.getUrlEncoder().withoutPadding().encodeToString(id.toByteArray())}",
-        ).absolutePath
+                directory,
+                "connection-diagnostics/${Base64.getUrlEncoder().withoutPadding().encodeToString(id.toByteArray())}",
+            )
+            .absolutePath
 
     fun load(id: String): ByteArray {
         val file = snapshotFile(id)

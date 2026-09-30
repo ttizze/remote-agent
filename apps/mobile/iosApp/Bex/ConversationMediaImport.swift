@@ -5,7 +5,7 @@ import UIKit
 
 /// Media import
 extension ThreadScreen {
-    func importPhotos(_ items: [PhotosPickerItem], draftKey: String) async {
+    func importPhotos(_ items: [PhotosPickerItem], draftKey: DraftIdentity) async {
         defer { preparingMedia = false }
         do {
             for item in items {

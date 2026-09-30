@@ -120,7 +120,9 @@ impl Browser {
     }
 
     async fn ensure(&self, state: &mut State, thread: &str) -> Result<(), String> {
-        agent_protocol::session::SessionRef::from_thread_id(thread).map_err(str::to_owned)?;
+        if thread.is_empty() || thread.len() > 8192 {
+            return Err("browser scope is required".into());
+        }
         if state.chrome.as_ref().is_some_and(|chrome| chrome.broken) {
             if let Some(chrome) = state.chrome.take() {
                 chrome.shutdown().await;
@@ -177,10 +179,11 @@ impl Browser {
         principal: &str,
         request: &BrowserRequest,
     ) -> Result<BrowserFrame, String> {
-        request.action.validate()?;
+        request.validate()?;
+        let thread = request.thread_id.to_string();
         let mut state = self.state.lock().await;
-        self.ensure(&mut state, &request.thread_id).await?;
-        let page = state.pages.get_mut(&request.thread_id).unwrap();
+        self.ensure(&mut state, &thread).await?;
+        let page = state.pages.get_mut(&thread).unwrap();
         authorize(
             page,
             principal,
@@ -200,14 +203,9 @@ impl Browser {
                 page.token = Uuid::new_v4().to_string();
                 self.notify();
             }
-            _ => {
-                self.action(&mut state, &request.thread_id, &request.action)
-                    .await?
-            }
+            _ => self.action(&mut state, &thread, &request.action).await?,
         }
-        let mut frame = self
-            .frame(&mut state, &request.thread_id, principal)
-            .await?;
+        let mut frame = self.frame(&mut state, &thread, principal).await?;
         if frame.image_id == request.image_id {
             frame.image.clear();
         }

@@ -3,7 +3,7 @@ import AgentCore
 /// Immutable native render values; Rust owns projection policy.
 struct ConversationPresentation: Sendable {
     let source: AgentCore.Thread
-    let id: String
+    let id: SessionRef?
     let title: String
     let rows: [ThreadConversationRow]
     private struct CachedTurn: Sendable {
@@ -56,6 +56,9 @@ struct ConversationPresentation: Sendable {
         rows += rendered.queued().map {
             let item = Self.item($0, id: $0.id(), previous: previous?.queued ?? [:], next: &nextQueued)
             return ThreadConversationRow(id: item.data.id, content: .queued(item))
+        }
+        rows += rendered.unplacedRequests().map { row in
+            ThreadConversationRow(id: row.id, content: .native(row, nil))
         }
         return Self(
             source: source,

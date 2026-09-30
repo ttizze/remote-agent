@@ -12,10 +12,19 @@ fn daemon_wire_preserves_nonempty_roots_and_structured_tool_results() {
         .as_ref()
         .unwrap()
         .iter()
-        .find(|item| item.kind.as_deref() == Some("mcpToolCall"))
+        .find(|item| {
+            matches!(
+                item.body(),
+                agent_protocol::items::ItemBody::ToolCall { .. }
+            )
+        })
         .unwrap();
-    assert_eq!(
-        item.result.as_ref().unwrap()["content"][0]["text"],
-        "Fixture lookup result"
-    );
+    let agent_protocol::items::ItemBody::ToolCall {
+        result: Some(result),
+        ..
+    } = item.body()
+    else {
+        panic!("tool result")
+    };
+    assert_eq!(result["content"][0]["text"], "Fixture lookup result");
 }

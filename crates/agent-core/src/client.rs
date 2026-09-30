@@ -1,6 +1,7 @@
 //! Client workflows built on the shared transport and protocol.
 use crate::{peer::PeerError, state::operations::ReadThread};
 use agent_protocol::operations::*;
+use agent_protocol::requests::{Answer, Request, validate_answer};
 use agent_transport::client::{Client, Updates};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -29,10 +30,10 @@ pub trait ClientExt {
         operation: &O,
     ) -> Result<Option<(O::Output, Updates, uuid::Uuid)>, PeerError>;
     async fn models(&self) -> Result<ModelPage, PeerError>;
-    async fn respond(&self, request: &ServerRequest, answer: &Answer) -> Result<(), PeerError>;
+    async fn respond(&self, request: &Request, answer: &Answer) -> Result<(), PeerError>;
     async fn session_images(
         &self,
-        thread_id: &str,
+        thread_id: &crate::session::SessionRef,
         session: Option<&crate::transport::Session>,
     ) -> Result<Vec<SessionImage>, PeerError>;
 }
@@ -91,12 +92,11 @@ impl ClientExt for Client {
         }
     }
 
-    async fn respond(&self, request: &ServerRequest, answer: &Answer) -> Result<(), PeerError> {
-        let result = answer_result(request, answer)?;
-        validate_answer(request, &result).map_err(PeerError::InvalidMessage)?;
+    async fn respond(&self, request: &Request, answer: &Answer) -> Result<(), PeerError> {
+        validate_answer(&request.body, answer).map_err(PeerError::InvalidMessage)?;
         self.request::<crate::models::Empty>(&crate::protocol::Call::AnswerSession(SessionAnswer {
             request_id: request.id.clone(),
-            result,
+            answer: answer.clone(),
         }))
         .await
         .map(|_| ())
@@ -104,7 +104,7 @@ impl ClientExt for Client {
 
     async fn session_images(
         &self,
-        thread_id: &str,
+        thread_id: &crate::session::SessionRef,
         session: Option<&crate::transport::Session>,
     ) -> Result<Vec<SessionImage>, PeerError> {
         // One bounded provider view; close this transient subscription before
@@ -125,19 +125,16 @@ impl ClientExt for Client {
         let mut bytes = 0usize;
         for turn in thread.turns.as_deref().unwrap_or_default().iter().rev() {
             for item in turn.items.as_deref().unwrap_or_default().iter().rev() {
-                if item.kind.as_deref() != Some("imageGeneration") || !native_items.insert(&item.id)
+                if !matches!(item.body(), crate::models::ItemBody::ImageGeneration { .. })
+                    || !native_items.insert(&item.id)
                 {
                     continue;
                 }
                 let detail;
-                let item = if turn
-                    .deferred_item_ids
-                    .as_ref()
-                    .is_some_and(|ids| ids.contains(&item.id))
-                {
+                let item = if item.is_deferred() {
                     detail = crate::transfers::resolve_item(
                         self.call(&crate::state::operations::ReadItem {
-                            thread_id: thread_id.into(),
+                            thread_id: thread_id.clone(),
                             turn_id: turn.id.clone(),
                             item_id: item.id.clone(),
                         })
@@ -149,15 +146,18 @@ impl ClientExt for Client {
                 } else {
                     item.as_ref()
                 };
-                let image = item
-                    .saved_path
+                let crate::models::ItemBody::ImageGeneration {
+                    saved_path, data, ..
+                } = item.body()
+                else {
+                    continue;
+                };
+                let image = saved_path
                     .as_deref()
                     .filter(|path| !path.trim().is_empty())
                     .map(|path| (path, false))
                     .or_else(|| {
-                        item.result
-                            .as_ref()
-                            .and_then(Value::as_str)
+                        data.as_deref()
                             .filter(|data| !data.trim().is_empty())
                             .map(|data| (data, true))
                     });

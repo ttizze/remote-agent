@@ -9,15 +9,16 @@
       "historyReadState": {
         "type": "complete"
       },
-      "id": "fixture-thread-1",
+      "id": {
+        "provider": "codex",
+        "id": "fixture-thread-1"
+      },
       "model": null,
       "name": "Simulator conversation",
       "path": "/fixture/workspace/fixture-thread-1.jsonl",
       "preview": "",
       "projectId": "workspace",
-      "status": {
-        "type": "idle"
-      },
+      "status": "idle",
       "turns": [
         {
           "completedAt": 4,
@@ -27,107 +28,286 @@
           "itemsHasMore": false,
           "items": [
             {
-              "clientId": "wire-fixture",
-              "content": [
-                {
-                  "text": "[items]",
-                  "type": "text"
-                }
-              ],
               "id": "fixture-user-1-1",
-              "text": "[items]",
-              "type": "userMessage"
+              "status": "unknown",
+              "clientInputId": "wire-fixture",
+              "body": {
+                "inline": {
+                  "body": {
+                    "userMessage": {
+                      "text": "[items]",
+                      "content": [
+                        {
+                          "text": {
+                            "text": "[items]"
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-commentary-1-1",
-              "phase": "commentary",
-              "text": "シミュレータで確認しています…",
-              "type": "agentMessage"
+              "status": "unknown",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "assistantText": {
+                      "text": "シミュレータで確認しています…",
+                      "phase": "commentary"
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-reasoning-1-1",
-              "summary": [
-                "確認中"
-              ],
-              "type": "reasoning"
+              "status": "unknown",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "reasoning": {
+                      "content": [
+                        "null"
+                      ],
+                      "summary": [
+                        "確認中"
+                      ]
+                    }
+                  }
+                }
+              }
             },
             {
-              "aggregatedOutput": "passed",
-              "command": "./gradlew test",
-              "cwd": "/fixture/workspace",
-              "exitCode": 0,
               "id": "fixture-command-1-1",
               "status": "completed",
-              "type": "commandExecution"
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "commandExecution": {
+                      "command": "./gradlew test",
+                      "cwd": "/fixture/workspace",
+                      "output": "passed",
+                      "exitCode": 0,
+                      "durationMs": null
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-plan-1-1",
-              "text": "確認計画",
-              "type": "plan"
+              "status": "unknown",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "plan": {
+                      "text": "確認計画"
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-mcp-1-1",
-              "result": {
-                "content": [
-                  {
-                    "text": "Fixture lookup result",
-                    "type": "text"
-                  }
-                ]
-              },
-              "server": "fixture",
               "status": "completed",
-              "tool": "lookup",
-              "type": "mcpToolCall"
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "toolCall": {
+                      "kind": "mcp",
+                      "tool": "lookup",
+                      "server": "fixture",
+                      "namespace": null,
+                      "arguments": null,
+                      "result": {
+                        "content": [
+                          {
+                            "text": "Fixture lookup result",
+                            "type": "text"
+                          }
+                        ]
+                      },
+                      "error": null,
+                      "content": [],
+                      "success": null,
+                      "durationMs": null
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-dynamic-1-1",
-              "status": "inProgress",
-              "tool": "fixture",
-              "type": "dynamicToolCall"
+              "status": "running",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "toolCall": {
+                      "kind": "dynamic",
+                      "tool": "fixture",
+                      "server": null,
+                      "namespace": null,
+                      "arguments": null,
+                      "result": null,
+                      "error": null,
+                      "content": [],
+                      "success": null,
+                      "durationMs": null
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-collab-1-1",
-              "status": "inProgress",
-              "tool": "spawn_agent",
-              "type": "collabAgentToolCall"
+              "status": "running",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "subagent": {
+                      "tool": "spawn_agent",
+                      "prompt": null,
+                      "model": null,
+                      "effort": null,
+                      "sender": null,
+                      "receivers": [],
+                      "states": [],
+                      "agentId": null,
+                      "result": null
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-subagent-1-1",
               "status": "running",
-              "type": "subAgentActivity"
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "subagent": {
+                      "tool": "",
+                      "prompt": null,
+                      "model": null,
+                      "effort": null,
+                      "sender": null,
+                      "receivers": [],
+                      "states": [],
+                      "agentId": null,
+                      "result": null
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-web-1-1",
-              "query": "Codex",
-              "type": "webSearch"
+              "status": "unknown",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "webSearch": {
+                      "query": "Codex",
+                      "action": null
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-image-1-1",
-              "path": "/tmp/fixture.png",
-              "type": "imageView"
+              "status": "unknown",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "imageView": {
+                      "path": "/tmp/fixture.png"
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-sleep-1-1",
-              "type": "sleep"
+              "status": "unknown",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "sleep": {}
+                  }
+                }
+              }
             },
             {
               "id": "fixture-review-in-1-1",
-              "type": "enteredReviewMode"
+              "status": "unknown",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "review": {
+                      "entering": true,
+                      "text": ""
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-review-out-1-1",
-              "type": "exitedReviewMode"
+              "status": "unknown",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "review": {
+                      "entering": false,
+                      "text": ""
+                    }
+                  }
+                }
+              }
             },
             {
               "id": "fixture-compaction-1-1",
-              "type": "contextCompaction"
+              "status": "unknown",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "compaction": {}
+                  }
+                }
+              }
             },
             {
               "id": "fixture-final-1-1",
-              "phase": "final_answer",
-              "text": "シミュレータで完了しました。",
-              "type": "agentMessage"
+              "status": "unknown",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "assistantText": {
+                      "text": "シミュレータで完了しました。",
+                      "phase": "final"
+                    }
+                  }
+                }
+              }
             }
           ],
           "startedAt": 1,
@@ -152,12 +332,13 @@
       {
         "createdAt": 1,
         "cwd": "/fixture/workspace",
-        "id": "fixture-thread-1",
+        "id": {
+          "provider": "codex",
+          "id": "fixture-thread-1"
+        },
         "name": "Simulator conversation",
         "projectId": "workspace",
-        "status": {
-          "type": "idle"
-        },
+        "status": "idle",
         "updatedAt": 1,
         "worktreeMerged": false,
         "session": {

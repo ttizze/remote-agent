@@ -66,8 +66,8 @@ impl Snapshot {
         if self
             .drafts
             .get(&self.navigation.draft_key)
-            .and_then(|d| d.model.as_deref())
-            .is_some_and(|m| m.starts_with("claude:"))
+            .and_then(|d| d.model.as_ref())
+            .is_some_and(|m| m.provider == agent_protocol::session::ProviderKind::Claude)
         {
             return None;
         }
@@ -152,7 +152,11 @@ mod tests {
         };
         let snapshot = Snapshot {
             drafts: std::sync::Arc::new(
-                [(String::from("chat"), std::sync::Arc::new(draft))].into(),
+                [(
+                    crate::state::DraftKey::from("chat"),
+                    std::sync::Arc::new(draft),
+                )]
+                .into(),
             ),
             ..Default::default()
         };
@@ -164,7 +168,12 @@ mod tests {
                     text: text.into(),
                 }),
             );
-            assert!(next.drafts["chat"].invocations.is_empty(), "{text}");
+            assert!(
+                next.drafts[&crate::state::DraftKey::from("chat")]
+                    .invocations
+                    .is_empty(),
+                "{text}"
+            );
         }
         for text in ["$review", "$review 日本語", "$review。"] {
             assert!(skill().is_in(text));
@@ -195,7 +204,10 @@ mod tests {
         );
         assert!(effects.is_empty());
         let mut draft = snapshot.drafts[&key].as_ref().clone();
-        draft.model = Some("selected-model".into());
+        draft.model = Some(agent_protocol::models::ModelRef {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            id: "selected-model".into(),
+        });
         draft.effort = Some("high".into());
         let snapshot = reduce(
             &snapshot,
@@ -215,8 +227,11 @@ mod tests {
         )
         .0;
         assert_eq!(
-            snapshot.drafts[&key].model.as_deref(),
-            Some("selected-model")
+            snapshot.drafts[&key].model.as_ref(),
+            Some(&agent_protocol::models::ModelRef {
+                provider: agent_protocol::session::ProviderKind::Codex,
+                id: "selected-model".into()
+            })
         );
         assert_eq!(snapshot.drafts[&key].effort.as_deref(), Some("high"));
         assert_eq!(snapshot.drafts[&key].invocations, vec![skill()]);
@@ -254,7 +269,7 @@ mod tests {
             )
             .0;
         }
-        let draft = snapshot.drafts["chat"].as_ref();
+        let draft = snapshot.drafts[&crate::state::DraftKey::from("chat")].as_ref();
         assert_eq!(draft.invocations, vec![other.clone(), plugin.clone()]);
         let restored: Draft =
             serde_json::from_str(&serde_json::to_string(&draft).unwrap()).unwrap();
@@ -265,11 +280,17 @@ mod tests {
             .map(Invocation::input)
             .collect::<Vec<_>>();
         assert_eq!(
-            Input::content(&inputs),
-            serde_json::json!([
-                {"type":"skill","name":"review","path":other.path},
-                {"type":"mention","name":"Example Plugin","path":plugin.path}
-            ])
+            inputs,
+            vec![
+                Input::Skill {
+                    name: "review".into(),
+                    path: other.path
+                },
+                Input::Mention {
+                    name: "Example Plugin".into(),
+                    path: plugin.path
+                },
+            ]
         );
     }
 }

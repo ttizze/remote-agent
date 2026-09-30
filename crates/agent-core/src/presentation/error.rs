@@ -7,7 +7,6 @@ pub fn error_message(error: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(raw) else {
         return "接続先で操作に失敗しました。エラーの詳細を取得できませんでした。".into();
     };
-    let value = crate::diagnostics::rpc_cause(&value);
     if value["code"] == "dictation_failed" {
         let reason = value["message"]
             .as_str()
@@ -30,7 +29,7 @@ mod error_tests {
     use super::error_message;
     #[test]
     fn provider_cause_survives_host_envelope_without_exposing_payloads() {
-        let raw = r#"remote RPC error: {"delivery":"unknown","providerError":{"code":-32600,"message":"thread example already has an active writer","data":{"prompt":"PRIVATE"}}}"#;
+        let raw = r#"remote RPC error: {"delivery":"unknown","code":"provider_failed","message":"thread example already has an active writer","execution":{"providerCode":"-32600"}}"#;
         assert_eq!(
             error_message(raw),
             "thread example already has an active writer"
@@ -38,7 +37,7 @@ mod error_tests {
         assert_eq!(crate::diagnostics::sanitize(raw), error_message(raw));
         for raw in [
             "remote RPC error: invalid",
-            r#"remote RPC error: {"providerError":{"message":" "}}"#,
+            r#"remote RPC error: {"message":" "}"#,
         ] {
             let message = error_message(raw);
             assert!(message.contains("詳細を取得できませんでした"));

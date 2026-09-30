@@ -2,6 +2,11 @@ import AgentCore
 import Foundation
 import UniformTypeIdentifiers
 
+struct DraftIdentity: Hashable {
+    let profile: String?
+    let key: DraftKey
+}
+
 typealias SnapshotRequest = (Intent, @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) -> Void
 
 extension BexAppViewModel {
@@ -33,7 +38,7 @@ extension BexAppViewModel {
         profiles.first { $0.id == selectedProfileId }?.name
     }
 
-    var selectedThreadId: String? {
+    var selectedThreadId: SessionRef? {
         snapshot.navigation().threadId
     }
 
@@ -53,12 +58,12 @@ extension BexAppViewModel {
         snapshot.selectedDirectory()
     }
 
-    var coreDraftKey: String {
+    var coreDraftKey: DraftKey {
         snapshot.navigation().draftKey
     }
 
-    var draftKey: String {
-        (selectedProfileId ?? "") + ":" + coreDraftKey
+    var draftKey: DraftIdentity {
+        DraftIdentity(profile: selectedProfileId, key: coreDraftKey)
     }
 
     var draft: String {
@@ -78,7 +83,7 @@ extension BexAppViewModel {
         guard !loadingThreads else { return }
         loadingThreads = true
         notice = nil
-        perform(.listThreads(ListThreads(query: snapshot.listQuery()))) { [weak self] _ in
+        perform(.listSessions(ListSessions(query: snapshot.listQuery()))) { [weak self] _ in
             self?.loadingThreads = false
         }
     }
@@ -94,7 +99,7 @@ extension BexAppViewModel {
         var query = snapshot.listQuery()
         guard query.searchTerm != term else { return }
         query.searchTerm = term
-        perform(.listThreads(ListThreads(query: query)))
+        perform(.listSessions(ListSessions(query: query)))
     }
 
     func openNewThread(cwd: String) {
@@ -105,7 +110,7 @@ extension BexAppViewModel {
         selectProfile(profileId); openNewThread(cwd: "")
     }
 
-    func openThread(_ id: String) {
+    func openThread(_ id: SessionRef) {
         notice = nil
         perform(.readThread(ReadThread(threadId: id, open: true)))
         if selectedThreadId == id {
@@ -144,7 +149,7 @@ extension BexAppViewModel {
         perform(.removeAttachment(draftKey: coreDraftKey, index: UInt32(id))) { [weak self] _ in self?.persist() }
     }
 
-    func transcribe(_ audio: Data, draftKey key: String, sendImmediately: Bool) {
+    func transcribe(_ audio: Data, draftKey key: DraftIdentity, sendImmediately: Bool) {
         guard !transcribing, key == draftKey else { return }
         transcribing = true
         perform(.transcribe(Dictate(
@@ -207,7 +212,7 @@ extension BexAppViewModel {
         }
     }
 
-    func readItemDetails(threadId: String, turnId: String, itemId: String) async -> String? {
+    func readItemDetails(threadId: SessionRef, turnId: String, itemId: String) async -> String? {
         do {
             _ = try await outcome(for: .readItem(ReadItem(threadId: threadId, turnId: turnId, itemId: itemId)))
             return nil
@@ -255,7 +260,7 @@ extension BexAppViewModel {
 
     func forkAndOpen(through turnId: String, completion: @escaping (String?) -> Void) {
         guard let threadId = selectedThreadId, let host = selectedProfileId else { completion(nil); return }
-        perform(.forkThread(ForkThread(threadId: threadId, lastTurnId: turnId))) { [self] result in
+        perform(.forkSession(ForkSession(threadId: threadId, lastTurnId: turnId))) { [self] result in
             guard selectedProfileId == host, selectedThreadId == threadId else { completion(nil); return }
             switch result {
             case let .success(.startedThread(id)):

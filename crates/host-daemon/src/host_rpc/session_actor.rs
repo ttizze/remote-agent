@@ -4,6 +4,8 @@ use agent_protocol::models::{Thread, ThreadResponse};
 #[derive(Default)]
 pub(super) struct SessionActor {
     pub(super) live: Thread,
+    pub(super) pending_requests:
+        std::collections::BTreeMap<agent_protocol::ids::RequestId, super::requests::PendingRequest>,
     pub(super) leases: usize,
     pub(super) submission_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
@@ -26,29 +28,29 @@ impl SessionActor {
                 .turns
                 .iter()
                 .flatten()
-                .filter(|turn| turn.status.as_deref() != Some("inProgress"))
+                .filter(|turn| turn.status != agent_protocol::execution::TurnStatus::Running)
                 .flat_map(|turn| turn.items.iter().flatten())
                 .any(|item| {
-                    item.kind.as_deref() == Some("userMessage")
-                        && item.client_id.as_ref() == Some(id)
+                    matches!(
+                        item.body(),
+                        agent_protocol::items::ItemBody::UserMessage { .. }
+                    ) && item.client_input_id.as_ref() == Some(id)
                 })
         });
         if let Some(turns) = &mut self.live.turns {
-            turns.retain(|turn| turn.status.as_deref() == Some("inProgress"));
+            turns.retain(|turn| turn.status == agent_protocol::execution::TurnStatus::Running || self.live.submissions.values().any(|delivery| matches!(delivery, agent_protocol::session::SubmissionDelivery::Accepted {turn_id:Some(id)} if id == &turn.id)));
         }
         if self
             .live
             .turns
             .as_ref()
             .is_none_or(|turns| turns.is_empty())
-            && self.live.status.as_ref().is_some_and(|status| {
-                status.kind != agent_protocol::models::ThreadStatusKind::Active
-            })
+            && self.live.status != agent_protocol::models::SessionStatus::Running
         {
-            self.live.status = None;
+            self.live.status = agent_protocol::models::SessionStatus::Unknown;
         }
         !self.live.submissions.is_empty()
-            || !self.live.requests.is_empty()
+            || !self.pending_requests.is_empty()
             || self
                 .live
                 .turns
@@ -67,8 +69,14 @@ impl SessionActor {
                 turns.push(turn.clone());
             }
         }
-        response.thread.status = self.live.status.clone().or(response.thread.status.take());
-        response.thread.requests = self.live.requests.clone();
+        if self.live.status != agent_protocol::models::SessionStatus::Unknown {
+            response.thread.status = self.live.status;
+        }
+        response.thread.requests = self
+            .pending_requests
+            .iter()
+            .map(|(id, pending)| (id.clone(), std::sync::Arc::new(pending.request.clone())))
+            .collect();
         response.thread.submissions = self.live.submissions.clone();
     }
 }
@@ -81,10 +89,7 @@ mod tests {
     #[test]
     fn finished_echo_retires_only_confirmed_input_and_stale_execution_status() {
         let mut actor = SessionActor {
-            live: serde_json::from_value(serde_json::json!({
-                "status":{"type":"idle"},
-                "turns":[{"id":"done","status":"completed","items":[{"id":"echo","type":"userMessage","clientId":"accepted"}]}]
-            })).unwrap(),
+            live: serde_json::from_value(serde_json::json!({"status":"idle","turns":[{"id":"done","status":"completed","items":[{"id":"echo","status":"unknown","clientInputId":"accepted","body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}}]}]})).unwrap(),
             ..Default::default()
         };
         actor.live.submissions.insert(
@@ -106,7 +111,7 @@ mod tests {
         assert_eq!(actor.live.submissions.len(), 2);
         assert!(actor.live.turns.as_ref().unwrap().is_empty());
         assert!(
-            actor.live.status.is_none(),
+            actor.live.status == agent_protocol::models::SessionStatus::Unknown,
             "retained delivery evidence must not override newer provider execution state"
         );
     }

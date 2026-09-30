@@ -59,11 +59,18 @@ internal fun TerminalDialog(
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     TextButton(onClick = dismiss) { Text("閉じる") }
-                    TextButton(onClick = {
-                        perform(Intent.KillTerminal(KillTerminal(handle))) {
-                            if (it.isSuccess) { terminated = true; dismiss() }
+                    TextButton(
+                        onClick = {
+                            perform(Intent.KillTerminal(KillTerminal(handle))) {
+                                if (it.isSuccess) {
+                                    terminated = true
+                                    dismiss()
+                                }
+                            }
                         }
-                    }) { Text("終了") }
+                    ) {
+                        Text("終了")
+                    }
                 }
                 TerminalBody(snapshot, handle, cwd, perform, Modifier.weight(1f))
             }
@@ -86,26 +93,38 @@ private fun TerminalBody(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             factory = { context ->
                 var started = false
-                NativeTerminal(context, object : TerminalSession.Transport {
-                    override fun write(data: ByteArray) {
-                        currentPerform(Intent.WriteTerminal(WriteTerminal(handle, data))) {}
+                NativeTerminal(
+                        context,
+                        object : TerminalSession.Transport {
+                            override fun write(data: ByteArray) {
+                                currentPerform(Intent.WriteTerminal(WriteTerminal(handle, data))) {}
+                            }
+
+                            override fun resize(columns: Int, rows: Int) {
+                                val size = TerminalSize(columns.toUShort(), rows.toUShort())
+                                if (!started) {
+                                    started = true
+                                    currentPerform(Intent.StartTerminal(StartTerminal(handle, cwd, size))) {}
+                                } else currentPerform(Intent.ResizeTerminal(ResizeTerminal(handle, size))) {}
+                            }
+                        },
+                    )
+                    .let { terminal ->
+                        nativeTerminal = terminal
+                        terminal.view
                     }
-                    override fun resize(columns: Int, rows: Int) {
-                        val size = TerminalSize(columns.toUShort(), rows.toUShort())
-                        if (!started) {
-                            started = true
-                            currentPerform(Intent.StartTerminal(StartTerminal(handle, cwd, size))) {}
-                        } else currentPerform(Intent.ResizeTerminal(ResizeTerminal(handle, size))) {}
-                    }
-                }).let { terminal -> nativeTerminal = terminal; terminal.view }
             },
             update = { view ->
                 val terminal = requireNotNull(nativeTerminal)
                 snapshot.terminalView(handle)?.output?.forEach { chunk ->
-                    if (terminal.feed(
-                        chunk.sequence.toLong(), chunk.data,
-                        chunk.resetSize?.cols?.toInt() ?: 0, chunk.resetSize?.rows?.toInt() ?: 0,
-                    )) {
+                    if (
+                        terminal.feed(
+                            chunk.sequence.toLong(),
+                            chunk.data,
+                            chunk.resetSize?.cols?.toInt() ?: 0,
+                            chunk.resetSize?.rows?.toInt() ?: 0,
+                        )
+                    ) {
                         view.post { currentPerform(Intent.AcknowledgeTerminal(handle, chunk.sequence)) {} }
                     }
                 }
@@ -117,18 +136,27 @@ private fun TerminalBody(
 
 @Composable
 private fun TerminalKeys(terminal: NativeTerminal?) {
-    val keys = listOf(
-        "Esc" to KeyEvent.KEYCODE_ESCAPE, "Tab" to KeyEvent.KEYCODE_TAB,
-        "Ctrl+C" to KeyEvent.KEYCODE_C, "←" to KeyEvent.KEYCODE_DPAD_LEFT,
-        "↓" to KeyEvent.KEYCODE_DPAD_DOWN, "↑" to KeyEvent.KEYCODE_DPAD_UP,
-        "→" to KeyEvent.KEYCODE_DPAD_RIGHT,
-    )
+    val keys =
+        listOf(
+            "Esc" to KeyEvent.KEYCODE_ESCAPE,
+            "Tab" to KeyEvent.KEYCODE_TAB,
+            "Ctrl+C" to KeyEvent.KEYCODE_C,
+            "←" to KeyEvent.KEYCODE_DPAD_LEFT,
+            "↓" to KeyEvent.KEYCODE_DPAD_DOWN,
+            "↑" to KeyEvent.KEYCODE_DPAD_UP,
+            "→" to KeyEvent.KEYCODE_DPAD_RIGHT,
+        )
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
         keys.forEach { (label, code) ->
-            TextButton(onClick = {
-                val modifiers = if (label == "Ctrl+C") KeyEvent.META_CTRL_ON else 0
-                terminal?.view?.onKeyDown(code, KeyEvent(0, 0, KeyEvent.ACTION_DOWN, code, 0, modifiers))
-            }, contentPadding = PaddingValues()) { Text(label) }
+            TextButton(
+                onClick = {
+                    val modifiers = if (label == "Ctrl+C") KeyEvent.META_CTRL_ON else 0
+                    terminal?.view?.onKeyDown(code, KeyEvent(0, 0, KeyEvent.ACTION_DOWN, code, 0, modifiers))
+                },
+                contentPadding = PaddingValues(),
+            ) {
+                Text(label)
+            }
         }
     }
 }

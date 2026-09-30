@@ -193,9 +193,9 @@ mod tests {
         let mut list = TitleList::new(&projects, &query);
         for index in 0..9 {
             for project in (1..=7).rev() {
-                list.push(thread(json!({"id":format!("p{project}-{index}"),"projectId":format!("p{project}"),"name":"title","preview":"long body".repeat(10000),"turns":[{"id":"turn"}]})));
+                list.push(thread(json!({"id":{"provider":"codex","id":format!("p{project}-{index}")},"projectId":format!("p{project}"),"name":"title","preview":"long body".repeat(10000),"turns":[{"id":"turn"}]})));
             }
-            list.push(thread(json!({"id":format!("chat-{index}"),"preview":"\nFirst line\nprivate body","cwd":"/other"})));
+            list.push(thread(json!({"id":{"provider":"codex","id":format!("chat-{index}")},"preview":"\nFirst line\nprivate body","cwd":"/other"})));
         }
         assert!(list.complete());
         let page = list.finish();
@@ -203,10 +203,10 @@ mod tests {
         let result = serde_json::to_value(page).unwrap();
         let data = result["data"].as_array().unwrap();
         assert_eq!(data.len(), 30);
-        assert_eq!(data[0]["id"], "p7-0");
-        assert_eq!(data[4]["id"], "p7-4");
-        assert_eq!(data[25]["id"], "chat-0");
-        assert_eq!(data[29]["id"], "chat-4");
+        assert_eq!(data[0]["id"]["id"], "p7-0");
+        assert_eq!(data[4]["id"]["id"], "p7-4");
+        assert_eq!(data[25]["id"]["id"], "chat-0");
+        assert_eq!(data[29]["id"]["id"], "chat-4");
         assert_eq!(data[25]["name"], "First line");
         assert!(
             data.iter()
@@ -229,12 +229,12 @@ mod tests {
         let mut list = TitleList::new(&projects, &query);
         for index in 0..1001 {
             list.push(thread(
-                json!({"id":format!("t{index}"),"projectId":"p","name":"Title"}),
+                json!({"id":{"provider":"codex","id":format!("t{index}")},"projectId":"p","name":"Title"}),
             ));
         }
         let result = serde_json::to_value(list.finish()).unwrap();
         assert_eq!(result["data"].as_array().unwrap().len(), 1001);
-        assert_eq!(result["data"][1000]["id"], "t1000");
+        assert_eq!(result["data"][1000]["id"]["id"], "t1000");
         assert_eq!(result["moreProjectIds"], json!([]));
     }
 
@@ -248,10 +248,10 @@ mod tests {
         let mut list = TitleList::new(&projects, &query);
         for index in 0..15 {
             list.push(thread(
-                json!({"id":format!("p{index}"),"projectId":"p","name":"P"}),
+                json!({"id":{"provider":"codex","id":format!("p{index}")},"projectId":"p","name":"P"}),
             ));
             list.push(thread(
-                json!({"id":format!("q{index}"),"projectId":"q","name":"Q"}),
+                json!({"id":{"provider":"codex","id":format!("q{index}")},"projectId":"q","name":"Q"}),
             ));
         }
         let result = serde_json::to_value(list.finish()).unwrap();

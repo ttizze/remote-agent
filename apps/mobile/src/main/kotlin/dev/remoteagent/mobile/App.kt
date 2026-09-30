@@ -34,8 +34,8 @@ import dev.remoteagent.core.AgentException
 import dev.remoteagent.core.AgentStore
 import dev.remoteagent.core.Connection
 import dev.remoteagent.core.Intent
+import dev.remoteagent.core.ListSessions
 import dev.remoteagent.core.LoadHostName
-import dev.remoteagent.core.ListThreads
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.ThreadList
@@ -117,7 +117,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         get() = snapshot.navigation().draftKey
 
     val selectionKey
-        get() = "$profileId:$draftKey"
+        get() = profileId to draftKey
 
     init {
         try {
@@ -320,7 +320,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
-    fun attach(selection: String, uri: Uri, complete: () -> Unit) {
+    fun attach(selection: Pair<String?, dev.remoteagent.core.DraftKey>, uri: Uri, complete: () -> Unit) {
         if (selection != selectionKey) {
             complete()
             return
@@ -402,7 +402,7 @@ private fun AndroidAppModel.connectionFailed(id: String, error: Exception) {
 internal fun AndroidAppModel.showThreads() {
     screen = Screen.Threads
     perform(Intent.ShowThreadList)
-    perform(Intent.ListThreads(ListThreads(query = snapshot.listQuery())))
+    perform(Intent.ListSessions(ListSessions(query = snapshot.listQuery())))
 }
 
 internal fun AndroidAppModel.showHosts() {
@@ -513,12 +513,13 @@ private fun ConnectionStatus(notice: String?, busy: Boolean, reconnect: Boolean,
 @Composable
 private fun androidx.compose.foundation.layout.ColumnScope.ConversationPane(model: AndroidAppModel) {
     androidx.compose.runtime.key(model.selectionKey) {
-
         var scrollToTopRequest by remember { mutableStateOf(0) }
         ConversationHeader(
             model.snapshot.navigation().threadId?.let(model.snapshot::conversation)?.title(),
             model::showThreads,
-        ) { scrollToTopRequest += 1 }
+        ) {
+            scrollToTopRequest += 1
+        }
         TerminalLauncher(model.snapshot, model::perform)
         ThreadDetailScreen(
             model.snapshot,
@@ -532,6 +533,5 @@ private fun androidx.compose.foundation.layout.ColumnScope.ConversationPane(mode
                 AttachmentButton(model.selectionKey, model::attach)
             }
         }
-
     }
 }

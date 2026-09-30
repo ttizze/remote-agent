@@ -134,7 +134,9 @@ fn content(result: Result<BrowserFrame, String>) -> Value {
 }
 
 pub async fn serve(socket: &Path, thread: &str) -> Result<(), String> {
-    agent_protocol::session::SessionRef::from_thread_id(thread).map_err(str::to_owned)?;
+    if thread.is_empty() || thread.len() > 8192 {
+        return Err("browser scope is required".into());
+    }
     let mut input = JsonlReader::with_max_message_bytes(tokio::io::stdin(), 64 * 1024);
     let mut output = JsonlWriter::with_max_message_bytes(tokio::io::stdout(), MAX_MESSAGE);
     let mut calls = tokio::task::JoinSet::<(Value, Value)>::new();

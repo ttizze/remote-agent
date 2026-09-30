@@ -1,11 +1,11 @@
 //! Shared, pure conversation updates. Neither provider IO nor client navigation
 //! belongs here: owners apply the returned value to their current conversation.
-use crate::models::{Item, Thread, ThreadStatus, Turn, append_text};
+use crate::execution::ExecutionError;
+use crate::models::{Item, ItemBody, SessionStatus, Thread, Turn, TurnStatus};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
     Codex,
@@ -14,90 +14,85 @@ pub enum ProviderKind {
 
 /// A native provider ID, scoped by provider. Paths and abbreviated IDs are not
 /// resolved here; only the provider adapter can resolve a native session.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "SessionIdentity")]
 pub struct SessionRef {
     pub provider: ProviderKind,
     pub id: String,
 }
 
+#[derive(Deserialize)]
+struct SessionIdentity {
+    provider: ProviderKind,
+    id: String,
+}
+impl TryFrom<SessionIdentity> for SessionRef {
+    type Error = &'static str;
+    fn try_from(value: SessionIdentity) -> Result<Self, Self::Error> {
+        Self::new(value.provider, value.id)
+    }
+}
+
 impl SessionRef {
-    pub fn from_thread_id(id: &str) -> Result<Self, &'static str> {
-        let (provider, id) = if let Some(id) = id.strip_prefix("codex:") {
-            (ProviderKind::Codex, id)
-        } else if let Some(id) = id.strip_prefix("claude:") {
-            (ProviderKind::Claude, id)
-        } else {
-            (ProviderKind::Codex, id)
-        };
-        let session = Self {
-            provider,
-            id: id.into(),
-        };
+    pub fn new(provider: ProviderKind, id: String) -> Result<Self, &'static str> {
+        let session = Self { provider, id };
         session.validate()?;
         Ok(session)
     }
-
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.id.is_empty() || self.id.len() > 4096 || self.id.trim() != self.id {
             return Err("native session ID is required");
         }
         Ok(())
     }
-
-    pub fn thread_id(&self) -> String {
-        match self.provider {
-            ProviderKind::Codex
-                if self.id.starts_with("claude:") || self.id.starts_with("codex:") =>
-            {
-                format!("codex:{}", self.id)
-            }
-            ProviderKind::Codex => self.id.clone(),
-            ProviderKind::Claude => format!("claude:{}", self.id),
-        }
+}
+impl std::fmt::Display for SessionRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        serde_json::to_string(self)
+            .expect("session serializes")
+            .fmt(f)
     }
 }
 
-/// Pure execution decision used by the Host after reading native state and
-/// overlaying its live execution. Client caches never choose an input route.
-#[derive(Debug, PartialEq)]
-pub enum SubmissionTarget<'a> {
-    Steer(&'a str),
-    Queue,
-    Start { cwd: &'a str, resume: bool },
-}
-pub fn submission_target<'a>(
-    status: Option<&ThreadStatus>,
-    turns: &'a [Arc<Turn>],
-    cwd: Option<&'a str>,
-) -> Result<SubmissionTarget<'a>, &'static str> {
-    let active = status.map(|status| status.kind == crate::models::ThreadStatusKind::Active);
-    if active != Some(false)
-        && let Some(turn) = turns
-            .iter()
-            .rev()
-            .find(|turn| turn.status.as_deref() == Some("inProgress") && !turn.id.trim().is_empty())
-    {
-        return Ok(SubmissionTarget::Steer(&turn.id));
+impl std::str::FromStr for SessionRef {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(value).map_err(|error| error.to_string())
     }
-    if active == Some(true) {
-        return Ok(SubmissionTarget::Queue);
-    }
-    Ok(SubmissionTarget::Start {
-        cwd: cwd
-            .filter(|cwd| !cwd.trim().is_empty())
-            .ok_or("thread working directory is unknown")?,
-        resume: status
-            .is_none_or(|status| status.kind == crate::models::ThreadStatusKind::NotLoaded),
-    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TextField {
-    Message,
-    Reasoning,
+    AssistantText,
+    ReasoningContent { index: u32 },
+    ReasoningSummary { index: u32 },
     CommandOutput,
-    FileChange,
+    FileOutput,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReasoningField {
+    Content,
+    Summary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum UpdateError {
+    #[error("turn ID is required")]
+    InvalidTurnId,
+    #[error("turn is not available")]
+    MissingTurn,
+    #[error("item is not available")]
+    MissingItem,
+    #[error("text field does not match item body")]
+    WrongBody,
+    #[error("item details must be read before appending")]
+    DeferredBody,
+    #[error("reasoning part index is not contiguous")]
+    InvalidPartIndex,
+    #[error("request is no longer pending")]
+    MissingRequest,
 }
 
 /// A small change to the current conversation, never a persistent event log.
@@ -105,45 +100,49 @@ pub enum TextField {
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SessionChange {
     Submission {
-        id: String,
+        id: crate::ids::ClientInputId,
         delivery: SubmissionDelivery,
     },
     Request {
-        request: crate::operations::ServerRequest,
+        request: crate::requests::Request,
     },
     RequestDelivery {
-        request_id: String,
+        request_id: crate::ids::RequestId,
         state: RequestDelivery,
     },
     ResolveRequest {
-        request_id: String,
+        request_id: crate::ids::RequestId,
     },
     Status {
-        status: ThreadStatus,
+        status: SessionStatus,
     },
     Turn {
         turn: Turn,
         completed: bool,
     },
     Item {
-        turn_id: String,
+        turn_id: crate::ids::TurnId,
         item: Arc<Item>,
     },
     RemoveItem {
-        turn_id: String,
-        item_id: String,
+        turn_id: crate::ids::TurnId,
+        item_id: crate::ids::ItemId,
     },
     Text {
-        turn_id: String,
-        item_id: String,
+        turn_id: crate::ids::TurnId,
+        item_id: crate::ids::ItemId,
         field: TextField,
         delta: String,
     },
+    ReasoningPart {
+        turn_id: crate::ids::TurnId,
+        item_id: crate::ids::ItemId,
+        field: ReasoningField,
+        index: u32,
+    },
     Error {
-        turn_id: String,
-        #[serde(with = "crate::protocol::json")]
-        error: Value,
-        will_retry: bool,
+        turn_id: crate::ids::TurnId,
+        error: ExecutionError,
     },
 }
 
@@ -152,7 +151,7 @@ pub enum SessionChange {
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SubmissionDelivery {
     Sending,
-    Accepted { turn_id: Option<String> },
+    Accepted { turn_id: Option<crate::ids::TurnId> },
     Unknown,
     Rejected,
 }
@@ -162,13 +161,14 @@ pub enum SubmissionDelivery {
 pub enum RequestDelivery {
     Awaiting,
     Sending,
+    Sent,
     Unknown,
 }
 
 impl SessionChange {
     /// Updates only the supplied conversation. The caller owns assignment,
     /// subscriptions, unread state, drafts and any follow-up IO.
-    pub fn apply(&self, previous: &Thread) -> Result<Thread, &'static str> {
+    pub fn apply(&self, previous: &Thread) -> Result<Thread, UpdateError> {
         let mut next = previous.clone();
         match self {
             Self::Submission { id, delivery } => {
@@ -177,15 +177,15 @@ impl SessionChange {
             }
             Self::Request { request } => {
                 next.requests
-                    .insert(request.id.to_string(), Arc::new(request.clone()));
+                    .insert(request.id.clone(), Arc::new(request.clone()));
                 return Ok(next);
             }
             Self::RequestDelivery { request_id, state } => {
                 let request = next
                     .requests
                     .get_mut(request_id)
-                    .ok_or("request is no longer pending")?;
-                Arc::make_mut(request).delivery_state = Some(*state);
+                    .ok_or(UpdateError::MissingRequest)?;
+                Arc::make_mut(request).delivery = *state;
                 return Ok(next);
             }
             Self::ResolveRequest { request_id } => {
@@ -195,7 +195,7 @@ impl SessionChange {
             _ => {}
         }
         if let Self::Status { status } = self {
-            next.status = Some(status.clone());
+            next.status = *status;
             return Ok(next);
         }
         let turn_id = match self {
@@ -203,6 +203,7 @@ impl SessionChange {
             Self::Item { turn_id, .. }
             | Self::RemoveItem { turn_id, .. }
             | Self::Text { turn_id, .. }
+            | Self::ReasoningPart { turn_id, .. }
             | Self::Error { turn_id, .. } => turn_id,
             Self::Status { .. }
             | Self::Submission { .. }
@@ -211,7 +212,7 @@ impl SessionChange {
             | Self::ResolveRequest { .. } => unreachable!(),
         };
         if turn_id.is_empty() {
-            return Err("turn ID is required");
+            return Err(UpdateError::InvalidTurnId);
         }
         let index = previous
             .turns
@@ -222,16 +223,22 @@ impl SessionChange {
         if let Self::Turn { turn, completed } = self {
             let old = index.map(|index| &previous.turns.as_ref().unwrap()[index]);
             if !completed
-                && old.is_some_and(|old| old.status.as_deref().is_some_and(|s| s != "inProgress"))
+                && old.is_some_and(|old| {
+                    old.status != TurnStatus::Running && old.status != TurnStatus::Unknown
+                })
             {
                 return Ok(next);
             }
             let mut merged = old.map_or_else(|| turn.clone(), |old| merge_fields(old, turn));
-            merged.status = Some(if *completed {
-                turn.status.clone().unwrap_or_else(|| "completed".into())
+            merged.status = if *completed {
+                if turn.status == TurnStatus::Unknown {
+                    TurnStatus::Completed
+                } else {
+                    turn.status
+                }
             } else {
-                "inProgress".into()
-            });
+                TurnStatus::Running
+            };
             if let Some(old) = old {
                 if turn.started_at.is_none() {
                     merged.started_at = old.started_at;
@@ -256,16 +263,15 @@ impl SessionChange {
                         items.clone()
                     },
                 );
-                if let Some(deferred) = &mut merged.deferred_item_ids {
-                    deferred.retain(|id| !items.iter().any(|item| &item.id == id));
-                }
             }
             if turn.error.is_none()
-                && (merged.status.as_deref() == Some("completed")
+                && (merged.status == TurnStatus::Completed
                     || old.is_some_and(|old| {
-                        old.error.as_ref().is_some_and(|e| e["willRetry"] == true)
+                        old.error
+                            .as_ref()
+                            .is_some_and(|e| e.retry.as_ref().is_some_and(|retry| retry.retrying))
                     }))
-                && merged.status.as_deref() != Some("inProgress")
+                && merged.status != TurnStatus::Running
             {
                 merged.error = None;
             }
@@ -275,28 +281,19 @@ impl SessionChange {
             } else {
                 turns.push(Arc::new(merged));
             }
-            let active = turns
-                .iter()
-                .any(|turn| turn.status.as_deref() == Some("inProgress"));
-            next.status = Some(ThreadStatus {
-                kind: if active {
-                    crate::models::ThreadStatusKind::Active
-                } else {
-                    crate::models::ThreadStatusKind::Idle
-                },
-            });
+            let active = turns.iter().any(|turn| turn.status == TurnStatus::Running);
+            next.status = if active {
+                SessionStatus::Running
+            } else {
+                SessionStatus::Idle
+            };
             return Ok(next);
         }
-        let Some(index) = index else {
-            return Ok(next);
-        };
+        let index = index.ok_or(UpdateError::MissingTurn)?;
         let old = &previous.turns.as_ref().unwrap()[index];
         let turn = Arc::make_mut(&mut next.turns.as_mut().unwrap()[index]);
         match self {
             Self::Item { item, .. } => {
-                if let Some(deferred) = &mut turn.deferred_item_ids {
-                    deferred.retain(|id| id != &item.id);
-                }
                 let items = turn.items.get_or_insert_default();
                 if let Some(index) = items.iter().position(|current| current.id == item.id) {
                     items[index] = item.clone();
@@ -315,53 +312,68 @@ impl SessionChange {
                 delta,
                 ..
             } => {
-                if delta.is_empty() {
-                    return Ok(previous.clone());
-                }
-                let Some(item) = turn
+                let item = turn
                     .items
                     .as_mut()
                     .and_then(|items| items.iter_mut().find(|item| &item.id == item_id))
-                else {
-                    return Ok(previous.clone());
-                };
-                let expected = match field {
-                    TextField::Message => "agentMessage",
-                    TextField::Reasoning => "reasoning",
-                    TextField::CommandOutput => "commandExecution",
-                    TextField::FileChange => "fileChange",
-                };
-                if item.kind.as_deref() != Some(expected) {
-                    return Ok(previous.clone());
+                    .ok_or(UpdateError::MissingItem)?;
+                if item.is_deferred() {
+                    return Err(UpdateError::DeferredBody);
                 }
                 let item = Arc::make_mut(item);
-                match field {
-                    TextField::Message => item.text.get_or_insert_default().push_str(delta),
-                    TextField::CommandOutput => item
-                        .aggregated_output
-                        .get_or_insert_default()
-                        .push_str(delta),
-                    TextField::Reasoning => {
-                        append_text(item.summary.get_or_insert(Value::Null), delta)
+                match (field, item.body_mut()) {
+                    (TextField::AssistantText, ItemBody::AssistantText { text, .. }) => {
+                        text.push_str(delta)
                     }
-                    TextField::FileChange => item
-                        .changes
-                        .get_or_insert_with(|| crate::models::ItemChanges(Vec::new()))
-                        .append_delta(delta),
+                    (TextField::CommandOutput, ItemBody::CommandExecution { output, .. })
+                    | (TextField::FileOutput, ItemBody::FileChange { output, .. }) => {
+                        output.push_str(delta)
+                    }
+                    (
+                        TextField::ReasoningContent { index },
+                        ItemBody::Reasoning { content, .. },
+                    ) => append_part(content, *index, delta)?,
+                    (
+                        TextField::ReasoningSummary { index },
+                        ItemBody::Reasoning { summary, .. },
+                    ) => append_part(summary, *index, delta)?,
+                    _ => return Err(UpdateError::WrongBody),
                 }
             }
-            Self::Error {
-                error, will_retry, ..
+            Self::ReasoningPart {
+                item_id,
+                field,
+                index,
+                ..
             } => {
-                if *will_retry && old.status.as_deref() != Some("inProgress") {
+                let item = turn
+                    .items
+                    .as_mut()
+                    .and_then(|items| items.iter_mut().find(|item| &item.id == item_id))
+                    .ok_or(UpdateError::MissingItem)?;
+                if item.is_deferred() {
+                    return Err(UpdateError::DeferredBody);
+                }
+                let ItemBody::Reasoning { content, summary } = Arc::make_mut(item).body_mut()
+                else {
+                    return Err(UpdateError::WrongBody);
+                };
+                append_part(
+                    match field {
+                        ReasoningField::Content => content,
+                        ReasoningField::Summary => summary,
+                    },
+                    *index,
+                    "",
+                )?;
+            }
+            Self::Error { error, .. } => {
+                if error.retry.as_ref().is_some_and(|retry| retry.retrying)
+                    && old.status != TurnStatus::Running
+                {
                     return Ok(previous.clone());
                 }
-                let mut error = match error.clone() {
-                    Value::Object(error) => error,
-                    message => Map::from_iter([("message".into(), message)]),
-                };
-                error.insert("willRetry".into(), Value::Bool(*will_retry));
-                turn.error = Some(Value::Object(error));
+                turn.error = Some(error.clone());
             }
             Self::Submission { .. }
             | Self::Status { .. }
@@ -376,12 +388,13 @@ impl SessionChange {
 
 pub(crate) fn merge_fields(previous: &Turn, incoming: &Turn) -> Turn {
     let mut merged = previous.clone();
+    if incoming.status != TurnStatus::Unknown {
+        merged.status = incoming.status;
+    }
     macro_rules! field { ($($field:ident),* $(,)?) => { $(if incoming.$field.is_some() { merged.$field = incoming.$field.clone(); })* }; }
     field!(
-        status,
         items_view,
         items_has_more,
-        deferred_item_ids,
         opening_user_message,
         started_at,
         completed_at,
@@ -438,7 +451,7 @@ pub struct Capabilities {
     pub model_change: bool,
 }
 pub fn input_unavailable_reason(thread: &Thread) -> Option<String> {
-    (!thread.capabilities.unwrap_or_default().additional_input && thread.turns.iter().flatten().any(|turn| turn.status.as_deref() == Some("inProgress")))
+    (!thread.capabilities.unwrap_or_default().additional_input && thread.turns.iter().flatten().any(|turn| turn.status == TurnStatus::Running))
         .then(|| "このプロバイダは実行中の追加送信に対応していません。完了を待つか、停止してから送信してください。".into())
 }
 
@@ -463,4 +476,17 @@ impl HistoryReadState {
     pub fn new(kind: HistoryReadKind, issues: Vec<String>) -> Self {
         Self { kind, issues }
     }
+}
+
+fn append_part(parts: &mut Vec<String>, index: u32, delta: &str) -> Result<(), UpdateError> {
+    let index = index as usize;
+    if index == parts.len() {
+        parts.push(delta.into());
+    } else {
+        parts
+            .get_mut(index)
+            .ok_or(UpdateError::InvalidPartIndex)?
+            .push_str(delta);
+    }
+    Ok(())
 }

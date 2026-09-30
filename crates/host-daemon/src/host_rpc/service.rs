@@ -27,21 +27,22 @@ use super::routing::{HostReply, HostSession, SessionId, SessionRouter};
 use crate::ProjectStore;
 
 #[derive(Debug, Serialize, thiserror::Error)]
-#[serde(untagged)]
-pub(super) enum Failure {
-    #[error("{message}")]
-    Host {
-        code: &'static str,
-        message: String,
-        delivery: agent_transport::peer::Delivery,
-    },
-    #[error("{provider_error}")]
-    Upstream {
-        #[serde(rename = "providerError")]
-        provider_error: Box<RawValue>,
-        message: String,
-        delivery: agent_transport::peer::Delivery,
-    },
+#[error("{message}")]
+pub(super) struct Failure {
+    code: &'static str,
+    message: String,
+    delivery: agent_protocol::error::Delivery,
+    pub(super) execution: Option<Box<agent_protocol::execution::ExecutionError>>,
+}
+impl From<Failure> for agent_protocol::error::RpcFailure {
+    fn from(error: Failure) -> Self {
+        Self {
+            code: error.code.into(),
+            message: error.message,
+            delivery: error.delivery,
+            execution: error.execution.map(|execution| *execution),
+        }
+    }
 }
 impl From<RpcMessageError> for Failure {
     fn from(error: RpcMessageError) -> Self {
@@ -55,6 +56,17 @@ impl From<serde_json::Error> for Failure {
     }
 }
 
+impl From<crate::claude::OperationError> for Failure {
+    fn from(error: crate::claude::OperationError) -> Self {
+        Self {
+            code: "claude_failed",
+            message: error.message,
+            delivery: error.delivery,
+            execution: None,
+        }
+    }
+}
+
 impl From<AppServerError> for Failure {
     fn from(error: AppServerError) -> Self {
         Self::unknown("codex_unavailable", error)
@@ -63,45 +75,43 @@ impl From<AppServerError> for Failure {
 
 impl Failure {
     fn before_submission(mut self) -> Self {
-        match &mut self {
-            Self::Host { delivery, .. } | Self::Upstream { delivery, .. } => {
-                *delivery = agent_transport::peer::Delivery::NotSent
-            }
-        }
+        self.delivery = agent_protocol::error::Delivery::NotSent;
         self
     }
-    fn delivery(&self) -> agent_transport::peer::Delivery {
-        match self {
-            Self::Host { delivery, .. } | Self::Upstream { delivery, .. } => *delivery,
+    pub(super) fn upstream(native: &RawValue) -> Self {
+        let value: serde_json::Value = serde_json::from_str(native.get()).unwrap_or_default();
+        let mut execution = super::native::codex_error(&value, false);
+        execution.message = agent_transport::diagnostics::sanitize(&execution.message);
+        execution.details = execution
+            .details
+            .map(|text| agent_transport::diagnostics::sanitize(&text));
+        if execution.provider_code.is_none() {
+            execution.provider_code = value["code"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| value["code"].as_i64().map(|code| code.to_string()));
         }
-    }
-
-    pub(super) fn upstream(provider_error: Box<RawValue>) -> Self {
-        let value: serde_json::Value =
-            serde_json::from_str(provider_error.get()).unwrap_or_default();
-        let message = value["message"]
-            .as_str()
-            .filter(|message| !message.trim().is_empty())
-            .map(agent_transport::diagnostics::sanitize)
-            .unwrap_or_else(|| "接続先で操作に失敗しました。もう一度お試しください。".into());
-        Self::Upstream {
-            message,
-            provider_error,
-            delivery: agent_transport::peer::Delivery::Unknown,
+        Self {
+            code: "provider_failed",
+            message: execution.message.clone(),
+            delivery: agent_protocol::error::Delivery::Unknown,
+            execution: Some(Box::new(execution)),
         }
     }
     pub(super) fn unknown(code: &'static str, error: impl std::fmt::Display) -> Self {
-        Self::Host {
+        Self {
             code,
             message: format!("{error:#}"),
-            delivery: agent_transport::peer::Delivery::Unknown,
+            delivery: agent_protocol::error::Delivery::Unknown,
+            execution: None,
         }
     }
     pub(super) fn new(code: &'static str, error: impl std::fmt::Display) -> Self {
-        Self::Host {
+        Self {
             code,
             message: format!("{error:#}"),
-            delivery: agent_transport::peer::Delivery::NotSent,
+            delivery: agent_protocol::error::Delivery::NotSent,
+            execution: None,
         }
     }
 }
@@ -349,11 +359,13 @@ impl HostRpcService {
             return self.session_open(session, params).await;
         }
         let result = async {
-            let (thread_id, input_id) = session_target(message);
-            let target = thread_id
-                .map(agent_protocol::session::SessionRef::from_thread_id)
-                .transpose()
-                .map_err(|error| Failure::new("invalid_params", error))?;
+            let (target, input_id) = session_target(message);
+            if let Some(target) = target {
+                target
+                    .validate()
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+            }
+            let target = target.cloned();
             let submission = target.as_ref().zip(input_id);
             // Keep the execution alive and serialize decisions through the
             // provider acknowledgement, including concurrent client inputs.
@@ -369,11 +381,7 @@ impl HostRpcService {
             let _workspace_read = if matches!(
                 message,
                 Call::Submit(_)
-                    | Call::QueueTurn(_)
-                    | Call::StartThread(_)
-                    | Call::ResumeThread(_)
-                    | Call::StartTurn(_)
-                    | Call::SteerTurn(_)
+                    | Call::CreateSession(_)
                     | Call::StartTerminal(_)
                     | Call::WriteFile(_)
                     | Call::Upload(_)
@@ -392,7 +400,7 @@ impl HostRpcService {
                 self.inner.router.begin_submission(target, id)?;
             }
             let result = if let Call::Submit(input) = message {
-                self.submit_input(session, target.as_ref().expect("submission target"), input)
+                self.submit_input(target.as_ref().expect("submission target"), input)
                     .await
                     .map(Into::into)
             } else {
@@ -404,16 +412,8 @@ impl HostRpcService {
                     Ok(Body::Submission(receipt)) => SubmissionDelivery::Accepted {
                         turn_id: receipt.turn_id.clone(),
                     },
-                    Ok(Body::Started(receipt)) => SubmissionDelivery::Accepted {
-                        turn_id: Some(receipt.turn.id.clone()),
-                    },
-                    Ok(_) => SubmissionDelivery::Accepted {
-                        turn_id: match message {
-                            Call::SteerTurn(input) => Some(input.expected_turn_id.clone()),
-                            _ => None,
-                        },
-                    },
-                    Err(error) if error.delivery() == agent_transport::peer::Delivery::NotSent => {
+                    Ok(_) => unreachable!("only submission returns delivery evidence"),
+                    Err(error) if error.delivery == agent_transport::peer::Delivery::NotSent => {
                         SubmissionDelivery::Rejected
                     }
                     Err(_) => SubmissionDelivery::Unknown,
@@ -437,64 +437,110 @@ impl HostRpcService {
 
     async fn submit_input(
         &self,
-        session: SessionId,
         target: &agent_protocol::session::SessionRef,
-        input: &agent_protocol::operations::Submission,
-    ) -> Result<agent_protocol::operations::SubmissionReceipt, Failure> {
-        use agent_protocol::operations::{
-            QueueTurn, ResumeThread, StartTurn, SteerTurn, SubmissionReceipt,
+        input: &op::Submission,
+    ) -> Result<op::SubmissionReceipt, Failure> {
+        if input
+            .model
+            .as_ref()
+            .is_some_and(|model| model.provider != target.provider || model.id.trim().is_empty())
+        {
+            return Err(Failure::new(
+                "provider_mismatch",
+                "別のプロバイダーのモデルを使う場合は新しい会話を作成してください。",
+            ));
+        }
+        if target.provider == ProviderKind::Codex
+            && let Some(error) = self.inner.restoration_error.borrow().as_ref()
+        {
+            return Err(Failure::new("account_unavailable", error));
+        }
+        let claude = if target.provider == ProviderKind::Claude {
+            Some(
+                self.inner
+                    .claude
+                    .get()
+                    .ok_or_else(|| Failure::new("claude_unavailable", "Claude is unavailable"))?,
+            )
+        } else {
+            None
         };
-        let mut response = match target.provider {
-            agent_protocol::session::ProviderKind::Codex => self
-                .inner
-                .codex
-                .request(
-                    "thread/read",
-                    &serde_json::json!({"threadId":target.id,"includeTurns":false}),
+        // Loaded state is native routing evidence; it is not a BEX session status.
+        let (mut response, requires_resume) = match claude {
+            Some(claude) => (
+                claude
+                    .read(&target.id, 1)
+                    .await
+                    .map_err(|e| Failure::new("session_read_failed", e))?,
+                false,
+            ),
+            None => {
+                let native: serde_json::Value = self
+                    .inner
+                    .codex
+                    .request(
+                        "thread/read",
+                        &serde_json::json!({"threadId":target.id,"includeTurns":false}),
+                    )
+                    .await
+                    .map_err(Failure::before_submission)?;
+                let requires_resume = native["thread"]["status"]["type"] == "notLoaded";
+                (
+                    super::native::codex_thread_response(native)
+                        .map_err(|e| Failure::new("invalid_thread", e))?,
+                    requires_resume,
                 )
-                .await
-                .map_err(Failure::before_submission)?,
-            agent_protocol::session::ProviderKind::Claude => self
-                .inner
-                .claude
-                .get()
-                .ok_or_else(|| Failure::new("claude_unavailable", "Claude is unavailable"))?
-                .read(&target.id, 1)
-                .await
-                .map_err(|e| Failure::new("session_read_failed", e))?,
+            }
         };
-        let expected = match target.provider {
-            agent_protocol::session::ProviderKind::Codex => target.id.as_str(),
-            agent_protocol::session::ProviderKind::Claude => input.thread_id.as_str(),
-        };
-        if response.thread.id.as_deref() != Some(expected) {
+        if response.thread.id.as_ref() != Some(target) {
             return Err(Failure::new(
                 "invalid_thread",
                 "native session identity changed",
             ));
         }
         self.inner.router.overlay_execution(target, &mut response);
-        let thread = &response.thread;
-        use agent_protocol::session::{SubmissionTarget, submission_target};
+        use super::submission::{SubmissionTarget, submission_target};
         let route = submission_target(
-            thread.status.as_ref(),
-            thread.turns.as_deref().unwrap_or_default(),
-            thread.cwd.as_deref(),
+            response.thread.status,
+            response.thread.turns.as_deref().unwrap_or_default(),
+            response.thread.cwd.as_deref(),
         )
         .map_err(|error| Failure::new("submission_unavailable", error))?;
-        let call = match route {
-            SubmissionTarget::Steer(turn_id) => Call::SteerTurn(SteerTurn {
-                thread_id: input.thread_id.clone(),
-                client_user_message_id: input.client_user_message_id.clone(),
-                input: input.input.clone(),
-                expected_turn_id: turn_id.into(),
-            }),
-            SubmissionTarget::Queue => Call::QueueTurn(QueueTurn {
-                thread_id: input.thread_id.clone(),
-                client_user_message_id: input.client_user_message_id.clone(),
-                input: input.input.clone(),
-            }),
-            SubmissionTarget::Start { cwd, resume } => {
+        let turn_id = match route {
+            SubmissionTarget::Steer(turn_id) => {
+                if let Some(claude) = claude {
+                    claude
+                        .additional_input(
+                            &target.id,
+                            Some(turn_id),
+                            &input.input,
+                            &input.client_user_message_id,
+                        )
+                        .await
+                        .map_err(Failure::from)?;
+                } else {
+                    self.inner.codex.request::<_, agent_protocol::models::Empty>("turn/steer", &serde_json::json!({"threadId":target.id,"expectedTurnId":turn_id,"clientUserMessageId":input.client_user_message_id,"input":super::native::codex_input(&input.input)})).await?;
+                }
+                Some(turn_id.into())
+            }
+            SubmissionTarget::Queue => {
+                if let Some(claude) = claude {
+                    claude
+                        .additional_input(
+                            &target.id,
+                            None,
+                            &input.input,
+                            &input.client_user_message_id,
+                        )
+                        .await
+                        .map_err(Failure::from)?;
+                } else {
+                    let reply: serde_json::Value = self.inner.codex.request("thread/queue/add", &serde_json::json!({"threadId":target.id,"clientUserMessageId":input.client_user_message_id,"input":super::native::codex_input(&input.input)})).await?;
+                    native_turn_id(reply["queuedSubmission"]["id"].as_str())?;
+                }
+                None
+            }
+            SubmissionTarget::Start { cwd } => {
                 let recreated = self
                     .inner
                     .worktrees
@@ -509,90 +555,71 @@ impl HostRpcService {
                         .await
                         .map_err(|error| Failure::new("workspace_resume_failed", error))?;
                 }
-                if resume || recreated.is_some() {
-                    self.request(
-                        session,
-                        &Call::ResumeThread(ResumeThread {
-                            thread_id: input.thread_id.clone(),
-                            cwd: Some(cwd.into()),
-                        }),
-                        Some(target),
-                    )
-                    .await
-                    .map_err(Failure::before_submission)?;
-                }
-                Call::StartTurn(StartTurn {
-                    thread_id: input.thread_id.clone(),
-                    client_user_message_id: input.client_user_message_id.clone(),
-                    input: input.input.clone(),
-                    model: input.model.clone(),
-                    effort: input.effort.clone(),
-                    service_tier: input.service_tier.clone(),
+                Some(if let Some(claude) = claude {
+                    claude
+                        .start_turn(&target.id, input)
+                        .await
+                        .map_err(Failure::from)?
+                } else {
+                    // Native resume is part of Host submission, never a client operation.
+                    let mut params = serde_json::json!({"threadId":target.id,"cwd":cwd});
+                    if let Some(config) = self.browser_config(&target.to_string())? {
+                        params["config"] = config;
+                    }
+                    if requires_resume || recreated.is_some() {
+                        self.inner
+                            .codex
+                            .thread_response("thread/resume", &params)
+                            .await
+                            .map_err(Failure::before_submission)?;
+                    }
+                    let reply: serde_json::Value = self.inner.codex.request("turn/start", &serde_json::json!({"threadId":target.id,"clientUserMessageId":input.client_user_message_id,"input":super::native::codex_input(&input.input),"model":input.model.as_ref().map(|model| &model.id),"effort":input.effort,"serviceTierForTurn":input.service_tier})).await?;
+                    native_turn_id(reply["turn"]["id"].as_str())?
                 })
             }
         };
-        let reply = self.request(session, &call, Some(target)).await?;
-        let turn_id = match (&call, reply) {
-            (Call::StartTurn(params), Body::Started(reply)) => {
-                agent_protocol::operations::RpcMethod::validate(params, &reply)
-                    .map_err(|error| Failure::unknown("invalid_submission_reply", error))?;
-                Some(reply.turn.id)
-            }
-            (Call::SteerTurn(params), Body::Empty(_)) => Some(params.expected_turn_id.clone()),
-            (Call::QueueTurn(params), Body::Queued(reply)) => {
-                agent_protocol::operations::RpcMethod::validate(params, &reply)
-                    .map_err(|error| Failure::unknown("invalid_submission_reply", error))?;
-                None
-            }
-            _ => {
-                return Err(Failure::unknown(
-                    "invalid_submission_reply",
-                    "provider returned an invalid submission result",
-                ));
-            }
-        };
-        Ok(SubmissionReceipt { turn_id })
+        Ok(op::SubmissionReceipt { turn_id })
     }
 
     async fn answer_request(
         &self,
         session: SessionId,
-        id: serde_json::Value,
-        result: serde_json::Value,
+        id: agent_protocol::ids::RequestId,
+        answer: agent_protocol::requests::Answer,
     ) -> Result<agent_protocol::models::Empty, Failure> {
-        let id = id.to_string();
-        let (provider, native) = self
+        use super::requests::RequestDestination;
+        use agent_protocol::session::RequestDelivery;
+        let (origin, result) = self
             .inner
             .router
-            .claim_response(session, &id, &result)
+            .claim_response(session, &id, &answer)
             .map_err(|error| Failure::new("invalid_answer", error))?;
-        let sent = if provider == agent_protocol::session::ProviderKind::Claude {
-            match self.inner.claude.get() {
-                Some(claude) => {
-                    claude
-                        .respond(
-                            native.as_str().ok_or_else(|| {
-                                Failure::new("invalid_answer", "Claude request ID must be a string")
-                            })?,
-                            &result,
-                        )
-                        .await
-                }
-                None => Err("Claude is unavailable".into()),
+        let unknown = scopeguard::guard(id.clone(), |id| {
+            self.inner
+                .router
+                .response_delivery(&id, RequestDelivery::Unknown)
+        });
+        let sent = match origin.destination {
+            RequestDestination::Claude { input } => {
+                crate::claude::send_response(&input, &origin.native_id, result).await
             }
-        } else {
-            match self.inner.codex.server() {
-                Ok(codex) => codex
-                    .send_raw(&serde_json::json!({"id":native,"result":result}).to_string())
+            RequestDestination::Codex { .. } => match self.inner.codex.server() {
+                Ok(codex) if origin.instance == self.inner.codex.instance => codex
+                    .send_raw(
+                        &serde_json::json!({"id":origin.native_id,"result":result}).to_string(),
+                    )
                     .await
                     .map_err(|e| e.to_string()),
-                Err(error) => Err(error.to_string()),
-            }
+                _ => Err("request source is unavailable".into()),
+            },
         };
         if let Err(error) = sent {
-            self.inner.router.response_unknown(&id);
             return Err(Failure::unknown("answer_delivery_unknown", error));
         }
+        self.inner
+            .router
+            .response_delivery(&id, RequestDelivery::Sent);
+        scopeguard::ScopeGuard::into_inner(unknown);
         Ok(agent_protocol::models::Empty {})
     }
 
@@ -630,14 +657,9 @@ impl HostRpcService {
                 }
             };
             let native_ms = started.elapsed().as_millis();
-            let expected = match target.provider {
-                agent_protocol::session::ProviderKind::Codex => target.id.clone(),
-                agent_protocol::session::ProviderKind::Claude => target.thread_id(),
-            };
-            if response.thread.id.as_deref() != Some(expected.as_str()) {
+            if response.thread.id.as_ref() != Some(&target) {
                 return Err(anyhow::anyhow!("native session identity changed"));
             }
-            response.thread.session = Some(target.clone());
             describe_thread(
                 &mut response.thread,
                 target.provider,
@@ -717,7 +739,7 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("item_read_failed", error))?
         } else {
             let params = op::ReadItem {
-                thread_id: target.id.clone(),
+                thread_id: target.clone(),
                 turn_id: params.turn_id.clone(),
                 item_id: params.item_id.clone(),
             };
@@ -732,7 +754,7 @@ impl HostRpcService {
                     .await
                     .map_err(|error| Failure::new("item_transfer_failed", error))?,
             );
-            response.item.retain_header();
+            response.item.defer();
         }
         Ok(response)
     }
@@ -762,21 +784,6 @@ impl HostRpcService {
                 .map_err(|e| Failure::new("browser_failed", e));
         }
         let method = request.method();
-        if matches!(request, Call::Provider(_))
-            && !matches!(
-                method,
-                "thread/list"
-                    | "account/read"
-                    | "account/login/start"
-                    | "account/login/cancel"
-                    | "account/logout"
-            )
-        {
-            return Err(Failure::new(
-                "method_not_found",
-                format!("unregistered method: {method}"),
-            ));
-        }
         if let Call::ReadItem(params) = request {
             let Some(target) = target_session else {
                 return Err(Failure::new("invalid_params", "session ID is required"));
@@ -786,66 +793,33 @@ impl HostRpcService {
                 .await
                 .map(Into::into);
         }
-        let claude_target = target_session
-            .filter(|target| target.provider == agent_protocol::session::ProviderKind::Claude);
-        if claude_target.is_none()
-            && matches!(
-                request,
-                Call::StartTurn(_) | Call::SteerTurn(_) | Call::QueueTurn(_)
-            )
-            && let Err(error) = self.inner.codex.server()
-        {
-            return Err(error);
-        }
-        if matches!(request, Call::StartTurn(_))
-            && claude_target.is_none()
-            && let Some(error) = self.inner.restoration_error.borrow().as_ref()
-        {
-            return Err(Failure::new("account_unavailable", error));
-        }
         if let Some(target) = target_session {
             let capabilities = provider_capabilities(target.provider);
-            let supported = match request {
-                Call::ForkThread(_) => capabilities.fork,
-                Call::RenameThread(_) => capabilities.rename,
-                Call::SteerTurn(_) | Call::QueueTurn(_) => capabilities.additional_input,
-                _ => true,
-            };
-            if !supported {
+            if matches!(request, Call::ForkSession(_)) && !capabilities.fork
+                || matches!(request, Call::RenameSession(_)) && !capabilities.rename
+            {
                 return Err(Failure::new(
                     "unsupported_operation",
                     format!("{method} is unsupported by this provider"),
                 ));
             }
-        }
-        if let Some(target) = claude_target {
-            return match self.inner.claude.get() {
-                Some(claude) => {
-                    claude
-                        .request(&target.id, request)
+            if target.provider == ProviderKind::Claude {
+                let claude =
+                    self.inner.claude.get().ok_or_else(|| {
+                        Failure::new("claude_unavailable", "Claude is unavailable")
+                    })?;
+                return match request {
+                    Call::Interrupt(params) => claude
+                        .interrupt(&target.id, &params.turn_id)
                         .await
-                        .map_err(|error| Failure::Host {
-                            code: "claude_failed",
-                            message: error.message,
-                            delivery: error.delivery,
-                        })
-                }
-                None => Err(Failure::new(
-                    "claude_unavailable",
-                    "このHostではClaude Codeが有効になっていません。",
-                )),
-            };
-        }
-        if let Call::StartTurn(params) = request
-            && params
-                .model
-                .as_deref()
-                .is_some_and(|model| model.starts_with(crate::claude::MODEL_PREFIX))
-        {
-            return Err(Failure::new(
-                "provider_mismatch",
-                "Claudeへ切り替える場合は新しい会話を作成してください。",
-            ));
+                        .map(|()| agent_protocol::models::Empty {}.into())
+                        .map_err(Failure::from),
+                    _ => Err(Failure::new(
+                        "unsupported_operation",
+                        format!("{method} is unsupported by this provider"),
+                    )),
+                };
+            }
         }
         let response = match request {
             Call::ReadPermissionSettings(params) => {
@@ -929,15 +903,15 @@ impl HostRpcService {
             | Call::SubmitAccountLogin(_)
             | Call::CancelAccountLogin(_) => self.account_request(request.clone()).await?,
 
-            Call::ListModels(params) if self.inner.claude.get().is_some() => {
+            Call::ListModels(params) => {
                 let first_page = params.cursor.is_none();
                 let (codex, claude) = tokio::join!(
                     self.inner
                         .codex
-                        .request::<_, op::ModelPage>(method, &params),
+                        .models(params),
                     async {
-                        if first_page {
-                            self.inner.claude.get().unwrap().models().await
+                        if first_page && let Some(claude) = self.inner.claude.get() {
+                            claude.models().await
                         } else {
                             Ok(Vec::new())
                         }
@@ -1010,7 +984,7 @@ impl HostRpcService {
                 agent_protocol::models::Empty {}.into()
             }
             Call::AnswerSession(params) => (self
-                .answer_request(session, params.request_id.clone(), params.result.clone())
+                .answer_request(session, params.request_id.clone(), params.answer.clone())
                 .await?)
                 .into(),
             Call::AddProject(params) => (self
@@ -1018,7 +992,7 @@ impl HostRpcService {
                 .await
                 .map_err(|error| Failure::new("project_add_failed", error))?)
             .into(),
-            Call::ListThreads(params) => {
+            Call::ListSessions(params) => {
                 let started = std::time::Instant::now();
                 let result = self.host_title_list(params.query.clone()).await;
                 tracing::info!(target: "bex", operation = "host.thread.list.performance",
@@ -1045,7 +1019,7 @@ impl HostRpcService {
                 (self.remove_worktree(params.clone()).await?).into()
             }
 
-            Call::StartThread(params) => (self.start_thread(params.clone()).await?).into(),
+            Call::CreateSession(params) => (self.create_session(params.clone()).await?).into(),
             Call::StartTerminal(params) => (self
                 .inner
                 .terminals
@@ -1093,55 +1067,18 @@ impl HostRpcService {
                 .request(session, request.clone())
                 .await
                 .map_err(|error| Failure::new("file_operation_failed", error))?,
-            Call::ListModels(_)
-            | Call::ResumeThread(_)
-            | Call::ForkThread(_)
-            | Call::StartTurn(_)
-            | Call::SteerTurn(_)
-            | Call::QueueTurn(_)
-            | Call::Interrupt(_)
-            | Call::RenameThread(_)
-            | Call::Provider(_) => {
-                let browser_scope = matches!(request, Call::ForkThread(_))
-                    .then(|| uuid::Uuid::new_v4().to_string());
-                let response = self
-                    .inner
-                    .codex
-                    .request_raw(&{
-                        let mut params = request.params_json()?;
-                        if let Some(target) = target_session {
-                            params["threadId"] = target.id.clone().into();
-                            if matches!(request, Call::ResumeThread(_))
-                                && let Some(config) = self.browser_config(&target.id)?
-                            {
-                                params["config"] = config;
-                            }
-                        }
-                        if let Some(scope) = &browser_scope
-                            && let Some(config) = self.browser_config(scope)?
-                        {
-                            params["config"] = config;
-                        }
-                        agent_transport::peer::request_line(method, &params)
-                            .expect("provider request serializes")
-                    })
-                    .await?;
-                let mut body = codex_response(method, response)?;
-                if let Body::Thread(response) = &mut body {
-                    if let Some(scope) = browser_scope
-                        && let Some(browser) = self.inner.browser.get()
-                        && let Some(id) = &response.thread.id
-                    {
-                        browser.bind_scope(scope, id.clone()).await;
-                    }
-                    describe_thread(
-                        &mut response.thread,
-                        agent_protocol::session::ProviderKind::Codex,
-                        &self.project_snapshot().await?,
-                    );
-                }
-                body
+            Call::ForkSession(params) => {
+                let target = target_session.expect("session-scoped fork");
+                let scope = uuid::Uuid::new_v4().to_string();
+                let mut native = serde_json::json!({"threadId":target.id,"lastTurnId":params.last_turn_id,"excludeTurns":params.exclude_turns});
+                if let Some(config) = self.browser_config(&scope)? { native["config"] = config; }
+                let mut response = self.inner.codex.thread_response("thread/fork", &native).await?;
+                if let Some(browser) = self.inner.browser.get() && let Some(id) = &response.thread.id { browser.bind_scope(scope, id.to_string()).await; }
+                describe_thread(&mut response.thread, ProviderKind::Codex, &self.project_snapshot().await?);
+                response.into()
             }
+            Call::Interrupt(params) => self.inner.codex.request::<_, agent_protocol::models::Empty>("turn/interrupt", &serde_json::json!({"threadId":target_session.expect("session-scoped interrupt").id,"turnId":params.turn_id})).await?.into(),
+            Call::RenameSession(params) => self.inner.codex.request::<_, agent_protocol::models::Empty>("thread/name/set", &serde_json::json!({"threadId":target_session.expect("session-scoped rename").id,"name":params.name})).await?.into(),
             _ => {
                 return Err(Failure::new(
                     "method_not_found",
@@ -1217,9 +1154,7 @@ impl HostRpcService {
                 if !cwd.starts_with(&worktree.path) {
                     continue;
                 }
-                let active = thread.status.as_ref().is_some_and(|status| {
-                    status.kind == agent_protocol::models::ThreadStatusKind::Active
-                });
+                let active = thread.status == agent_protocol::models::SessionStatus::Running;
                 if active {
                     worktree.blocked_reason = Some("このワークツリーで作業を実行中です。完了または停止してから削除してください。".into());
                 }
@@ -1441,19 +1376,21 @@ impl HostRpcService {
         Ok(page)
     }
 
-    async fn start_thread(
+    async fn create_session(
         &self,
-        mut params: agent_protocol::operations::StartThread,
+        mut params: agent_protocol::operations::CreateSession,
     ) -> Result<ThreadResponse, Failure> {
-        let provider = if params
+        let provider = params.provider;
+        if params
             .model
-            .as_deref()
-            .is_some_and(|model| model.starts_with(crate::claude::MODEL_PREFIX))
+            .as_ref()
+            .is_some_and(|model| model.provider != provider || model.id.trim().is_empty())
         {
-            agent_protocol::session::ProviderKind::Claude
-        } else {
-            agent_protocol::session::ProviderKind::Codex
-        };
+            return Err(Failure::new(
+                "provider_mismatch",
+                "model must name a model of the requested provider",
+            ));
+        }
         if provider == agent_protocol::session::ProviderKind::Codex {
             self.inner.codex.server()?;
         }
@@ -1494,32 +1431,48 @@ impl HostRpcService {
                 Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
             }
         }
-        let mut response = if let Some(model) = params.model.as_deref()
-            && provider == agent_protocol::session::ProviderKind::Claude
-        {
+        let mut response = if provider == agent_protocol::session::ProviderKind::Claude {
             let claude = self.inner.claude.get().ok_or_else(|| {
                 Failure::new(
                     "claude_unavailable",
                     "このHostではClaude Codeが有効になっていません。",
                 )
             })?;
+            let model = match params.model {
+                Some(model) => model.id,
+                None => {
+                    claude
+                        .models()
+                        .await
+                        .map_err(|error| Failure::new("claude_unavailable", error))?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| {
+                            Failure::new("claude_unavailable", "Claude model catalog is empty")
+                        })?
+                        .model
+                        .id
+                }
+            };
             claude
-                .create(params.cwd.as_deref().unwrap_or_default(), model)
+                .create(params.cwd.as_deref().unwrap_or_default(), &model)
                 .await
                 .map_err(|error| Failure::new("claude_unavailable", error))?
         } else {
             let scope = uuid::Uuid::new_v4().to_string();
-            let mut request =
-                serde_json::json!({"cwd":params.cwd,"model":params.model,"projectId":project_id});
+            let mut request = serde_json::json!({"cwd":params.cwd,"model":params.model.map(|model| model.id),"projectId":project_id});
             if let Some(config) = self.browser_config(&scope)? {
                 request["config"] = config;
             }
-            let response: ThreadResponse =
-                self.inner.codex.request("thread/start", &request).await?;
+            let response: ThreadResponse = self
+                .inner
+                .codex
+                .thread_response("thread/start", &request)
+                .await?;
             if let Some(browser) = self.inner.browser.get()
                 && let Some(id) = &response.thread.id
             {
-                browser.bind_scope(scope, id.clone()).await;
+                browser.bind_scope(scope, id.to_string()).await;
             }
             response
         };
@@ -1544,6 +1497,7 @@ impl HostRpcService {
         let mut events = codex.subscribe();
         let router = self.inner.router.clone();
         let stopped = self.inner.codex.stopped.clone();
+        let instance = self.inner.codex.instance;
         let processed = self.inner.codex.processed.clone();
         let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
@@ -1598,7 +1552,17 @@ impl HostRpcService {
                         } else if request.kind() == RpcMessageKind::Request {
                             let admission = serde_json::from_str(&line)
                                 .map_err(|error| error.to_string())
-                                .and_then(|request| super::codex::request(&router, request));
+                                .and_then(|request| {
+                                    super::codex::request(
+                                        &router,
+                                        instance,
+                                        stopped.clone(),
+                                        request,
+                                    )
+                                });
+                            if let Err(error) = &admission {
+                                tracing::warn!(target: "bex", operation = "host.codex.request_rejected", message = %error);
+                            }
                             if let Err(error) = admission
                                 && let Some(inner) = inner.upgrade()
                                 && let Ok(codex) = &inner.codex.process
@@ -1606,7 +1570,8 @@ impl HostRpcService {
                             {
                                 let _ = codex.send_raw(&response).await;
                             }
-                        } else if let Err(error) = super::codex::event(&router, &request) {
+                        } else if let Err(error) = super::codex::event(&router, instance, &request)
+                        {
                             tracing::error!(target: "bex", operation = "host.codex.event", message = %error);
                             break;
                         }
@@ -1652,29 +1617,13 @@ fn canonical_storage_path(path: &std::path::Path) -> std::path::PathBuf {
 
 // Every session-scoped operation provides its target here. Submission IDs
 // additionally identify the operations whose delivery must be tracked.
-fn session_target(request: &Call) -> (Option<&str>, Option<&str>) {
+fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRef>, Option<&str>) {
     match request {
-        Call::Submit(p) => (
-            Some(p.thread_id.as_str()),
-            Some(p.client_user_message_id.as_str()),
-        ),
-        Call::StartTurn(p) => (
-            Some(p.thread_id.as_str()),
-            Some(p.client_user_message_id.as_str()),
-        ),
-        Call::SteerTurn(p) => (
-            Some(p.thread_id.as_str()),
-            Some(p.client_user_message_id.as_str()),
-        ),
-        Call::QueueTurn(p) => (
-            Some(p.thread_id.as_str()),
-            Some(p.client_user_message_id.as_str()),
-        ),
-        Call::ResumeThread(p) => (Some(p.thread_id.as_str()), None),
-        Call::ForkThread(p) => (Some(p.thread_id.as_str()), None),
-        Call::Interrupt(p) => (Some(p.thread_id.as_str()), None),
-        Call::ReadItem(p) => (Some(p.thread_id.as_str()), None),
-        Call::RenameThread(p) => (Some(p.thread_id.as_str()), None),
+        Call::Submit(p) => (Some(&p.thread_id), Some(p.client_user_message_id.as_str())),
+        Call::ForkSession(p) => (Some(&p.thread_id), None),
+        Call::Interrupt(p) => (Some(&p.thread_id), None),
+        Call::ReadItem(p) => (Some(&p.thread_id), None),
+        Call::RenameSession(p) => (Some(&p.thread_id), None),
         _ => (None, None),
     }
 }
@@ -1695,77 +1644,163 @@ fn describe_thread(
 ) {
     thread.project_id = projects.project_membership(thread.cwd.as_deref(), &thread.project_id);
     thread.capabilities = Some(provider_capabilities(provider));
-    let session = thread.session.take().or_else(|| {
-        thread
-            .id
-            .as_ref()
-            .map(|id| agent_protocol::session::SessionRef {
-                provider,
-                id: id.clone(),
-            })
-    });
-    if let Some(session) = session {
-        thread.id = Some(session.thread_id());
-        thread.session = Some(session);
-    }
 }
 
-fn codex_response(method: &str, line: String) -> Result<Body, Failure> {
-    match agent_protocol::protocol::json_boundary::response(method, &line)
-        .map_err(|error| Failure::unknown("invalid_params", error))?
-    {
-        Response::Failure { error } => {
-            // Provider fields are not Bex delivery evidence.
-            Err(Failure::upstream(serde_json::value::to_raw_value(&error)?))
-        }
-        Response::Success { result } => Ok(result),
-    }
+fn native_turn_id(id: Option<&str>) -> Result<agent_protocol::ids::TurnId, Failure> {
+    id.filter(|id| !id.trim().is_empty())
+        .map(Into::into)
+        .ok_or_else(|| {
+            Failure::unknown(
+                "invalid_submission_reply",
+                "native submission ID is missing",
+            )
+        })
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn answers_keep_delivery_evidence_until_the_source_resolves_them() {
+        use super::super::requests::{RequestDestination, RequestOrigin};
+        use super::*;
+        use agent_protocol::{
+            requests::{Answer, ElicitationAnswer},
+            session::{RequestDelivery, SessionChange, SessionRef},
+        };
+        use futures_util::FutureExt;
+        let root = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            Err("not used".into()),
+            ProjectStore::new(root.path().join("worktrees.json")),
+        );
+        let connection = service.open_session();
+        let router = &service.inner.router;
+        let target = SessionRef::new(ProviderKind::Claude, "native".into()).unwrap();
+        let (input, mut receiver) = tokio::sync::mpsc::channel(1);
+        let instance = uuid::Uuid::new_v4();
+        let answer = Answer::Elicitation {
+            action: ElicitationAnswer::Accept {
+                values: serde_json::json!({}),
+            },
+        };
+        let delivery = |id: &agent_protocol::ids::RequestId| {
+            let mut response = ThreadResponse {
+                thread: Thread::default(),
+                model: None,
+            };
+            router.overlay_execution(&target, &mut response);
+            response
+                .thread
+                .requests
+                .get(id)
+                .map(|request| request.delivery)
+        };
+        for native in ["cancelled", "written"] {
+            let adapted = super::super::requests::claude(uuid::Uuid::new_v4().to_string().into(), &"unrelated".into(), &serde_json::json!({"subtype":"elicitation","mcp_server_name":"server","requested_schema":{"type":"object","properties":{}}})).unwrap();
+            let id = adapted.request.id.clone();
+            router
+                .request(
+                    target.clone(),
+                    RequestOrigin {
+                        instance,
+                        native_id: serde_json::json!(native),
+                        destination: RequestDestination::Claude {
+                            input: input.clone(),
+                        },
+                    },
+                    adapted,
+                )
+                .unwrap();
+            // Session-scoped elicitation works without a live turn and survives another turn's completion.
+            router.session_change(
+                &target,
+                SessionChange::Turn {
+                    turn: agent_protocol::models::Turn {
+                        id: "unrelated".into(),
+                        ..Default::default()
+                    },
+                    completed: true,
+                },
+            );
+            assert_eq!(delivery(&id), Some(RequestDelivery::Awaiting));
+            if native == "cancelled" {
+                assert!(
+                    input
+                        .try_send(crate::claude::Command {
+                            value: serde_json::Value::Null,
+                            user: None,
+                            delivered: None,
+                        })
+                        .is_ok()
+                );
+            }
+            let mut operation =
+                Box::pin(service.answer_request(connection.id(), id.clone(), answer.clone()));
+            assert!(operation.as_mut().now_or_never().is_none());
+            assert_eq!(delivery(&id), Some(RequestDelivery::Sending));
+            assert!(
+                router
+                    .claim_response(connection.id(), &id, &answer)
+                    .is_err()
+            );
+            let command = receiver.try_recv().unwrap();
+            if native == "cancelled" {
+                drop(operation);
+                assert_eq!(delivery(&id), Some(RequestDelivery::Unknown));
+                assert!(command.delivered.is_none());
+            } else {
+                assert_eq!(command.value["response"]["request_id"], native);
+                command.delivered.unwrap().send(Ok(())).unwrap();
+                operation.await.unwrap();
+                assert_eq!(delivery(&id), Some(RequestDelivery::Sent));
+            }
+            assert!(
+                router
+                    .claim_response(connection.id(), &id, &answer)
+                    .is_err()
+            );
+            router.resolve_native_request(instance, &serde_json::json!(native));
+            assert_eq!(delivery(&id), None);
+        }
+    }
+
     #[test]
     fn native_error_fields_never_prove_non_delivery() {
         let native = serde_json::json!({"code":123,"message":"not sent","delivery":"notSent","details":{"kept":true}});
-        let response = super::codex_response(
-            "turn/start",
-            serde_json::json!({"id":1,"error":native}).to_string(),
-        )
-        .unwrap_err();
+        let response = super::Failure::upstream(&serde_json::value::to_raw_value(&native).unwrap());
 
-        assert_eq!(
-            response.delivery(),
-            agent_transport::peer::Delivery::Unknown
-        );
+        assert_eq!(response.delivery, agent_transport::peer::Delivery::Unknown);
         let response = super::Response::from_result::<(), _>(Err(response))
             .unwrap()
             .into_value();
         assert_eq!(response["error"]["delivery"], "unknown");
-        assert_eq!(response["error"]["providerError"], native);
+        assert!(response["error"].get("providerError").is_none());
+        assert_eq!(response["error"]["execution"]["providerCode"], "123");
+        assert_eq!(response["error"]["execution"]["category"], "other");
         assert_eq!(response["error"]["message"], "not sent");
     }
-    #[tokio::test]
-    async fn unknown_methods_do_not_require_or_reach_codex() {
-        use super::*;
-        let root = tempfile::tempdir().unwrap();
-        let service = HostRpcService::new(
-            Err("must not be consulted".into()),
-            ProjectStore::new(root.path().join("bex-worktrees.json")),
-        );
-        let session = service.open_session();
-        for params in [
-            serde_json::json!({}),
-            serde_json::json!({"threadId":"claude:native"}),
+    #[test]
+    fn unknown_and_native_methods_are_rejected_before_dispatch() {
+        for method in [
+            "not/public",
+            "provider",
+            "thread/list",
+            "thread/read",
+            "thread/resume",
+            "turn/start",
+            "turn/steer",
+            "thread/queue/add",
+            "account/read",
         ] {
-            let call = agent_protocol::protocol::json_boundary::call("not/public", params).unwrap();
-            let response = service.dispatch(session.id(), &call).await.unwrap();
-            let response = agent_protocol::protocol::decode::<
-                agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
-            >(&response.initial)
-            .unwrap()
-            .into_value();
-            assert_eq!(response["error"]["code"], "method_not_found");
-            assert_eq!(response["error"]["delivery"], "notSent");
+            for params in [
+                serde_json::json!({}),
+                serde_json::json!({"threadId":{"provider":"claude","id":"native"}}),
+            ] {
+                assert!(
+                    agent_protocol::protocol::json_boundary::call(method, params).is_err(),
+                    "{method}"
+                );
+            }
         }
     }
     #[tokio::test]
@@ -1778,12 +1813,11 @@ mod tests {
         );
         let session = service.open_session();
         for (method, expected) in [
-            ("thread/fork", "unsupported_operation"),
-            ("thread/name/set", "unsupported_operation"),
-            ("turn/steer", "claude_unavailable"),
-            ("thread/queue/add", "claude_unavailable"),
+            ("host/session/fork", "unsupported_operation"),
+            ("host/session/rename", "unsupported_operation"),
+            ("host/session/submit", "claude_unavailable"),
         ] {
-            let call = agent_protocol::protocol::json_boundary::call(method, serde_json::json!({"threadId":"claude:native","clientUserMessageId":method,"lastTurnId":"turn","excludeTurns":false,"name":"Renamed","input":[],"expectedTurnId":"turn"})).unwrap();
+            let call = agent_protocol::protocol::json_boundary::call(method, serde_json::json!({"threadId":{"provider":"claude","id":"native"},"clientUserMessageId":method,"lastTurnId":"turn","excludeTurns":false,"name":"Renamed","input":[],"expectedTurnId":"turn"})).unwrap();
             let response = service.dispatch(session.id(), &call).await.unwrap();
             let response = agent_protocol::protocol::decode::<
                 agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,
@@ -1803,10 +1837,10 @@ mod tests {
             ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
         let session = service.open_session();
-        for method in ["turn/start", "turn/steer", "thread/queue/add"] {
+        for method in ["host/session/submit"] {
             let call = agent_protocol::protocol::json_boundary::call(
                 method,
-                serde_json::json!({"threadId":"native","clientUserMessageId":"input","input":[],"expectedTurnId":"turn"}),
+                serde_json::json!({"threadId":{"provider":"codex","id":"native"},"clientUserMessageId":"input","input":[],"expectedTurnId":"turn"}),
             ).unwrap();
             for _ in 0..2 {
                 let response = service.dispatch(session.id(), &call).await.unwrap();
@@ -1821,9 +1855,8 @@ mod tests {
 
     #[test]
     fn malformed_provider_reply_does_not_prove_non_delivery() {
-        let error =
-            super::codex_response("turn/start", r#"{"id":1,"result":{}}"#.into()).unwrap_err();
-        assert_eq!(error.delivery(), agent_transport::peer::Delivery::Unknown);
+        let error = super::native_turn_id(None).unwrap_err();
+        assert_eq!(error.delivery, agent_transport::peer::Delivery::Unknown);
     }
 
     #[tokio::test]

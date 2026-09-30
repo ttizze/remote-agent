@@ -33,8 +33,8 @@ pub struct PermissionControl<'a> {
     pub error: Option<&'a str>,
 }
 impl Snapshot {
-    pub fn permission_control(&self, draft_key: &str) -> PermissionControl<'_> {
-        let provider = self.model_provider_for_draft(draft_key.into());
+    pub fn permission_control(&self, draft_key: &crate::state::DraftKey) -> PermissionControl<'_> {
+        let provider = self.model_provider_for_draft(draft_key.clone());
         let state = self
             .permission_settings
             .as_ref()
@@ -76,11 +76,16 @@ mod tests {
     #[test]
     fn permissions_load_on_connection_and_provider_change_without_retry_loops() {
         let mut snapshot = Snapshot::default();
-        assert!(snapshot.permission_control("draft").load_request.is_none());
+        assert!(
+            snapshot
+                .permission_control(&crate::state::DraftKey::from("draft"))
+                .load_request
+                .is_none()
+        );
         snapshot.connected = true;
         assert_eq!(
             snapshot
-                .permission_control("draft")
+                .permission_control(&crate::state::DraftKey::from("draft"))
                 .load_request
                 .unwrap()
                 .provider,
@@ -90,21 +95,39 @@ mod tests {
             provider: ProviderKind::Codex,
             result: None,
         }));
-        assert!(snapshot.permission_control("draft").load_request.is_none());
+        assert!(
+            snapshot
+                .permission_control(&crate::state::DraftKey::from("draft"))
+                .load_request
+                .is_none()
+        );
         Arc::make_mut(snapshot.permission_settings.as_mut().unwrap()).result =
             Some(Err("offline".into()));
-        assert!(snapshot.permission_control("draft").load_request.is_none());
-        assert_eq!(snapshot.permission_control("draft").label, "取得できません");
+        assert!(
+            snapshot
+                .permission_control(&crate::state::DraftKey::from("draft"))
+                .load_request
+                .is_none()
+        );
+        assert_eq!(
+            snapshot
+                .permission_control(&crate::state::DraftKey::from("draft"))
+                .label,
+            "取得できません"
+        );
         Arc::make_mut(&mut snapshot.drafts).insert(
             "draft".into(),
             Arc::new(Draft {
-                model: Some("claude:sonnet".into()),
+                model: Some(agent_protocol::models::ModelRef {
+                    provider: agent_protocol::session::ProviderKind::Claude,
+                    id: "sonnet".into(),
+                }),
                 ..Default::default()
             }),
         );
         assert_eq!(
             snapshot
-                .permission_control("draft")
+                .permission_control(&crate::state::DraftKey::from("draft"))
                 .load_request
                 .unwrap()
                 .provider,
@@ -124,18 +147,49 @@ mod tests {
             })),
             ..Default::default()
         };
-        assert_eq!(snapshot.permission_control("draft").label, "フルアクセス");
+        assert_eq!(
+            snapshot
+                .permission_control(&crate::state::DraftKey::from("draft"))
+                .label,
+            "フルアクセス"
+        );
         Arc::make_mut(&mut snapshot.drafts).insert(
             "draft".into(),
             Arc::new(Draft {
-                model: Some("claude:sonnet".into()),
+                model: Some(agent_protocol::models::ModelRef {
+                    provider: agent_protocol::session::ProviderKind::Claude,
+                    id: "sonnet".into(),
+                }),
                 ..Default::default()
             }),
         );
-        let control = snapshot.permission_control("draft");
+        let control = snapshot.permission_control(&crate::state::DraftKey::from("draft"));
         assert_eq!(control.provider, ProviderKind::Claude);
         assert_eq!(control.label, "読み込み中…");
         assert_eq!(control.version, None);
+        let session = crate::session::SessionRef {
+            provider: ProviderKind::Claude,
+            id: "native".into(),
+        };
+        let key = crate::state::DraftKey::from(session);
+        assert_eq!(
+            snapshot.permission_control(&key).provider,
+            ProviderKind::Claude
+        );
+        Arc::make_mut(&mut snapshot.drafts).insert(
+            key.clone(),
+            Arc::new(Draft {
+                model: Some(agent_protocol::models::ModelRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "codex-model".into(),
+                }),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(
+            snapshot.permission_control(&key).provider,
+            ProviderKind::Claude
+        );
         let bytes = crate::persistence::encode(&snapshot).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains("native-version"));
         let restored = crate::persistence::decode(&bytes).unwrap();

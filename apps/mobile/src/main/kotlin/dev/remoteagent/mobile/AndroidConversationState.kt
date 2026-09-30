@@ -27,6 +27,7 @@ internal data class ConversationProjection(
     val turns: Map<String, Pair<RenderedTurn, List<ConversationRow>>>,
     val rows: List<ConversationRow>,
     val queued: List<RenderedItem>,
+    val requestRows: List<ConversationRow>,
 )
 
 internal fun projectConversationRows(
@@ -46,6 +47,6 @@ internal fun projectConversationRows(
                 turns[turn.id()] = turn to content
                 content
             }
-        ConversationProjection(next, turns, rows, next.queued())
+        ConversationProjection(next, turns, rows, next.queued(), next.unplacedRequests())
     }
 }

@@ -1,5 +1,6 @@
 //! Claude Code owns inference, credentials and its transcript. The Host owns
 //! the client-facing conversation and adapts the CLI's streaming protocol.
+use agent_protocol::{execution::*, items::*};
 mod accounts;
 mod history;
 mod process;
@@ -8,7 +9,7 @@ use anyhow::Context;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,15 +25,9 @@ use agent_protocol::models::Thread;
 
 use agent_protocol::models::ThreadResponse;
 
-use agent_protocol::models::ThreadStatus;
-
-use agent_protocol::models::ThreadStatusKind;
+use agent_protocol::models::SessionStatus;
 
 use agent_protocol::models::Turn;
-
-use agent_protocol::protocol::Body;
-
-use agent_protocol::protocol::Call;
 
 use agent_protocol::session::ProviderKind;
 
@@ -75,8 +70,6 @@ impl From<&str> for OperationError {
     }
 }
 
-pub(crate) const MODEL_PREFIX: &str = "claude:";
-
 pub(crate) struct Claude {
     browser: Option<Arc<crate::browser::Browser>>,
     program: PathBuf,
@@ -85,7 +78,6 @@ pub(crate) struct Claude {
     pub(crate) accounts: AsyncMutex<accounts::Accounts>,
     records: AsyncMutex<HashMap<String, Arc<AsyncMutex<Record>>>>,
     processes: Arc<Semaphore>,
-    pending: Arc<Mutex<HashMap<String, Pending>>>,
     router: SessionRouter,
     stop: CancellationToken,
     workers: AsyncMutex<tokio::task::JoinSet<()>>,
@@ -109,22 +101,15 @@ struct Idle {
 }
 
 struct Running {
-    turn_id: String,
+    turn_id: agent_protocol::ids::TurnId,
     input: mpsc::Sender<Command>,
     interrupt: watch::Receiver<Option<Result<(), String>>>,
 }
 
-struct Command {
-    value: Value,
-    user: Option<Item>,
-    delivered: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-}
-
-struct Pending {
-    thread_id: String,
-    request_id: String,
-    input: Value,
-    sender: mpsc::Sender<Command>,
+pub(crate) struct Command {
+    pub(crate) value: Value,
+    pub(crate) user: Option<Item>,
+    pub(crate) delivered: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 }
 
 impl Drop for Claude {
@@ -166,7 +151,6 @@ impl Claude {
             native_home,
             records: AsyncMutex::new(HashMap::new()),
             processes: Arc::new(Semaphore::new(8)),
-            pending: Arc::new(Mutex::new(HashMap::new())),
             router,
             stop: CancellationToken::new(),
             workers: AsyncMutex::new(tokio::task::JoinSet::new()),
@@ -259,9 +243,12 @@ impl Claude {
                     .or(efforts.first())
                     .map(|effort| effort.reasoning_effort.clone())
                     .unwrap_or_default();
-                let model = format!("{MODEL_PREFIX}{name}");
+                let model = agent_protocol::models::ModelRef {
+                    provider: ProviderKind::Claude,
+                    id: name.into(),
+                };
                 Ok(Model {
-                    id: model.clone(),
+                    id: name.into(),
                     model,
                     display_name: format!("Claude · {display}"),
                     default_reasoning_effort: default,
@@ -280,24 +267,23 @@ impl Claude {
             return Err(anyhow::anyhow!("Claudeの作業フォルダがありません。"));
         }
         let session_id = Uuid::new_v4();
-        let id = format!("claude:{session_id}");
         let response = ThreadResponse {
             thread: Thread {
-                id: Some(id.clone()),
-                session: Some(SessionRef {
+                id: Some(SessionRef {
                     provider: ProviderKind::Claude,
                     id: session_id.to_string(),
                 }),
                 cwd: Some(cwd.to_string_lossy().into_owned()),
-                status: Some(ThreadStatus {
-                    kind: ThreadStatusKind::Idle,
-                }),
+                status: SessionStatus::Idle,
                 turns: Some(Vec::new()),
                 created_at: Some(now() as f64),
                 updated_at: Some(now() as f64),
                 ..Default::default()
             },
-            model: Some(model.into()),
+            model: Some(agent_protocol::models::ModelRef {
+                provider: ProviderKind::Claude,
+                id: model.into(),
+            }),
         };
         let record = Record {
             cwd: cwd.to_string_lossy().into_owned(),
@@ -327,7 +313,7 @@ impl Claude {
             cwd: summary
                 .cwd
                 .context("Claude working directory is unavailable")?,
-            model: "claude:default".into(),
+            model: "default".into(),
             session_id: native_id,
             resumable: true,
             running: None,
@@ -377,17 +363,12 @@ impl Claude {
                             id: path
                                 .file_stem()
                                 .and_then(|id| id.to_str())
-                                .map(|id| format!("claude:{id}")),
-                            session: path.file_stem().and_then(|id| id.to_str()).map(|id| {
-                                SessionRef {
+                                .map(|id| SessionRef {
                                     provider: ProviderKind::Claude,
                                     id: id.into(),
-                                }
-                            }),
+                                }),
                             name: Some("Claude履歴を読み取れません".into()),
-                            status: Some(ThreadStatus {
-                                kind: ThreadStatusKind::NotLoaded,
-                            }),
+                            status: SessionStatus::Unknown,
                             ..Default::default()
                         };
                         thread.history_read_state =
@@ -405,25 +386,23 @@ impl Claude {
         for record in records {
             let record = record.lock().await;
             if record.running.is_some() {
-                let id = format!("claude:{}", record.session_id);
+                let id = SessionRef {
+                    provider: ProviderKind::Claude,
+                    id: record.session_id.to_string(),
+                };
                 if let Some(thread) = threads
                     .iter_mut()
-                    .find(|thread| thread.id.as_deref() == Some(&id))
+                    .find(|thread| thread.id.as_ref() == Some(&id))
                 {
-                    thread.status = Some(ThreadStatus {
-                        kind: ThreadStatusKind::Active,
-                    });
+                    thread.status = SessionStatus::Running;
                 } else {
                     threads.push(Thread {
-                        id: Some(id),
-                        session: Some(SessionRef {
+                        id: Some(SessionRef {
                             provider: ProviderKind::Claude,
                             id: record.session_id.to_string(),
                         }),
                         cwd: Some(record.cwd.clone()),
-                        status: Some(ThreadStatus {
-                            kind: ThreadStatusKind::Active,
-                        }),
+                        status: SessionStatus::Running,
                         ..Default::default()
                     });
                 }
@@ -487,14 +466,7 @@ impl Claude {
                     None => return Err(error),
                 };
                 let mut thread = Thread {
-                    id: Some(
-                        SessionRef {
-                            provider: ProviderKind::Claude,
-                            id: id.into(),
-                        }
-                        .thread_id(),
-                    ),
-                    session: Some(SessionRef {
+                    id: Some(SessionRef {
                         provider: ProviderKind::Claude,
                         id: id.into(),
                     }),
@@ -512,7 +484,10 @@ impl Claude {
                 }
                 Ok(ThreadResponse {
                     thread,
-                    model: Some(record.model.clone()),
+                    model: Some(agent_protocol::models::ModelRef {
+                        provider: ProviderKind::Claude,
+                        id: record.model.clone(),
+                    }),
                 })
             }
         }
@@ -523,7 +498,23 @@ impl Claude {
         id: &str,
         params: &op::ReadItem,
     ) -> Result<op::ItemResponse, OperationError> {
-        let response = self.read(id, usize::MAX).await?;
+        let native = Uuid::parse_str(id).map_err(|_| "invalid Claude ID")?;
+        let home = self.native_home.clone();
+        let mut native_history = tokio::task::spawn_blocking(move || {
+            let path = history::resolve(&home, native)?;
+            history::read_details(&path, usize::MAX)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("{error:#}"))?;
+        self.router.overlay_execution(
+            &SessionRef {
+                provider: ProviderKind::Claude,
+                id: id.into(),
+            },
+            &mut native_history.response,
+        );
+        let response = native_history.response;
         let item = response
             .thread
             .turns
@@ -536,7 +527,11 @@ impl Claude {
             .find(|item| item.id == params.item_id)
             .ok_or("Claude native history item is unavailable")?;
         let mut item = (**item).clone();
-        if let Some(path) = item.detail_file.as_deref() {
+        if let Some(path) = native_history
+            .details
+            .get(&item.id)
+            .and_then(|details| details.output_path.as_deref())
+        {
             use tokio::io::AsyncReadExt;
             let file = tokio::fs::File::open(path)
                 .await
@@ -549,25 +544,32 @@ impl Claude {
             if bytes.len() as u64 > history::MAX_FILE_BYTES {
                 return Err("native output exceeds parser read budget".into());
             }
-            item.result = Some(Value::String(
-                String::from_utf8(bytes).map_err(|error| error.to_string())?,
-            ));
+            let content =
+                Value::String(String::from_utf8(bytes).map_err(|error| error.to_string())?);
+            item.body = ItemContent::Inline {
+                body: Box::new(tool_result_body(item.body(), &content, &Value::Null)),
+            };
         }
-        if let Some(agent_id) = item.agent_id.as_deref() {
+        if let ItemBody::Subagent {
+            agent_id: Some(agent_id),
+            ..
+        } = item.body()
+        {
             let home = self.native_home.clone();
-            let session_id = Uuid::parse_str(id).map_err(|_| "invalid Claude ID")?;
             let agent_id = agent_id.to_owned();
             let related = tokio::task::spawn_blocking(move || {
-                history::read_related(&home, session_id, &agent_id, usize::MAX)
+                history::read_related(&home, native, &agent_id, usize::MAX)
             })
             .await
             .map_err(|error| error.to_string())?;
-            item.result = Some(match related {
-                Ok(response) => json!({"output":item.result,"subagent":response.thread}),
-                Err(error) => {
-                    json!({"output":item.result,"subagentHistory":{"type":"unavailable","message":format!("{error:#}")}})
-                }
-            });
+            if let ItemBody::Subagent { result, .. } = item.body_mut() {
+                *result = Some(match related {
+                    Ok(response) => json!({"output":result.take(),"subagent":response.thread}),
+                    Err(error) => {
+                        json!({"output":result.take(),"subagentHistory":{"type":"unavailable","message":format!("{error:#}")}})
+                    }
+                });
+            }
         }
         Ok(op::ItemResponse {
             item,
@@ -595,76 +597,45 @@ impl Claude {
         Ok(())
     }
 
-    pub(crate) async fn request(&self, id: &str, request: &Call) -> Result<Body, OperationError> {
-        let method = request.method();
-        if matches!(request, Call::ResumeThread(_)) {
-            self.record(id).await?;
-            return Ok(agent_protocol::models::Empty {}.into());
-        }
+    pub(crate) async fn interrupt(
+        &self,
+        id: &str,
+        turn_id: &agent_protocol::ids::TurnId,
+    ) -> Result<(), OperationError> {
         let record = self.record(id).await?;
-        match request {
-            Call::StartTurn(params) => self
-                .start_turn(id, record, params.clone())
-                .await
-                .map(Into::into),
-            Call::Interrupt(params) => {
-                let (input, mut interrupt) = {
-                    let record = record.lock().await;
-                    let running = record
-                        .running
-                        .as_ref()
-                        .ok_or("Claudeは実行中ではありません。")?;
-                    if params.turn_id != running.turn_id {
-                        return Err(
-                            "Claudeの実行対象が変わりました。会話を更新してください。".into()
-                        );
-                    }
-                    (running.input.clone(), running.interrupt.clone())
-                };
-                if interrupt.borrow().is_none() {
-                    input.send(Command { value: json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}), user: None, delivered: None }).await.map_err(|_| "Claude Code input is closed")?;
-                }
-                tokio::time::timeout(std::time::Duration::from_secs(15), async {
-                    loop {
-                        if let Some(result) = interrupt.borrow().clone() {
-                            return result;
-                        }
-                        interrupt
-                            .changed()
-                            .await
-                            .map_err(|_| "Claude Code exited before acknowledging interruption")?;
-                    }
-                })
-                .await
-                .map_err(|_| "Claude Codeの停止要求がタイムアウトしました。")??;
-                Ok(agent_protocol::models::Empty {}.into())
+        let (input, mut interrupt) = {
+            let record = record.lock().await;
+            let running = record
+                .running
+                .as_ref()
+                .ok_or("Claudeは実行中ではありません。")?;
+            if turn_id != &running.turn_id {
+                return Err("Claudeの実行対象が変わりました。会話を更新してください。".into());
             }
-            Call::SteerTurn(params) => {
-                self.additional_input(
-                    &record,
-                    Some(&params.expected_turn_id),
-                    &params.input,
-                    &params.client_user_message_id,
-                )
-                .await?;
-                Ok(agent_protocol::models::Empty {}.into())
-            }
-            Call::QueueTurn(params) => {
-                let id = self
-                    .additional_input(&record, None, &params.input, &params.client_user_message_id)
-                    .await?;
-                Ok(op::QueuedTurn {
-                    queued_submission: op::TurnIdentity { id },
-                }
-                .into())
-            }
-            _ => Err(format!("Claude Codeでは {method} に対応していません。").into()),
+            (running.input.clone(), running.interrupt.clone())
+        };
+        if interrupt.borrow().is_none() {
+            input.send(Command { value: json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}), user: None, delivered: None }).await.map_err(|_| "Claude Code input is closed")?;
         }
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                if let Some(result) = interrupt.borrow().clone() {
+                    return result;
+                }
+                interrupt
+                    .changed()
+                    .await
+                    .map_err(|_| "Claude Code exited before acknowledging interruption")?;
+            }
+        })
+        .await
+        .map_err(|_| "Claude Codeの停止要求がタイムアウトしました。")??;
+        Ok(())
     }
 
-    async fn additional_input(
+    pub(crate) async fn additional_input(
         &self,
-        record: &AsyncMutex<Record>,
+        id: &str,
         expected_turn_id: Option<&str>,
         input: &[op::Input],
         client_id: &str,
@@ -672,29 +643,24 @@ impl Claude {
         if self.stop.is_cancelled() {
             return Err("Host is shutting down".into());
         }
+        let record = self.record(id).await?;
         let content = input_content(input).await?;
         let state = record.lock().await;
         let running = state
             .running
             .as_ref()
             .ok_or("Claudeは実行中ではありません。")?;
-        if expected_turn_id.is_some_and(|id| id != running.turn_id) {
+        if expected_turn_id.is_some_and(|id| id != running.turn_id.as_str()) {
             return Err("Claudeの実行対象が変わりました。会話を更新してください。".into());
         }
         let sender = running.input.clone();
         let session = state.session_id;
         drop(state);
-        let id = Uuid::new_v4().to_string();
+        let id = client_id.to_owned();
         let (delivered, receipt) = tokio::sync::oneshot::channel();
         sender.send(Command {
             value: json!({"type":"user","uuid":id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null}),
-            user: Some(Item {
-                id: id.clone(),
-                kind: Some("userMessage".into()),
-                content: Some(op::Input::content(input)),
-                client_id: Some(client_id.into()),
-                ..Default::default()
-            }),
+            user: Some(Item { id: id.clone().into(), status: ItemStatus::Unknown, client_input_id: Some(client_id.into()), body: ItemContent::Inline { body: Box::new(ItemBody::UserMessage { text: None, content: op::Input::message_parts(input) }) } }),
             delivered: Some(delivered),
         }).await.map_err(|_| "Claude Code input is closed")?;
         tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
@@ -711,12 +677,12 @@ impl Claude {
         Ok(id)
     }
 
-    async fn start_turn(
+    pub(crate) async fn start_turn(
         &self,
         id: &str,
-        record: Arc<AsyncMutex<Record>>,
-        params: op::StartTurn,
-    ) -> Result<op::StartedTurn, OperationError> {
+        params: &op::Submission,
+    ) -> Result<agent_protocol::ids::TurnId, OperationError> {
+        let record = self.record(id).await?;
         if self.stop.is_cancelled() {
             return Err("Host is shutting down".into());
         }
@@ -725,10 +691,12 @@ impl Claude {
         if state.running.is_some() {
             return Err("Claudeはすでに実行中です。".into());
         }
-        let model = params.model.as_deref().unwrap_or(&state.model);
-        let model_name = model
-            .strip_prefix(MODEL_PREFIX)
-            .ok_or("Codexへ切り替える場合は新しい会話を作成してください。")?;
+        let model = params
+            .model
+            .as_ref()
+            .map(|model| model.id.as_str())
+            .unwrap_or(&state.model);
+        let model_name = model;
         let model_name = model_name.to_owned();
         let model = model.to_owned();
         let effort = params.effort.as_deref();
@@ -772,7 +740,15 @@ impl Claude {
                 Some((&model_name, effort)),
                 self.browser
                     .as_ref()
-                    .map(|browser| browser.provider_config(&format!("claude:{session}")))
+                    .map(|browser| {
+                        browser.provider_config(
+                            &SessionRef {
+                                provider: ProviderKind::Claude,
+                                id: session.to_string(),
+                            }
+                            .to_string(),
+                        )
+                    })
                     .transpose()?,
             )
             .await?;
@@ -786,22 +762,26 @@ impl Claude {
             }
             process
         };
-        let turn_id = Uuid::new_v4().to_string();
+        let turn_id: agent_protocol::ids::TurnId = params.client_user_message_id.as_str().into();
         let user = Item {
-            id: Uuid::new_v4().to_string(),
-            kind: Some("userMessage".into()),
-            content: Some(op::Input::content(&params.input)),
-            client_id: Some(params.client_user_message_id),
-            ..Default::default()
+            id: params.client_user_message_id.as_str().into(),
+            status: ItemStatus::Unknown,
+            client_input_id: Some(params.client_user_message_id.clone()),
+            body: ItemContent::Inline {
+                body: Box::new(ItemBody::UserMessage {
+                    text: None,
+                    content: op::Input::message_parts(&params.input),
+                }),
+            },
         };
         let turn = Turn {
             id: turn_id.clone(),
-            status: Some("inProgress".into()),
+            status: TurnStatus::Running,
             items: Some(vec![Arc::new(user)]),
             started_at: Some(now() as f64),
             ..Default::default()
         };
-        if let Err(error) = process.write(&json!({"type":"user","uuid":turn_id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null})).await {
+        if let Err(error) = process.write(&json!({"type":"user","uuid":params.client_user_message_id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null})).await {
             return Err(OperationError { message: error, delivery: agent_transport::peer::Delivery::Unknown });
         }
         state.model = model.clone();
@@ -827,7 +807,7 @@ impl Claude {
         let worker = Worker {
             record,
             router: self.router.clone(),
-            pending: self.pending.clone(),
+            instance: Uuid::new_v4(),
             session: target,
             turn_id: turn_id.clone(),
             input,
@@ -845,63 +825,32 @@ impl Claude {
             }
         }
         workers.spawn(worker.run(process, receiver));
-        Ok(op::StartedTurn {
-            turn: op::TurnIdentity { id: turn_id },
-        })
-    }
-
-    pub(crate) async fn respond(&self, id: &str, result: &Value) -> Result<(), String> {
-        let pending = self
-            .pending
-            .lock()
-            .unwrap()
-            .remove(id)
-            .ok_or("Claude request is no longer pending")?;
-        let response = if result["decision"] == "accept" {
-            json!({"behavior":"allow","updatedInput":pending.input})
-        } else if let Some(answers) = result["answers"].as_object() {
-            let mut input = pending.input;
-            let answers: serde_json::Map<_, _> = answers
-                .iter()
-                .map(|(question, answer)| {
-                    (
-                        question.clone(),
-                        Value::String(
-                            answer["answers"]
-                                .as_array()
-                                .into_iter()
-                                .flatten()
-                                .filter_map(Value::as_str)
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                        ),
-                    )
-                })
-                .collect();
-            input["answers"] = Value::Object(answers);
-            json!({"behavior":"allow","updatedInput":input})
-        } else {
-            json!({"behavior":"deny","message":"ユーザーがこの操作を拒否しました。"})
-        };
-        let (delivered, receipt) = tokio::sync::oneshot::channel();
-        pending.sender.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":pending.request_id,"response":response}}), user: None, delivered: Some(delivered) }).await.map_err(|_| "Claude Code input is closed")?;
-        tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
-            .await
-            .map_err(|_| "Claude answer delivery is unknown")?
-            .map_err(|_| "Claude exited before confirming the answer write")??;
-        self.router
-            .resolve_native_request(ProviderKind::Claude, &id.into());
-        Ok(())
+        Ok(turn_id)
     }
 }
 
+pub(crate) async fn send_response(
+    input: &mpsc::Sender<Command>,
+    id: &Value,
+    result: Value,
+) -> Result<(), String> {
+    let request_id = id.as_str().ok_or("Claude request ID must be a string")?;
+    let (delivered, receipt) = tokio::sync::oneshot::channel();
+    input.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}), user: None, delivered: Some(delivered) }).await.map_err(|_| "Claude Code input is closed")?;
+    tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
+        .await
+        .map_err(|_| "Claude answer delivery is unknown")?
+        .map_err(|_| "Claude exited before confirming the answer write")??;
+    Ok(())
+}
+
 struct Worker {
+    instance: Uuid,
     auth_revision: u64,
     record: Arc<AsyncMutex<Record>>,
     router: SessionRouter,
-    pending: Arc<Mutex<HashMap<String, Pending>>>,
     session: SessionRef,
-    turn_id: String,
+    turn_id: agent_protocol::ids::TurnId,
     input: mpsc::Sender<Command>,
     stop: CancellationToken,
     stream: HashMap<String, (String, usize)>,
@@ -912,6 +861,10 @@ struct Worker {
 
 impl Worker {
     async fn run(mut self, mut process: Process, mut input: mpsc::Receiver<Command>) {
+        let router = self.router.clone();
+        let _requests = scopeguard::guard(self.instance, move |instance| {
+            router.close_request_source(instance)
+        });
         let mut interrupted = false;
         let mut pending_inputs = HashSet::new();
         let outcome = async {
@@ -938,9 +891,14 @@ impl Worker {
                         let message = message?.ok_or("Claude Code exited without a result")?;
                         if message["type"] == "result" {
                             if message["is_error"] == true {
-                                return Err(message["result"].as_str().map(str::to_owned)
-                                    .or_else(|| message["errors"].as_array().map(|errors| errors.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("\n")))
-                                    .unwrap_or_else(|| "Claude Codeの実行に失敗しました。".into()));
+                                let mut error = execution_error(&message, false);
+                                if error.category == ErrorCategory::Other && let Some(previous) = self.router.current_turn(&self.session, &self.turn_id).and_then(|turn| turn.error) {
+                                    error.category = previous.category;
+                                    error.provider_code = previous.provider_code;
+                                }
+                                let text = error.message.clone();
+                                self.router.session_change(&self.session, SessionChange::Error {turn_id: self.turn_id.clone(), error});
+                                return Err(text);
                             }
                             // A result can belong to the input before a queued message.
                             // Keep reading until Claude has consumed every submitted input.
@@ -953,12 +911,16 @@ impl Worker {
                             pending_inputs.remove(id);
                         }
                         if message["type"] == "control_request" {
-                            self.permission(&message)?;
+                            if let Err(error) = self.permission(&message) {
+                                tracing::warn!(target: "bex", operation = "host.claude.request_rejected", message = %error);
+                                let response = if message["request"]["subtype"] == "request_user_dialog" {
+                                    json!({"subtype":"success","request_id":message["request_id"],"response":{"behavior":"cancelled"}})
+                                } else { json!({"subtype":"error","request_id":message["request_id"],"error":error}) };
+                                process.write(&json!({"type":"control_response","response":response})).await?;
+                            }
                         } else if message["type"] == "control_cancel_request" {
                             let request_id = message["request_id"].as_str().ok_or("Claude canceled request ID is missing")?;
-                            let id = self.approval_id(request_id);
-                            self.pending.lock().unwrap().remove(&id);
-                            self.router.resolve_native_request(ProviderKind::Claude, &id.into());
+                            self.router.resolve_native_request(self.instance, &request_id.into());
                         } else if message["type"] == "control_response" && message["response"]["request_id"] == "interrupt" {
                             let result = if message["response"]["subtype"] == "success" { interrupted = true; Ok(()) }
                                 else { Err(format!("Claude Codeの停止に失敗しました: {}", message["response"]["error"])) };
@@ -972,6 +934,7 @@ impl Worker {
         }.await;
         // Reject commands that lost the race with completion before retaining the process.
         drop(input);
+        drop(_requests);
         let mut retained = None;
         let outcome = if outcome.is_ok() && !self.stop.is_cancelled() {
             retained = Some(process);
@@ -980,22 +943,6 @@ impl Worker {
             let exited = process.finish().await;
             outcome.and(exited)
         };
-        let pending: Vec<_> = {
-            let mut pending = self.pending.lock().unwrap();
-            let ids: Vec<_> = pending
-                .iter()
-                .filter(|(_, request)| request.thread_id == self.session.thread_id())
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in &ids {
-                pending.remove(id);
-            }
-            ids
-        };
-        for id in pending {
-            self.router
-                .resolve_native_request(ProviderKind::Claude, &id.into());
-        }
         let mut record = self.record.lock().await;
         let Some(mut turn) = self.router.current_turn(&self.session, &self.turn_id) else {
             record.running = None;
@@ -1006,35 +953,37 @@ impl Worker {
             self.router.session_change(
                 &self.session,
                 SessionChange::Status {
-                    status: ThreadStatus {
-                        kind: ThreadStatusKind::NotLoaded,
-                    },
+                    status: SessionStatus::Unknown,
                 },
             );
             return;
         };
-        turn.status = Some(
-            if interrupted {
-                "interrupted"
-            } else if outcome.is_ok() {
-                "completed"
-            } else {
-                "failed"
-            }
-            .into(),
-        );
+        turn.status = if interrupted {
+            TurnStatus::Interrupted
+        } else if outcome.is_ok() {
+            TurnStatus::Completed
+        } else {
+            TurnStatus::Failed
+        };
         turn.completed_at = Some(now() as f64);
         if let Some(items) = &mut turn.items {
             for item in items
                 .iter_mut()
-                .filter(|item| item.status.as_deref() == Some("inProgress"))
+                .filter(|item| item.status == ItemStatus::Running)
             {
-                Arc::make_mut(item).status =
-                    Some(if interrupted { "interrupted" } else { "failed" }.into());
+                Arc::make_mut(item).status = if interrupted {
+                    ItemStatus::Interrupted
+                } else {
+                    ItemStatus::Failed
+                };
             }
         }
         if let Err(error) = outcome {
-            turn.error = Some(json!({"message":error}));
+            turn.error.get_or_insert(ExecutionError {
+                category: ErrorCategory::Network,
+                message: error,
+                ..Default::default()
+            });
         }
         record.running = None;
         let released = CancellationToken::new();
@@ -1080,78 +1029,24 @@ impl Worker {
         if message.to_string().len() > 32 * 1024 {
             return Err("Claude control request exceeds its size limit".into());
         }
-        let request = &message["request"];
-        if request["subtype"] != "can_use_tool" {
-            return Err(format!(
-                "unsupported Claude control request: {}",
-                request["subtype"]
-            ));
-        }
         let request_id = message["request_id"]
             .as_str()
-            .ok_or("Claude permission request ID is missing")?;
-        let id = self.approval_id(request_id);
-        let tool = request["tool_name"]
-            .as_str()
-            .ok_or("Claude permission tool name is missing")?;
-        let mut params = json!({"threadId":self.session.thread_id(),"turnId":self.turn_id,"itemId":request["tool_use_id"],
-            "reason":format!("{tool}\n{}", serde_json::to_string_pretty(&request["input"]).map_err(|error| error.to_string())?),
-            "availableDecisions":["accept","decline"]});
-        let method = if tool == "AskUserQuestion" {
-            let questions = request["input"]["questions"]
-                .as_array()
-                .ok_or("Claude questions are missing")?;
-            params["questions"] = Value::Array(
-                questions
-                    .iter()
-                    .map(|question| {
-                        let mut question = question.clone();
-                        question["id"] = question["question"].clone();
-                        question
-                    })
-                    .collect(),
-            );
-            "item/tool/requestUserInput"
-        } else {
-            match tool {
-                "Bash" => "item/commandExecution/requestApproval",
-                "Write" | "Edit" | "NotebookEdit" => "item/fileChange/requestApproval",
-                _ => "claude/tool/requestApproval",
-            }
-        };
-        self.pending.lock().unwrap().insert(
-            id.clone(),
-            Pending {
-                thread_id: self.session.thread_id(),
-                request_id: request_id.into(),
-                input: request["input"].clone(),
-                sender: self.input.clone(),
-            },
-        );
-        let result = self.router.request(
+            .ok_or("Claude request ID is missing")?;
+        let adapted = crate::host_rpc::requests::claude(
+            Uuid::new_v4().to_string().into(),
+            &self.turn_id,
+            &message["request"],
+        )?;
+        self.router.request(
             self.session.clone(),
-            agent_protocol::operations::ServerRequest {
-                delivery_state: None,
-                native_request_id: None,
-                id: id.clone().into(),
-                method: method.into(),
-                params: std::mem::take(
-                    params
-                        .as_object_mut()
-                        .expect("request parameters are an object"),
-                ),
+            crate::host_rpc::requests::RequestOrigin {
+                instance: self.instance,
+                native_id: request_id.into(),
+                destination: crate::host_rpc::requests::RequestDestination::Claude {
+                    input: self.input.clone(),
+                },
             },
-        );
-        if result.is_err() {
-            self.pending.lock().unwrap().remove(&id);
-        }
-        result
-    }
-
-    fn approval_id(&self, request_id: &str) -> String {
-        format!(
-            "claude-permission:{}:{}:{request_id}",
-            self.session.id, self.turn_id
+            adapted,
         )
     }
 
@@ -1159,6 +1054,28 @@ impl Worker {
         let scope = message["parent_tool_use_id"].as_str().unwrap_or_default();
         if message["type"] == "stream_event" {
             return self.stream_event(&message["event"], scope).await;
+        }
+        if message["type"] == "rate_limit_event" {
+            if let Some(error) = usage_limit_error(&message["rate_limit_info"]) {
+                self.router.session_change(
+                    &self.session,
+                    SessionChange::Error {
+                        turn_id: self.turn_id.clone(),
+                        error,
+                    },
+                );
+            }
+            return Ok(());
+        }
+        if message["type"] == "system" && message["subtype"] == "api_retry" {
+            self.router.session_change(
+                &self.session,
+                SessionChange::Error {
+                    turn_id: self.turn_id.clone(),
+                    error: execution_error(&message, true),
+                },
+            );
+            return Ok(());
         }
         let mut record = self.record.lock().await;
         let kind = message["type"].as_str().unwrap_or_default();
@@ -1171,10 +1088,20 @@ impl Worker {
         if kind != "assistant" && kind != "user" {
             return Ok(());
         }
+        if kind == "assistant" && message["error"].is_string() {
+            self.router.session_change(
+                &self.session,
+                SessionChange::Error {
+                    turn_id: self.turn_id.clone(),
+                    error: execution_error(&message, false),
+                },
+            );
+        }
         let blocks = message["message"]["content"]
             .as_array()
             .ok_or("Claude message content is missing")?;
         let message_id = message["message"]["id"].as_str();
+        let cwd = record.cwd.clone();
         drop(record);
         let mut turn = self
             .router
@@ -1205,15 +1132,18 @@ impl Worker {
                         .find(|item| Some(item.id.as_str()) == block["tool_use_id"].as_str())
                         .ok_or("Claude tool result has no matching tool call")?;
                     let item = Arc::make_mut(item);
-                    item.status = Some(
-                        if block["is_error"] == true {
-                            "failed"
-                        } else {
-                            "completed"
-                        }
-                        .into(),
-                    );
-                    item.result = Some(block["content"].clone());
+                    item.status = if block["is_error"] == true {
+                        ItemStatus::Failed
+                    } else {
+                        ItemStatus::Completed
+                    };
+                    item.body = ItemContent::Inline {
+                        body: Box::new(tool_result_body(
+                            item.body(),
+                            &block["content"],
+                            &message["toolUseResult"],
+                        )),
+                    };
                     self.router.session_change(
                         &self.session,
                         SessionChange::Item {
@@ -1224,12 +1154,14 @@ impl Worker {
                     continue;
                 }
                 Some("text") if kind != "assistant" => continue,
-                _ => match content_item(id, block, "inProgress")
-                    .map_err(|error| error.to_string())?
-                {
-                    Some(item) => item,
-                    None => continue,
-                },
+                _ => content_item(
+                    &self.session,
+                    id,
+                    block,
+                    Some(cwd.as_str()),
+                    ItemStatus::Running,
+                )
+                .map_err(|error| error.to_string())?,
             };
             self.router.session_change(
                 &self.session,
@@ -1269,17 +1201,23 @@ impl Worker {
                 *index = event["index"]
                     .as_u64()
                     .ok_or("Claude block index is missing")? as usize;
-                let kind = match event["content_block"]["type"].as_str() {
-                    Some("text") => "agentMessage",
-                    Some("thinking") => "reasoning",
+                let body = match event["content_block"]["type"].as_str() {
+                    Some("text") => ItemBody::AssistantText {
+                        citation: None,
+                        text: String::new(),
+                        phase: AssistantPhase::Unknown,
+                    },
+                    Some("thinking") => ItemBody::Reasoning {
+                        content: vec![String::new()],
+                        summary: vec![],
+                    },
                     _ => return Ok(()),
                 };
-                let item = Item {
-                    id: format!("{message}:{index}"),
-                    kind: Some(kind.into()),
-                    text: Some(String::new()),
-                    ..Default::default()
-                };
+                let item = Item::new(
+                    format!("{message}:{index}").into(),
+                    ItemStatus::Running,
+                    body,
+                );
                 self.router.session_change(
                     &self.session,
                     SessionChange::Item {
@@ -1290,8 +1228,10 @@ impl Worker {
             }
             Some("content_block_delta") => {
                 let (target, field) = match event["delta"]["type"].as_str() {
-                    Some("text_delta") => (TextField::Message, "text"),
-                    Some("thinking_delta") => (TextField::Reasoning, "thinking"),
+                    Some("text_delta") => (TextField::AssistantText, "text"),
+                    Some("thinking_delta") => {
+                        (TextField::ReasoningContent { index: 0 }, "thinking")
+                    }
                     _ => return Ok(()),
                 };
                 let (message, _) = self
@@ -1309,7 +1249,7 @@ impl Worker {
                     &self.session,
                     SessionChange::Text {
                         turn_id: self.turn_id.clone(),
-                        item_id: id,
+                        item_id: id.into(),
                         field: target,
                         delta: delta.into(),
                     },
@@ -1321,40 +1261,283 @@ impl Worker {
     }
 }
 
+/// Classify native evidence before reducing it to a user-facing message.
+fn usage_limit_error(info: &Value) -> Option<ExecutionError> {
+    if info["status"] != "rejected" {
+        return None;
+    }
+    Some(ExecutionError {
+        category: ErrorCategory::UsageLimit,
+        message: "Claudeの利用上限に達しました。".into(),
+        provider_code: info["rateLimitType"].as_str().map(str::to_owned),
+        resets_at_seconds: info["resetsAt"].as_u64(),
+        ..Default::default()
+    })
+}
+fn execution_error(message: &Value, retrying: bool) -> ExecutionError {
+    let code = message["error"]
+        .as_str()
+        .or_else(|| message["subtype"].as_str());
+    let status = message["api_error_status"]
+        .as_u64()
+        .or_else(|| message["error_status"].as_u64());
+    let category = match code {
+        Some("authentication_failed" | "oauth_org_not_allowed") => ErrorCategory::Auth,
+        Some("rate_limit") => ErrorCategory::RateLimited,
+        Some("overloaded") => ErrorCategory::Overloaded,
+        Some("invalid_request" | "model_not_found") => ErrorCategory::InvalidInput,
+        Some(
+            "error_max_turns" | "error_max_budget_usd" | "error_max_structured_output_retries",
+        ) => ErrorCategory::SessionLimit,
+        Some("server_error") => ErrorCategory::Internal,
+        _ => match status {
+            Some(401 | 403) => ErrorCategory::Auth,
+            Some(429) => ErrorCategory::RateLimited,
+            Some(503) => ErrorCategory::Overloaded,
+            Some(400 | 404 | 422) => ErrorCategory::InvalidInput,
+            Some(500..=599) => ErrorCategory::Internal,
+            None if retrying => ErrorCategory::Network,
+            _ => ErrorCategory::Other,
+        },
+    };
+    let text = message["result"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            message["errors"].as_array().map(|errors| {
+                errors
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        })
+        .or_else(|| {
+            message["message"]["content"].as_array().map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|block| block["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        })
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "Claude Codeの実行に失敗しました。".into());
+    ExecutionError {
+        category,
+        message: text,
+        provider_code: code.map(str::to_owned),
+        http_status: status.and_then(|v| v.try_into().ok()),
+        retry: retrying.then(|| RetryEvidence {
+            retrying,
+            overloaded: category == ErrorCategory::Overloaded,
+            attempt: message["attempt"].as_u64().and_then(|v| v.try_into().ok()),
+            max_attempts: message["max_retries"]
+                .as_u64()
+                .and_then(|v| v.checked_add(1))
+                .and_then(|v| v.try_into().ok()),
+        }),
+        retry_delay_ms: message["retry_delay_ms"].as_u64(),
+        ..Default::default()
+    }
+}
+
 fn content_item(
+    session: &SessionRef,
     id: String,
     block: &Value,
-    tool_status: &str,
-) -> Result<Option<Item>, serde_json::Error> {
-    let mut item = Item {
-        id,
-        ..Default::default()
-    };
-    match block["type"].as_str() {
-        Some("text" | "thinking") => {
-            let thinking = block["type"] == "thinking";
-            item.kind = Some(
-                if thinking {
-                    "reasoning"
-                } else {
-                    "agentMessage"
-                }
-                .into(),
-            );
-            item.text =
-                serde_json::from_value(block[if thinking { "thinking" } else { "text" }].clone())?;
-        }
+    cwd: Option<&str>,
+    tool_status: ItemStatus,
+) -> Result<Item, serde_json::Error> {
+    let text = |key: &str| block[key].as_str().unwrap_or_default().to_owned();
+    let mut id = id.into();
+    let mut status = ItemStatus::Completed;
+    let body = match block["type"].as_str() {
+        Some("text") => ItemBody::AssistantText {
+            citation: None,
+            text: text("text"),
+            phase: AssistantPhase::Unknown,
+        },
+        Some("thinking") => ItemBody::Reasoning {
+            content: vec![text("thinking")],
+            summary: vec![],
+        },
         Some("tool_use") => {
-            item.id = serde_json::from_value(block["id"].clone())?;
-            item.kind = Some("mcpToolCall".into());
-            item.server = Some("Claude Code".into());
-            item.tool = serde_json::from_value(block["name"].clone())?;
-            item.arguments = (!block["input"].is_null()).then(|| block["input"].clone());
-            item.status = Some(tool_status.into());
+            id = serde_json::from_value(block["id"].clone())?;
+            status = tool_status;
+            let input = &block["input"];
+            let string = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
+            match block["name"].as_str() {
+                Some("Bash") => ItemBody::CommandExecution {
+                    actions: vec![],
+                    source: agent_protocol::items::CommandSource::Unknown,
+                    process_id: None,
+                    command: string("command"),
+                    cwd: cwd.map(str::to_owned),
+                    output: String::new(),
+                    exit_code: None,
+                    duration_ms: None,
+                },
+                Some("Write" | "Edit" | "NotebookEdit") => {
+                    let proposal = match block["name"].as_str() {
+                        Some("Write") => FileProposal::Write {
+                            content: string("content"),
+                        },
+                        Some("Edit") => FileProposal::Edit {
+                            old_text: string("old_string"),
+                            new_text: string("new_string"),
+                            replace_all: input["replace_all"] == true,
+                        },
+                        _ => FileProposal::Notebook {
+                            cell_id: input["cell_id"].as_str().map(str::to_owned),
+                            source: string("new_source"),
+                            mode: input["edit_mode"].as_str().map(str::to_owned),
+                        },
+                    };
+                    ItemBody::FileChange {
+                        changes: vec![FileChange {
+                            path: string(if block["name"] == "NotebookEdit" {
+                                "notebook_path"
+                            } else {
+                                "file_path"
+                            }),
+                            kind: FileChangeKind::Unknown,
+                            diff: None,
+                            proposal: Some(proposal),
+                        }],
+                        output: String::new(),
+                    }
+                }
+                Some("Agent" | "Task") => ItemBody::Subagent {
+                    tool: text("name"),
+                    prompt: input["prompt"].as_str().map(str::to_owned),
+                    model: input["model"].as_str().map(str::to_owned),
+                    effort: None,
+                    sender: Some(session.clone()),
+                    receivers: vec![],
+                    states: vec![],
+                    agent_id: None,
+                    result: None,
+                },
+                _ => ItemBody::ToolCall {
+                    resource_uri: None,
+                    plugin_id: None,
+                    kind: ToolKind::Local,
+                    tool: text("name"),
+                    server: Some("Claude Code".into()),
+                    namespace: None,
+                    arguments: input.clone(),
+                    result: None,
+                    error: None,
+                    content: vec![],
+                    success: None,
+                    duration_ms: None,
+                },
+            }
         }
-        _ => return Ok(None),
+        _ => {
+            status = ItemStatus::Unknown;
+            ItemBody::Custom {
+                provider: ProviderKind::Claude,
+                kind: text("type"),
+                value: block.clone(),
+            }
+        }
+    };
+    Ok(Item::new(id, status, body))
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativePatchHunk {
+    old_start: u64,
+    old_lines: u64,
+    new_start: u64,
+    new_lines: u64,
+    lines: Vec<String>,
+}
+fn structured_patch(value: &Value) -> Option<String> {
+    use std::fmt::Write as _;
+    let hunks: Vec<NativePatchHunk> = serde_json::from_value(value.clone()).ok()?;
+    if hunks.is_empty() {
+        return None;
     }
-    Ok(Some(item))
+    let mut diff = String::new();
+    for hunk in hunks {
+        if !hunk
+            .lines
+            .iter()
+            .all(|line| line.starts_with([' ', '+', '-', '\\']))
+        {
+            return None;
+        }
+        writeln!(
+            diff,
+            "@@ -{},{} +{},{} @@",
+            hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+        )
+        .ok()?;
+        for line in hunk.lines {
+            writeln!(diff, "{line}").ok()?;
+        }
+    }
+    Some(diff)
+}
+fn tool_result_body(body: &ItemBody, content: &Value, metadata: &Value) -> ItemBody {
+    let mut body = body.clone();
+    let output = || {
+        content.as_str().map(str::to_owned).unwrap_or_else(|| {
+            content
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    };
+    match &mut body {
+        ItemBody::CommandExecution {
+            output: result,
+            exit_code,
+            ..
+        } => {
+            *result = output();
+            if let Some(code) = metadata["exitCode"]
+                .as_i64()
+                .and_then(|code| code.try_into().ok())
+            {
+                *exit_code = Some(code);
+            }
+        }
+        ItemBody::FileChange {
+            changes,
+            output: result,
+        } => {
+            *result = output();
+            if changes.len() == 1 {
+                let change = &mut changes[0];
+                if let Some(diff) = structured_patch(&metadata["structuredPatch"]) {
+                    change.diff = Some(diff);
+                }
+                match metadata["type"].as_str() {
+                    Some("create") => change.kind = FileChangeKind::Add,
+                    Some("update") => change.kind = FileChangeKind::Update { move_path: None },
+                    _ => {}
+                }
+            }
+        }
+        ItemBody::Subagent {
+            agent_id, result, ..
+        } => {
+            if let Some(id) = metadata["agentId"].as_str() {
+                *agent_id = Some(id.into());
+            }
+            *result = Some(content.clone());
+        }
+        ItemBody::ToolCall { result, .. } => *result = Some(content.clone()),
+        _ => {}
+    }
+    body
 }
 
 async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
@@ -1405,4 +1588,103 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod execution_tests {
+    use super::*;
+    #[test]
+    fn native_error_evidence_distinguishes_quota_retry_auth_and_warning() {
+        for (message, category) in [
+            (
+                json!({"error":"authentication_failed"}),
+                ErrorCategory::Auth,
+            ),
+            (json!({"api_error_status":429}), ErrorCategory::RateLimited),
+            (json!({"api_error_status":503}), ErrorCategory::Overloaded),
+            (
+                json!({"subtype":"error_max_turns"}),
+                ErrorCategory::SessionLimit,
+            ),
+            (
+                json!({"error":"invalid_request"}),
+                ErrorCategory::InvalidInput,
+            ),
+        ] {
+            assert_eq!(execution_error(&message, false).category, category);
+        }
+        let retry = execution_error(
+            &json!({"error":"overloaded","attempt":2,"max_retries":4,"retry_delay_ms":1500,"error_status":503}),
+            true,
+        );
+        assert_eq!(retry.http_status, Some(503));
+        assert_eq!(retry.retry_delay_ms, Some(1500));
+        assert_eq!(
+            retry.retry,
+            Some(RetryEvidence {
+                retrying: true,
+                overloaded: true,
+                attempt: Some(2),
+                max_attempts: Some(5)
+            })
+        );
+        for status in ["allowed", "allowed_warning"] {
+            assert!(
+                usage_limit_error(
+                    &json!({"status":status,"rateLimitType":"five_hour","utilization":0.9})
+                )
+                .is_none()
+            );
+        }
+        let limit = usage_limit_error(
+            &json!({"status":"rejected","rateLimitType":"five_hour","resetsAt":123456}),
+        )
+        .unwrap();
+        assert_eq!(limit.category, ErrorCategory::UsageLimit);
+        assert_eq!(limit.resets_at_seconds, Some(123456));
+    }
+    #[test]
+    fn native_tools_preserve_observations_without_inventing_exit_codes_or_diffs() {
+        let session = SessionRef::new(ProviderKind::Claude, "session".into()).unwrap();
+        let command = content_item(
+            &session,
+            "stream".into(),
+            &json!({"type":"tool_use","id":"bash","name":"Bash","input":{"command":"false"}}),
+            Some("/work"),
+            ItemStatus::Running,
+        )
+        .unwrap();
+        let unknown = tool_result_body(command.body(), &json!("done"), &Value::Null);
+        assert!(matches!(
+            unknown,
+            ItemBody::CommandExecution {
+                exit_code: None,
+                ..
+            }
+        ));
+        let known = tool_result_body(command.body(), &json!("failed"), &json!({"exitCode":7}));
+        assert!(matches!(
+            tool_result_body(&known, &json!("expanded"), &Value::Null),
+            ItemBody::CommandExecution {
+                exit_code: Some(7),
+                ..
+            }
+        ));
+        let edit = content_item(&session,"stream".into(),&json!({"type":"tool_use","id":"edit","name":"Edit","input":{"file_path":"/work/a","old_string":"old","new_string":"new"}}),Some("/work"),ItemStatus::Running).unwrap();
+        assert!(
+            matches!(edit.body(),ItemBody::FileChange {changes,..} if changes[0].diff.is_none() && changes[0].proposal.is_some())
+        );
+        let applied = tool_result_body(
+            edit.body(),
+            &json!("edited"),
+            &json!({"type":"update","structuredPatch":[{"oldStart":5,"oldLines":1,"newStart":5,"newLines":1,"lines":["-actual old","+actual new"]}]}),
+        );
+        assert!(
+            matches!(applied,ItemBody::FileChange {changes,..} if changes[0].diff.as_deref() == Some("@@ -5,1 +5,1 @@\n-actual old\n+actual new\n"))
+        );
+        let future = json!({"type":"future_block","nested":{"a":[1,2]}});
+        assert!(
+            matches!(content_item(&session,"unknown".into(),&future,None,ItemStatus::Unknown).unwrap().body(),ItemBody::Custom {provider:ProviderKind::Claude,value,..} if value == &future)
+        );
+    }
 }

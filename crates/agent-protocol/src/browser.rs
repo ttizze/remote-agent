@@ -6,7 +6,7 @@ pub const HEIGHT: u32 = 768;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BrowserRequest {
-    pub thread_id: String,
+    pub thread_id: crate::session::SessionRef,
     pub control_token: String,
     pub tab_id: String,
     pub image_id: String,
@@ -150,7 +150,7 @@ impl std::fmt::Debug for BrowserFrame {
 
 impl BrowserRequest {
     pub fn validate(&self) -> Result<(), String> {
-        crate::session::SessionRef::from_thread_id(&self.thread_id)?;
+        self.thread_id.validate()?;
         self.action.validate()
     }
 }

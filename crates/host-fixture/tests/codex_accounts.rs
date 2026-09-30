@@ -65,12 +65,12 @@ async fn completed_turn(
     let result = call(
         service,
         session,
-        "turn/start",
-        json!({"threadId":thread,"clientUserMessageId":text,"input":[{"type":"text","text":text}]}),
+        "host/session/submit",
+        json!({"threadId":{"provider":"codex","id":thread},"clientUserMessageId":text,"input":[{"text":{"text":text}}]}),
     )
     .await;
     assert!(result.get("error").is_none(), "{result}");
-    let id = result["result"]["turn"]["id"].as_str().unwrap().to_owned();
+    let id = result["result"]["turnId"].as_str().unwrap().to_owned();
     loop {
         let event = agent_protocol::protocol::decode::<agent_protocol::session::SessionChange>(
             &updates.recv().await.unwrap(),
@@ -80,7 +80,7 @@ async fn completed_turn(
             turn,
             completed: true,
         } = event
-            && turn.id == id
+            && turn.id.as_str() == id
         {
             return id;
         }
@@ -126,8 +126,8 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let usage = usage.await.unwrap();
         assert_eq!(usage["result"]["windows"][0]["remainingPercent"], 72);
         assert_eq!(usage["result"]["windows"][1]["remainingPercent"], 86);
-        let started = call(&service, &mut session, "host/thread/start", json!({"cwd":home})).await;
-        let thread = started["result"]["thread"]["id"].as_str().unwrap();
+        let started = call(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":home})).await;
+        let thread = started["result"]["thread"]["id"]["id"].as_str().unwrap();
         completed_turn(&service, &mut session, thread, "before switch").await;
         let before = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
         assert!(before.get("error").is_none(), "{before}");
@@ -197,11 +197,11 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let accounts = call(&service, &mut session, "host/account/list", json!({})).await;
         assert!(accounts["result"]["selectedId"].is_null());
         assert!(accounts["result"]["error"].is_string());
-        assert!(call(&service, &mut session, "thread/list", json!({})).await.get("error").is_none());
-        assert_eq!(call(&service, &mut session, "turn/start", json!({"threadId":"any","clientUserMessageId":"unavailable-account","input":[{"type":"text","text":"must not use a different account"}]})).await["error"]["code"], "account_unavailable");
+        assert!(call(&service, &mut session, "host/session/list", json!({})).await.get("error").is_none());
+        assert_eq!(call(&service, &mut session, "host/session/submit", json!({"threadId":{"provider":"codex","id":"any"},"clientUserMessageId":"unavailable-account","input":[{"text":{"text":"must not use a different account"}}]})).await["error"]["code"], "account_unavailable");
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
-        let started = call(&service, &mut session, "host/thread/start", json!({"cwd":home})).await;
-        completed_turn(&service, &mut session, started["result"]["thread"]["id"].as_str().unwrap(), "recovered account").await;
+        let started = call(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":home})).await;
+        completed_turn(&service, &mut session, started["result"]["thread"]["id"]["id"].as_str().unwrap(), "recovered account").await;
         let logged_out = call(&service, &mut session, "host/account/logout", json!({"accountId":second})).await;
         assert!(logged_out.get("error").is_none(), "{logged_out}");
         let remaining = call(&service, &mut session, "host/account/list", json!({})).await;
@@ -234,11 +234,11 @@ async fn helper_initialization_does_not_block_completed_turns() {
         let started = call(
             &service,
             &mut session,
-            "host/thread/start",
-            json!({"cwd":home}),
+            "host/session/create",
+            json!({"provider":"codex","cwd":home}),
         )
         .await;
-        let thread = started["result"]["thread"]["id"].as_str().unwrap();
+        let thread = started["result"]["thread"]["id"]["id"].as_str().unwrap();
         let gate = home.join("initialize-release");
         std::fs::write(
             home.join("fixture-config.json"),

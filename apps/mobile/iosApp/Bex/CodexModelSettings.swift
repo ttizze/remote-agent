@@ -10,15 +10,15 @@ extension BexAppViewModel {
         snapshot.accounts()?.error ?? snapshot.error()
     }
 
-    var selectedModel: String {
-        snapshot.draft(key: coreDraftKey).model ?? ""
+    var selectedModel: ModelRef? {
+        snapshot.draft(key: coreDraftKey).model
     }
 
     var currentModel: Model? {
         models.first { $0.model == selectedModel }
     }
 
-    func chooseModel(_ value: String) {
+    func chooseModel(_ value: ModelRef) {
         perform(.selectModel(threadId: coreDraftKey, model: value))
     }
 

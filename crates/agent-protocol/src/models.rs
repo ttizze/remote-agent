@@ -84,17 +84,17 @@ fn project_membership<'de, D: serde::Deserializer<'de>>(
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
     pub history_read_state: Option<crate::session::HistoryReadState>,
-    pub session: Option<crate::session::SessionRef>,
     pub capabilities: Option<crate::session::Capabilities>,
     #[serde(default)]
-    pub requests: BTreeMap<String, Arc<crate::operations::ServerRequest>>,
+    pub requests: BTreeMap<crate::ids::RequestId, Arc<crate::requests::Request>>,
     #[serde(default)]
-    pub submissions: BTreeMap<String, crate::session::SubmissionDelivery>,
-    pub id: Option<String>,
+    pub submissions: BTreeMap<crate::ids::ClientInputId, crate::session::SubmissionDelivery>,
+    pub id: Option<crate::session::SessionRef>,
     pub name: Option<String>,
     pub cwd: Option<String>,
     pub worktree_merged: Option<bool>,
-    pub status: Option<ThreadStatus>,
+    #[serde(default)]
+    pub status: SessionStatus,
     pub turns: Option<Vec<Arc<Turn>>>,
     #[serde(default, deserialize_with = "project_membership")]
     pub project_id: ProjectMembership,
@@ -108,140 +108,32 @@ pub struct Thread {
     pub list_stale: Option<bool>,
     pub agent_id: Option<String>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ThreadStatusKind {
-    Active,
-    Idle,
-    NotLoaded,
-    SystemError,
-    #[serde(other)]
-    Other,
-}
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ThreadStatus {
-    #[serde(rename = "type")]
-    pub kind: ThreadStatusKind,
-}
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Turn {
-    pub id: String,
-    pub status: Option<String>,
+    pub id: crate::ids::TurnId,
+    #[serde(default)]
+    pub status: TurnStatus,
     pub items: Option<Vec<Arc<Item>>>,
     pub items_view: Option<String>,
     pub items_has_more: Option<bool>,
-    pub deferred_item_ids: Option<Vec<String>>,
     pub opening_user_message: Option<Arc<Item>>,
     pub started_at: Option<f64>,
     pub completed_at: Option<f64>,
     pub duration_ms: Option<u64>,
-    #[serde(default)]
-    #[serde(with = "crate::protocol::json")]
-    pub error: Option<Value>,
+    pub error: Option<ExecutionError>,
     pub started_at_ms: Option<u64>,
     pub completed_at_ms: Option<u64>,
 }
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Item {
-    pub id: String,
-    #[serde(rename = "type", default)]
-    pub kind: Option<String>,
-    pub text: Option<String>,
-    pub status: Option<String>,
-    pub command: Option<String>,
-    pub aggregated_output: Option<String>,
-    pub saved_path: Option<String>,
-    #[serde(default)]
-    #[serde(with = "crate::protocol::json")]
-    pub result: Option<Value>,
-    pub client_id: Option<String>,
-    #[serde(default, deserialize_with = "present_changes")]
-    pub changes: Option<ItemChanges>,
-    pub phase: Option<String>,
-    pub tool: Option<String>,
-    pub server: Option<String>,
-    pub query: Option<String>,
-    pub path: Option<String>,
-    pub cwd: Option<String>,
-    pub detail_file: Option<String>,
-    pub agent_id: Option<String>,
-    #[serde(default)]
-    #[serde(with = "crate::protocol::json")]
-    pub content: Option<Value>,
-    #[serde(default)]
-    #[serde(with = "crate::protocol::json")]
-    pub summary: Option<Value>,
-    #[serde(default)]
-    #[serde(with = "crate::protocol::json")]
-    pub arguments: Option<Value>,
-    #[serde(default)]
-    #[serde(with = "crate::protocol::json")]
-    pub review: Option<Value>,
-    pub exit_code: Option<i32>,
-}
-/// A file activity keeps its affected paths and change kinds while diff bodies
-/// may be fetched separately.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ItemChange {
-    pub path: Option<String>,
-    #[serde(default)]
-    #[serde(with = "crate::protocol::json")]
-    pub kind: Option<Value>,
-    pub diff: Option<String>,
-}
-
-/// Only supported file-change fields enter the application model.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ItemChanges(pub Vec<ItemChange>);
-fn present_changes<'de, D: serde::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<ItemChanges>, D::Error> {
-    if deserializer.is_human_readable() {
-        let value = Value::deserialize(deserializer)?;
-        Ok(serde_json::from_value(value).ok())
-    } else {
-        Option::<ItemChanges>::deserialize(deserializer)
-    }
-}
-impl ItemChanges {
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-    pub(crate) fn append_delta(&mut self, delta: &str) {
-        if self.0.is_empty() {
-            self.0.push(ItemChange {
-                path: Some(String::new()),
-                kind: Some(Value::String("update".into())),
-                diff: None,
-            });
-        }
-        self.0
-            .last_mut()
-            .unwrap()
-            .diff
-            .get_or_insert_with(String::new)
-            .push_str(delta);
-    }
-    fn retain_headers(&mut self) {
-        for file in &mut self.0 {
-            file.diff = None;
-        }
-    }
-}
+pub use crate::{execution::*, items::*};
 
 impl Thread {
-    pub fn active_turn_id(&self) -> Option<String> {
+    pub fn active_turn_id(&self) -> Option<crate::ids::TurnId> {
         self.turns
             .as_ref()?
             .iter()
             .rev()
-            .find(|turn| turn.status.as_deref() == Some("inProgress"))
+            .find(|turn| turn.status == TurnStatus::Running)
             .map(|turn| turn.id.clone())
     }
 }
@@ -252,74 +144,29 @@ impl Thread {
         for turn in self.turns.iter_mut().flatten() {
             let turn = Arc::make_mut(turn);
             for item in turn.items.iter_mut().flatten() {
-                if item.id.is_empty()
-                    || fits_inline(
-                        item,
-                        if matches!(
-                            item.kind.as_deref(),
-                            Some("userMessage" | "agentMessage" | "imageGeneration")
-                        ) {
-                            max_inline_bytes
-                        } else {
-                            // Hundreds of individually small, collapsed tool
-                            // bodies otherwise dominate the initial history page.
-                            512.min(max_inline_bytes)
-                        },
-                    )
-                {
-                    continue;
-                }
-                let item = Arc::make_mut(item);
-                item.retain_header();
-                let ids = turn.deferred_item_ids.get_or_insert_default();
-                if !ids.contains(&item.id) {
-                    ids.push(item.id.clone());
+                let limit = if matches!(
+                    item.body(),
+                    ItemBody::UserMessage { .. }
+                        | ItemBody::AssistantText { .. }
+                        | ItemBody::ImageGeneration { .. }
+                ) {
+                    max_inline_bytes
+                } else {
+                    512.min(max_inline_bytes)
+                };
+                if !item.id.is_empty() && !fits_inline(item, limit) {
+                    Arc::make_mut(item).defer();
                 }
             }
             if let Some(item) = &mut turn.opening_user_message
                 && !fits_inline(item, max_inline_bytes)
             {
-                Arc::make_mut(item).retain_header();
-            }
-        }
-    }
-}
-impl Item {
-    pub fn retain_header(&mut self) {
-        if let Some(text) = &mut self.text {
-            truncate_detail(text);
-        }
-        if let Some(command) = &mut self.command {
-            *command = compact_title(command);
-        }
-        // Command output is only displayed after expansion, which reads the
-        // original item. A truncated output is not part of its activity header.
-        self.aggregated_output = None;
-        if self.kind.as_deref() == Some("imageGeneration")
-            || self
-                .result
-                .as_mut()
-                .is_some_and(|result| !retain_scalar(result))
-        {
-            self.result = None;
-        }
-        if let Some(changes) = &mut self.changes {
-            changes.retain_headers();
-        }
-        for value in [
-            &mut self.content,
-            &mut self.summary,
-            &mut self.arguments,
-            &mut self.review,
-        ] {
-            if value.as_mut().is_some_and(|value| !retain_scalar(value)) {
-                *value = None;
+                Arc::make_mut(item).defer();
             }
         }
     }
 }
 
-// Stop counting when the budget is exceeded; never allocate another large body.
 fn fits_inline(value: &impl Serialize, limit: usize) -> bool {
     postcard::serialize_with_flavor::<_, postcard::ser_flavors::Size, usize>(
         value,
@@ -328,25 +175,10 @@ fn fits_inline(value: &impl Serialize, limit: usize) -> bool {
     .is_ok_and(|size| size <= limit)
 }
 
-fn truncate_detail(text: &mut String) {
-    let mut end = text.len().min(256);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.truncate(end);
-}
-// Tool results keep only a short scalar preview until their details are read.
-fn retain_scalar(value: &mut Value) -> bool {
-    if let Value::String(text) = value {
-        truncate_detail(text);
-    }
-    !value.is_array() && !value.is_object()
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadResponse {
     pub thread: Thread,
-    pub model: Option<String>,
+    pub model: Option<ModelRef>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -374,11 +206,18 @@ pub struct Project {
 pub struct ProjectRoot {
     pub path: String,
 }
+/// Native model identity scoped by provider; neither field is encoded in the other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRef {
+    pub provider: crate::session::ProviderKind,
+    pub id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
-    pub model: String,
+    pub model: ModelRef,
     pub display_name: String,
     pub default_reasoning_effort: String,
     pub supported_reasoning_efforts: Vec<ReasoningEffort>,
@@ -389,17 +228,9 @@ pub struct Model {
 pub fn provider_models(models: &[Model], provider: crate::session::ProviderKind) -> Vec<Model> {
     models
         .iter()
-        .filter(|model| model_provider(&model.model) == provider)
+        .filter(|model| model.model.provider == provider)
         .cloned()
         .collect()
-}
-
-pub fn model_provider(model: &str) -> crate::session::ProviderKind {
-    if model.starts_with("claude:") {
-        crate::session::ProviderKind::Claude
-    } else {
-        crate::session::ProviderKind::Codex
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -486,7 +317,7 @@ pub struct Worktree {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorktreeThread {
-    pub id: String,
+    pub id: crate::session::SessionRef,
     pub name: String,
     pub active: bool,
 }
@@ -513,48 +344,52 @@ mod tests {
     #[test]
     fn deferred_read_keeps_conversation_and_activity_headers() {
         let text = "会話".repeat(4096);
-        let result = json!({"thread":{"turns":[{"id":"turn","items":[
-            {"id":"user","type":"userMessage","content":[{"type":"text","text":text}]},
-            {"id":"agent","type":"agentMessage","text":text},
-            {"id":"command","type":"commandExecution","command":"日本語".repeat(1000),"status":"completed","aggregatedOutput":text},
-            {"id":"files","type":"fileChange","status":"completed","changes":[{"path":"a.txt","kind":{"type":"update"},"diff":text}]},
-            {"id":"future","type":"futureTool","tool":"inspect","status":"completed","result":{"content":text}},
-            {"id":"small","type":"reasoning","summary":["short"]}
-        ]}]}});
+        let result = json!({"thread":{"turns":[{"id":"turn","items":[{"id":"user","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[{"text":{"text":text}}]}}}}},{"id":"agent","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}},{"id":"command","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"日本語".repeat(1000),"cwd":null,"output":text,"exitCode":null,"durationMs":null}}}}},{"id":"files","status":"completed","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[{"path":"a.txt","kind":{"update":{"movePath":null}},"diff":text,"proposal":null}],"output":""}}}}},{"id":"future","status":"completed","clientInputId":null,"body":{"inline":{"body":{"custom":{"provider":"codex","kind":"futureTool","value":{"id":"future","type":"futureTool","tool":"inspect","status":"completed","result":{"content":text}}}}}}},{"id":"small","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":["short"]}}}}}],"status":"unknown"}]}});
         let mut typed: ThreadResponse = serde_json::from_value(result).unwrap();
         typed.thread.defer_item_details(MAX_INLINE_ITEM_BYTES);
-        let result = serde_json::to_value(typed).unwrap();
-        let turn = &result["thread"]["turns"][0];
-        let items = &turn["items"];
-        assert_eq!(items[0]["content"][0]["text"], text);
-        assert_eq!(items[1]["text"], text);
-        assert!(items[2]["command"].as_str().unwrap().starts_with("日本語"));
-        assert_eq!(items[2]["status"], "completed");
-        assert_eq!(items[3]["changes"][0]["path"], "a.txt");
-        assert_eq!(items[3]["changes"][0]["kind"]["type"], "update");
-        assert_eq!(items[4]["tool"], "inspect");
-        assert_eq!(items[5]["summary"], json!(["short"]));
+        let items = typed.thread.turns.as_ref().unwrap()[0]
+            .items
+            .as_ref()
+            .unwrap();
+        assert!(
+            matches!(items[0].body(),ItemBody::UserMessage {content,..} if content.first() == Some(&MessagePart::Text {text:text.clone()}))
+        );
+        assert!(
+            matches!(items[1].body(),ItemBody::AssistantText {text:actual,..} if actual == &text)
+        );
+        assert!(
+            matches!(items[2].body(),ItemBody::CommandExecution {command,..} if command.starts_with("日本語"))
+        );
+        assert_eq!(items[2].status, ItemStatus::Completed);
+        assert!(
+            matches!(items[3].body(),ItemBody::FileChange {changes,..} if changes[0].path == "a.txt" && matches!(changes[0].kind,FileChangeKind::Update {..}))
+        );
+        assert!(matches!(items[4].body(),ItemBody::Custom {kind,..} if kind == "futureTool"));
+        assert!(
+            matches!(items[5].body(),ItemBody::Reasoning {summary,..} if summary == &vec!["short"])
+        );
         assert_eq!(
-            turn["deferredItemIds"],
-            json!(["command", "files", "future"])
+            items
+                .iter()
+                .filter(|item| item.is_deferred())
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["command", "files", "future"]
         );
     }
 
     #[test]
     fn generated_image_output_is_not_truncated_as_an_activity_detail() {
-        let image = json!({"id":"image","type":"imageGeneration","status":"completed",
-            "result":"A".repeat(8192),"savedPath":format!("/{} image.png", "directory/".repeat(40))});
-        let result = json!({"thread":{"turns":[{"id":"turn","items":[image]}]}});
+        let image = json!({"id":"image","status":"completed","clientInputId":null,"body":{"inline":{"body":{"imageGeneration":{"savedPath":format!("/{} image.png", "directory/".repeat(40)),"data":"A".repeat(8192),"revisedPrompt":null}}}}});
+        let result = json!({"thread":{"turns":[{"id":"turn","items":[image],"status":"unknown"}]}});
         let mut typed: ThreadResponse = serde_json::from_value(result).unwrap();
         typed.thread.defer_item_details(MAX_INLINE_ITEM_BYTES);
-        let result = serde_json::to_value(typed).unwrap();
-        for field in ["result", "savedPath"] {
-            assert_eq!(
-                result["thread"]["turns"][0]["items"][0][field],
-                image[field]
-            );
-        }
-        assert!(result["thread"]["turns"][0]["deferredItemIds"].is_null());
+        let item = &typed.thread.turns.as_ref().unwrap()[0]
+            .items
+            .as_ref()
+            .unwrap()[0];
+        assert_eq!(serde_json::to_value(item.as_ref()).unwrap(), image);
+        assert!(!item.is_deferred());
     }
 }
 
@@ -573,29 +408,6 @@ pub struct UploadedFile {
     pub path: String,
     pub size: u64,
     pub sha256: [u8; 32],
-}
-
-pub(crate) fn append_text(value: &mut Value, delta: &str) {
-    if !value.is_string() {
-        let text = match value.take() {
-            Value::Array(parts) => parts
-                .into_iter()
-                .filter_map(|part| match part {
-                    Value::String(text) => Some(text),
-                    Value::Object(mut object) => object
-                        .remove("text")
-                        .and_then(|text| text.as_str().map(str::to_owned)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        };
-        *value = Value::String(text);
-    }
-    if let Value::String(text) = value {
-        text.push_str(delta);
-    }
 }
 
 pub fn compact_title(value: &str) -> String {

@@ -12,8 +12,9 @@ use std::{collections::BTreeMap, sync::Arc};
 pub struct PersistedState {
     storage_scope: String,
     archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
-    drafts: Arc<BTreeMap<String, Arc<Draft>>>,
-    pending_submissions: Arc<BTreeMap<String, Arc<PendingSubmission>>>,
+    #[serde(with = "entries")]
+    drafts: Arc<BTreeMap<crate::state::DraftKey, Arc<Draft>>>,
+    pending_submissions: Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
     navigation: Arc<Navigation>,
     activity: Arc<Activity>,
@@ -52,4 +53,33 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
         activity: saved.activity,
         ..Default::default()
     })
+}
+
+/// Structured domain keys are stored as entries, without encoding keys into strings.
+pub(crate) mod entries {
+    use serde::{Deserialize, Serialize};
+    use std::{collections::BTreeMap, sync::Arc};
+    pub fn serialize<S: serde::Serializer, K: Serialize, V: Serialize>(
+        values: &BTreeMap<K, V>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(values.iter())
+    }
+    pub fn deserialize<
+        'de,
+        D: serde::Deserializer<'de>,
+        K: Deserialize<'de> + Ord,
+        V: Deserialize<'de>,
+    >(
+        deserializer: D,
+    ) -> Result<Arc<BTreeMap<K, V>>, D::Error> {
+        let entries = Vec::<(K, V)>::deserialize(deserializer)?;
+        let mut values = BTreeMap::new();
+        for (key, value) in entries {
+            if values.insert(key, value).is_some() {
+                return Err(serde::de::Error::custom("duplicate domain key"));
+            }
+        }
+        Ok(Arc::new(values))
+    }
 }

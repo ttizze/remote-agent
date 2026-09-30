@@ -1,13 +1,16 @@
 //! Read-only access to Claude's native transcript tree. Never repairs or writes
 //! transcripts, and never launches the CLI to list or display a conversation.
 use agent_protocol::{
+    execution::*,
+    ids::ItemId,
+    items::*,
     models::{Item, Thread, ThreadResponse, Turn},
     session::{ProviderKind, SessionRef},
 };
 use anyhow::{Context as _, Result, anyhow};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -98,8 +101,7 @@ pub(super) fn summary(path: &Path) -> Result<Thread> {
         .and_then(|id| id.to_str())
         .context("invalid native transcript filename")?;
     let mut thread = Thread {
-        id: Some(format!("claude:{id}")),
-        session: Some(SessionRef {
+        id: Some(SessionRef {
             provider: ProviderKind::Claude,
             id: id.into(),
         }),
@@ -109,9 +111,7 @@ pub(super) fn summary(path: &Path) -> Result<Thread> {
             .ok()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map(|time| time.as_secs() as f64),
-        status: Some(agent_protocol::models::ThreadStatus {
-            kind: agent_protocol::models::ThreadStatusKind::NotLoaded,
-        }),
+        status: agent_protocol::models::SessionStatus::Unknown,
         ..Default::default()
     };
     for line in head.split(|byte| *byte == b'\n').chain(
@@ -155,17 +155,44 @@ fn input_text(content: &Value) -> Option<String> {
     (!text.is_empty()).then(|| text.chars().take(160).collect())
 }
 
-fn input_blocks(blocks: &[Value]) -> Vec<Value> {
-    blocks.iter().map(|block| {
-        if block["type"] == "image" && block["source"]["type"] == "base64" {
-            json!({"type":"image","url":format!("data:{};base64,{}", block["source"]["media_type"].as_str().unwrap_or("application/octet-stream"), block["source"]["data"].as_str().unwrap_or_default())})
-        } else if block["type"] == "image" && block["source"]["type"] == "url" { json!({"type":"image","url":block["source"]["url"]}) }
-        else { block.clone() }
-    }).collect()
+fn input_blocks(blocks: &[Value]) -> Vec<MessagePart> {
+    blocks
+        .iter()
+        .filter_map(|block| match block["type"].as_str() {
+            Some("text") => Some(MessagePart::Text {
+                text: block["text"].as_str()?.into(),
+            }),
+            Some("image") => {
+                let source = &block["source"];
+                let source = match source["type"].as_str() {
+                    Some("base64") => format!(
+                        "data:{};base64,{}",
+                        source["media_type"].as_str()?,
+                        source["data"].as_str()?
+                    ),
+                    Some("url") => source["url"].as_str()?.into(),
+                    _ => return None,
+                };
+                Some(MessagePart::Image { source })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub(super) struct NativeItemDetails {
+    pub output_path: Option<String>,
+}
+pub(super) struct NativeHistory {
+    pub response: ThreadResponse,
+    pub details: BTreeMap<ItemId, NativeItemDetails>,
+}
+pub(super) fn read_details(path: &Path, limit: usize) -> Result<NativeHistory> {
+    read_with_summary(path, summary(path)?, limit)
 }
 
 pub(super) fn read(path: &Path, limit: usize) -> Result<ThreadResponse> {
-    read_with_summary(path, summary(path)?, limit)
+    read_with_summary(path, summary(path)?, limit).map(|history| history.response)
 }
 
 pub(super) fn read_related(
@@ -193,8 +220,7 @@ pub(super) fn read_related(
         return Err(anyhow!("native subagent path escapes its session"));
     }
     let mut thread = Thread {
-        id: Some(format!("claude:{session_id}")),
-        session: Some(SessionRef {
+        id: Some(SessionRef {
             provider: ProviderKind::Claude,
             id: session_id.to_string(),
         }),
@@ -202,10 +228,10 @@ pub(super) fn read_related(
         ..Default::default()
     };
     thread.agent_id = Some(agent_id.into());
-    read_with_summary(&path, thread, limit)
+    read_with_summary(&path, thread, limit).map(|history| history.response)
 }
 
-fn read_with_summary(path: &Path, thread: Thread, limit: usize) -> Result<ThreadResponse> {
+fn read_with_summary(path: &Path, thread: Thread, limit: usize) -> Result<NativeHistory> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(path)?;
     let offset = file.metadata()?.len().saturating_sub(MAX_FILE_BYTES);
@@ -256,12 +282,8 @@ fn convert(
     nodes: Vec<Value>,
     limit: usize,
     mut warnings: Vec<&str>,
-) -> Result<ThreadResponse> {
-    let native_id = &thread
-        .session
-        .as_ref()
-        .context("Claude session ID missing")?
-        .id;
+) -> Result<NativeHistory> {
+    let native_id = &thread.id.as_ref().context("Claude session ID missing")?.id;
     let mut indexed = HashMap::new();
     let mut leaf = None;
     for (index, node) in nodes.iter().enumerate() {
@@ -305,6 +327,8 @@ fn convert(
     if chain.is_empty() && !nodes.is_empty() {
         warnings.push("transcript has no readable message chain");
     }
+    let mut details = BTreeMap::new();
+    let session = thread.id.as_ref().unwrap().clone();
     let mut turns: Vec<Arc<Turn>> = Vec::new();
     let mut model = None;
     let mut block_indices: HashMap<String, usize> = HashMap::new();
@@ -353,7 +377,7 @@ fn convert(
                     if turns.is_empty() {
                         turns.push(Arc::new(Turn {
                             id: node["uuid"].as_str().unwrap_or_default().into(),
-                            status: Some("completed".into()),
+                            status: TurnStatus::Completed,
                             items: Some(Vec::new()),
                             ..Default::default()
                         }));
@@ -364,12 +388,24 @@ fn convert(
                         .items
                         .as_mut()
                         .unwrap()
-                        .push(Arc::new(Item {
-                            id: node["uuid"].as_str().unwrap_or_default().into(),
-                            kind: Some("nativeAttachment".into()),
-                            result: Some(attachment.clone()),
-                            ..Default::default()
-                        }));
+                        .push(Arc::new(Item::new(
+                            node["uuid"].as_str().unwrap_or_default().into(),
+                            ItemStatus::Unknown,
+                            ItemBody::Attachment {
+                                kind: match attachment["type"].as_str() {
+                                    Some(
+                                        "hook_success"
+                                        | "hook_error"
+                                        | "hook_non_blocking_error"
+                                        | "hook_blocking_error",
+                                    ) => AttachmentKind::HookResult,
+                                    Some("edited_text_file") => AttachmentKind::FileEdit,
+                                    Some("remote_session_change") => AttachmentKind::SessionUpdate,
+                                    _ => AttachmentKind::Other,
+                                },
+                                content: attachment.clone(),
+                            },
+                        )));
                 }
             }
             continue;
@@ -385,7 +421,10 @@ fn convert(
             continue;
         }
         if let Some(name) = node["message"]["model"].as_str() {
-            model = Some(format!("claude:{name}"));
+            model = Some(agent_protocol::models::ModelRef {
+                provider: agent_protocol::session::ProviderKind::Claude,
+                id: name.into(),
+            });
         }
         let content = queued_prompt.unwrap_or(&node["message"]["content"]);
         let user_id = queued_prompt
@@ -412,7 +451,7 @@ fn convert(
         if (user_input && queued_prompt.is_none()) || turns.is_empty() {
             turns.push(Arc::new(Turn {
                 id: user_id.unwrap_or_default().into(),
-                status: Some("completed".into()),
+                status: TurnStatus::Completed,
                 items: Some(Vec::new()),
                 ..Default::default()
             }));
@@ -422,10 +461,14 @@ fn convert(
         if user_input {
             items.push(Arc::new(Item {
                 id: user_id.context("user message ID is unavailable")?.into(),
-                kind: Some("userMessage".into()),
-                content: Some(Value::Array(input_blocks(blocks))),
-                client_id: user_id.map(str::to_owned),
-                ..Default::default()
+                status: ItemStatus::Unknown,
+                client_input_id: user_id.map(Into::into),
+                body: ItemContent::Inline {
+                    body: Box::new(ItemBody::UserMessage {
+                        text: None,
+                        content: input_blocks(blocks),
+                    }),
+                },
             }));
         }
         let message_id = node["message"]["id"]
@@ -445,33 +488,39 @@ fn convert(
                         .find(|item| Some(item.id.as_str()) == block["tool_use_id"].as_str())
                     {
                         let item = Arc::make_mut(item);
-                        item.status = Some(
-                            if block["is_error"] == true {
-                                "failed"
-                            } else {
-                                "completed"
-                            }
-                            .into(),
+                        item.status = if block["is_error"] == true {
+                            ItemStatus::Failed
+                        } else {
+                            ItemStatus::Completed
+                        };
+                        item.body = ItemContent::Inline {
+                            body: Box::new(super::tool_result_body(
+                                item.body(),
+                                &block["content"],
+                                &node["toolUseResult"],
+                            )),
+                        };
+                        details.insert(
+                            item.id.clone(),
+                            NativeItemDetails {
+                                output_path: node["toolUseResult"]["persistedOutputPath"]
+                                    .as_str()
+                                    .map(str::to_owned),
+                            },
                         );
-                        item.result = Some(block["content"].clone());
-                        item.detail_file = node["toolUseResult"]["persistedOutputPath"]
-                            .as_str()
-                            .map(str::to_owned);
-                        item.agent_id =
-                            node["toolUseResult"]["agentId"].as_str().map(str::to_owned);
                     } else {
                         warnings.push("tool result has no available tool call");
                     }
                     continue;
                 }
                 Some("text" | "image") if kind == "user" => continue,
-                _ => match super::content_item(id, block, "interrupted")? {
-                    Some(item) => item,
-                    None => {
-                        warnings.push("unsupported message block");
-                        continue;
-                    }
-                },
+                _ => super::content_item(
+                    &session,
+                    id,
+                    block,
+                    thread.cwd.as_deref(),
+                    ItemStatus::Unknown,
+                )?,
             };
             items.push(Arc::new(item));
         }
@@ -498,11 +547,25 @@ fn convert(
         warnings.into_iter().map(str::to_owned).collect(),
     ));
     thread.turns = Some(turns);
-    Ok(ThreadResponse { thread, model })
+    Ok(NativeHistory {
+        response: ThreadResponse { thread, model },
+        details,
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    fn item_text(item: &agent_protocol::items::Item) -> Option<&str> {
+        match item.body() {
+            agent_protocol::items::ItemBody::AssistantText { text, .. } => Some(text),
+            agent_protocol::items::ItemBody::UserMessage { text, .. } => text.as_deref(),
+            agent_protocol::items::ItemBody::Reasoning { content, .. } => {
+                content.first().map(String::as_str)
+            }
+            _ => None,
+        }
+    }
+
     use super::*;
     const ID: &str = "12345678-1234-4234-8234-123456789abc";
     const NATIVE: &str = include_str!("../../tests/fixtures/claude-2.1.266.jsonl");
@@ -569,34 +632,34 @@ mod tests {
         );
         let turns = response.thread.turns.unwrap();
         assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0].id, "u");
+        assert_eq!(turns[0].id, "u".into());
         let items = turns[0].items.as_ref().unwrap();
         assert_eq!(items.len(), 8);
         for (item, attachment) in items[1..].iter().zip(&attachments) {
-            assert_eq!(item.kind.as_deref(), Some("nativeAttachment"));
-            assert_eq!(item.result.as_ref(), Some(attachment));
-            let presentation = agent_core::presentation::item_presentation(item);
+            assert!(
+                matches!(item.body(), ItemBody::Attachment {content, ..} if content == attachment)
+            );
+            let presentation =
+                agent_core::presentation::item_presentation(item, Some(ProviderKind::Claude));
             assert!(presentation.visible && presentation.collapsible);
             let body = agent_core::presentation::body::expanded_body(item);
             assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), *attachment);
         }
         let text = &items[5];
-        assert_eq!(text.id, "source-queued-text");
-        assert_eq!(text.kind.as_deref(), Some("userMessage"));
-        assert_eq!(
-            text.content.as_ref().unwrap()[0]["text"],
-            "additional instruction"
+        assert_eq!(text.id, "source-queued-text".into());
+        assert!(matches!(text.body(), ItemBody::UserMessage { .. }));
+        assert!(
+            matches!(text.body(), ItemBody::UserMessage {content, ..} if content.first() == Some(&MessagePart::Text {text: "additional instruction".into()}))
         );
         let image = &items[6];
-        assert_eq!(image.id, "source-queued-image");
-        assert_eq!(
-            image.content.as_ref().unwrap()[1]["url"],
-            "data:image/png;base64,aW1hZ2U="
+        assert_eq!(image.id, "source-queued-image".into());
+        assert!(
+            matches!(image.body(), ItemBody::UserMessage {content, ..} if content.get(1) == Some(&MessagePart::Image {source: "data:image/png;base64,aW1hZ2U=".into()}))
         );
-        assert_eq!(items[7].text.as_deref(), Some("queued answer"));
+        assert_eq!(item_text(&(items[7])), Some("queued answer"));
         let page = read(&path, 1).unwrap();
         assert_eq!(page.thread.history_has_more, Some(true));
-        assert_eq!(page.thread.turns.unwrap()[0].id, "next-turn");
+        assert_eq!(page.thread.turns.unwrap()[0].id, "next-turn".into());
         assert_eq!(fs::read_to_string(path).unwrap(), source);
     }
 
@@ -609,8 +672,12 @@ mod tests {
         );
         let response = read(&path, 1000).unwrap();
         assert_eq!(
-            response.thread.id.as_deref(),
-            Some(format!("claude:{ID}").as_str())
+            response
+                .thread
+                .id
+                .as_ref()
+                .map(|session| session.id.as_str()),
+            Some(ID)
         );
         let turns = response.thread.turns.unwrap();
         assert!(!turns.is_empty());
@@ -618,16 +685,14 @@ mod tests {
             .iter()
             .flat_map(|turn| turn.items.iter().flatten())
             .collect();
-        assert!(
-            items
-                .iter()
-                .any(|item| item.kind.as_deref() == Some("userMessage"))
-        );
-        assert!(
-            items
-                .iter()
-                .any(|item| item.kind.as_deref() == Some("agentMessage"))
-        );
+        assert!(items.iter().any(|item| matches!(
+            item.body(),
+            agent_protocol::items::ItemBody::UserMessage { .. }
+        )));
+        assert!(items.iter().any(|item| matches!(
+            item.body(),
+            agent_protocol::items::ItemBody::AssistantText { .. }
+        )));
         assert_eq!(fs::read_to_string(path).unwrap(), NATIVE);
     }
     #[test]
@@ -717,8 +782,7 @@ mod tests {
         ];
         let response = convert(
             Thread {
-                id: Some(format!("claude:{ID}")),
-                session: Some(SessionRef {
+                id: Some(SessionRef {
                     provider: ProviderKind::Claude,
                     id: ID.into(),
                 }),
@@ -729,13 +793,15 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let turns = response.thread.turns.unwrap();
+        let turns = response.response.thread.turns.unwrap();
         assert_eq!(turns.len(), 1);
         let items = turns[0].items.as_ref().unwrap();
         assert_eq!(items.len(), 3);
-        assert_eq!(items[1].id, "call");
-        assert_eq!(items[1].result, Some(json!("output")));
-        assert_eq!(items[2].id, "m:1");
-        assert_eq!(items[2].text.as_deref(), Some("selected answer"));
+        assert_eq!(items[1].id, "call".into());
+        assert!(
+            matches!(items[1].body(), ItemBody::ToolCall {result: Some(value), ..} if value == "output")
+        );
+        assert_eq!(items[2].id, "m:1".into());
+        assert_eq!(item_text(&(items[2])), Some("selected answer"));
     }
 }

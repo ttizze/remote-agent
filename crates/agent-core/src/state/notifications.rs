@@ -12,7 +12,7 @@ pub(super) fn notification(
     } = message
     {
         let mut next = previous.clone();
-        let id = session.thread_id();
+        let id = session.clone();
         let activity = Arc::make_mut(&mut next.activity);
         activity.active.insert(id.clone(), active);
         if active {
@@ -38,16 +38,14 @@ pub(super) fn notification(
         | Notification::Exited { .. }
         | Notification::TerminalRestored { .. }
         | Notification::TerminalDetached { .. }) => process(previous, event),
-        Notification::Provider { method, .. } if method == "thread/name/updated" => {
-            (previous.clone(), refresh_list(previous))
-        }
+        Notification::SessionRenamed { .. } => (previous.clone(), refresh_list(previous)),
         _ => (previous.clone(), Vec::new()),
     }
 }
 
 fn refresh_list(snapshot: &Snapshot) -> Vec<Effect> {
     if snapshot.connected {
-        vec![Effect::execute(op::ListThreads::new(
+        vec![Effect::execute(op::ListSessions::new(
             (*snapshot.list_query).clone(),
         ))]
     } else {
@@ -134,16 +132,12 @@ pub(super) fn session_update(
             ..
         }
     );
-    let active = thread
-        .status
-        .as_ref()
-        .map(|status| status.kind == crate::models::ThreadStatusKind::Active);
+    let active = thread.status == crate::models::SessionStatus::Running;
     let refresh_workspace = (completed || matches!(update.change, SessionChange::Item { .. }))
         && current.cwd.as_deref() == Some(&next.navigation.cwd);
     Arc::make_mut(&mut next.conversations).insert(id.clone(), Arc::new(thread));
-    project_requests(&mut next);
     reconcile_pending(&mut next, id);
-    let changed_metadata = matches!(&update.change, SessionChange::Item { item, .. } if item.kind.as_deref() == Some("userMessage") || (item.kind.as_deref() == Some("commandExecution") && item.status.as_deref() == Some("completed")));
+    let changed_metadata = matches!(&update.change, SessionChange::Item { item, .. } if matches!(item.body(), crate::models::ItemBody::UserMessage { .. }) || (matches!(item.body(), crate::models::ItemBody::CommandExecution { .. }) && item.status == crate::models::ItemStatus::Completed));
     let mut effects = if completed || changed_metadata {
         refresh_list(previous)
     } else {
@@ -151,7 +145,7 @@ pub(super) fn session_update(
     };
     if next.connected
         && completed
-        && active == Some(false)
+        && !active
         && next
             .conversations
             .get(id)

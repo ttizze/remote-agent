@@ -1,26 +1,23 @@
 package dev.remoteagent.mobile
 
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.ui.Alignment
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Card
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,10 +25,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -43,19 +43,23 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import com.revenuecat.placeholder.PlaceholderDefaults
+import com.revenuecat.placeholder.placeholder
+import dev.remoteagent.core.Intent
 import dev.remoteagent.core.MarkdownAlignment
 import dev.remoteagent.core.MarkdownBlock
 import dev.remoteagent.core.MarkdownRun
-import dev.remoteagent.core.markdownBlocks
-import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.RenderedItem
-import com.revenuecat.placeholder.PlaceholderDefaults
-import com.revenuecat.placeholder.placeholder
+import dev.remoteagent.core.markdownBlocks
 
 @Composable
-internal fun ThreadMessageCard(item: RenderedItem, isUser: Boolean, cwd: String,
-    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit) {
+internal fun ThreadMessageCard(
+    item: RenderedItem,
+    isUser: Boolean,
+    cwd: String,
+    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+) {
     val content = remember(item) { item.presentation() }
     val imageFrame = Modifier.widthIn(max = 320.dp).fillMaxWidth().height(320.dp)
     Column(
@@ -64,11 +68,17 @@ internal fun ThreadMessageCard(item: RenderedItem, isUser: Boolean, cwd: String,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (content.imagePlaceholder) {
-            Box(imageFrame
-                .placeholder(enabled = true, color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = RoundedCornerShape(10.dp), highlight = PlaceholderDefaults.pulse)
-                .semantics { contentDescription = "画像を生成中" }
-                .testTag("image.generation.skeleton"))
+            Box(
+                imageFrame
+                    .placeholder(
+                        enabled = true,
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(10.dp),
+                        highlight = PlaceholderDefaults.pulse,
+                    )
+                    .semantics { contentDescription = "画像を生成中" }
+                    .testTag("image.generation.skeleton")
+            )
         }
         if (isUser && content.imageSources.isNotEmpty()) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -122,23 +132,27 @@ internal fun ThreadActivityCard(item: RenderedItem, loadDetails: (String) -> Uni
 }
 
 @Composable
-internal fun ConversationBody(body: String, cwd: String = "",
-    perform: ((Intent, (Result<Outcome>) -> Unit) -> Unit)? = null) {
+internal fun ConversationBody(
+    body: String,
+    cwd: String = "",
+    perform: ((Intent, (Result<Outcome>) -> Unit) -> Unit)? = null,
+) {
     val blocks = remember(body) { markdownBlocks(body) }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         blocks.forEachIndexed { index, block ->
             when (block) {
-                is MarkdownBlock.Paragraph -> Text(
-                    markdownText(block.runs, header = block.style.header != null,
-                                  marker = block.style.marker),
-                    style = when (block.style.header?.toInt()) {
-                        1 -> MaterialTheme.typography.headlineSmall
-                        null -> MaterialTheme.typography.bodyLarge
-                        else -> MaterialTheme.typography.titleLarge
-                    },
-                    fontFamily = if (block.style.code) FontFamily.Monospace else FontFamily.Default,
-                    modifier = Modifier.padding(start = if (block.style.quoted) 12.dp else 0.dp),
-                )
+                is MarkdownBlock.Paragraph ->
+                    Text(
+                        markdownText(block.runs, header = block.style.header != null, marker = block.style.marker),
+                        style =
+                            when (block.style.header?.toInt()) {
+                                1 -> MaterialTheme.typography.headlineSmall
+                                null -> MaterialTheme.typography.bodyLarge
+                                else -> MaterialTheme.typography.titleLarge
+                            },
+                        fontFamily = if (block.style.code) FontFamily.Monospace else FontFamily.Default,
+                        modifier = Modifier.padding(start = if (block.style.quoted) 12.dp else 0.dp),
+                    )
                 is MarkdownBlock.Visualization -> ConversationVisualization(block.path, cwd, perform)
                 is MarkdownBlock.Table -> MarkdownTable(block, index)
             }
@@ -153,21 +167,20 @@ private fun MarkdownTable(table: MarkdownBlock.Table, index: Int) {
         Column(Modifier.horizontalScroll(rememberScrollState()).testTag("markdown.table.$index")) {
             table.rows.forEachIndexed { row, cells ->
                 Row(
-                    Modifier.background(
-                        if (row == 0) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent
-                    )
+                    Modifier.background(if (row == 0) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
                 ) {
                     cells.forEachIndexed { column, cell ->
                         Text(
                             markdownText(cell.runs),
-                            modifier = Modifier.width(width).padding(10.dp)
-                                .testTag("markdown.cell.$index.$row.$column"),
+                            modifier =
+                                Modifier.width(width).padding(10.dp).testTag("markdown.cell.$index.$row.$column"),
                             style = MaterialTheme.typography.bodyLarge,
-                            textAlign = when (table.columns[column]) {
-                                MarkdownAlignment.LEFT -> TextAlign.Left
-                                MarkdownAlignment.CENTER -> TextAlign.Center
-                                MarkdownAlignment.RIGHT -> TextAlign.Right
-                            },
+                            textAlign =
+                                when (table.columns[column]) {
+                                    MarkdownAlignment.LEFT -> TextAlign.Left
+                                    MarkdownAlignment.CENTER -> TextAlign.Center
+                                    MarkdownAlignment.RIGHT -> TextAlign.Right
+                                },
                         )
                     }
                 }
@@ -177,20 +190,20 @@ private fun MarkdownTable(table: MarkdownBlock.Table, index: Int) {
     }
 }
 
-private fun markdownText(
-    runs: List<MarkdownRun>, header: Boolean = false, marker: String? = null,
-) = buildAnnotatedString {
-    if (marker != null) append("$marker ")
-    runs.forEach { run ->
-        withStyle(SpanStyle(
-            fontWeight = if (header || run.strong) FontWeight.Bold else null,
-            fontStyle = if (run.emphasis) FontStyle.Italic else null,
-            fontFamily = if (run.code) FontFamily.Monospace else null,
-            textDecoration = if (run.strikethrough) TextDecoration.LineThrough else TextDecoration.None,
-        )) {
-            val link = run.link
-            if (link != null) withLink(LinkAnnotation.Url(link)) { append(run.text) }
-            else append(run.text)
+private fun markdownText(runs: List<MarkdownRun>, header: Boolean = false, marker: String? = null) =
+    buildAnnotatedString {
+        if (marker != null) append("$marker ")
+        runs.forEach { run ->
+            withStyle(
+                SpanStyle(
+                    fontWeight = if (header || run.strong) FontWeight.Bold else null,
+                    fontStyle = if (run.emphasis) FontStyle.Italic else null,
+                    fontFamily = if (run.code) FontFamily.Monospace else null,
+                    textDecoration = if (run.strikethrough) TextDecoration.LineThrough else TextDecoration.None,
+                )
+            ) {
+                val link = run.link
+                if (link != null) withLink(LinkAnnotation.Url(link)) { append(run.text) } else append(run.text)
+            }
         }
     }
-}

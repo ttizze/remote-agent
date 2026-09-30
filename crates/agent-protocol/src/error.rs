@@ -18,6 +18,16 @@ impl Delivery {
     }
 }
 
+/// A BEX operation failure. Native payloads are classified by the Host first.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RpcFailure {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub delivery: Delivery,
+    pub execution: Option<crate::execution::ExecutionError>,
+}
+
 #[cfg(test)]
 mod delivery_tests {
     use super::*;

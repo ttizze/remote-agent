@@ -1,12 +1,6 @@
 //! One contract per native request; provider JSON conversion stays at its boundary.
-use super::{json_boundary::Opaque, *};
+use super::*;
 use crate::{models as m, operations as op, session as s};
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderCall {
-    pub method: String,
-    #[serde(with = "super::json")]
-    pub params: Value,
-}
 macro_rules! contracts {
     ($($variant:ident, $method:literal => ($params:ty, $result:ty) $([$clone:ident $(, $validate:path)?])?),* $(,)?) => {
         // Bind metadata to the operation, not the parameter type: ReadFile and
@@ -32,30 +26,28 @@ macro_rules! contracts {
         pub enum Call { $($variant($params)),* }
         impl Call {
             pub fn method(&self) -> &str {
-                if let Self::Provider(call) = self { return &call.method; }
                 match self { $(Self::$variant(_) => $method),* }
             }
             pub fn params_json(&self) -> Result<Value, serde_json::Error> {
-                if let Self::Provider(call) = self { return Ok(call.params.clone()); }
                 match self { $(Self::$variant(params) => serde_json::to_value(params)),* }
             }
         }
         pub fn from_json(method: &str, params: Value) -> io::Result<Call> {
             Ok(match method {
                 $($method => Call::$variant(serde_json::from_value(params).map_err(io::Error::other)?)),*,
-                _ => Call::Provider(ProviderCall { method: method.into(), params }),
+                _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unregistered method: {method}"))),
             })
         }
         pub fn provider_response(method: &str, line: &str) -> Result<Response, crate::message::RpcMessageError> {
             match method {
-                $($method => Response::from_result(crate::message::RpcResponse::<$result>::parse(line)?.outcome)),*,
-                _ => Response::from_result(crate::message::RpcResponse::<Value>::parse(line)?.outcome),
+                $($method => super::json_boundary::typed_response::<$result>(line)),*,
+                _ => Err(crate::message::RpcMessageError::InvalidCombination {reason:"unregistered BEX response"}),
             }
         }
         pub fn fixture_reply(method: &str, bytes: &[u8]) -> io::Result<Value> {
             match method {
                 $($method => Ok(decode::<Response<$result>>(bytes)?.into_value())),*,
-                _ => Ok(decode::<Response<Opaque>>(bytes)?.into_value()),
+                _ => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unregistered method: {method}"))),
             }
         }
     };
@@ -74,17 +66,13 @@ contracts! {
     AnswerSession, "host/session/answer" => (op::SessionAnswer, m::Empty),
     RequestSession, "host/session/request" => (op::OpenRequest, s::SessionRef) [clone],
     SessionScope, "host/session/scope" => (m::Empty, String),
-    ReadItem, "host/thread/item/read" => (op::ReadItem, op::ItemResponse) [clone, op::ReadItem::validate],
+    ReadItem, "host/session/item/read" => (op::ReadItem, op::ItemResponse) [clone, op::ReadItem::validate],
     AddProject, "host/project/add" => (op::AddProject, String) [clone],
-    ListThreads, "host/thread/list" => (op::ListThreads, m::ThreadList) [clone],
-    StartThread, "host/thread/start" => (op::StartThread, m::ThreadResponse) [clone, op::StartThread::validate],
-    ForkThread, "thread/fork" => (op::ForkThread, m::ThreadResponse) [clone, op::ForkThread::validate],
-    ResumeThread, "thread/resume" => (op::ResumeThread, m::Empty) [clone],
+    ListSessions, "host/session/list" => (op::ListSessions, m::ThreadList) [clone],
+    CreateSession, "host/session/create" => (op::CreateSession, m::ThreadResponse) [clone, op::CreateSession::validate],
+    ForkSession, "host/session/fork" => (op::ForkSession, m::ThreadResponse) [clone, op::ForkSession::validate],
     Submit, "host/session/submit" => (op::Submission, op::SubmissionReceipt) [clone],
-    StartTurn, "turn/start" => (op::StartTurn, op::StartedTurn) [clone, op::StartTurn::validate],
-    SteerTurn, "turn/steer" => (op::SteerTurn, m::Empty) [clone],
-    QueueTurn, "thread/queue/add" => (op::QueueTurn, op::QueuedTurn) [clone, op::QueueTurn::validate],
-    Interrupt, "turn/interrupt" => (op::Interrupt, m::Empty) [clone],
+    Interrupt, "host/session/interrupt" => (op::Interrupt, m::Empty) [clone],
     ReadPermissionSettings, "host/permissions/read" => (crate::permissions::ReadPermissionSettings, crate::permissions::PermissionSettings) [clone],
     UpdatePermissionSettings, "host/permissions/update" => (crate::permissions::UpdatePermissionSettings, crate::permissions::PermissionSettings) [clone],
     ComposerCatalog, "host/composer/catalog" => (op::LoadComposerCatalog, crate::composer::ComposerCatalog) [clone],
@@ -122,8 +110,7 @@ contracts! {
     RegisterRemote, "host/registerRemote" => (op::RegisterRemoteHost, m::RemoteHost) [clone],
     RemoveRemote, "host/removeRemote" => (op::RemoveRemoteHost, m::Empty) [clone],
     Revoke, "host/revoke" => (op::RevokeDevice, m::Empty) [clone],
-    RenameThread, "thread/name/set" => (op::RenameThread, m::Empty) [clone],
-    Provider, "provider" => (ProviderCall, Opaque),
+    RenameSession, "host/session/rename" => (op::RenameSession, m::Empty) [clone],
     Browser, "host/browser" => (crate::browser::BrowserRequest, crate::browser::BrowserFrame) [clone],
     ConnectionPerformance, "host/diagnostics/connection" => (crate::diagnostics::ConnectionPerformance, m::Empty) [clone],
 }
@@ -131,7 +118,6 @@ contracts! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operations::RpcMethod;
 
     #[test]
     fn shared_input_does_not_merge_file_read_and_download() {
@@ -148,23 +134,5 @@ mod tests {
         ));
         assert_eq!(read.params_json().unwrap(), download.params_json().unwrap());
         assert_ne!(read.method(), download.method());
-    }
-
-    #[test]
-    fn generated_submission_contracts_keep_response_validation() {
-        let params =
-            serde_json::json!({"threadId":"thread","clientUserMessageId":"input","input":[]});
-        let start: op::StartTurn = serde_json::from_value(params.clone()).unwrap();
-        let queue: op::QueueTurn = serde_json::from_value(params).unwrap();
-        for id in ["", "  ", "turn"] {
-            let started = op::StartedTurn {
-                turn: op::TurnIdentity { id: id.into() },
-            };
-            let queued = op::QueuedTurn {
-                queued_submission: op::TurnIdentity { id: id.into() },
-            };
-            assert_eq!(RpcMethod::validate(&start, &started).is_ok(), id == "turn");
-            assert_eq!(RpcMethod::validate(&queue, &queued).is_ok(), id == "turn");
-        }
     }
 }

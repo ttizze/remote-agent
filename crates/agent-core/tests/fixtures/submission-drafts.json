@@ -27,7 +27,10 @@
           "isImage": false
         }
       ],
-      "model": "new-model",
+      "model": {
+        "provider": "codex",
+        "id": "new-model"
+      },
       "effort": null
     },
     "expected": {
@@ -44,7 +47,10 @@
           "isImage": false
         }
       ],
-      "model": "new-model",
+      "model": {
+        "provider": "codex",
+        "id": "new-model"
+      },
       "effort": null
     }
   },

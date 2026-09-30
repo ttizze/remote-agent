@@ -26,12 +26,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.ListQuery
-import dev.remoteagent.core.ListThreads
+import dev.remoteagent.core.ListSessions
 import dev.remoteagent.core.ReadThread
+import dev.remoteagent.core.SessionRef
 import dev.remoteagent.core.ThreadList
 import dev.remoteagent.core.ThreadSummary
 
@@ -51,7 +52,7 @@ internal fun ThreadListScreen(
     LaunchedEffect(search) {
         kotlinx.coroutines.delay(SEARCH_DEBOUNCE_MILLIS)
         if (currentQuery.searchTerm != search)
-            dispatch(Intent.ListThreads(ListThreads(query = currentQuery.copy(searchTerm = search))))
+            dispatch(Intent.ListSessions(ListSessions(query = currentQuery.copy(searchTerm = search))))
     }
     LazyColumn(
         modifier.fillMaxSize(),
@@ -61,7 +62,7 @@ internal fun ThreadListScreen(
         item {
             Row {
                 Button(onClick = showHosts) { Text("PC一覧") }
-                Button(onClick = { perform(Intent.ListThreads(ListThreads(query = query))) }) { Text("更新") }
+                Button(onClick = { perform(Intent.ListSessions(ListSessions(query = query))) }) { Text("更新") }
             }
             OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), label = { Text("チャットを検索") })
             Text("プロジェクト", style = MaterialTheme.typography.headlineSmall)
@@ -74,7 +75,7 @@ internal fun ThreadListScreen(
                 TextButton(onClick = { openConversation(Intent.NewChat("")) }) { Text("新規") }
             }
         }
-        items(threads.filter { it.projectId == null }, key = { it.id }) { SummaryRow(it, openConversation) }
+        items(threads.filter { it.projectId == null }, key = { it.id.listKey }) { SummaryRow(it, openConversation) }
         if (list?.hasMoreChats == true)
             item { TextButton(onClick = { perform(Intent.ExpandThreadList(null, false)) }) { Text("もっと見る") } }
         if (list != null && threads.isEmpty()) item { Text("タスクがありません。") }
@@ -91,15 +92,20 @@ private fun SummaryRow(thread: ThreadSummary, openConversation: (Intent) -> Unit
         Text(thread.title, Modifier.weight(1f))
         if (thread.active) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
         else if (thread.unread) Text("● 完了・未確認")
-        if (thread.worktreeMerged) Icon(
-            painterResource(R.drawable.ic_merge), "main にマージ済み",
-            Modifier.padding(start = 8.dp).size(18.dp),
-            tint = MaterialTheme.colorScheme.tertiary,
-        )
+        if (thread.worktreeMerged)
+            Icon(
+                painterResource(R.drawable.ic_merge),
+                "main にマージ済み",
+                Modifier.padding(start = 8.dp).size(18.dp),
+                tint = MaterialTheme.colorScheme.tertiary,
+            )
     }
 }
 
 private const val SEARCH_DEBOUNCE_MILLIS = 200L
+
+private val SessionRef.listKey: String
+    get() = "session:$provider:$id"
 
 private fun LazyListScope.projectThreads(
     list: ThreadList?,
@@ -119,7 +125,9 @@ private fun LazyListScope.projectThreads(
                 }
             }
         }
-        items(threads.filter { it.projectId == project.id }, key = { it.id }) { SummaryRow(it, openConversation) }
+        items(threads.filter { it.projectId == project.id }, key = { it.id.listKey }) {
+            SummaryRow(it, openConversation)
+        }
         if (project.id in list?.moreProjectIds.orEmpty())
             item(key = "more:${project.id}") {
                 TextButton(onClick = { perform(Intent.ExpandThreadList(project.id, false)) }) { Text("もっと見る") }

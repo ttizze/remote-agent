@@ -261,6 +261,22 @@ fn main() {
                         json!({"type":"stream_event","session_id":session,"event":{"type":"message_start","message":{"id":message}}}),
                     );
                     block(&session, &message, 0, "text", "Waiting for interruption");
+                } else if matches!(text.as_str(), "unknown_control" | "dialog" | "elicitation") {
+                    let request = match text.as_str() {
+                        "dialog" => json!({"subtype":"request_user_dialog","dialog_kind":"future"}),
+                        "elicitation" => {
+                            json!({"subtype":"elicitation","mcp_server_name":"fixture","message":"Name?","requested_schema":{"type":"object","required":["name"],"properties":{"name":{"type":"string","minLength":1}}}})
+                        }
+                        _ => json!({"subtype":"future_control"}),
+                    };
+                    emit(
+                        json!({"type":"control_request","request_id":"control-1","request":request}),
+                    );
+                    waiting = Some(match text.as_str() {
+                        "dialog" => "dialog",
+                        "elicitation" => "elicitation",
+                        _ => "unknown_control",
+                    });
                 } else if text == "permission" || text == "question" {
                     let tool = if text == "question" {
                         "AskUserQuestion"
@@ -292,6 +308,23 @@ fn main() {
                 }
             }
             "control_response" => {
+                if matches!(waiting, Some("unknown_control" | "dialog" | "elicitation")) {
+                    assert_eq!(value["response"]["request_id"], "control-1");
+                    match waiting.unwrap() {
+                        "unknown_control" => assert_eq!(value["response"]["subtype"], "error"),
+                        "dialog" => {
+                            assert_eq!(value["response"]["response"]["behavior"], "cancelled")
+                        }
+                        "elicitation" => assert_eq!(
+                            value["response"]["response"],
+                            json!({"action":"accept","content":{"name":"BEX"}})
+                        ),
+                        _ => unreachable!(),
+                    }
+                    reply(&session, inputs.len(), "control resolved");
+                    waiting = None;
+                    continue;
+                }
                 assert_eq!(value["response"]["request_id"], "permission-1");
                 let response = &value["response"]["response"];
                 let allowed = response["behavior"] == "allow";

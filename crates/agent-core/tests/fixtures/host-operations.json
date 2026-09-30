@@ -404,21 +404,30 @@
     "name": "fork retains unknown Codex thread metadata",
     "command": {
       "type": "forkThread",
-      "threadId": "thread",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread"
+      },
       "lastTurnId": "last"
     },
     "exchanges": [
       {
-        "method": "thread/fork",
+        "method": "host/session/fork",
         "params": {
-          "threadId": "thread",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread"
+          },
           "lastTurnId": "last",
           "excludeTurns": true
         },
         "response": {
           "result": {
             "thread": {
-              "id": "fork",
+              "id": {
+                "provider": "codex",
+                "id": "fork"
+              },
               "turns": [],
               "future": {
                 "retained": true
@@ -430,7 +439,10 @@
     ],
     "result": {
       "thread": {
-        "id": "fork",
+        "id": {
+          "provider": "codex",
+          "id": "fork"
+        },
         "turns": [],
         "future": {
           "retained": true

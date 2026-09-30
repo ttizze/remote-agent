@@ -141,7 +141,13 @@ impl Desktop {
                             }))
                             .into_any_element()
                     }
-                    Some(ConversationRow::Turn(turn)) => view.turn(&turn, cx),
+                    Some(ConversationRow::Turn(turn)) => {
+                        let session = view
+                            .rendered
+                            .as_ref()
+                            .and_then(|conversation| conversation.source.id.clone());
+                        view.turn(session.as_ref(), &turn, cx)
+                    }
                     Some(ConversationRow::Pending(id, pending)) => {
                         let row = view.pending_item(&id, &pending, cx);
                         h_flex()
@@ -152,11 +158,7 @@ impl Desktop {
                             .child(v_flex().w_full().max_w(px(CHAT_WIDTH)).gap_4().child(row))
                             .into_any_element()
                     }
-                    Some(ConversationRow::Request(key, request)) => view.request_card(
-                        &key,
-                        &agent_core::presentation::conversation::request(&key, &request),
-                        cx,
-                    ),
+                    Some(ConversationRow::Request(request)) => view.request_card(&request, cx),
                     None => div().into_any_element(),
                 })
                 .unwrap_or_else(|_| div().into_any_element())
@@ -270,7 +272,7 @@ impl Desktop {
         let send = if let Some(id) = running.filter(|_| empty) {
             self.icon_button("stop", IconName::Pause, "停止", cx, move |s, _, _| {
                 s.dispatch(Intent::Interrupt(op::Interrupt {
-                    thread_id: s.selected().into(),
+                    thread_id: s.selected().expect("selected conversation").clone(),
                     turn_id: id.clone(),
                 }));
             })
@@ -399,7 +401,7 @@ impl Desktop {
             .w_full()
             .max_w(px(CHAT_WIDTH))
             .gap_3()
-            .when(self.selected().is_empty(), |column| {
+            .when(self.selected().is_none(), |column| {
                 column.child(
                     v_flex()
                         .items_start()
@@ -409,7 +411,7 @@ impl Desktop {
                 )
             })
             .when(
-                !self.selected().is_empty()
+                !self.selected().is_none()
                     && self
                         .snapshot
                         .workspace

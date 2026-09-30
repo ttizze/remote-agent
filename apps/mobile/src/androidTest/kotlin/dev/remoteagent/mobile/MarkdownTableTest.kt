@@ -15,8 +15,8 @@ import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
@@ -35,17 +35,15 @@ class MarkdownTableTest {
 
     @Test
     fun sharedTableRendersEveryCellAfterStreamingAndReopening() {
-        val fixture = InstrumentationRegistry.getInstrumentation().context.assets.open("table.md")
-            .bufferedReader().use { it.readText() }
+        val fixture =
+            InstrumentationRegistry.getInstrumentation().context.assets.open("table.md").bufferedReader().use {
+                it.readText()
+            }
         val body = mutableStateOf(fixture.substringBefore("| Codex"))
         val visible = mutableStateOf(true)
         compose.setContent {
             MaterialTheme {
-                Surface {
-                    Column(Modifier.width(360.dp)) {
-                        if (visible.value) ConversationBody(body.value)
-                    }
-                }
+                Surface { Column(Modifier.width(360.dp)) { if (visible.value) ConversationBody(body.value) } }
             }
         }
         compose.onNodeWithTag("markdown.cell.0.0.0").assertTextEquals("構成")
@@ -59,8 +57,10 @@ class MarkdownTableTest {
 
     @Test
     fun sharedDocumentRendersProseAndResolvesReferences() {
-        val fixture = InstrumentationRegistry.getInstrumentation().context.assets.open("document.md")
-            .bufferedReader().use { it.readText() }
+        val fixture =
+            InstrumentationRegistry.getInstrumentation().context.assets.open("document.md").bufferedReader().use {
+                it.readText()
+            }
         compose.setContent {
             MaterialTheme { Surface { Column(Modifier.width(360.dp)) { ConversationBody(fixture) } } }
         }
@@ -68,19 +68,27 @@ class MarkdownTableTest {
             compose.onNodeWithText(text).assertIsDisplayed()
         }
         val layouts = mutableListOf<TextLayoutResult>()
-        compose.onNodeWithText("前の 太字と 強調、取消、参照。")
-            .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        compose.onNodeWithText("前の 太字と 強調、取消、参照。").performSemanticsAction(SemanticsActions.GetTextLayoutResult) {
+            it(layouts)
+        }
         val text = layouts.single().layoutInput.text
-        assertTrue(text.spanStyles.any {
-            text.text.substring(it.start, it.end) == "強調" &&
-                it.item.fontWeight == androidx.compose.ui.text.font.FontWeight.Bold &&
-                it.item.fontStyle == androidx.compose.ui.text.font.FontStyle.Italic
-        })
-        assertEquals("https://example.com/reference",
-            (text.getLinkAnnotations(0, text.length).single().item as androidx.compose.ui.text.LinkAnnotation.Url).url)
+        assertTrue(
+            text.spanStyles.any {
+                text.text.substring(it.start, it.end) == "強調" &&
+                    it.item.fontWeight == androidx.compose.ui.text.font.FontWeight.Bold &&
+                    it.item.fontStyle == androidx.compose.ui.text.font.FontStyle.Italic
+            }
+        )
+        assertEquals(
+            "https://example.com/reference",
+            (text.getLinkAnnotations(0, text.length).single().item as androidx.compose.ui.text.LinkAnnotation.Url).url,
+        )
         layouts.clear()
-        compose.onNodeWithText("![コード内](not-an-image.png)\n| table | stays code |")
-            .performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        compose.onNodeWithText("![コード内](not-an-image.png)\n| table | stays code |").performSemanticsAction(
+            SemanticsActions.GetTextLayoutResult
+        ) {
+            it(layouts)
+        }
         assertEquals(androidx.compose.ui.text.font.FontFamily.Monospace, layouts.single().layoutInput.style.fontFamily)
         assertTrue(layouts.single().layoutInput.text.spanStyles.all { it.item.fontFamily == null })
         compose.onNodeWithText("後の 参照。").assertExists()
@@ -93,8 +101,10 @@ class MarkdownTableTest {
         val header = compose.onNodeWithTag("markdown.cell.0.0.0")
         val headerLayouts = mutableListOf<TextLayoutResult>()
         header.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(headerLayouts) }
-        assertEquals(androidx.compose.ui.text.font.FontWeight.Bold,
-            headerLayouts.single().layoutInput.text.spanStyles.single().item.fontWeight)
+        assertEquals(
+            androidx.compose.ui.text.font.FontWeight.Bold,
+            headerLayouts.single().layoutInput.text.spanStyles.single().item.fontWeight,
+        )
         first.assertIsDisplayed().assertTextEquals("Codexハーネス＋Claude接続")
         second.assertIsDisplayed().assertTextEquals("Codex／Claude Codeを並列接続")
         assertEquals(header.getUnclippedBoundsInRoot().left, first.getUnclippedBoundsInRoot().left)
@@ -103,8 +113,7 @@ class MarkdownTableTest {
         compose.onNodeWithTag("markdown.table.0").performTouchInput { swipeLeft() }
         compose.onNodeWithTag("markdown.table.0").performTouchInput { swipeLeft() }
         val burden = compose.onNodeWithTag("markdown.cell.0.1.2")
-        burden.assertIsDisplayed()
-            .assertTextEquals("通信変換、モデルの挙動、サブスク認証との適合を検証する必要")
+        burden.assertIsDisplayed().assertTextEquals("通信変換、モデルの挙動、サブスク認証との適合を検証する必要")
         compose.onNodeWithTag("markdown.cell.0.2.2").assertTextEquals("両者の機能差をBexが吸収する必要")
         val layouts = mutableListOf<TextLayoutResult>()
         burden.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }

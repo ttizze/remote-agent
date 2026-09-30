@@ -51,7 +51,7 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Fork inherits the selected answer and accepts a new turn")
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let number = try XCTUnwrap(originalAnswerID.split(separator: "-").dropLast().last)
-        let original = app.descendants(matching: .any)["tasks.row.fixture-thread-\(number)"]
+        let original = app.descendants(matching: .any)["tasks.row.codex:fixture-thread-\(number)"]
         XCTAssertTrue(original.waitForExistence(timeout: 15)); original.tap()
         XCTAssertTrue(app.descendants(matching: .any)[nextID].waitForExistence(timeout: 20))
     }
@@ -62,7 +62,7 @@ extension BexLaunchUITests {
         app.buttons["model.settings"].tap()
         _ = addFixtureClaudeAccount(app)
         openModelChoices(app)
-        XCTAssertTrue(app.buttons["model.choice.claude:default"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.buttons["model.choice.default"].waitForExistence(timeout: 15))
         selectFixtureProvider(app, "Codex")
         app.buttons["model.accounts"].tap()
         XCTAssertEqual(app.buttons["model.account.desktop"].value as? String, "選択中")
@@ -213,7 +213,7 @@ extension BexLaunchUITests {
         _ = addFixtureClaudeAccount(app)
         openModelChoices(app)
         XCTAssertFalse(app.buttons["model.choice.fixture-model"].exists)
-        app.buttons["model.choice.claude:default"].tap()
+        app.buttons["model.choice.default"].tap()
         app.buttons["model.close"].tap()
         XCTAssertFalse(fast.exists)
         XCTAssertEqual(effort.value as? String, "high")
@@ -222,7 +222,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(app.buttons["model.effort.medium"].exists)
         app.buttons["model.effort.high"].tap()
         model.tap()
-        app.buttons["model.choice.claude:haiku"].tap()
+        app.buttons["model.choice.haiku"].tap()
         app.buttons["model.close"].tap()
         XCTAssertFalse(effort.exists)
         model.tap()

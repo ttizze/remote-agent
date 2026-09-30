@@ -183,7 +183,10 @@ mod tests {
             publish.await.unwrap();
             let restored: Snapshot =
                 agent_core::persistence::decode(&std::fs::read(path).unwrap()).unwrap();
-            assert_eq!(restored.drafts["draft"].text, "last edit before close");
+            assert_eq!(
+                restored.drafts[&agent_core::state::DraftKey::from("draft")].text,
+                "last edit before close"
+            );
             assert!(store.dispatch(Intent::ShowThreadList).await.is_err());
         })
         .await
@@ -227,7 +230,10 @@ mod tests {
             publish.await.unwrap();
             let restored: Snapshot =
                 agent_core::persistence::decode(&std::fs::read(path).unwrap()).unwrap();
-            assert_eq!(restored.drafts["draft"].text, "recovered");
+            assert_eq!(
+                restored.drafts[&agent_core::state::DraftKey::from("draft")].text,
+                "recovered"
+            );
         })
         .await
         .expect("persistence recovery stalled");

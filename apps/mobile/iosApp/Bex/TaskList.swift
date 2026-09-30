@@ -246,6 +246,10 @@ private struct ThreadListRow: View {
     var indented = false
     let open: () -> Void
 
+    private var accessibilityID: String {
+        "\(thread.id.provider == .codex ? "codex" : "claude"):\(thread.id.id)"
+    }
+
     var body: some View {
         Button(action: open) {
             HStack(spacing: 10) {
@@ -253,11 +257,11 @@ private struct ThreadListRow: View {
                 Spacer()
                 if thread.active {
                     ProgressView().controlSize(.small)
-                        .accessibilityIdentifier("tasks.running.\(thread.id)")
+                        .accessibilityIdentifier("tasks.running.\(accessibilityID)")
                 } else if thread.unread {
                     Circle().fill(Color.white).frame(width: 8, height: 8)
                         .accessibilityLabel("完了・未確認")
-                        .accessibilityIdentifier("tasks.completed.\(thread.id)")
+                        .accessibilityIdentifier("tasks.completed.\(accessibilityID)")
                 }
                 if thread.worktreeMerged {
                     Image("GitMerge")
@@ -265,13 +269,13 @@ private struct ThreadListRow: View {
                         .frame(width: 18, height: 18)
                         .foregroundStyle(.purple)
                         .accessibilityLabel("main にマージ済み")
-                        .accessibilityIdentifier("tasks.merged.\(thread.id)")
+                        .accessibilityIdentifier("tasks.merged.\(accessibilityID)")
                 }
             }
             .padding(.leading, indented ? 40 : 0)
             .contentShape(Rectangle())
         }
-        .accessibilityIdentifier("tasks.row.\(thread.id)")
+        .accessibilityIdentifier("tasks.row.\(accessibilityID)")
         .accessibilityValue(thread.active ? "実行中" : thread.unread ? "完了・未確認" : "")
         .taskListRowStyle()
     }

@@ -5,7 +5,7 @@ use std::io;
 
 pub mod json_boundary;
 mod requests;
-pub use requests::{Call, ProviderCall, contracts};
+pub use requests::{Call, contracts};
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,12 +51,8 @@ pub enum Notification {
         #[serde(rename = "processHandle")]
         handle: String,
     },
-    /// Opaque external-provider events for raw subscribers.
-    Provider {
-        method: String,
-        #[serde(with = "json")]
-        params: Value,
-    },
+    #[serde(rename = "host/session/renamed")]
+    SessionRenamed { session: crate::session::SessionRef },
 }
 
 pub fn encode(value: impl Serialize) -> io::Result<Vec<u8>> {
@@ -78,10 +74,15 @@ pub fn response_frame(response: Response) -> io::Result<Vec<u8>> {
         return Ok(bytes);
     }
     encode(Response::<()>::Failure {
-        error: serde_json::json!({"code":"response_too_large","message":"RPC response exceeds the transfer limit"}),
+        error: crate::error::RpcFailure {
+            code: "response_too_large".into(),
+            message: "RPC response exceeds the transfer limit".into(),
+            delivery: crate::error::Delivery::Unknown,
+            execution: None,
+        },
     })
 }
-// Host handlers may return different native results; each serializes directly.
+// Host handlers return domain results; each serializes directly.
 macro_rules! results {
     ($($variant:ident($(#[$attr:meta])* $ty:ty)),* $(,)?) => {
         #[derive(Debug, Serialize)]
@@ -107,21 +108,15 @@ results! {
     HostStatus(crate::models::HostStatus), Invitation(crate::models::Invitation),
     Remotes(Vec<crate::models::RemoteHost>), Remote(crate::models::RemoteHost),
     Submission(crate::operations::SubmissionReceipt),
-    Started(crate::operations::StartedTurn), Queued(crate::operations::QueuedTurn),
-    Unit(()), Text(String), Provider(#[serde(with = "json")] Value)
+    Unit(()), Text(String)
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response<T = Body> {
-    Success {
-        result: T,
-    },
-    Failure {
-        #[serde(with = "json")]
-        error: Value,
-    },
+    Success { result: T },
+    Failure { error: crate::error::RpcFailure },
 }
 impl Response {
-    pub fn from_result<T: Into<Body>, E: Serialize>(
+    pub fn from_result<T: Into<Body>, E: Into<crate::error::RpcFailure>>(
         result: Result<T, E>,
     ) -> Result<Response, crate::message::RpcMessageError> {
         Ok(match result {
@@ -129,17 +124,20 @@ impl Response {
                 result: result.into(),
             },
             Err(error) => Response::Failure {
-                error: serde_json::to_value(error)?,
+                error: error.into(),
             },
         })
     }
     pub fn error(
-        code: impl Serialize,
+        code: impl ToString,
         message: &impl std::fmt::Display,
     ) -> Result<Response, crate::message::RpcMessageError> {
-        Self::from_result::<(), _>(Err(
-            serde_json::json!({"code":code,"message":message.to_string()}),
-        ))
+        Self::from_result::<(), _>(Err(crate::error::RpcFailure {
+            code: code.to_string(),
+            message: message.to_string(),
+            delivery: crate::error::Delivery::Unknown,
+            execution: None,
+        }))
     }
 }
 impl<T: Serialize> Response<T> {

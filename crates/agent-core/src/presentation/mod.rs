@@ -7,36 +7,56 @@ pub mod error;
 pub mod model_settings;
 pub mod permissions;
 
-use crate::models::{Item, Turn};
+use crate::models::{
+    ApprovalReviewStatus, AssistantPhase, AttachmentKind, Item, ItemBody, ItemStatus, ToolKind,
+    Turn, TurnStatus,
+};
 use serde::Serialize;
-use serde_json::Value;
 pub mod body;
 
 pub mod conversation;
 pub mod list;
 pub mod markdown;
 
-/// Borrow only the fields used for grouping; pending input can supply metadata
-/// without allocating a native item or copying its message and attachments.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum GroupKind {
+    Hidden,
+    User,
+    Assistant,
+    Command,
+    FileChange,
+    Image,
+    #[default]
+    Activity,
+}
+/// Borrow only the values needed for grouping, including pending input.
 #[derive(Clone, Copy, Default)]
 pub struct ItemMetadata<'a> {
     pub id: &'a str,
     pub client_id: Option<&'a str>,
-    pub kind: &'a str,
-    pub phase: Option<&'a str>,
-    pub file_count: usize,
+    pub kind: GroupKind,
+    pub phase: AssistantPhase,
 }
 impl<'a> From<&'a Item> for ItemMetadata<'a> {
     fn from(item: &'a Item) -> Self {
         Self {
             id: &item.id,
-            client_id: item.client_id.as_deref(),
-            kind: item.kind.as_deref().unwrap_or_default(),
-            phase: item.phase.as_deref(),
-            file_count: item
-                .changes
-                .as_ref()
-                .map_or(0, crate::models::ItemChanges::len),
+            client_id: item.client_input_id.as_deref(),
+            kind: match item.body() {
+                ItemBody::UserMessage { .. } => GroupKind::User,
+                ItemBody::AssistantText { .. } => GroupKind::Assistant,
+                ItemBody::CommandExecution { .. } => GroupKind::Command,
+                ItemBody::FileChange { .. } => GroupKind::FileChange,
+                ItemBody::ImageGeneration { .. } => GroupKind::Image,
+                ItemBody::Reasoning { .. } | ItemBody::Review { .. } | ItemBody::Sleep {} => {
+                    GroupKind::Hidden
+                }
+                _ => GroupKind::Activity,
+            },
+            phase: match item.body() {
+                ItemBody::AssistantText { phase, .. } => *phase,
+                _ => AssistantPhase::Unknown,
+            },
         }
     }
 }
@@ -65,10 +85,12 @@ pub struct Segment {
 impl Segment {
     pub fn role(&self, index: usize, item: ItemMetadata<'_>) -> Role {
         match item.kind {
-            "reasoning" | "sleep" | "enteredReviewMode" | "exitedReviewMode" => Role::Hidden,
-            "userMessage" => Role::User,
-            "imageGeneration" => Role::Response,
-            "agentMessage" if self.answer.is_none_or(|answer| answer == index) => Role::Response,
+            GroupKind::Hidden => Role::Hidden,
+            GroupKind::User => Role::User,
+            GroupKind::Image => Role::Response,
+            GroupKind::Assistant if self.answer.is_none_or(|answer| answer == index) => {
+                Role::Response
+            }
             _ => Role::Activity,
         }
     }
@@ -86,7 +108,7 @@ pub fn project_items<'a>(
     count: usize,
     item: impl Fn(usize) -> ItemMetadata<'a> + 'a,
 ) -> impl Iterator<Item = Segment> + 'a {
-    let completed = turn.status.as_deref() == Some("completed");
+    let completed = turn.status == TurnStatus::Completed;
     let mut start = 0;
     let mut first = true;
     let mut exchange_end = 0;
@@ -98,12 +120,12 @@ pub fn project_items<'a>(
         first = false;
         if start == exchange_end {
             exchange_end = (start + 1..count)
-                .find(|&index| item(index).kind == "userMessage")
+                .find(|&index| item(index).kind == GroupKind::User)
                 .unwrap_or(count);
             exchange_has_answer = completed
                 && (start..exchange_end).any(|index| {
                     let value = item(index);
-                    value.kind == "agentMessage" && value.phase != Some("commentary")
+                    value.kind == GroupKind::Assistant && value.phase != AssistantPhase::Commentary
                 });
         }
         let mut end = exchange_end;
@@ -111,29 +133,34 @@ pub fn project_items<'a>(
             let mut follows_response = false;
             for index in start..exchange_end {
                 let value = item(index);
-                if follows_response && value.kind != "agentMessage" && visible(value) {
+                if follows_response
+                    && value.kind != GroupKind::Assistant
+                    && value.kind != GroupKind::Hidden
+                {
                     end = index;
                     break;
                 }
-                follows_response |= value.kind == "agentMessage";
+                follows_response |= value.kind == GroupKind::Assistant;
             }
         }
         let answer = if completed {
             (start..end)
                 .rev()
                 .find(|&index| {
-                    item(index).kind == "agentMessage" && item(index).phase == Some("final_answer")
+                    item(index).kind == GroupKind::Assistant
+                        && item(index).phase == AssistantPhase::Final
                 })
                 .or_else(|| {
                     (start..end).rev().find(|&index| {
-                        item(index).kind == "agentMessage" && item(index).phase.is_none()
+                        item(index).kind == GroupKind::Assistant
+                            && item(index).phase == AssistantPhase::Unknown
                     })
                 })
         } else {
             None
         };
         let id = if start == 0 {
-            turn.id.clone()
+            turn.id.to_string()
         } else {
             let first = item(start);
             format!("{}:{}", turn.id, first.client_id.unwrap_or(first.id))
@@ -163,10 +190,7 @@ pub fn project_items<'a>(
                         .map(&item),
                 );
                 if segment.last
-                    && matches!(
-                        turn.status.as_deref().unwrap_or_default(),
-                        "failed" | "interrupted"
-                    )
+                    && matches!(turn.status, TurnStatus::Failed | TurnStatus::Interrupted)
                 {
                     format!("{}・{summary}", work_summary(turn))
                 } else {
@@ -182,18 +206,12 @@ pub fn project_items<'a>(
         Some(segment)
     })
 }
-fn visible(item: ItemMetadata<'_>) -> bool {
-    !matches!(
-        item.kind,
-        "reasoning" | "sleep" | "enteredReviewMode" | "exitedReviewMode"
-    )
-}
 fn activity_summary<'a>(items: impl Iterator<Item = ItemMetadata<'a>>) -> String {
     let (mut commands, mut files, mut tools) = (false, false, false);
     for item in items {
         match item.kind {
-            "commandExecution" => commands = true,
-            "fileChange" => files = true,
+            GroupKind::Command => commands = true,
+            GroupKind::FileChange => files = true,
             _ => tools = true,
         }
     }
@@ -213,7 +231,7 @@ fn activity_summary<'a>(items: impl Iterator<Item = ItemMetadata<'a>>) -> String
 }
 
 fn work_summary(turn: &Turn) -> String {
-    if turn.status.as_deref() == Some("inProgress") {
+    if turn.status == agent_protocol::execution::TurnStatus::Running {
         return "作業中…".into();
     }
     let duration = turn
@@ -244,15 +262,15 @@ fn work_summary(turn: &Turn) -> String {
     } else {
         summary.push_str("作業");
     }
-    summary.push_str(match turn.status.as_deref().unwrap_or_default() {
-        "interrupted" => {
+    summary.push_str(match turn.status {
+        TurnStatus::Interrupted => {
             if duration.is_some() {
                 "した後に中断しました"
             } else {
                 "を中断しました"
             }
         }
-        "failed" => {
+        TurnStatus::Failed => {
             if duration.is_some() {
                 "した後に失敗しました"
             } else {
@@ -310,57 +328,69 @@ pub struct ItemPresentation {
     pub collapsible: bool,
     pub visible: bool,
 }
-pub fn item_presentation(item: &Item) -> ItemPresentation {
-    let (kind, title, collapsible) = match item.kind.as_deref().unwrap_or_default() {
-        "userMessage" => ("user", "You".into(), false),
-        "agentMessage" => (
-            if item.phase.as_deref().unwrap_or_default() == "commentary" {
+pub fn item_presentation(
+    item: &Item,
+    provider: Option<crate::session::ProviderKind>,
+) -> ItemPresentation {
+    let (kind, title, collapsible) = match item.body() {
+        ItemBody::UserMessage { .. } => ("user", "You".into(), false),
+        ItemBody::AssistantText { phase, .. } => (
+            if *phase == AssistantPhase::Commentary {
                 "commentary"
             } else {
                 "agent"
             },
-            "Codex".into(),
+            match provider {
+                Some(crate::session::ProviderKind::Codex) => "Codex",
+                Some(crate::session::ProviderKind::Claude) => "Claude",
+                None => "Assistant",
+            }
+            .into(),
             false,
         ),
-        "reasoning" => ("reasoning", "作業の詳細".into(), true),
-        "imageGeneration" => ("imageGeneration", tool_title(item), false),
-        "commandExecution" => (
-            "command",
-            compact_title(item.command.as_deref().unwrap_or_default()),
-            true,
-        ),
-        "fileChange" => (
+        ItemBody::Reasoning { .. } => ("reasoning", "作業の詳細".into(), true),
+        ItemBody::CommandExecution { command, .. } => ("command", compact_title(command), true),
+        ItemBody::FileChange { changes, .. } => (
             "fileChange",
-            format!("{}件のファイル変更", ItemMetadata::from(item).file_count),
+            format!("{}件のファイル変更", changes.len()),
             true,
         ),
-        _ => ("unknown", tool_title(item), true),
+        ItemBody::ImageGeneration { .. } => (
+            "imageGeneration",
+            match item.status {
+                ItemStatus::Running => "",
+                ItemStatus::Failed => "画像を生成できませんでした",
+                _ => "生成画像",
+            }
+            .into(),
+            false,
+        ),
+        _ => ("unknown", tool_title(item.body()), true),
     };
     ItemPresentation {
         kind,
         title,
         collapsible,
-        visible: visible(item.into()),
+        visible: ItemMetadata::from(item).kind != GroupKind::Hidden,
     }
 }
-fn tool_title(item: &Item) -> String {
-    let tool = item.tool.as_deref().unwrap_or_default();
-    match item.kind.as_deref().unwrap_or_default() {
-        "nativeAttachment" => match item
-            .result
-            .as_ref()
-            .and_then(|value| value["type"].as_str())
-        {
-            Some(
-                "hook_success" | "hook_error" | "hook_non_blocking_error" | "hook_blocking_error",
-            ) => "フックの実行結果".into(),
-            Some("edited_text_file") => "ファイルの編集内容".into(),
-            Some("remote_session_change") => "セッションの更新情報".into(),
-            _ => "会話の添付情報".into(),
-        },
-        "hookPrompt" => "追加指示".into(),
-        "plan" => "計画を更新しました".into(),
-        "mcpToolCall" => match (item.server.as_deref().unwrap_or_default(), tool) {
+fn tool_title(body: &ItemBody) -> String {
+    match body {
+        ItemBody::Attachment { kind, .. } => match kind {
+            AttachmentKind::HookResult => "フックの実行結果",
+            AttachmentKind::FileEdit => "ファイルの編集内容",
+            AttachmentKind::SessionUpdate => "セッションの更新情報",
+            AttachmentKind::Other => "会話の添付情報",
+        }
+        .into(),
+        ItemBody::Hook { .. } => "追加指示".into(),
+        ItemBody::Plan { .. } => "計画を更新しました".into(),
+        ItemBody::ToolCall {
+            kind: ToolKind::Mcp,
+            tool,
+            server,
+            ..
+        } => match (server.as_deref().unwrap_or_default(), tool.as_str()) {
             ("", "") => "MCPツールを実行しました".into(),
             (server, "") => format!("{}の連携を使用しました", compact_title(server)),
             ("", tool) => compact_title(tool),
@@ -370,54 +400,55 @@ fn tool_title(item: &Item) -> String {
                 compact_title(tool)
             ),
         },
-        "dynamicToolCall" => {
+        ItemBody::ToolCall { tool, .. } => {
             if tool.is_empty() {
                 "ツールを実行しました".into()
             } else {
                 format!("{}を実行しました", compact_title(tool))
             }
         }
-        "collabAgentToolCall" => {
+        ItemBody::Subagent { tool, .. } => {
             if tool.is_empty() {
-                "サブエージェントを操作しました".into()
+                "サブエージェントが作業しました".into()
             } else {
                 format!("サブエージェント: {}", compact_title(tool))
             }
         }
-        "subAgentActivity" => "サブエージェントが作業しました".into(),
-        "webSearch" => match item.query.as_deref().unwrap_or_default() {
-            "" => "Webを検索しました".into(),
-            query => format!("Webを検索: {}", compact_title(query)),
-        },
-        "imageView" => match item.path.as_deref().unwrap_or_default() {
-            "" => "画像を確認しました".into(),
-            path => format!("画像を確認: {}", compact_title(path)),
-        },
-        "imageGeneration" => match item.status.as_deref().unwrap_or_default() {
-            "inProgress" => "",
-            "failed" => "画像を生成できませんでした",
-            _ => "生成画像",
+        ItemBody::WebSearch { query, .. } => {
+            if query.is_empty() {
+                "Webを検索しました".into()
+            } else {
+                format!("Webを検索: {}", compact_title(query))
+            }
         }
-        .into(),
-        "contextCompaction" => "コンテキストを圧縮しました".into(),
-        "automaticApprovalReview" => match item
-            .review
-            .as_ref()
-            .and_then(|review| review.get("status"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-        {
-            "inProgress" => "承認を自動確認中",
-            "denied" => "自動確認で拒否されました",
-            "timedOut" => "自動確認がタイムアウトしました",
-            "aborted" => "自動確認を中止しました",
+        ItemBody::ImageView { path } => {
+            if path.is_empty() {
+                "画像を確認しました".into()
+            } else {
+                format!("画像を確認: {}", compact_title(path))
+            }
+        }
+        ItemBody::Compaction {} => "コンテキストを圧縮しました".into(),
+        ItemBody::AutomaticApproval { status, .. } => match status {
+            ApprovalReviewStatus::Running => "承認を自動確認中",
+            ApprovalReviewStatus::Denied => "自動確認で拒否されました",
+            ApprovalReviewStatus::TimedOut => "自動確認がタイムアウトしました",
+            ApprovalReviewStatus::Aborted => "自動確認を中止しました",
             _ => "承認を自動確認しました",
         }
         .into(),
-        "sleep" => "待機しました".into(),
-        "enteredReviewMode" => "レビューを開始しました".into(),
-        "exitedReviewMode" => "レビューを終了しました".into(),
-        kind => format!("Codex item ({})", compact_title(kind)),
+        ItemBody::Sleep {} => "待機しました".into(),
+        ItemBody::Review { entering, .. } => if *entering {
+            "レビューを開始しました"
+        } else {
+            "レビューを終了しました"
+        }
+        .into(),
+        ItemBody::Error { .. } => "エラー".into(),
+        ItemBody::Custom { provider, kind, .. } => {
+            format!("{provider:?} item ({})", compact_title(kind))
+        }
+        _ => unreachable!("messages use their own presentation"),
     }
 }
 
@@ -431,19 +462,21 @@ mod presentation_tests {
 
     #[rstest::rstest]
     fn generated_images_remain_visible_outside_completed_work(
-        #[values("inProgress", "completed", "failed")] status: &str,
+        #[values("running", "completed", "failed")] status: &str,
     ) {
-        let turn = turn!({"id":"turn","status":"completed","items":[
-            {"id":"work","type":"reasoning"},
-            {"id":"image","type":"imageGeneration","status":status},
-            {"id":"answer","type":"agentMessage","phase":"final_answer","text":"Here is the image"}
-        ]});
+        let turn = turn!({"id":"turn","status":"completed","items":[{"id":"work","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":[]}}}}},{"id":"image","status":status,"clientInputId":null,"body":{"inline":{"body":{"imageGeneration":{"savedPath":null,"data":null,"revisedPrompt":null}}}}},{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"Here is the image","phase":"final"}}}}}]});
         let segment = project(&turn).next().unwrap();
         assert_eq!(
             segment.role(1, turn.items.as_ref().unwrap()[1].as_ref().into()),
             Role::Response
         );
-        assert!(!item_presentation(turn.items.as_ref().unwrap()[1].as_ref()).collapsible);
+        assert!(
+            !item_presentation(
+                turn.items.as_ref().unwrap()[1].as_ref(),
+                Some(crate::session::ProviderKind::Codex)
+            )
+            .collapsible
+        );
     }
 
     fn rows<'a>(part: &'a Segment, turn: &'a Turn, role: Role) -> impl Iterator<Item = &'a Item> {
@@ -455,7 +488,7 @@ mod presentation_tests {
     }
     #[test]
     fn completed_turn_projects_user_work_and_final() {
-        let turn = turn!({"id":"turn","status":"completed","durationMs":40000,"items":[{"id":"u","type":"userMessage"},{"id":"r","type":"reasoning"},{"id":"c","type":"commandExecution"},{"id":"a","type":"agentMessage","phase":"commentary"},{"id":"f","type":"agentMessage","phase":"final_answer"}]});
+        let turn = turn!({"id":"turn","status":"completed","durationMs":40000,"items":[{"id":"u","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"r","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":[]}}}}},{"id":"c","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"a","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"f","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"final"}}}}}]});
         let p = project(&turn).next().unwrap();
         assert_eq!(rows(&p, &turn, Role::User).count(), 1);
         assert_eq!(
@@ -464,14 +497,17 @@ mod presentation_tests {
                 .collect::<Vec<_>>(),
             ["c", "a"]
         );
-        assert_eq!(rows(&p, &turn, Role::Response).next().unwrap().id, "f");
+        assert_eq!(
+            rows(&p, &turn, Role::Response).next().unwrap().id,
+            "f".into()
+        );
         assert!(p.collapsible);
         assert!(!p.initially_expanded);
         assert_eq!(p.label.as_deref(), Some("2件の過去のメッセージ"));
     }
     #[test]
     fn completed_empty_turn_does_not_restore_thinking() {
-        let turn = turn!({"id":"turn","status":"completed","items":[{"id":"u","type":"userMessage","text":"追加メッセージ"}]});
+        let turn = turn!({"id":"turn","status":"completed","items":[{"id":"u","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":"追加メッセージ","content":[]}}}}}]});
         assert!(project(&turn).next().unwrap().label.is_none());
     }
     fn order(turn: &Turn) -> Vec<String> {
@@ -480,49 +516,39 @@ mod presentation_tests {
                 rows(&part, turn, Role::User)
                     .chain(rows(&part, turn, Role::Activity))
                     .chain(rows(&part, turn, Role::Response))
-                    .map(|item| item.id.clone())
+                    .map(|item| item.id.to_string())
                     .collect::<Vec<_>>()
             })
             .collect()
     }
     #[rstest::rstest]
-    #[case::live("inProgress", "inProgress")]
-    #[case::live_completed_command("inProgress", "completed")]
-    #[case::live_failed_command("inProgress", "failed")]
+    #[case::live("running", "running")]
+    #[case::live_completed_command("running", "completed")]
+    #[case::live_failed_command("running", "failed")]
     #[case::completed("completed", "completed")]
     #[case::failed("failed", "failed")]
-    #[case::interrupted("interrupted", "inProgress")]
-    #[case::missing_status("", "completed")]
+    #[case::interrupted("interrupted", "running")]
+    #[case::missing_status("unknown", "completed")]
     fn command_groups_start_collapsed_for_live_and_restored_turns(
         #[case] status: &str,
         #[case] command_status: &str,
     ) {
-        let turn = turn!({"id":"turn","status":status,"items":[
-            {"id":"u","type":"userMessage","text":"Inspect"},
-            {"id":"c","type":"commandExecution","command":"pwd","status":command_status},
-            {"id":"a","type":"agentMessage","text":"Result"}
-        ]});
+        let turn = turn!({"id":"turn","status":status,"items":[{"id":"u","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":"Inspect","content":[]}}}}},{"id":"c","status":command_status,"clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"a","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"Result","phase":"unknown"}}}}}]});
         let group = project(&turn).find(|part| part.collapsible).unwrap();
         assert!(
             !group.initially_expanded,
             "command group opened without a user action: turn={status}, command={command_status}"
         );
-        assert_eq!(rows(&group, &turn, Role::Activity).next().unwrap().id, "c");
+        assert_eq!(
+            rows(&group, &turn, Role::Activity).next().unwrap().id,
+            "c".into()
+        );
         assert!(group.label.is_some());
     }
 
     #[test]
     fn live_commentary_separates_activity_groups_without_reordering() {
-        let turn = turn!({"id":"turn","status":"inProgress","items":[
-            {"id":"u","type":"userMessage"},
-            {"id":"intro","type":"agentMessage","phase":"commentary"},
-            {"id":"c1","type":"commandExecution"},
-            {"id":"c2","type":"commandExecution"},
-            {"id":"progress","type":"agentMessage","phase":"commentary"},
-            {"id":"tool","type":"mcpToolCall"},
-            {"id":"followup","type":"userMessage"},
-            {"id":"r","type":"reasoning"}
-        ]});
+        let turn = turn!({"id":"turn","status":"running","items":[{"id":"u","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"intro","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"c1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"c2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"progress","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"tool","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"toolCall":{"kind":"mcp","tool":"","server":null,"namespace":null,"arguments":null,"result":null,"error":null,"content":[],"success":null,"durationMs":null}}}}},{"id":"followup","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"r","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":[]}}}}}]});
         assert_eq!(
             order(&turn),
             ["u", "intro", "c1", "c2", "progress", "tool", "followup"]
@@ -536,45 +562,31 @@ mod presentation_tests {
     }
     #[rstest::rstest]
     fn completed_exchanges_keep_each_answer_beside_its_question(
-        #[values(Value::Null, json!("final_answer"))] phase: Value,
+        #[values(AssistantPhase::Unknown, AssistantPhase::Final)] phase: AssistantPhase,
     ) {
-        let turn = turn!({"id":"turn","status":"completed","durationMs":1459000,"items":[
-            {"id":"u1","type":"userMessage"},
-            {"id":"progress","type":"agentMessage","phase":"commentary"},
-            {"id":"f1","type":"agentMessage","phase":phase},
-            {"id":"u2","type":"userMessage"},
-            {"id":"c","type":"commandExecution"},
-            {"id":"f2","type":"agentMessage","phase":phase}
-        ]});
+        let turn = turn!({"id":"turn","status":"completed","durationMs":1459000,"items":[{"id":"u1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"progress","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"f1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":phase}}}}},{"id":"u2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"c","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"f2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":phase}}}}}]});
         assert_eq!(order(&turn), ["u1", "progress", "f1", "u2", "c", "f2"]);
         let parts: Vec<_> = project(&turn).collect();
         assert_eq!(parts.len(), 2);
         assert_eq!(
             rows(&parts[0], &turn, Role::Response).next().unwrap().id,
-            "f1"
+            "f1".into()
         );
         assert_eq!(
             rows(&parts[1], &turn, Role::Response).next().unwrap().id,
-            "f2"
+            "f2".into()
         );
         assert_eq!(parts[0].label.as_deref(), Some("1件の過去のメッセージ"));
         assert_eq!(parts[1].label.as_deref(), Some("1件の過去のメッセージ"));
     }
     #[test]
     fn later_answer_does_not_hide_earlier_unanswered_commentary() {
-        let turn = turn!({"id":"turn","status":"completed","items":[
-            {"id":"u1","type":"userMessage"},
-            {"id":"a1","type":"agentMessage","phase":"commentary"},
-            {"id":"c","type":"commandExecution"},
-            {"id":"a2","type":"agentMessage","phase":"commentary"},
-            {"id":"u2","type":"userMessage"},
-            {"id":"answer","type":"agentMessage","phase":"final_answer"}
-        ]});
+        let turn = turn!({"id":"turn","status":"completed","items":[{"id":"u1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"a1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"c","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"a2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"u2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"final"}}}}}]});
         assert_eq!(order(&turn), ["u1", "a1", "c", "a2", "u2", "answer"]);
         let responses: Vec<_> = project(&turn)
             .flat_map(|part| {
                 rows(&part, &turn, Role::Response)
-                    .map(|item| item.id.clone())
+                    .map(|item| item.id.to_string())
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -586,10 +598,7 @@ mod presentation_tests {
             ("failed", "12秒 作業した後に失敗しました"),
             ("interrupted", "12秒 作業した後に中断しました"),
         ] {
-            let turn = turn!({"id":"turn","status":status,"durationMs":12000,"items":[
-                {"id":"a","type":"agentMessage","phase":"commentary"},
-                {"id":"r","type":"reasoning"}
-            ]});
+            let turn = turn!({"id":"turn","status":status,"durationMs":12000,"items":[{"id":"a","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"r","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":[]}}}}}]});
             assert_eq!(order(&turn), ["a"]);
             let last = project(&turn).last().unwrap();
             assert!(last.last && !last.collapsible);
@@ -598,12 +607,7 @@ mod presentation_tests {
     }
     #[test]
     fn hidden_lifecycle_items_do_not_split_visible_responses() {
-        let turn = turn!({"id":"turn","status":"inProgress","items":[
-            {"id":"a","type":"agentMessage","phase":"commentary"},
-            {"id":"sleep","type":"sleep"},
-            {"id":"review","type":"exitedReviewMode"},
-            {"id":"b","type":"agentMessage","phase":"commentary"}
-        ]});
+        let turn = turn!({"id":"turn","status":"running","items":[{"id":"a","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"sleep","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"sleep":{}}}}},{"id":"review","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"review":{"entering":false,"text":""}}}}},{"id":"b","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}}]});
         assert_eq!(project(&turn).count(), 1);
         assert_eq!(order(&turn), ["a", "b"]);
     }
@@ -630,10 +634,7 @@ mod projection_tests {
     }
     #[test]
     fn duplicate_native_ids_keep_distinct_response_and_activity_indices() {
-        let turn = turn!({"id":"turn","status":"completed","items":[
-            {"id":"same","type":"agentMessage","text":"old"},
-            {"id":"same","type":"agentMessage","phase":"final_answer","text":"new"}
-        ]});
+        let turn = turn!({"id":"turn","status":"completed","items":[{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"old","phase":"unknown"}}}}},{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"final"}}}}}]});
         let segment = project(&turn).next().unwrap();
         assert_eq!(
             segment.role(0, turn.items.as_ref().unwrap()[0].as_ref().into()),
@@ -647,10 +648,7 @@ mod projection_tests {
     }
     #[test]
     fn pending_metadata_preserves_source_positions() {
-        let turn = turn!({"id":"t","status":"inProgress","items":[
-            {"id":"a","type":"agentMessage","phase":"commentary","text":"private body"},
-            {"id":"b","type":"commandExecution","aggregatedOutput":"private output"}
-        ]});
+        let turn = turn!({"id":"t","status":"running","items":[{"id":"a","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"private body","phase":"commentary"}}}}},{"id":"b","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"private output","exitCode":null,"durationMs":null}}}}}]});
         let items = turn.items.as_ref().unwrap();
         let order = source_order(items.len(), |i| &items[i].id, [Some("a")]);
         let item = |index: usize| {
@@ -661,7 +659,7 @@ mod projection_tests {
                 ItemMetadata {
                     id: "p",
                     client_id: Some("p"),
-                    kind: "userMessage",
+                    kind: GroupKind::User,
                     ..Default::default()
                 }
             }
@@ -678,13 +676,16 @@ mod projection_tests {
     }
     #[test]
     fn titles_keep_one_bounded_unicode_line() {
-        let command: Item = serde_json::from_value(json!({"id":"command","type":"commandExecution","command":"  cargo test\nsecret second line"})).unwrap();
-        assert_eq!(item_presentation(&command).title, "cargo test");
+        let command: Item = serde_json::from_value(json!({"id":"command","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"  cargo test\nsecret second line","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}})).unwrap();
+        assert_eq!(
+            item_presentation(&command, Some(crate::session::ProviderKind::Codex)).title,
+            "cargo test"
+        );
         let command: Item = serde_json::from_value(
-            json!({"id":"command","type":"commandExecution","command":"日".repeat(121)}),
+            json!({"id":"command","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"日".repeat(121),"cwd":null,"output":"","exitCode":null,"durationMs":null}}}}}),
         )
         .unwrap();
-        let title = item_presentation(&command).title;
+        let title = item_presentation(&command, Some(crate::session::ProviderKind::Codex)).title;
         assert_eq!(title.chars().count(), 121);
         assert!(title.ends_with('…'));
     }
@@ -699,17 +700,43 @@ mod deferred_item_tests {
             format!("{}\nhidden script", "日本語".repeat(60)),
             "cargo check\nhidden script".into(),
         ] {
-            let mut item = Item {
-                kind: Some("commandExecution".into()),
-                command: Some(command),
-                aggregated_output: Some("hidden output".repeat(100)),
-                ..Default::default()
+            let mut item = Item::new(
+                "command".into(),
+                ItemStatus::Completed,
+                ItemBody::CommandExecution {
+                    actions: vec![],
+                    source: agent_protocol::items::CommandSource::Unknown,
+                    process_id: None,
+                    command,
+                    cwd: None,
+                    output: "hidden output".repeat(100),
+                    exit_code: None,
+                    duration_ms: None,
+                },
+            );
+            let title = crate::presentation::item_presentation(
+                &item,
+                Some(crate::session::ProviderKind::Codex),
+            )
+            .title;
+            item.defer();
+            assert_eq!(
+                crate::presentation::item_presentation(
+                    &item,
+                    Some(crate::session::ProviderKind::Codex)
+                )
+                .title,
+                title
+            );
+            assert!(item.is_deferred());
+            let ItemBody::CommandExecution {
+                command, output, ..
+            } = item.body()
+            else {
+                panic!("command body")
             };
-            let title = crate::presentation::item_presentation(&item).title;
-            item.retain_header();
-            assert_eq!(crate::presentation::item_presentation(&item).title, title);
-            assert_eq!(item.command.as_deref(), Some(title.as_str()));
-            assert_eq!(item.aggregated_output, None);
+            assert_eq!(command, &title);
+            assert!(output.is_empty());
         }
     }
 }

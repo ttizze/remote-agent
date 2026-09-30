@@ -1,27 +1,20 @@
 //! Adapters for recorded JSON fixtures and external provider replies.
-use super::*;
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Opaque(#[serde(with = "super::json")] pub Value);
-impl From<Opaque> for Body {
-    fn from(value: Opaque) -> Self {
-        value.0.into()
-    }
-}
 pub use super::requests::{
     fixture_reply as reply, from_json as call, provider_response as response,
 };
+use super::*;
 pub fn notification(method: &str, params: Value) -> Result<Notification, serde_json::Error> {
-    match method {
-        "host/session/activity"
-        | "process/outputDelta"
-        | "process/exited"
-        | "host/terminal/failed"
-        | "host/terminal/restored"
-        | "host/terminal/detached" => serde_json::from_value(serde_json::json!({method:params})),
-        _ => Ok(Notification::Provider {
-            method: method.into(),
-            params,
-        }),
-    }
+    serde_json::from_value(serde_json::json!({method:params}))
+}
+
+pub(super) fn typed_response<T: DeserializeOwned + Into<Body>>(
+    line: &str,
+) -> Result<Response, crate::message::RpcMessageError> {
+    let reply = crate::message::RpcResponse::<T>::parse(line)?;
+    Response::from_result(match reply.outcome {
+        Ok(value) => Ok(value),
+        Err(error) => Err(serde_json::from_str::<crate::error::RpcFailure>(
+            error.get(),
+        )?),
+    })
 }

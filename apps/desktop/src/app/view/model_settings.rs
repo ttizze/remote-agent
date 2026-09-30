@@ -79,7 +79,7 @@ impl Desktop {
         let accounts = self.snapshot.account.accounts.as_ref();
         let provider = self.model_provider.unwrap_or_else(|| {
             self.snapshot
-                .model_provider_for_draft(self.draft_key().into())
+                .model_provider_for_draft(self.draft_key().clone())
         });
         let disabled = self.account_busy
             || self.busy > 0
@@ -140,7 +140,7 @@ impl Desktop {
                                     s.account_operation(Intent::SelectAccountForDraft(
                                         op::SelectAccountForDraft {
                                             id: id.clone(),
-                                            thread_id: s.draft_key().into(),
+                                            thread_id: s.draft_key().clone(),
                                         },
                                     ));
                                     cx.notify();
@@ -319,7 +319,7 @@ impl Desktop {
             return;
         }
         if matches!(intent, Intent::StartAccountLogin(_)) {
-            self.account_login_draft = Some(self.draft_key().into());
+            self.account_login_draft = Some(self.draft_key().clone());
         }
         self.account_busy = true;
         self.perform(intent, OperationCompletion::Account);
@@ -483,7 +483,7 @@ impl Desktop {
         }
         let provider = self.model_provider.unwrap_or_else(|| {
             self.snapshot
-                .model_provider_for_draft(self.draft_key().into())
+                .model_provider_for_draft(self.draft_key().clone())
         });
         let disabled = self.account_busy
             || self.busy > 0
@@ -538,10 +538,10 @@ impl Desktop {
                                             s.model_provider = Some(provider);
                                             if let Some(model) = s
                                                 .snapshot
-                                                .model_for_provider(s.draft_key().into(), provider)
+                                                .model_for_provider(s.draft_key().clone(), provider)
                                             {
                                                 s.dispatch(Intent::SelectModel {
-                                                    thread_id: s.draft_key().into(),
+                                                    thread_id: s.draft_key().clone(),
                                                     model,
                                                 });
                                             }
@@ -647,7 +647,7 @@ impl Desktop {
                     .accessibility_label(model.display_name.clone())
                     .on_click(cx.listener(move |s, _, _, _| {
                         s.dispatch(Intent::SelectModel {
-                            thread_id: s.draft_key().into(),
+                            thread_id: s.draft_key().clone(),
                             model: value.clone(),
                         });
                     }))
@@ -707,7 +707,7 @@ impl Desktop {
     }
 
     pub(super) fn fast_control(&self, cx: &Context<Self>) -> AnyElement {
-        let controls = self.snapshot.model_quick_controls(self.draft_key().into());
+        let controls = self.snapshot.model_quick_controls(self.draft_key().clone());
         let Some(next) = controls.toggle_fast_to else {
             return div().into_any_element();
         };
@@ -723,7 +723,7 @@ impl Desktop {
             cx,
             move |s, _, _| {
                 s.dispatch(Intent::SelectServiceTier {
-                    thread_id: s.draft_key().into(),
+                    thread_id: s.draft_key().clone(),
                     service_tier: next.clone(),
                 });
             },
@@ -741,7 +741,7 @@ impl Desktop {
     }
 
     pub(super) fn effort_control(&self, cx: &Context<Self>) -> AnyElement {
-        let controls = self.snapshot.model_quick_controls(self.draft_key().into());
+        let controls = self.snapshot.model_quick_controls(self.draft_key().clone());
         if controls.efforts.is_empty() {
             return div().into_any_element();
         }
@@ -787,7 +787,7 @@ impl Desktop {
                             .on_click(move |_, _, cx| {
                                 let _ = entity.update(cx, |s, cx| {
                                     s.dispatch(Intent::SelectEffort {
-                                        thread_id: s.draft_key().into(),
+                                        thread_id: s.draft_key().clone(),
                                         effort: value.clone(),
                                     });
                                     cx.notify();
@@ -920,10 +920,10 @@ mod tests {
                     {"provider":"claude","id":"claude:second"}],"selectedId":"first","selectedClaudeId":"claude:second"
                 })).unwrap()));
                 snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
-                    {"id":"gpt","model":"gpt","displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"priority"}]},
-                    {"id":"claude:sonnet","model":"claude:sonnet","displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+                    {"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"priority"}]},
+                    {"id":"claude:sonnet","model":{"provider": "claude", "id": "sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
                 ])).unwrap());
-                Arc::make_mut(&mut snapshot.drafts).insert(key, Arc::new(Draft { model: Some("gpt".into()), ..Default::default() }));
+                Arc::make_mut(&mut snapshot.drafts).insert(key, Arc::new(Draft { model: Some(agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Codex, id: "gpt".into() }), ..Default::default() }));
             });
             cx.observe(&desktop, |_, _, cx| cx.notify()).detach();
             PickerView(desktop)

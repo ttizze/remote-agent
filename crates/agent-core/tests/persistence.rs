@@ -9,7 +9,11 @@ use std::sync::Arc;
 fn runtime_fields_cannot_override_restored_user_work() {
     let mut snapshot = Snapshot::default();
     Arc::make_mut(&mut snapshot.drafts).insert(
-        "thread".into(),
+        agent_protocol::session::SessionRef {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            id: "thread".into(),
+        }
+        .into(),
         Arc::new(Draft {
             text: "keep this draft".into(),
             ..Default::default()

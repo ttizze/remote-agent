@@ -7,10 +7,10 @@ use crate::client::ClientExt;
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dictate {
-    pub draft_key: String,
+    pub draft_key: DraftKey,
     pub audio: Vec<u8>,
     pub send: bool,
-    pub client_user_message_id: String,
+    pub client_user_message_id: agent_protocol::ids::ClientInputId,
 }
 
 impl Operation for Dictate {
@@ -72,29 +72,26 @@ impl Operation for Dictate {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Respond {
-    pub request_id: Value,
+    pub request_id: agent_protocol::ids::RequestId,
     pub answer: Answer,
 }
 impl Operation for Respond {
     type Output = ();
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        let request = context
-            .snapshot
-            .requests
-            .get(&self.request_id.to_string())
-            .ok_or_else(|| {
-                PeerError::InvalidMessage("server request is no longer pending".into())
-            })?;
+        let request = context.snapshot.request(&self.request_id).ok_or_else(|| {
+            PeerError::InvalidMessage("server request is no longer pending".into())
+        })?;
         context.client.respond(request, &self.answer).await
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSubmission {
-    pub draft_key: String,
+    pub provider: crate::session::ProviderKind,
+    pub draft_key: DraftKey,
     pub cwd: Option<String>,
-    pub client_user_message_id: String,
+    pub client_user_message_id: agent_protocol::ids::ClientInputId,
     pub draft: Arc<Draft>,
 }
 impl Operation for StartSubmission {
@@ -112,7 +109,8 @@ impl Operation for StartSubmission {
     }
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         context
-            .call(&StartThread {
+            .call(&CreateSession {
+                provider: self.provider,
                 cwd: self.cwd.clone(),
                 model: self.draft.model.clone(),
             })
@@ -157,11 +155,11 @@ impl StartSubmission {
         if remove_original {
             drafts.remove(&draft_key);
         }
-        drafts.insert(id.clone(), target);
+        drafts.insert(id.clone().into(), target);
         if let Some(pending) =
             Arc::make_mut(&mut snapshot.pending_submissions).get_mut(&client_user_message_id)
         {
-            Arc::make_mut(pending).draft_key = id.clone();
+            Arc::make_mut(pending).draft_key = id.clone().into();
         }
         effects.push(Effect::execute(SendSubmission {
             thread_id: id,
@@ -169,7 +167,7 @@ impl StartSubmission {
             draft,
         }));
         if snapshot.threads.is_some() {
-            effects.push(Effect::execute(ListThreads::new(
+            effects.push(Effect::execute(ListSessions::new(
                 (*snapshot.list_query).clone(),
             )));
         }
@@ -178,14 +176,14 @@ impl StartSubmission {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendSubmission {
-    pub thread_id: String,
-    pub client_user_message_id: String,
+    pub thread_id: crate::session::SessionRef,
+    pub client_user_message_id: agent_protocol::ids::ClientInputId,
     pub draft: Arc<Draft>,
 }
 #[derive(Debug)]
 pub enum SubmissionProgress {
     Opened(Box<crate::session::OpenedSession>),
-    Sent(Option<String>),
+    Sent(Option<agent_protocol::ids::TurnId>),
 }
 impl Operation for SendSubmission {
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
@@ -285,7 +283,7 @@ impl Operation for SendSubmission {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadAttachment {
-    pub draft_key: String,
+    pub draft_key: DraftKey,
     pub attachment: Attachment,
     pub directory: String,
 }

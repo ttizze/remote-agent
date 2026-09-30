@@ -1,7 +1,7 @@
 //! Real Store + iroh streams + the Host's production transfer reservations.
 //! Only control responses are scripted, to place deltas and stalls precisely.
 use super::WorkspaceFiles;
-use agent_protocol::session::{SessionChange, TextField};
+use agent_protocol::session::SessionChange;
 #[allow(dead_code)]
 #[path = "../../../agent-core/tests/support/host.rs"]
 mod host_fixture;
@@ -9,7 +9,7 @@ use agent_core::{
     state::{Intent, Snapshot, operations as op},
     store::Store,
 };
-use agent_protocol::operations::Answer;
+use agent_protocol::requests::Answer;
 use agent_transport::transport::{Endpoint, Identity, Relays, Trust};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -44,13 +44,27 @@ async fn wait_for(store: &Store, condition: impl Fn(&Snapshot) -> bool) {
     }
 }
 fn item(id: usize, complete: bool) -> Value {
-    if id.is_multiple_of(2) {
-        json!({"id":format!("item-{id}"),"type":"agentMessage","text":if complete {format!("{id}:{}", "x".repeat(BODY_SIZE))} else {String::new()}})
-    } else if complete {
-        json!({"id":format!("item-{id}"),"type":"imageGeneration","result":format!("{id}:{}", "A".repeat(BODY_SIZE))})
+    let body = if id.is_multiple_of(2) {
+        json!({"assistantText":{"text":if complete {format!("{id}:{}", "x".repeat(BODY_SIZE))} else {String::new()},"phase":"unknown"}})
     } else {
-        json!({"id":format!("item-{id}"),"type":"imageGeneration"})
-    }
+        json!({"imageGeneration":{"savedPath":null,"data":if complete {Some(format!("{id}:{}", "A".repeat(BODY_SIZE)))} else {None},"revisedPrompt":null}})
+    };
+    json!({"id":format!("item-{id}"),"status":"unknown","clientInputId":null,"body":if complete {json!({"inline":{"body":body}})} else {json!({"deferred":{"summary":body}})}})
+}
+fn command(output: &str) -> Value {
+    json!({"id":"item-0","status":"running","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":output,"exitCode":null,"durationMs":null}}}}})
+}
+fn deferred_command(output: &str) -> Value {
+    let mut item = command(output);
+    let body = item["body"]["inline"]["body"].take();
+    item["body"] = json!({"deferred":{"summary":body}});
+    item
+}
+fn command_output(item: &agent_protocol::items::Item) -> &str {
+    let agent_protocol::items::ItemBody::CommandExecution { output, .. } = item.body() else {
+        panic!("command body")
+    };
+    output
 }
 impl Fixture {
     async fn start(count: usize, automatic_reads: bool) -> Self {
@@ -98,7 +112,7 @@ impl Fixture {
             async move {
                 while let Some(request) = reader.read_request().await.unwrap() {
                     let result = match request["method"].as_str().unwrap() {
-                        "host/thread/list" => {
+                        "host/session/list" => {
                             json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
                         }
                         "host/account/list" => json!({"accounts":[]}),
@@ -107,13 +121,11 @@ impl Fixture {
                             let items = if automatic_reads {
                                 (0..count).map(|i| item(i, false)).collect::<Vec<_>>()
                             } else {
-                                vec![
-                                    json!({"id":"item-0","type":"commandExecution","aggregatedOutput":""}),
-                                ]
+                                vec![deferred_command("")]
                             };
-                            json!({"session":request["params"]["session"],"subscriptionId":subscription,"response":{"thread":{"id":"A","turns":[{"id":"turn","status":"inProgress","deferredItemIds":(0..count).map(|i| format!("item-{i}")).collect::<Vec<_>>(),"items":items}]}}})
+                            json!({"session":request["params"]["session"],"subscriptionId":subscription,"response":{"thread":{"id":{"provider":"codex","id":"A"},"turns":[{"id":"turn","status":"running","items":items}]}}})
                         }
-                        "host/thread/item/read" if automatic_reads => {
+                        "host/session/item/read" if automatic_reads => {
                             let id: usize = request["params"]["itemId"]
                                 .as_str()
                                 .unwrap()
@@ -170,7 +182,12 @@ impl Fixture {
     }
     async fn open(&self) {
         self.store
-            .dispatch(Intent::ReadThread(op::ReadThread::new("A".into())))
+            .dispatch(Intent::ReadThread(op::ReadThread::new(
+                agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "A".into(),
+                },
+            )))
             .await
             .unwrap();
     }
@@ -198,16 +215,18 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
             transfers.push(fixture.session.accept_stream().await.unwrap());
         }
         assert_eq!(fixture.files.grants.lock().unwrap().len(), 4);
-        fixture.update(SessionChange::Text { turn_id:"turn".into(), item_id:"item-0".into(), field:TextField::Message, delta:"live update".into() }).await;
-        fixture.update(SessionChange::Request { request: serde_json::from_value(json!({"id":"approval","method":"item/commandExecution/requestApproval","params":{"threadId":"A","turnId":"turn","itemId":"item-0"}})).unwrap() }).await;
-        wait_for(&fixture.store, |s| s.requests.contains_key("\"approval\"") && s.conversations["A"].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].text.as_deref() == Some("live update")).await;
+        let mut changed: agent_protocol::items::Item = serde_json::from_value(item(0, false)).unwrap();
+        if let agent_protocol::items::ItemBody::AssistantText {text, ..} = changed.body_mut() {*text = "live update".into();}
+        fixture.update(SessionChange::Item {turn_id:"turn".into(), item: changed.into()}).await;
+        fixture.update(SessionChange::Request { request: serde_json::from_value(json!({"id": "approval", "target": {"turn": {"turnId": "turn", "itemId": "item-0"}}, "delivery": "awaiting", "body": {"approval": {"kind": "command", "description": "", "details": "", "choices": [{"id": "choice-0", "label": "承認", "description": "", "meaning": "allow", "scope": "once"}, {"id": "choice-1", "label": "このセッションで承認", "description": "", "meaning": "allow", "scope": "session"}, {"id": "choice-2", "label": "拒否", "description": "", "meaning": "deny", "scope": "once"}, {"id": "choice-3", "label": "キャンセル", "description": "", "meaning": "cancel", "scope": "once"}]}}})).unwrap() }).await;
+        wait_for(&fixture.store, |s| s.request("approval").is_some() && matches!(s.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "live update")).await;
         for intent in [
-            Intent::Respond(op::Respond {request_id:json!("approval"),answer:Answer::Decision {index:2}}),
-            Intent::Interrupt(op::Interrupt {thread_id:"A".into(),turn_id:"turn".into()}),
+            Intent::Respond(op::Respond {request_id: "approval".into(),answer:Answer::Approval {choice_id: "choice-2".into()}}),
+            Intent::Interrupt(op::Interrupt {thread_id: agent_protocol::session::SessionRef {provider:agent_protocol::session::ProviderKind::Codex,id:"A".into()},turn_id:"turn".into()}),
         ] {
             let completion = fixture.store.dispatch(intent);
             let request = fixture.requests.recv().await.unwrap();
-            assert!(matches!(request["method"].as_str(), Some("host/session/answer" | "turn/interrupt")));
+            assert!(matches!(request["method"].as_str(), Some("host/session/answer" | "host/session/interrupt")));
             fixture.output.lock().await.reply(&request, json!({"result":{}})).await.unwrap();
             completion.await.unwrap();
         }
@@ -223,10 +242,10 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
                 fixture.files.transfer(OWNER, stream).await.unwrap();
             }
         };
-        let complete = wait_for(&fixture.store, |s| s.conversations["A"].turns.as_ref().unwrap()[0].deferred_item_ids.as_ref().unwrap().is_empty());
+        let complete = wait_for(&fixture.store, |s| s.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap().iter().all(|item| !item.is_deferred()));
         tokio::select! { _ = serving => unreachable!(), _ = complete => {} }
         let snapshot = fixture.store.snapshot();
-        let items = snapshot.conversations["A"].turns.as_ref().unwrap()[0].items.as_ref().unwrap();
+        let items = snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap();
         assert_eq!(items.len(), 12);
         for (id, actual) in items.iter().enumerate() {
             let expected: agent_protocol::models::Item = serde_json::from_value(item(id, true)).unwrap();
@@ -242,29 +261,92 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
     tokio::time::timeout(Duration::from_secs(30), async {
         let mut fixture = Fixture::start(1, false).await;
         fixture.open().await;
-        let completion = fixture.store.dispatch(Intent::ReadItem(op::ReadItem {thread_id:"A".into(),turn_id:"turn".into(),item_id:"item-0".into()}));
+        let completion = fixture.store.dispatch(Intent::ReadItem(op::ReadItem {
+            thread_id: agent_protocol::session::SessionRef {
+                provider: agent_protocol::session::ProviderKind::Codex,
+                id: "A".into(),
+            },
+            turn_id: "turn".into(),
+            item_id: "item-0".into(),
+        }));
         for iteration in 0..=12 {
             let request = fixture.requests.recv().await.unwrap();
-            assert_eq!(request["method"], "host/thread/item/read");
-            let body = json!({"id":"item-0","type":"commandExecution","aggregatedOutput":format!("complete-{iteration}:{}", "x".repeat(BODY_SIZE))});
-            let grant = fixture.files.download_bytes(OWNER, agent_protocol::protocol::encode(serde_json::from_value::<agent_protocol::models::Item>(body).unwrap()).unwrap()).await.unwrap();
+            assert_eq!(request["method"], "host/session/item/read");
+            let body = command(&format!("complete-{iteration}:{}", "x".repeat(BODY_SIZE)));
+            let grant = fixture
+                .files
+                .download_bytes(
+                    OWNER,
+                    agent_protocol::protocol::encode(
+                        serde_json::from_value::<agent_protocol::models::Item>(body).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
             if iteration < 12 {
                 // This is deliberately BEFORE the control response, not a
                 // delta during the item body transfer. Wait for Store application as the
                 // barrier so the source Arc is certainly stale on arrival.
-                fixture.update(SessionChange::Text { turn_id:"turn".into(), item_id:"item-0".into(), field:TextField::CommandOutput, delta:"d".into() }).await;
-                wait_for(&fixture.store, |s| s.conversations["A"].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].aggregated_output.as_deref() == Some("d".repeat(iteration+1).as_str())).await;
+                fixture
+                    .update(SessionChange::Item {
+                        turn_id: "turn".into(),
+                        item: serde_json::from_value(deferred_command(&"d".repeat(iteration + 1)))
+                            .unwrap(),
+                    })
+                    .await;
+                wait_for(&fixture.store, |s| {
+                    command_output(
+                        &s.conversations[&agent_protocol::session::SessionRef {
+                            provider: agent_protocol::session::ProviderKind::Codex,
+                            id: "A".into(),
+                        }]
+                            .turns
+                            .as_ref()
+                            .unwrap()[0]
+                            .items
+                            .as_ref()
+                            .unwrap()[0],
+                    ) == "d".repeat(iteration + 1)
+                })
+                .await;
             }
-            fixture.output.lock().await.reply(&request, json!({"result":{"item":{"id":"item-0","type":"commandExecution"},"transfer":grant}})).await.unwrap();
+            fixture
+                .output
+                .lock()
+                .await
+                .reply(
+                    &request,
+                    json!({"result":{"item":command(""),"transfer":grant}}),
+                )
+                .await
+                .unwrap();
             let stream = fixture.session.accept_stream().await.unwrap();
             fixture.files.transfer(OWNER, stream).await.unwrap();
             assert!(fixture.files.grants.lock().unwrap().is_empty());
         }
         completion.await.unwrap();
         let snapshot = fixture.store.snapshot();
-        let turn = &snapshot.conversations["A"].turns.as_ref().unwrap()[0];
-        assert!(turn.deferred_item_ids.as_ref().unwrap().is_empty());
-        assert_eq!(turn.items.as_ref().unwrap()[0].aggregated_output.as_deref(), Some(format!("complete-12:{}", "x".repeat(BODY_SIZE)).as_str()));
+        let turn = &snapshot.conversations[&agent_protocol::session::SessionRef {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            id: "A".into(),
+        }]
+            .turns
+            .as_ref()
+            .unwrap()[0];
+        assert!(
+            turn.items
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|item| !item.is_deferred())
+        );
+        assert_eq!(
+            command_output(&turn.items.as_ref().unwrap()[0]),
+            format!("complete-12:{}", "x".repeat(BODY_SIZE))
+        );
         fixture.close().await;
-    }).await.expect("stale control response left an unconsumed grant");
+    })
+    .await
+    .expect("stale control response left an unconsumed grant");
 }

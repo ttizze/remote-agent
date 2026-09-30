@@ -132,7 +132,7 @@ pub fn initialize(
 pub fn rpc_error(operation: &str, request_id: Option<u64>, raw: &RawValue) {
     match serde_json::from_str::<Value>(raw.get()) {
         Ok(value) => {
-            let error = rpc_cause(&value);
+            let error = &value;
             tracing::error!(target: "bex",
                 operation,
                 message = error.get("message").and_then(serde_json::Value::as_str)
@@ -143,11 +143,6 @@ pub fn rpc_error(operation: &str, request_id: Option<u64>, raw: &RawValue) {
         }
         Err(_) => tracing::error!(target: "bex", operation, request_id, "Malformed RPC error"),
     }
-}
-
-/// Select the provider cause from a Host failure without changing delivery evidence.
-pub fn rpc_cause(error: &Value) -> &Value {
-    error.get("providerError").unwrap_or(error)
 }
 
 /// Decode only error fields; ignore conversation bodies in turn notifications.
@@ -401,7 +396,6 @@ pub fn sanitize(message: &str) -> String {
     let envelope = serde_json::from_str::<Value>(value).ok();
     let message = envelope
         .as_ref()
-        .map(rpc_cause)
         .and_then(|v| v.get("message"))
         .and_then(Value::as_str)
         .unwrap_or(message);

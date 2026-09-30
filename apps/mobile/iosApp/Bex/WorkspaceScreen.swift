@@ -137,7 +137,7 @@ private struct WorkspaceToolsScreen: View {
 
 private struct WorkspaceBrowserScreen: View {
     @ObservedObject var model: BexAppViewModel
-    let thread: String
+    let thread: SessionRef
     @Environment(\.scenePhase) private var scenePhase
     @State private var frame: BrowserFrame?
     @State private var image: UIImage?

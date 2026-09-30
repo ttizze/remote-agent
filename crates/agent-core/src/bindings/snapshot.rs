@@ -3,7 +3,7 @@ use super::{AgentError, error};
 use crate::{
     models::{FileContent, FileList, ListQuery, Model, WorktreeSettings},
     presentation::conversation::{
-        ItemPresentation, RenderedConversation, RenderedItem, RenderedTurn, Request, request,
+        ItemPresentation, RenderedConversation, RenderedItem, RenderedTurn,
     },
     state::{Draft, FileDraft, Navigation, Snapshot},
 };
@@ -27,9 +27,6 @@ impl Snapshot {
     pub fn models_unchanged(&self, other: Arc<Self>) -> bool {
         Arc::ptr_eq(&self.models, &other.models)
     }
-    pub fn requests_unchanged(&self, other: Arc<Self>) -> bool {
-        Arc::ptr_eq(&self.requests, &other.requests)
-    }
     pub fn conversation_unchanged(&self, other: Arc<Self>) -> bool {
         let id = self.navigation.thread_id.as_ref();
         if id != other.navigation.thread_id.as_ref()
@@ -45,9 +42,7 @@ impl Snapshot {
             (None, None) => true,
             _ => false,
         };
-        same_thread
-            && Arc::ptr_eq(&self.pending_submissions, &other.pending_submissions)
-            && Arc::ptr_eq(&self.requests, &other.requests)
+        same_thread && Arc::ptr_eq(&self.pending_submissions, &other.pending_submissions)
     }
     #[uniffi::constructor]
     pub fn empty() -> Arc<Self> {
@@ -80,7 +75,7 @@ impl Snapshot {
     pub fn navigation(&self) -> Navigation {
         self.navigation.as_ref().clone()
     }
-    pub fn draft(&self, key: String) -> Draft {
+    pub fn draft(&self, key: crate::state::DraftKey) -> Draft {
         self.drafts
             .get(&key)
             .map(|draft| draft.as_ref().clone())
@@ -92,16 +87,10 @@ impl Snapshot {
     pub fn models(&self) -> Vec<Model> {
         self.models.as_ref().clone()
     }
-    pub fn conversation(&self, id: String) -> Option<Arc<Thread>> {
+    pub fn conversation(&self, id: crate::session::SessionRef) -> Option<Arc<Thread>> {
         self.conversations
             .get(&id)
             .map(|value| Arc::new(Thread(value.clone())))
-    }
-    pub fn requests(&self) -> Vec<Request> {
-        self.requests
-            .iter()
-            .map(|(key, source)| request(key, source))
-            .collect()
     }
     pub fn directory(&self) -> Option<FileList> {
         self.workspace.directory.as_deref().cloned()
@@ -141,11 +130,11 @@ impl Snapshot {
 }
 #[uniffi::export]
 impl Thread {
-    pub fn active_turn_id(&self) -> Option<String> {
+    pub fn active_turn_id(&self) -> Option<agent_protocol::ids::TurnId> {
         self.0.active_turn_id()
     }
-    pub fn id(&self) -> String {
-        self.0.id.clone().unwrap_or_default()
+    pub fn id(&self) -> Option<crate::session::SessionRef> {
+        self.0.id.clone()
     }
     pub fn title(&self) -> String {
         self.0.name.clone().unwrap_or_default()
@@ -174,11 +163,14 @@ impl RenderedConversation {
     pub fn queued(&self) -> Vec<Arc<RenderedItem>> {
         self.queued.clone()
     }
+    pub fn unplaced_requests(&self) -> Vec<crate::presentation::conversation::ConversationRow> {
+        self.request_rows.clone()
+    }
 }
 #[uniffi::export]
 impl RenderedTurn {
     pub fn id(&self) -> String {
-        self.source.id.clone()
+        self.source.id.to_string()
     }
     pub fn unchanged(&self, other: Arc<Self>) -> bool {
         std::ptr::eq(self, other.as_ref())
@@ -245,11 +237,21 @@ mod tests {
     #[test]
     fn abi_handles_preserve_conversation_projection_identity() {
         let mut snapshot = Snapshot::default();
-        Arc::make_mut(&mut snapshot.navigation).thread_id = Some("chat".into());
+        Arc::make_mut(&mut snapshot.navigation).thread_id =
+            Some(agent_protocol::session::SessionRef {
+                provider: agent_protocol::session::ProviderKind::Codex,
+                id: "chat".into(),
+            });
         Arc::make_mut(&mut snapshot.conversations).insert(
-            "chat".into(),
+            agent_protocol::session::SessionRef {
+                provider: agent_protocol::session::ProviderKind::Codex,
+                id: "chat".into(),
+            },
             Arc::new(crate::models::Thread {
-                id: Some("chat".into()),
+                id: Some(agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "chat".into(),
+                }),
                 ..Default::default()
             }),
         );
@@ -260,6 +262,18 @@ mod tests {
             &Some(first.clone()),
         );
         assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(snapshot.conversation("chat".into()).unwrap().id(), "chat");
+        assert_eq!(
+            snapshot
+                .conversation(agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "chat".into()
+                })
+                .unwrap()
+                .id(),
+            Some(agent_protocol::session::SessionRef {
+                provider: agent_protocol::session::ProviderKind::Codex,
+                id: "chat".into()
+            })
+        );
     }
 }

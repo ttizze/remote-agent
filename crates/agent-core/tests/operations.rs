@@ -1,11 +1,12 @@
 use agent_core::client::ClientExt;
+use agent_protocol::requests::{Answer, Request};
 #[allow(dead_code)]
 #[path = "support/host.rs"]
 mod host_fixture;
 use agent_core::state::operations::{
-    CancelAccountLogin, ForkThread, Interrupt, ListAccounts, ListFiles, ListThreads,
-    ReadAccountLogin, ReadFile, ReadItem, ReadThread, ReadWorktreeSettings, ReviewWorkspace,
-    SelectAccount, StartAccountLogin, StartThread, UpdateWorktreeSettings,
+    CancelAccountLogin, CreateSession, ForkSession, Interrupt, ListAccounts, ListFiles,
+    ListSessions, ReadAccountLogin, ReadFile, ReadItem, ReadThread, ReadWorktreeSettings,
+    ReviewWorkspace, SelectAccount, StartAccountLogin, UpdateWorktreeSettings,
 };
 use agent_protocol::{
     models::{ListQuery, WorktreeSettings},
@@ -13,7 +14,7 @@ use agent_protocol::{
 };
 use agent_transport::{client::Client, peer::PeerError};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value[key].as_str().unwrap()
@@ -30,11 +31,12 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
     let result = match text(command, "type") {
         "listThreads" => {
             let query: ListQuery = serde_json::from_value(command["query"].clone()).unwrap();
-            call!(ListThreads { query })
+            call!(ListSessions { query })
         }
-        "startThread" => call!(StartThread {
+        "startThread" => call!(CreateSession {
+            provider: agent_protocol::session::ProviderKind::Codex,
             cwd: optional(command, "cwd").map(str::to_owned),
-            model: optional(command, "model").map(str::to_owned)
+            model: serde_json::from_value(command["model"].clone()).unwrap()
         }),
         "readThread" | "readOlder" => serde_json::to_value(
             client
@@ -44,16 +46,16 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                     } else {
                         5
                     },
-                    ..ReadThread::new(text(command, "threadId").to_owned())
+                    ..ReadThread::new(serde_json::from_value(command["threadId"].clone()).unwrap())
                 })
                 .await?
                 .response,
         )
         .unwrap(),
         "readItem" => call!(ReadItem {
-            thread_id: text(command, "threadId").to_owned(),
-            turn_id: text(command, "turnId").to_owned(),
-            item_id: text(command, "itemId").to_owned()
+            thread_id: serde_json::from_value(command["threadId"].clone()).unwrap(),
+            turn_id: text(command, "turnId").into(),
+            item_id: text(command, "itemId").into()
         }),
         "sendTurn" => {
             let input = &command["input"];
@@ -77,10 +79,10 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             }
             let reply = client
                 .call(&Submission {
-                    thread_id: text(command, "threadId").into(),
+                    thread_id: serde_json::from_value(command["threadId"].clone()).unwrap(),
                     client_user_message_id: text(input, "clientUserMessageId").into(),
                     input: items,
-                    model: optional(command, "model").map(str::to_owned),
+                    model: serde_json::from_value(command["model"].clone()).unwrap(),
                     effort: optional(command, "effort").map(str::to_owned),
                     service_tier: optional(command, "serviceTierForTurn").map(str::to_owned),
                 })
@@ -90,15 +92,18 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         }
         "interruptTurn" => {
             call!(Interrupt {
-                thread_id: text(command, "threadId").to_owned(),
-                turn_id: text(command, "turnId").to_owned()
+                thread_id: serde_json::from_value(command["threadId"].clone()).unwrap(),
+                turn_id: text(command, "turnId").into()
             });
             Value::Null
         }
         "models" => json!(client.models().await?.data),
         "sessionImages" => json!(
             client
-                .session_images(text(command, "threadId"), None)
+                .session_images(
+                    &serde_json::from_value(command["threadId"].clone()).unwrap(),
+                    None
+                )
                 .await?
         ),
         "transcribe" => json!(
@@ -114,35 +119,9 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                 .text
         ),
         "respond" => {
-            let request: ServerRequest =
-                serde_json::from_value(command["request"].clone()).unwrap();
-            let answer = &command["answer"];
-            let answers: BTreeMap<String, String> = if answer["type"] == "answers" {
-                serde_json::from_value(answer["answers"].clone()).unwrap()
-            } else {
-                BTreeMap::new()
-            };
-            let raw = if answer["type"] == "raw" {
-                Some(
-                    serde_json::from_str::<Value>(text(answer, "json"))
-                        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?,
-                )
-            } else {
-                None
-            };
-            let answer = match text(answer, "type") {
-                "decision" => Answer::Decision {
-                    index: answer["index"].as_u64().unwrap() as u32,
-                },
-                "permissions" => Answer::Permissions {
-                    allow: answer["allow"].as_bool().unwrap(),
-                },
-                "answers" => Answer::Questions { answers },
-                "raw" => Answer::Raw {
-                    value: raw.unwrap(),
-                },
-                kind => panic!("unknown answer {kind}"),
-            };
+            let request: Request = serde_json::from_value(command["request"].clone()).unwrap();
+            let answer: Answer = serde_json::from_value(command["answer"].clone())
+                .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
             client.respond(&request, &answer).await?;
             Value::Null
         }
@@ -184,9 +163,9 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             });
             Value::Null
         }
-        "forkThread" => call!(ForkThread {
-            thread_id: text(command, "threadId").to_owned(),
-            last_turn_id: text(command, "lastTurnId").to_owned(),
+        "forkThread" => call!(ForkSession {
+            thread_id: serde_json::from_value(command["threadId"].clone()).unwrap(),
+            last_turn_id: text(command, "lastTurnId").into(),
             exclude_turns: true
         }),
         kind => panic!("unknown operation {kind}"),
@@ -279,7 +258,7 @@ async fn run_case(case: &Value) {
                 } else if case["errorRaw"].get("item").is_some() {
                     normalize::<ItemResponse>(&case["errorRaw"])
                 } else {
-                    case["errorRaw"].clone()
+                    normalize::<agent_protocol::error::RpcFailure>(&case["errorRaw"])
                 },
                 "{}",
                 case["name"]

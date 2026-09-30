@@ -92,7 +92,7 @@ impl Desktop {
         });
         self.perform(
             Intent::InsertInvocation {
-                thread_id: self.draft_key().into(),
+                thread_id: self.draft_key().clone(),
                 text: inserted.text,
                 invocation,
             },

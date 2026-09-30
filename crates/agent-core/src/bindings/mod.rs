@@ -356,6 +356,17 @@ impl Receipt {
 
 #[cfg(test)]
 mod tests {
+    fn item_text(item: &agent_protocol::items::Item) -> Option<&str> {
+        match item.body() {
+            agent_protocol::items::ItemBody::AssistantText { text, .. } => Some(text),
+            agent_protocol::items::ItemBody::UserMessage { text, .. } => text.as_deref(),
+            agent_protocol::items::ItemBody::Reasoning { content, .. } => {
+                content.first().map(String::as_str)
+            }
+            _ => None,
+        }
+    }
+
     #[allow(dead_code)]
     mod host_fixture {
         include!("../../tests/support/host.rs");
@@ -449,7 +460,7 @@ mod tests {
             };
             let cached = crate::state::Snapshot {
                 list_query: Arc::new(crate::models::ListQuery { project_limit: 15, chat_limit: 25, search_term: "retained search".into(), project_thread_limits: [("project".into(), 35)].into() }),
-                navigation: Arc::new(crate::state::Navigation { thread_id: Some("thread".into()), draft_key: "thread".into(), ..Default::default() }),
+                navigation: Arc::new(crate::state::Navigation { thread_id: Some(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }), draft_key: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), ..Default::default() }),
                 ..Default::default()
             };
             let mut saved: serde_json::Value = serde_json::from_slice(&cached.serialize_local_state().unwrap()).unwrap();
@@ -465,7 +476,7 @@ mod tests {
             let mut old = reader;
             let _first_writer = writer;
             assert!(store.snapshot().connected());
-            store.dispatch(Intent::SetDraftText { thread_id: "thread".into(), text: "preserved".into() })
+            store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), text: "preserved".into() })
                 .unwrap().wait().await.unwrap();
             // Leave every automatic read pending on the old transport.
             let mut methods = std::collections::BTreeSet::new();
@@ -474,7 +485,7 @@ mod tests {
                     .expect("Connected must reload without native intents").unwrap().unwrap();
                 methods.insert(request["method"].as_str().unwrap().to_owned());
             }
-            assert_eq!(methods, ["host/thread/list", "host/session/open", "model/list", "host/account/list"].map(str::to_owned).into());
+            assert_eq!(methods, ["host/session/list", "host/session/open", "model/list", "host/account/list"].map(str::to_owned).into());
             let server = async {
                 assert!(!matches!(old.read_request().await, Ok(Some(_))),
                     "reconnect must close the old stream without probing it with list/history reads");
@@ -485,7 +496,7 @@ mod tests {
                     assert!(requests.insert(request["method"].as_str().unwrap().to_owned(), request).is_none());
                 }
                 writer.reply(&requests["host/account/list"], json!({"result":{"accounts":[]}})).await.unwrap();
-                let list = &requests["host/thread/list"];
+                let list = &requests["host/session/list"];
                 assert_eq!(list["params"]["projectLimit"], 15);
                 assert_eq!(list["params"]["chatLimit"], 25);
                 assert_eq!(list["params"]["projectThreadLimits"]["project"], 35);
@@ -493,9 +504,9 @@ mod tests {
                 let open = &requests["host/session/open"];
                 assert_eq!(open["params"]["session"]["id"], "thread");
                 // Finish the conversation before the lists; no reload invalidates another.
-                writer.reply(open, json!({ "result":{"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":"after reconnect"}]}]}}}})).await.unwrap();
-                writer.reply(&requests["model/list"], json!({ "result":{"data":[{"id":"fresh-model","model":"fresh-model","displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}})).await.unwrap();
-                writer.reply(list, json!({ "result":{"data":[{"id":"thread","name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
+                writer.reply(open, json!({"result":{"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"after reconnect","phase":"unknown"}}}}}],"status":"unknown"}]}}}})).await.unwrap();
+                writer.reply(&requests["model/list"], json!({ "result":{"data":[{"id":"fresh-model","model":{"provider": "codex", "id": "fresh-model"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}})).await.unwrap();
+                writer.reply(list, json!({ "result":{"data":[{"id":{"provider":"codex","id":"thread"},"name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
                 assert!(!matches!(reader.read_request().await, Ok(Some(_))));
                 next.close();
             };
@@ -508,7 +519,7 @@ mod tests {
                 loop {
                     let ready = {
                         let snapshot = updates.borrow_and_update();
-                        snapshot.account.accounts.is_some() && snapshot.threads.is_some() && !snapshot.models.is_empty() && snapshot.conversations.contains_key("thread")
+                        snapshot.account.accounts.is_some() && snapshot.threads.is_some() && !snapshot.models.is_empty() && snapshot.conversations.contains_key(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })
                     };
                     if ready { break; }
                     updates.changed().await.unwrap();
@@ -516,11 +527,11 @@ mod tests {
                 let snapshot = store.store.snapshot();
                 assert!(snapshot.connected());
                 assert!(snapshot.error.is_none());
-                assert_eq!(snapshot.navigation.thread_id.as_deref(), Some("thread"));
-                assert!(snapshot.threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_deref() == Some("thread")));
-                assert_eq!(snapshot.conversations["thread"].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].text.as_deref(), Some("after reconnect"));
-                assert_eq!(snapshot.models[0].model, "fresh-model");
-                assert_eq!(snapshot.drafts["thread"].text, "preserved");
+                assert_eq!(snapshot.navigation.thread_id.as_ref().map(|session| session.id.as_str()), Some("thread"));
+                assert!(snapshot.threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_ref().map(|session| session.id.as_str()) == Some("thread")));
+                assert_eq!(item_text(&(snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])), Some("after reconnect"));
+                assert_eq!(snapshot.models[0].model, agent_protocol::models::ModelRef {provider:agent_protocol::session::ProviderKind::Codex,id:"fresh-model".into()});
+                assert_eq!(snapshot.drafts[&crate::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })].text, "preserved");
                 store.shutdown().await.unwrap();
             };
             tokio::join!(server, client);
@@ -552,7 +563,7 @@ mod tests {
                     };
                     let snapshot = Snapshot {
                         navigation: Arc::new(crate::state::Navigation {
-                            thread_id: selected.then(|| "thread".into()), draft_key: "thread".into(),
+                            thread_id: selected.then(|| agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }), draft_key: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(),
                             ..Default::default()
                         }), ..Default::default()
                     };
@@ -565,8 +576,8 @@ mod tests {
                             "host/session/scope" => json!("fixture-storage"),
                             "host/diagnostics/connection" => json!({}),
                             "host/account/list" => json!({"accounts":[]}),
-                            "host/thread/list" => json!({"data":[{"id":"thread","name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
-                            "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[{"id":"turn","items":[{"id":"answer","type":"agentMessage","text":text}]}]}}}),
+                            "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                            "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}}],"status":"unknown"}]}}}),
                             "model/list" => json!({"data":[],"nextCursor":null}),
                             method => panic!("unexpected request: {method}"),
                         };
@@ -599,13 +610,13 @@ mod tests {
                                 let check = candidate_reader.read_request().await.unwrap().unwrap();
                                 assert_eq!(check["method"], "host/session/scope");
                                 let initial = candidate_reader.read_request().await.unwrap().unwrap();
-                                assert_eq!(initial["method"], "host/thread/list");
-                                candidate_writer.reply(&check, json!({"error":{"code":-32000,"message":"candidate rejected"}})).await.unwrap();
+                                assert_eq!(initial["method"], "host/session/list");
+                                candidate_writer.reply(&check, json!({"error":{"code":"request_failed","message":"candidate rejected"}})).await.unwrap();
                                 assert!(!matches!(candidate_reader.read_request().await, Ok(Some(_))), "failed replacement must close before old connection succeeds");
                                 candidate.close();
                             }
                             let reply = if mode == "error" {
-                                json!({"error":{"code":-32000,"message":"history unavailable"}})
+                                json!({"error":{"code":"request_failed","message":"history unavailable"}})
                             } else { response(&request, "after") };
                             writer.reply(&request, reply).await.unwrap();
                             if mode == "slow" { tokio::time::sleep(Duration::from_millis(1200)).await; }
@@ -617,11 +628,11 @@ mod tests {
                     let client = async {
                         let mut updates = store.store.subscribe();
                         loop {
-                            let ready = { let snapshot = updates.borrow_and_update(); snapshot.account.accounts.is_some() && snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key("thread")) };
+                            let ready = { let snapshot = updates.borrow_and_update(); snapshot.account.accounts.is_some() && snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })) };
                             if ready { break; }
                             updates.changed().await.unwrap();
                         }
-                        store.dispatch(Intent::SetDraftText { thread_id: "thread".into(), text: "keep draft".into() }).unwrap().wait().await.unwrap();
+                        store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), text: "keep draft".into() }).unwrap().wait().await.unwrap();
                         let started = std::time::Instant::now();
                         let resumed = tokio::time::timeout(Duration::from_millis(500), store.resume(connection())).await
                             .expect("foreground recovery must not wait for provider reads or shutdown deadlines");
@@ -633,13 +644,13 @@ mod tests {
                             let ready = {
                                 let snapshot = updates.borrow_and_update();
                                 snapshot.threads.as_ref().is_some_and(|list| list.data.iter().any(|thread| thread.name.as_deref() == Some("after")))
-                                    && (!selected || snapshot.conversations["thread"].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].text.as_deref() == Some("after"))
+                                    && (!selected || item_text(&(snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])) == Some("after"))
                             };
                             if ready { break; }
                             updates.changed().await.unwrap();
                         } }
                         assert!(store.snapshot().connected());
-                        assert_eq!(store.snapshot().drafts["thread"].text, "keep draft");
+                        assert_eq!(store.snapshot().drafts[&crate::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })].text, "keep draft");
                         assert_eq!(store.endpoint.lock().await.as_ref().unwrap().endpoint.node_id(), old_identity, "recovery retains the endpoint identity; discovered addresses can change");
                         store.shutdown().await.unwrap();
                     };
@@ -787,7 +798,7 @@ mod tests {
         }
         assert_eq!(
             methods,
-            ["host/thread/list", "model/list", "host/account/list"]
+            ["host/session/list", "model/list", "host/account/list"]
                 .map(str::to_owned)
                 .into()
         );
@@ -817,7 +828,7 @@ mod tests {
                 .unwrap();
         assert_eq!(check["method"], "host/session/scope");
         let initial = candidate_reader.read_request().await.unwrap().unwrap();
-        assert_eq!(initial["method"], "host/thread/list");
+        assert_eq!(initial["method"], "host/session/list");
         tokio::time::timeout(Duration::from_millis(500), store.disconnect())
             .await
             .unwrap()
@@ -866,7 +877,7 @@ mod tests {
                 let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
                 let connection = || Connection { ticket: host.ticket().to_string(), identity: identity.to_bytes().to_vec(), invitation: None, use_relays: false };
                 let cached = Snapshot {
-                    navigation: Arc::new(crate::state::Navigation { thread_id: selected.then(|| "thread".into()), draft_key: "thread".into(), ..Default::default() }),
+                    navigation: Arc::new(crate::state::Navigation { thread_id: selected.then(|| agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }), draft_key: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), ..Default::default() }),
                     ..Default::default()
                 };
                 let store = AgentStore::offline(crate::persistence::encode(&cached).unwrap(), None).await.unwrap();
@@ -882,15 +893,15 @@ mod tests {
                         }
                         for request in requests {
                             let result = match request["method"].as_str().unwrap() {
-                                "host/thread/list" => json!({"data":[{"id":"thread","name":format!("round {round}")}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
-                                "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":"thread","turns":[]}}}),
+                                "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":format!("round {round}")}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                                "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[]}}}),
                                 "host/account/list" if round == 0 => json!({"accounts":[]}),
                                 "model/list" if round == 0 => json!({"data":[],"nextCursor":null}),
                                 method => panic!("unexpected refresh request {method}"),
                             };
                             if round == 2 && selected && request["method"] == "host/session/open" { pending.push(request); continue; }
-                            let response = if round == 1 && request["method"] == "host/thread/list" {
-                                json!({"error":{"code":-32000,"message":"temporary read error"}})
+                            let response = if round == 1 && request["method"] == "host/session/list" {
+                                json!({"error":{"code":"request_failed","message":"temporary read error"}})
                             } else { json!({"result":result}) };
                             writer.reply(&request, response).await.unwrap();
                         }
@@ -900,19 +911,19 @@ mod tests {
                 let client = async {
                     let mut updates = store.store.subscribe();
                     loop {
-                        let ready = { let snapshot = updates.borrow_and_update(); snapshot.account.accounts.is_some() && snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key("thread")) };
+                        let ready = { let snapshot = updates.borrow_and_update(); snapshot.account.accounts.is_some() && snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })) };
                         if ready { break; }
                         updates.changed().await.unwrap();
                     }
-                    store.dispatch(Intent::SetDraftText { thread_id: "thread".into(), text: "preserved".into() }).unwrap().wait().await.unwrap();
+                    store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), text: "preserved".into() }).unwrap().wait().await.unwrap();
                     let refresh = || async {
                         use crate::state::operations as op;
-                        let list = store.store.dispatch(Intent::ListThreads(op::ListThreads::new(
+                        let list = store.store.dispatch(Intent::ListSessions(op::ListSessions::new(
                             (*store.snapshot().list_query).clone(),
                         )));
                         let history = async {
                             if selected {
-                                store.store.dispatch(Intent::ReadThread(op::ReadThread::new("thread".into()))).await?;
+                                store.store.dispatch(Intent::ReadThread(op::ReadThread::new(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }))).await?;
                             }
                             Ok(Outcome::Applied)
                         };
@@ -933,7 +944,7 @@ mod tests {
                     assert!(after.error.is_none());
                     assert_eq!(after.epoch, before.epoch);
                     assert_eq!(after.navigation, before.navigation);
-                    assert_eq!(after.drafts["thread"].text, "preserved");
+                    assert_eq!(after.drafts[&crate::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })].text, "preserved");
                     assert_eq!(after.threads.as_ref().unwrap().data[0].name.as_deref(), Some(if selected { "round 3" } else { "round 2" }));
                     store.shutdown().await.unwrap();
                 };

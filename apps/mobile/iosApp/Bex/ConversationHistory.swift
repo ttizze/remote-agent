@@ -70,10 +70,13 @@ extension ThreadScreen {
                     expandedItemIds.insert(item.data.id)
                 }
             },
-            loadDetails: { await model.readItemDetails(
-                threadId: conversation?.id ?? "", turnId: turnId,
-                itemId: item.data.nativeId ?? item.data.id
-            ) }
+            loadDetails: {
+                guard let threadId = conversation?.id else { return nil }
+                return await model.readItemDetails(
+                    threadId: threadId, turnId: turnId,
+                    itemId: item.data.nativeId ?? item.data.id
+                )
+            }
         )
     }
 

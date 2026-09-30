@@ -52,8 +52,8 @@ import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.ReadItem
 import dev.remoteagent.core.Respond
 import dev.remoteagent.core.Snapshot
-import dev.remoteagent.core.insertInvocation
 import dev.remoteagent.core.activityIsExpanded
+import dev.remoteagent.core.insertInvocation
 import java.util.UUID
 import kotlinx.coroutines.launch
 
@@ -71,6 +71,12 @@ internal fun ThreadDetailScreen(
     val listState = rememberLazyListState()
     var activityExpansion by remember(threadId) { mutableStateOf(emptyMap<String, ActivityExpansion>()) }
     var following by remember(threadId) { mutableStateOf(true) }
+    val loadOlder = older?.let { load ->
+        {
+            following = false
+            load()
+        }
+    }
     ObserveFollowing(listState, snapshot, following && older != null, { following = it }, scrollToTopRequest)
     Column(modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -85,29 +91,15 @@ internal fun ThreadDetailScreen(
                 }
                 if (threadId?.let(snapshot::conversation)?.hasMoreHistory() == true)
                     item(key = "history:turns") {
-                        Button(
-                            onClick = {
-                                following = false
-                                older?.invoke()
-                            },
-                            enabled = older != null,
-                        ) {
-                            Text("以前の会話を読み込む")
-                        }
+                        Button(onClick = { loadOlder?.invoke() }, enabled = loadOlder != null) { Text("以前の会話を読み込む") }
                     }
-                conversationRows(projection?.rows.orEmpty(), activityExpansion) { content ->
+                val renderRow: @Composable (ConversationRowContent) -> Unit = { content ->
                     ConversationContent(
                         content,
                         threadId,
                         snapshot.navigation().cwd,
                         perform,
-                        older =
-                            older?.let { load ->
-                                {
-                                    following = false
-                                    load()
-                                }
-                            },
+                        older = loadOlder,
                         activityHeader = { activity ->
                             ActivityHeader(activity, activityExpansion[activity.id]) { choice ->
                                 activityExpansion = activityExpansion + (activity.id to choice)
@@ -115,9 +107,11 @@ internal fun ThreadDetailScreen(
                         },
                     )
                 }
+                conversationRows(projection?.rows.orEmpty(), activityExpansion, renderRow)
                 items(projection?.queued.orEmpty(), key = { "queued:${it.id()}" }) {
                     ThreadMessageCard(it, true, snapshot.navigation().cwd, perform)
                 }
+                conversationRows(projection?.requestRows.orEmpty(), activityExpansion, renderRow)
             }
             LatestMessageButton(listState) { following = true }
         }
@@ -139,13 +133,15 @@ private fun BoxScope.LatestMessageButton(
                     follow()
                 }
             },
-            colors = IconButtonDefaults.filledIconButtonColors(
-                containerColor = Color.DarkGray,
-                contentColor = Color.White,
-            ),
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp)
-                .semantics { contentDescription = "最新のメッセージへ" },
-        ) { Text("↓") }
+            colors =
+                IconButtonDefaults.filledIconButtonColors(containerColor = Color.DarkGray, contentColor = Color.White),
+            modifier =
+                Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp).semantics {
+                    contentDescription = "最新のメッセージへ"
+                },
+        ) {
+            Text("↓")
+        }
     }
 }
 
@@ -169,7 +165,7 @@ private fun LazyListScope.conversationRows(
 @Composable
 private fun ConversationContent(
     content: ConversationRowContent,
-    threadId: String?,
+    threadId: dev.remoteagent.core.SessionRef?,
     cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
     older: (() -> Unit)? = null,
@@ -233,19 +229,21 @@ internal fun ThreadComposer(
                 Box {
                     if (attachment.isImage) {
                         AttachmentThumbnail(attachment.path, attachment.name, perform)
-                    } else {
-                        Text(attachment.name, Modifier.padding(end = 44.dp, top = 12.dp))
-                    }
+                    } else Text(attachment.name, Modifier.padding(end = 44.dp, top = 12.dp))
                     TextButton(
                         onClick = { perform(Intent.RemoveAttachment(navigation.draftKey, index.toUInt())) {} },
-                        colors = ButtonDefaults.textButtonColors(
-                            containerColor = Color.Black.copy(alpha = 0.75f),
-                            contentColor = Color.White,
-                        ),
-                        modifier = Modifier.size(44.dp).align(Alignment.TopEnd).semantics {
-                            contentDescription = "${attachment.name}を外す"
-                        },
-                    ) { Text("×") }
+                        colors =
+                            ButtonDefaults.textButtonColors(
+                                containerColor = Color.Black.copy(alpha = 0.75f),
+                                contentColor = Color.White,
+                            ),
+                        modifier =
+                            Modifier.size(44.dp).align(Alignment.TopEnd).semantics {
+                                contentDescription = "${attachment.name}を外す"
+                            },
+                    ) {
+                        Text("×")
+                    }
                 }
             }
         }
@@ -259,7 +257,7 @@ internal fun ThreadComposer(
             draft.text,
             { perform(Intent.EditComposer(navigation.draftKey, it, it.toByteArray(Charsets.UTF_8).size.toUInt())) {} },
             Modifier.fillMaxWidth(),
-            label = { Text("Codexへの入力") },
+            label = { Text("メッセージ") },
             minLines = 2,
         )
         Row {
@@ -271,8 +269,7 @@ internal fun ThreadComposer(
                     perform(Intent.Submit(navigation.threadId, UUID.randomUUID().toString())) { sending = false }
                 },
                 enabled =
-                    inputUnavailable == null && !sending &&
-                        (draft.text.isNotBlank() || draft.attachments.isNotEmpty()),
+                    inputUnavailable == null && !sending && (draft.text.isNotBlank() || draft.attachments.isNotEmpty()),
             ) {
                 Text("送信")
             }
@@ -281,9 +278,12 @@ internal fun ThreadComposer(
 }
 
 @Composable
-internal fun AttachmentButton(selectionKey: String, attach: (String, Uri, () -> Unit) -> Unit) {
+internal fun AttachmentButton(
+    selectionKey: Pair<String?, dev.remoteagent.core.DraftKey>,
+    attach: (Pair<String?, dev.remoteagent.core.DraftKey>, Uri, () -> Unit) -> Unit,
+) {
     var transferring by remember { mutableStateOf(false) }
-    var selection by remember { mutableStateOf("") }
+    var selection by remember { mutableStateOf(selectionKey) }
     val picker =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) {

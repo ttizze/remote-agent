@@ -7,7 +7,6 @@ use agent_transport::transport::{
     Endpoint, HostPeer, IncomingRequest, IncomingSession, NodeId, Session, Ticket, authorize,
 };
 use anyhow::{Context, Result};
-use serde_json::json;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -300,10 +299,14 @@ impl HostRuntime {
             } else {
                 self.manage(message).await
             };
-            return Response::from_result(
-                result
-                    .map_err(|message| json!({"code": -32602, "message": format!("{message:#}")})),
-            )
+            return Response::from_result(result.map_err(|message| {
+                agent_protocol::error::RpcFailure {
+                    code: "management_failed".into(),
+                    message: format!("{message:#}"),
+                    delivery: agent_protocol::error::Delivery::NotSent,
+                    execution: None,
+                }
+            }))
             .map(Into::into)
             .map_err(Into::into);
         }

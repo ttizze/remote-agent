@@ -9,12 +9,14 @@ mod view;
 use crate::{Runtime, diff::DiffView, platform, store_session::StoreSession};
 use agent_core::{
     presentation::conversation::{ActivityExpansion, ConversationRowContent},
-    state::{Attachment, Draft, Intent, PendingSubmission, Snapshot},
+    state::{Attachment, Draft, DraftKey, Intent, PendingSubmission, Snapshot},
     store::Outcome,
 };
 use agent_protocol::{
+    ids::{ItemId, RequestId, TurnId},
     models::{Item, Model, RemoteHost, Thread, Turn, WorktreeSettings},
-    operations::{Answer, ServerRequest},
+    requests::Answer,
+    session::SessionRef,
 };
 use dictation::{Dictation, Phase};
 use gpui_kit::{
@@ -29,7 +31,6 @@ use gpui_kit::{
     *,
 };
 use hosts::{HostEvent, Hosts};
-use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -49,10 +50,10 @@ enum OperationCompletion {
     },
     Item {
         generation: u64,
-        key: (String, String),
+        key: (TurnId, ItemId),
     },
     WorktreeSettings,
-    Request(String),
+    Request(RequestId),
     Dictation(uuid::Uuid),
     RemoveWorktree,
     Account,
@@ -104,14 +105,13 @@ pub(crate) enum Mode {
     },
 }
 struct Question {
-    id: String,
+    definition: agent_protocol::requests::Question,
     input: Entity<InputState>,
-    options: Vec<String>,
-    prompt: String,
+    selected: HashSet<String>,
 }
 struct RequestInputs {
     questions: Vec<Question>,
-    raw: Entity<TextareaState>,
+    response: Entity<TextareaState>,
     sent: bool,
 }
 struct ImageGallery {
@@ -152,15 +152,15 @@ enum ConversationRow {
     History,
     Turn(Arc<agent_core::presentation::conversation::RenderedTurn>),
     Pending(String, Arc<PendingSubmission>),
-    Request(String, Arc<ServerRequest>),
+    Request(Box<agent_core::presentation::conversation::Request>),
 }
 impl ConversationRow {
     fn same_identity(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::History, Self::History) => true,
             (Self::Turn(a), Self::Turn(b)) => a.source.id == b.source.id,
-            (Self::Pending(a, _), Self::Pending(b, _))
-            | (Self::Request(a, _), Self::Request(b, _)) => a == b,
+            (Self::Pending(a, _), Self::Pending(b, _)) => a == b,
+            (Self::Request(a), Self::Request(b)) => a.id == b.id,
             _ => false,
         }
     }
@@ -168,7 +168,7 @@ impl ConversationRow {
         match (self, other) {
             (Self::Turn(a), Self::Turn(b)) => Arc::ptr_eq(a, b),
             (Self::Pending(a, x), Self::Pending(b, y)) => a == b && Arc::ptr_eq(x, y),
-            (Self::Request(a, x), Self::Request(b, y)) => a == b && Arc::ptr_eq(x, y),
+            (Self::Request(a), Self::Request(b)) => a == b,
             _ => false,
         }
     }
@@ -209,7 +209,7 @@ pub(crate) struct Desktop {
     model_search: Entity<InputState>,
     model_provider: Option<agent_protocol::session::ProviderKind>,
     account_sign_out: Option<String>,
-    account_login_draft: Option<String>,
+    account_login_draft: Option<DraftKey>,
     worktree_copy_paths: Entity<TextareaState>,
     worktree_directory: Entity<InputState>,
     worktree_dirty: bool,
@@ -236,13 +236,13 @@ pub(crate) struct Desktop {
     review_expanded: bool,
     source_paths: Vec<String>,
     source_items: Vec<Arc<Item>>,
-    requests: HashMap<String, RequestInputs>,
+    requests: HashMap<RequestId, RequestInputs>,
     list: ListState,
     hovered_conversation_marker: Option<usize>,
     rows: Vec<ConversationRow>,
     history_loading: bool,
     history_error: String,
-    item_details: HashMap<(String, String), DetailLoad>,
+    item_details: HashMap<(TurnId, ItemId), DetailLoad>,
     rendered: Option<Arc<agent_core::presentation::conversation::RenderedConversation>>,
     diffs: HashMap<String, Entity<DiffView>>,
     images: HashMap<String, ImageState>,
@@ -366,7 +366,7 @@ impl Desktop {
                         view.composer_pending = Some(revision);
                         view.perform(
                             Intent::EditComposer {
-                                thread_id: view.draft_key().into(),
+                                thread_id: view.draft_key().clone(),
                                 text: value.to_string(),
                                 cursor: cursor as u32,
                             },
@@ -407,7 +407,7 @@ impl Desktop {
                     if value.as_ref() != view.snapshot.list_query.search_term {
                         let mut query = (*view.snapshot.list_query).clone();
                         query.search_term = value.to_string();
-                        view.dispatch(Intent::ListThreads(op::ListThreads::new(query)));
+                        view.dispatch(Intent::ListSessions(op::ListSessions::new(query)));
                     }
                 }
             }),
@@ -985,16 +985,17 @@ impl Desktop {
                 input.set_value(settings.worktree_directory.clone(), window, cx)
             });
         }
-        if !Arc::ptr_eq(&previous.requests, &self.snapshot.requests) {
+        let conversations_changed =
+            !Arc::ptr_eq(&previous.conversations, &self.snapshot.conversations);
+        if conversations_changed {
             self.sync_request_inputs(window, cx);
         }
         if navigated
-            || !Arc::ptr_eq(&previous.conversations, &self.snapshot.conversations)
+            || conversations_changed
             || !Arc::ptr_eq(
                 &previous.pending_submissions,
                 &self.snapshot.pending_submissions,
             )
-            || !Arc::ptr_eq(&previous.requests, &self.snapshot.requests)
         {
             self.sync_rows(navigated, window, cx);
         }
@@ -1014,12 +1015,19 @@ impl Desktop {
                 .map(|attachment| attachment.path.as_str())
                 .collect();
             for item in self.user_items() {
-                if let Some(parts) = item.content.as_ref().and_then(Value::as_array) {
-                    paths.extend(
-                        parts
-                            .iter()
-                            .filter_map(|part| part.get("path").and_then(Value::as_str)),
-                    );
+                if let agent_protocol::items::ItemBody::UserMessage { content, .. } = item.body() {
+                    paths.extend(content.iter().filter_map(|part| match part {
+                        agent_protocol::items::MessagePart::Image { source }
+                            if !source.starts_with("data:") =>
+                        {
+                            Some(source.as_str())
+                        }
+                        agent_protocol::items::MessagePart::Attachment { path, .. }
+                        | agent_protocol::items::MessagePart::Invocation { path, .. } => {
+                            Some(path.as_str())
+                        }
+                        _ => None,
+                    }));
                 }
             }
             self.source_paths = paths.into_iter().map(str::to_owned).collect();
@@ -1049,18 +1057,15 @@ impl Desktop {
             session.save(self.snapshot.clone());
         }
     }
-    fn draft_key(&self) -> &str {
+    fn draft_key(&self) -> &DraftKey {
         &self.snapshot.navigation.draft_key
     }
-    fn selected(&self) -> &str {
-        self.snapshot
-            .navigation
-            .thread_id
-            .as_deref()
-            .unwrap_or_default()
+    fn selected(&self) -> Option<&SessionRef> {
+        self.snapshot.navigation.thread_id.as_ref()
     }
     fn thread(&self) -> Option<&Arc<Thread>> {
-        self.snapshot.conversations.get(self.selected())
+        self.selected()
+            .and_then(|id| self.snapshot.conversations.get(id))
     }
     fn draft(&self) -> &Draft {
         static EMPTY: Draft = Draft {
@@ -1080,7 +1085,7 @@ impl Desktop {
         self.snapshot
             .models
             .iter()
-            .find(|model| Some(model.model.as_str()) == self.draft().model.as_deref())
+            .find(|model| Some(&model.model) == self.draft().model.as_ref())
     }
     fn remote_key(&self) -> &str {
         self.remote.as_ref().map_or("local", |remote| &remote.id)
@@ -1095,7 +1100,12 @@ impl Desktop {
             .unwrap_or_default()
             .iter()
             .flat_map(|turn| turn.items.as_deref().unwrap_or_default())
-            .filter(|item| item.kind.as_deref() == Some("userMessage"))
+            .filter(|item| {
+                matches!(
+                    item.body(),
+                    agent_protocol::items::ItemBody::UserMessage { .. }
+                )
+            })
     }
     fn sync_rows(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.rendered = self.snapshot.conversation_thread().map(|thread| {
@@ -1105,7 +1115,7 @@ impl Desktop {
                 &self.rendered,
             )
         });
-        let rows = conversation_rows(&self.snapshot, &self.rendered);
+        let rows = conversation_rows(&self.rendered);
         if reset {
             self.list.reset(rows.len());
             self.list.scroll_to_end();
@@ -1187,14 +1197,14 @@ impl Desktop {
     fn remeasure_item(&self, id: &str) {
         for (index, row) in self.rows.iter().enumerate() {
             if let ConversationRow::Turn(turn) = row
-                && (turn.source.id == id
+                && (turn.source.id.as_str() == id
                     || turn
                         .source
                         .items
                         .as_deref()
                         .unwrap_or_default()
                         .iter()
-                        .any(|item| item.id == id))
+                        .any(|item| item.id.as_str() == id))
             {
                 self.list.remeasure_items(index..index + 1);
             }
@@ -1206,7 +1216,7 @@ impl Desktop {
         self.dispatch(Intent::NewChat { cwd });
         self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
-    fn open_chat(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_chat(&mut self, id: SessionRef, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = Tab::Chat;
         self.cancel_recording();
         self.busy += 1;
@@ -1229,13 +1239,13 @@ impl Desktop {
         self.list.remeasure_items(0..1);
         self.perform(
             Intent::ReadOlder {
-                thread_id: self.selected().into(),
+                thread_id: self.selected().expect("selected conversation").clone(),
             },
             OperationCompletion::History { generation },
         );
         cx.notify();
     }
-    fn detail(&mut self, turn_id: String, item_id: String) {
+    fn detail(&mut self, turn_id: TurnId, item_id: ItemId) {
         let key = (turn_id.clone(), item_id.clone());
         if self
             .item_details
@@ -1248,8 +1258,9 @@ impl Desktop {
             .thread()
             .and_then(|thread| thread.turns.as_ref())
             .and_then(|turns| turns.iter().find(|turn| turn.id == turn_id))
-            .and_then(|turn| turn.deferred_item_ids.as_ref())
-            .is_some_and(|ids| ids.contains(&item_id));
+            .and_then(|turn| turn.items.as_ref())
+            .and_then(|items| items.iter().find(|item| item.id == item_id))
+            .is_some_and(|item| item.is_deferred());
         if !needed {
             return;
         }
@@ -1263,7 +1274,7 @@ impl Desktop {
         let generation = self.snapshot.epoch;
         self.perform(
             Intent::ReadItem(op::ReadItem {
-                thread_id: self.selected().into(),
+                thread_id: self.selected().expect("selected conversation").clone(),
                 turn_id,
                 item_id,
             }),
@@ -1332,7 +1343,7 @@ impl Desktop {
         self.perform(
             Intent::Submit {
                 thread_id: None,
-                client_user_message_id: uuid::Uuid::new_v4().to_string(),
+                client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
             },
             OperationCompletion::Busy,
         );
@@ -1355,12 +1366,16 @@ impl Desktop {
             return;
         };
         let cwd = self.snapshot.selected_directory();
+        let provider = self
+            .snapshot
+            .model_provider_for_draft(self.draft_key().clone());
         let prompt = format!("次の選択範囲について詳しく説明してください。\n\n{text}");
         self.busy += 1;
         self.effect(
             async move {
                 let Outcome::StartedThread { id } = store
-                    .dispatch(Intent::StartThread(op::StartThread {
+                    .dispatch(Intent::CreateSession(op::CreateSession {
+                        provider,
                         cwd: Some(cwd),
                         model: None,
                     }))
@@ -1372,7 +1387,7 @@ impl Desktop {
                 // The new thread has its own draft; existing side-chat input stays intact.
                 store
                     .dispatch(Intent::SetDraftText {
-                        thread_id: id.clone(),
+                        thread_id: id.clone().into(),
                         text: prompt,
                     })
                     .await
@@ -1384,7 +1399,7 @@ impl Desktop {
                 store
                     .dispatch(Intent::Submit {
                         thread_id: Some(id),
-                        client_user_message_id: uuid::Uuid::new_v4().to_string(),
+                        client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
                     })
                     .await
                     .map_err(|error| error.to_string())
@@ -1395,7 +1410,7 @@ impl Desktop {
     }
 
     fn refresh_threads(&self) {
-        self.dispatch(Intent::ListThreads(op::ListThreads::new(
+        self.dispatch(Intent::ListSessions(op::ListSessions::new(
             (*self.snapshot.list_query).clone(),
         )));
     }
@@ -1707,21 +1722,20 @@ impl Desktop {
             OperationCompletion::WorktreeSettings,
         );
     }
-    fn respond(&mut self, key: String, id: Value, answer: Answer) {
-        if let Some(inputs) = self.requests.get_mut(&key) {
+    fn respond(&mut self, id: RequestId, answer: Answer) {
+        if let Some(inputs) = self.requests.get_mut(&id) {
             inputs.sent = true;
         }
         self.perform(
             Intent::Respond(op::Respond {
-                request_id: id,
+                request_id: id.clone(),
                 answer,
             }),
-            OperationCompletion::Request(key),
+            OperationCompletion::Request(id),
         );
     }
 }
 fn conversation_rows(
-    snapshot: &Snapshot,
     rendered: &Option<Arc<agent_core::presentation::conversation::RenderedConversation>>,
 ) -> Vec<ConversationRow> {
     let mut rows = Vec::new();
@@ -1738,30 +1752,17 @@ fn conversation_rows(
             }
         }));
     }
-    let projected_requests: HashSet<_> = rendered
-        .iter()
-        .flat_map(|conversation| &conversation.turns)
-        .flat_map(|turn| &turn.rows)
-        .filter_map(|row| match &row.content {
-            ConversationRowContent::PendingRequest { request } => Some(request.key.as_str()),
-            _ => None,
-        })
-        .collect();
     rows.extend(
-        snapshot
-            .requests
+        rendered
             .iter()
-            .filter(|(_, request)| {
-                request
-                    .params
-                    .get("threadId")
-                    .and_then(Value::as_str)
-                    .is_none_or(|id| {
-                        id == snapshot.navigation.thread_id.as_deref().unwrap_or_default()
-                    })
-            })
-            .filter(|(id, _)| !projected_requests.contains(id.as_str()))
-            .map(|(id, request)| ConversationRow::Request(id.clone(), request.clone())),
+            .flat_map(|conversation| &conversation.request_rows)
+            .filter_map(|row| {
+                if let ConversationRowContent::PendingRequest { request } = &row.content {
+                    Some(ConversationRow::Request(request.clone()))
+                } else {
+                    None
+                }
+            }),
     );
     rows
 }
@@ -2025,28 +2026,35 @@ mod completion_tests {
 
     #[test]
     fn row_projection_keeps_repeated_turns_and_scopes_requests_without_changing_input() {
-        let source: Arc<Thread> = Arc::new(serde_json::from_value(serde_json::json!({
-            "id": "selected", "turns": [
-                {"id": "repeated", "items": [{"id":"first", "type":"agentMessage", "text":"first answer"}]},
-                {"id": "repeated", "items": [{"id":"second", "type":"agentMessage", "text":"second answer"}]}
-            ]
-        })).unwrap());
+        let mut source: Arc<Thread> = Arc::new(serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"selected"},"turns":[{"id":"repeated","items":[{"id":"first","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"first answer","phase":"unknown"}}}}}],"status":"unknown"},{"id":"repeated","items":[{"id":"second","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"second answer","phase":"unknown"}}}}}],"status":"unknown"}]})).unwrap());
         let mut snapshot = Snapshot::default();
-        Arc::make_mut(&mut snapshot.navigation).thread_id = Some("selected".into());
-        for (key, params) in [
-            ("global", serde_json::json!({})),
-            ("other", serde_json::json!({"threadId":"other"})),
-        ] {
-            Arc::make_mut(&mut snapshot.requests).insert(
-                key.into(),
-                Arc::new(
-                    serde_json::from_value(
-                        serde_json::json!({"id":key,"method":"request","params":params}),
-                    )
-                    .unwrap(),
-                ),
-            );
-        }
+        Arc::make_mut(&mut snapshot.navigation).thread_id =
+            Some(agent_protocol::session::SessionRef {
+                provider: agent_protocol::session::ProviderKind::Codex,
+                id: "selected".into(),
+            });
+        let request = Arc::new(agent_protocol::requests::Request {
+            id: "global".into(),
+            target: agent_protocol::requests::RequestTarget::Session,
+            delivery: agent_protocol::session::RequestDelivery::Awaiting,
+            body: agent_protocol::requests::RequestBody::Elicitation {
+                server: "fixture".into(),
+                message: "input".into(),
+                input: agent_protocol::requests::ElicitationInput::Form { fields: vec![] },
+            },
+        });
+        Arc::make_mut(&mut source)
+            .requests
+            .insert(request.id.clone(), request.clone());
+        let mut other = (*source).clone();
+        let request = Arc::make_mut(other.requests.get_mut("global").unwrap());
+        request.id = "other".into();
+        other.id = Some(agent_protocol::session::SessionRef {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            id: "other".into(),
+        });
+        Arc::make_mut(&mut snapshot.conversations)
+            .insert(other.id.clone().unwrap(), Arc::new(other));
         let before = snapshot.clone();
         let rendered = Some(
             agent_core::presentation::conversation::project_conversation(
@@ -2055,8 +2063,8 @@ mod completion_tests {
                 &None,
             ),
         );
-        let rows = conversation_rows(&snapshot, &rendered);
-        let repeated = conversation_rows(&snapshot, &rendered);
+        let rows = conversation_rows(&rendered);
+        let repeated = conversation_rows(&rendered);
         assert_eq!(rows.len(), 4);
         assert!(matches!(rows[0], ConversationRow::History));
         for (index, turn) in source.turns.as_ref().unwrap().iter().enumerate() {
@@ -2065,7 +2073,9 @@ mod completion_tests {
             };
             assert!(Arc::ptr_eq(&row.source, turn));
         }
-        assert!(matches!(&rows[3], ConversationRow::Request(key, _) if key == "global"));
+        assert!(
+            matches!(&rows[3], ConversationRow::Request(request) if request.id.as_str() == "global")
+        );
         assert!(rows.iter().zip(&repeated).all(|(a, b)| a.unchanged(b)
             || matches!((a, b), (ConversationRow::History, ConversationRow::History))));
         assert_eq!(snapshot, before);

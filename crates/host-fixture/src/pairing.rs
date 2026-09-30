@@ -193,7 +193,7 @@ fn route(
                 runtime,
                 ticket,
                 identity,
-                &agent_core::state::operations::StartThread {cwd: Some(root.join("project").to_string_lossy().into_owned()), model: None},
+                &agent_core::state::operations::CreateSession {provider: agent_protocol::session::ProviderKind::Codex, cwd: Some(root.join("project").to_string_lossy().into_owned()), model: None},
             )?;
             return Ok((
                 200,
@@ -218,8 +218,8 @@ fn route(
                 Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
             let result: Result<()> = async {
                 connection.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(serde_json::from_value::<agent_protocol::session::OpenSession>(json!({"session":{"provider":"codex","id":"fixture-external-thread"},"limit":5})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap())?;
-                connection.peer.call(&serde_json::from_value::<agent_protocol::operations::StartTurn>(json!({"threadId":"fixture-external-thread","clientUserMessageId":"fixture-other-client",
-                        "input":[{"type":"text","text":"[success] Reply from another Bex client"}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap())?;
+                connection.peer.call(&serde_json::from_value::<agent_protocol::operations::Submission>(json!({"threadId":{"provider":"codex","id":"fixture-external-thread"},"clientUserMessageId":"fixture-other-client",
+                        "input":[{"text":{"text":"[success] Reply from another Bex client"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap())?;
                 Ok(())
             }.await;
             connection.close().await;

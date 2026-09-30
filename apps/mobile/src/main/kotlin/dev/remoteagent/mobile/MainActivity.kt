@@ -62,11 +62,18 @@ class MainActivity : ComponentActivity() {
                             Text("許可して接続")
                         }
                         Text("拒否した場合は再試行するか、設定で許可できます。インターネット経由の接続も選べます。")
-                        Button(onClick = {
-                            startActivity(
-                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
-                            )
-                        }) { Text("アプリの設定を開く") }
+                        Button(
+                            onClick = {
+                                startActivity(
+                                    Intent(
+                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                        Uri.parse("package:$packageName"),
+                                    )
+                                )
+                            }
+                        ) {
+                            Text("アプリの設定を開く")
+                        }
                         Button(onClick = { continueOverInternet = true }) { Text("インターネット経由で接続") }
                     }
                 }

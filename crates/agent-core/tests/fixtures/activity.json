@@ -4,22 +4,34 @@
     "visible": null,
     "events": [
       {
-        "method": "turn/started",
-        "params": {
-          "threadId": "a",
+        "method": "fixture/session/change",
+        "session": {
+          "provider": "codex",
+          "id": "a"
+        },
+        "change": {
           "turn": {
-            "id": "turn",
-            "status": "inProgress"
+            "turn": {
+              "id": "turn",
+              "status": "running"
+            },
+            "completed": false
           }
         }
       },
       {
-        "method": "turn/completed",
-        "params": {
-          "threadId": "a",
+        "method": "fixture/session/change",
+        "session": {
+          "provider": "codex",
+          "id": "a"
+        },
+        "change": {
           "turn": {
-            "id": "turn",
-            "status": "completed"
+            "turn": {
+              "id": "turn",
+              "status": "completed"
+            },
+            "completed": true
           }
         }
       }
@@ -32,12 +44,18 @@
     "visible": "a",
     "events": [
       {
-        "method": "turn/completed",
-        "params": {
-          "threadId": "a",
+        "method": "fixture/session/change",
+        "session": {
+          "provider": "codex",
+          "id": "a"
+        },
+        "change": {
           "turn": {
-            "id": "turn",
-            "status": "completed"
+            "turn": {
+              "id": "turn",
+              "status": "completed"
+            },
+            "completed": true
           }
         }
       }
@@ -50,12 +68,18 @@
     "visible": null,
     "events": [
       {
-        "method": "turn/completed",
-        "params": {
-          "threadId": "a",
+        "method": "fixture/session/change",
+        "session": {
+          "provider": "codex",
+          "id": "a"
+        },
+        "change": {
           "turn": {
-            "id": "turn",
-            "status": "failed"
+            "turn": {
+              "id": "turn",
+              "status": "failed"
+            },
+            "completed": true
           }
         }
       }
@@ -68,12 +92,18 @@
     "visible": null,
     "events": [
       {
-        "method": "turn/completed",
-        "params": {
-          "threadId": "a",
+        "method": "fixture/session/change",
+        "session": {
+          "provider": "codex",
+          "id": "a"
+        },
+        "change": {
           "turn": {
-            "id": "turn",
-            "status": "interrupted"
+            "turn": {
+              "id": "turn",
+              "status": "interrupted"
+            },
+            "completed": true
           }
         }
       }
@@ -86,21 +116,30 @@
     "visible": null,
     "events": [
       {
-        "method": "turn/completed",
-        "params": {
-          "threadId": "a",
+        "method": "fixture/session/change",
+        "session": {
+          "provider": "codex",
+          "id": "a"
+        },
+        "change": {
           "turn": {
-            "id": "turn",
-            "status": "completed"
+            "turn": {
+              "id": "turn",
+              "status": "completed"
+            },
+            "completed": true
           }
         }
       },
       {
-        "method": "thread/status/changed",
-        "params": {
-          "threadId": "a",
+        "method": "fixture/session/change",
+        "session": {
+          "provider": "codex",
+          "id": "a"
+        },
+        "change": {
           "status": {
-            "type": "active"
+            "status": "running"
           }
         }
       }
@@ -113,21 +152,30 @@
     "visible": null,
     "events": [
       {
-        "method": "turn/completed",
-        "params": {
-          "threadId": "a",
+        "method": "fixture/session/change",
+        "session": {
+          "provider": "codex",
+          "id": "a"
+        },
+        "change": {
           "turn": {
-            "id": "turn",
-            "status": "completed"
+            "turn": {
+              "id": "turn",
+              "status": "completed"
+            },
+            "completed": true
           }
         }
       },
       {
-        "method": "thread/status/changed",
-        "params": {
-          "threadId": "a",
+        "method": "fixture/session/change",
+        "session": {
+          "provider": "codex",
+          "id": "a"
+        },
+        "change": {
           "status": {
-            "type": "idle"
+            "status": "idle"
           }
         }
       }

@@ -16,15 +16,6 @@ use gpui_kit::component::{
 };
 use std::path::PathBuf;
 
-fn text<'a>(value: &'a Value, key: &str) -> &'a str {
-    value.get(key).and_then(Value::as_str).unwrap_or_default()
-}
-fn array(value: &Value) -> &[Value] {
-    value.as_array().map(Vec::as_slice).unwrap_or_default()
-}
-fn field<'a>(map: &'a serde_json::Map<String, Value>, key: &str) -> &'a Value {
-    map.get(key).unwrap_or(&Value::Null)
-}
 fn file_name(path: &str) -> String {
     Path::new(path)
         .file_name()
@@ -138,7 +129,7 @@ impl Render for Desktop {
                     .and_then(|page| {
                         page.data
                             .iter()
-                            .find(|thread| thread.id.as_deref() == Some(self.selected()))
+                            .find(|thread| thread.id.as_ref() == self.selected())
                     })
                     .and_then(|thread| thread.name.as_deref())
             })

@@ -129,7 +129,7 @@ async fn rpc_failure_is_persisted_before_delivery_and_success_preserves_it() {
         "thread/resume",
         Some(44),
         serde_json::value::RawValue::from_string(
-            r#"{"delivery":"unknown","providerError":{"code":-32600,"message":"thread example already has an active writer","data":"PRIVATE_DATA"}}"#.into(),
+            r#"{"delivery":"unknown","code":"provider_failed","message":"thread example already has an active writer","execution":{"providerCode":"-32600"}}"#.into(),
         ).unwrap().as_ref(),
     );
     let contents = fs::read_to_string(&path).unwrap();
@@ -145,7 +145,7 @@ async fn rpc_failure_is_persisted_before_delivery_and_success_preserves_it() {
     assert_eq!(records[0]["message"], "failed [credential omitted]");
     assert_eq!(records[1]["errorCode"], "provider_failed");
     assert_eq!(records[1]["requestId"], 43);
-    assert_eq!(records[2]["errorCode"], -32600);
+    assert_eq!(records[2]["errorCode"], "provider_failed");
     assert_eq!(records[2]["requestId"], 44);
     assert_eq!(
         records[2]["message"],

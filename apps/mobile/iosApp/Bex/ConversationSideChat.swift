@@ -6,16 +6,16 @@ final class SideChatRequest: ObservableObject {
     let id = UUID()
     let text: String
     let host: String
-    let originalThreadId: String
+    let originalThreadId: SessionRef
     let originalConversation: ConversationPresentation?
     let cwd: String
-    private(set) var threadId: String?
+    private(set) var threadId: SessionRef?
     private var draftInitialized = false
     private var transition: Task<Void, Never>?
     @Published private(set) var preparing = true
     @Published private(set) var error: String?
 
-    init(text: String, host: String, originalThreadId: String,
+    init(text: String, host: String, originalThreadId: SessionRef,
          originalConversation: ConversationPresentation?, cwd: String) {
         self.text = text
         self.host = host
@@ -49,7 +49,11 @@ final class SideChatRequest: ObservableObject {
         error = nil
         do {
             if threadId == nil {
-                let result = try await model.outcome(for: .startThread(StartThread(cwd: cwd, model: nil)))
+                let result = try await model.outcome(for: .createSession(CreateSession(
+                    provider: model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey),
+                    cwd: cwd,
+                    model: nil
+                )))
                 guard case let .startedThread(id) = result else { throw CocoaError(.coderInvalidValue) }
                 threadId = id
             }
@@ -57,7 +61,7 @@ final class SideChatRequest: ObservableObject {
             if !draftInitialized {
                 if !text.isEmpty {
                     _ = try await model.outcome(for: .setDraftText(
-                        threadId: threadId, text: BexAppViewModel.selectionQuote(text)
+                        threadId: .session(session: threadId), text: BexAppViewModel.selectionQuote(text)
                     ))
                 }
                 draftInitialized = true

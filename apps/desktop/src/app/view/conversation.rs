@@ -159,14 +159,13 @@ impl Desktop {
         turn: Option<&Turn>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let id = item.id.clone();
-        let kind = item.kind.as_deref().unwrap_or_default();
+        let id = item.id.to_string();
         let expanded = self.expanded_items.contains(&id);
         let deferred = projected.data.deferred;
         if expanded && deferred {
             let key = (
                 turn.map(|turn| turn.id.clone()).unwrap_or_default(),
-                id.clone(),
+                item.id.clone(),
             );
             let label = match self
                 .item_details
@@ -199,9 +198,11 @@ impl Desktop {
                 .into_any_element();
         }
         let turn_id = turn.map(|turn| turn.id.clone()).unwrap_or_default();
-        match kind {
-            "agentMessage" => self.markdown(id, &projected.data.body, cx),
-            "imageGeneration" => {
+        match item.body() {
+            agent_protocol::items::ItemBody::AssistantText { .. } => {
+                self.markdown(id, &projected.data.body, cx)
+            }
+            agent_protocol::items::ItemBody::ImageGeneration { .. } => {
                 let path = projected
                     .data
                     .image_sources
@@ -237,33 +238,28 @@ impl Desktop {
                 }
                 body.into_any_element()
             }
-            "userMessage" => {
+            agent_protocol::items::ItemBody::UserMessage { text, content } => {
                 let mut body = user_message_bubble();
                 let mut has_body = false;
-                if item.content.as_ref().unwrap_or(&Value::Null).is_array() {
-                    for (i, part) in array(item.content.as_ref().unwrap_or(&Value::Null))
-                        .iter()
-                        .enumerate()
-                    {
-                        if matches!(text(part, "type"), "localImage" | "image")
-                            || (text(part, "type") == "text" && text(part, "text").is_empty())
-                        {
-                            continue;
-                        }
-                        has_body = true;
-                        body = body.child(match text(part, "type") {
-                            "text" => TextView::markdown(
+                if !content.is_empty() {
+                    for (i, part) in content.iter().enumerate() {
+                        use agent_protocol::items::MessagePart;
+                        let rendered = match part {
+                            MessagePart::Image { .. } => continue,
+                            MessagePart::Text { text } if text.is_empty() => continue,
+                            MessagePart::Text { text } => TextView::markdown(
                                 SharedString::from(format!("{id}-{i}")),
-                                literal(text(part, "text")),
+                                literal(text),
                             )
                             .selectable(true)
                             .into_any_element(),
-                            _ => {
-                                let path = text(part, "path").to_owned();
+                            MessagePart::Attachment { name, path }
+                            | MessagePart::Invocation { name, path } => {
+                                let path = path.clone();
                                 self.button(
                                     format!("{id}-{i}"),
                                     if path.is_empty() {
-                                        part.to_string()
+                                        name.clone()
                                     } else {
                                         file_name(&path)
                                     },
@@ -276,14 +272,16 @@ impl Desktop {
                                 )
                                 .into_any_element()
                             }
-                        });
+                        };
+                        has_body = true;
+                        body = body.child(rendered);
                     }
                 } else {
-                    has_body = !item.text.as_deref().unwrap_or_default().is_empty();
+                    has_body = !text.as_deref().unwrap_or_default().is_empty();
                     body = body.child(
                         TextView::markdown(
                             SharedString::from(id.clone()),
-                            literal(item.text.as_deref().unwrap_or_default()),
+                            literal(text.as_deref().unwrap_or_default()),
                         )
                         .selectable(true),
                     );
@@ -302,7 +300,9 @@ impl Desktop {
                 user_message_row(&id, &projected.data.body, body, timestamp, edit)
                     .into_any_element()
             }
-            "commandExecution" => {
+            agent_protocol::items::ItemBody::CommandExecution {
+                command, exit_code, ..
+            } => {
                 let label = projected.data.title.clone();
                 let toggle = id.clone();
                 let mut body = v_flex().gap_2().child(
@@ -313,7 +313,7 @@ impl Desktop {
                         move |s, _, _| {
                             toggle_set(&mut s.expanded_items, &toggle);
                             if s.expanded_items.contains(&toggle) {
-                                s.detail(turn_id.clone(), toggle.clone());
+                                s.detail(turn_id.clone(), toggle.clone().into());
                             }
                             s.pause_tail();
                             s.remeasure_item(&toggle);
@@ -325,10 +325,7 @@ impl Desktop {
                 if expanded {
                     let output = projected.expanded_body();
                     let copied = output.clone();
-                    let content = format!(
-                        "$ {}\n\n{output}",
-                        item.command.as_deref().unwrap_or_default()
-                    );
+                    let content = format!("$ {}\n\n{output}", command);
                     body = body
                         .child(
                             h_flex()
@@ -353,16 +350,14 @@ impl Desktop {
                         )
                         .child(Self::activity_text(format!("output-{id}"), &content, ""))
                         .child(div().text_sm().text_color(rgb(0x999999)).child(format!(
-                                "{} {}",
-                                item.status.as_deref().unwrap_or_default(),
-                                item.exit_code
-                                    .map(|v| format!("exit {v}"))
-                                    .unwrap_or_default()
-                            )));
+                            "{} {}",
+                            item.status.label(),
+                            exit_code.map(|v| format!("exit {v}")).unwrap_or_default()
+                        )));
                 }
                 body.into_any_element()
             }
-            "fileChange" => {
+            agent_protocol::items::ItemBody::FileChange { .. } => {
                 let mut body = v_flex().gap_3();
                 for (i, change) in agent_core::presentation::body::file_changes(item).enumerate() {
                     let path = change.path.into_owned();
@@ -379,7 +374,7 @@ impl Desktop {
                             move |s, _, _| {
                                 toggle_set(&mut s.expanded_items, &toggle);
                                 if s.expanded_items.contains(&toggle) {
-                                    s.detail(turn_id.clone(), toggle.clone());
+                                    s.detail(turn_id.clone(), toggle.clone().into());
                                 }
                                 s.pause_tail();
                                 s.remeasure_item(&toggle);
@@ -393,12 +388,25 @@ impl Desktop {
                         ));
                     body = body.child(row);
                     if expanded {
-                        body = body.child(Self::diff(
-                            &mut self.diffs,
-                            format!("diff-{id}-{i}"),
-                            &change.diff,
-                            cx,
-                        ));
+                        if let Some(diff) = &change.diff {
+                            body = body.child(Self::diff(
+                                &mut self.diffs,
+                                format!("diff-{id}-{i}"),
+                                diff,
+                                cx,
+                            ));
+                        }
+                        if change.diff.is_none() || change.proposal.is_some() {
+                            let details = agent_core::presentation::body::file_change_details(
+                                None,
+                                change.proposal,
+                            );
+                            body = body.child(Self::activity_text(
+                                format!("file-details-{id}-{i}"),
+                                &details,
+                                "",
+                            ));
+                        }
                     }
                 }
                 body.into_any_element()
@@ -418,7 +426,7 @@ impl Desktop {
                         move |s, _, _| {
                             toggle_set(&mut s.expanded_items, &toggle);
                             if s.expanded_items.contains(&toggle) {
-                                s.detail(turn_id.clone(), toggle.clone());
+                                s.detail(turn_id.clone(), toggle.clone().into());
                             }
                             s.pause_tail();
                             s.remeasure_item(&toggle);
@@ -437,6 +445,7 @@ impl Desktop {
     }
     pub(super) fn turn(
         &mut self,
+        session: Option<&SessionRef>,
         projected: &Arc<agent_core::presentation::conversation::RenderedTurn>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -504,7 +513,7 @@ impl Desktop {
                     }
                 }
                 ConversationRowContent::PendingRequest { request } => {
-                    body = body.child(self.request_card(&request.key, request, cx));
+                    body = body.child(self.request_card(request, cx));
                 }
                 ConversationRowContent::Error { error } => {
                     body = body.child(div().text_color(rgb(0xff8e86)).child(error.message.clone()));
@@ -529,33 +538,37 @@ impl Desktop {
                                             ));
                                         }),
                                 )
-                                .when_some(fork_turn_id.clone(), |actions, turn_id| {
-                                    let thread_id = self.selected().to_owned();
-                                    actions.child(
-                                        Button::new(format!("fork-{}", item.data.id))
-                                            .small()
-                                            .ghost()
-                                            .tooltip("ここから会話を分岐")
-                                            .accessibility_label("ここから会話を分岐")
-                                            .on_click(cx.listener(move |view, _, _, cx| {
-                                                if !view.snapshot.connected || view.busy > 0 {
-                                                    return;
-                                                }
-                                                view.busy += 1;
-                                                view.perform(
-                                                    Intent::ForkThread(op::ForkThread::new(
-                                                        thread_id.clone(),
-                                                        turn_id.clone(),
-                                                    )),
-                                                    OperationCompletion::Busy,
-                                                );
-                                                cx.notify();
-                                            }))
-                                            .icon(Icon::default().path("bex/branch.svg"))
-                                            .debug_selector(|| "response-fork".into())
-                                            .disabled(!self.snapshot.connected || self.busy > 0),
-                                    )
-                                }),
+                                .when_some(
+                                    session.cloned().zip(fork_turn_id.clone()),
+                                    |actions, (thread_id, turn_id)| {
+                                        actions.child(
+                                            Button::new(format!("fork-{}", item.data.id))
+                                                .small()
+                                                .ghost()
+                                                .tooltip("ここから会話を分岐")
+                                                .accessibility_label("ここから会話を分岐")
+                                                .on_click(cx.listener(move |view, _, _, cx| {
+                                                    if !view.snapshot.connected || view.busy > 0 {
+                                                        return;
+                                                    }
+                                                    view.busy += 1;
+                                                    view.perform(
+                                                        Intent::ForkSession(op::ForkSession::new(
+                                                            thread_id.clone(),
+                                                            turn_id.clone(),
+                                                        )),
+                                                        OperationCompletion::Busy,
+                                                    );
+                                                    cx.notify();
+                                                }))
+                                                .icon(Icon::default().path("bex/branch.svg"))
+                                                .debug_selector(|| "response-fork".into())
+                                                .disabled(
+                                                    !self.snapshot.connected || self.busy > 0,
+                                                ),
+                                        )
+                                    },
+                                ),
                         );
                     }
                 }
@@ -683,12 +696,12 @@ impl Desktop {
 
     pub(super) fn request_card(
         &mut self,
-        key: &str,
         request: &agent_core::presentation::conversation::Request,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        use agent_protocol::requests::{Answer, ElicitationAnswer, ElicitationInput, RequestBody};
         let id = &request.id;
-        let params = &request.params;
+        let key = id;
         let Some(inputs) = self.requests.get(key) else {
             return div().into_any_element();
         };
@@ -698,125 +711,199 @@ impl Desktop {
             .rounded_lg()
             .bg(rgb(0x30312a))
             .child(request.title.clone())
-            .child(request.body.clone())
-            .child(
+            .child(request.body.clone());
+        if !request.details.is_empty() {
+            body = body.child(
                 TextView::markdown(
                     SharedString::from(format!("request-{key}")),
-                    fenced(
-                        &serde_json::to_string_pretty(params).unwrap_or_default(),
-                        "json",
-                    ),
+                    fenced(&request.details, "json"),
                 )
                 .selectable(true),
             );
-        if inputs.sent || !request.can_respond {
-            return body
-                .child("回答を送信しました。Host の確認を待っています。")
-                .into_any_element();
         }
-        if !inputs.questions.is_empty() {
-            for question in &inputs.questions {
-                body = body.child(question.prompt.clone());
-                for (index, option) in question.options.iter().enumerate() {
-                    let input = question.input.clone();
-                    let value = option.clone();
-                    body = body.child(self.button(
-                        format!("answer-{key}-{}-{index}", question.id),
-                        option.clone(),
-                        cx,
-                        move |_, window, cx| {
-                            input.update(cx, |input, cx| input.set_value(value.clone(), window, cx))
-                        },
-                    ));
-                }
-                body = body.child(Input::new(&question.input));
-            }
-            let key = key.to_owned();
-            let id = id.clone();
-            body = body.child(self.button(
-                format!("respond-{key}"),
-                "回答を送信",
-                cx,
-                move |view, _, cx| {
-                    let Some(inputs) = view.requests.get(&key) else {
-                        return;
-                    };
-                    let answers = inputs
-                        .questions
-                        .iter()
-                        .map(|question| {
-                            (
-                                question.id.clone(),
-                                question.input.read(cx).value().to_string(),
-                            )
-                        })
-                        .collect();
-                    view.respond(key.clone(), id.clone(), Answer::Questions { answers });
-                },
-            ));
-        } else if matches!(
-            request.kind,
-            agent_core::presentation::conversation::RequestKind::CommandApproval
-                | agent_core::presentation::conversation::RequestKind::FileApproval
-        ) {
-            let mut row = h_flex().gap_2().flex_wrap();
-            for (index, label) in request.decision_labels.iter().enumerate() {
-                let key = key.to_owned();
-                let id = id.clone();
-                row = row.child(self.button(
-                    format!("decision-{key}-{index}"),
-                    label.clone(),
-                    cx,
-                    move |view, _, _| {
-                        view.respond(
-                            key.clone(),
-                            id.clone(),
-                            Answer::Decision {
-                                index: index as u32,
+        if inputs.sent || !request.can_respond {
+            return body.into_any_element();
+        }
+        match &request.request_body {
+            RequestBody::Question { .. } => {
+                for question in &inputs.questions {
+                    body = body.child(question.definition.prompt.clone());
+                    for option in &question.definition.choices {
+                        let request_key = key.to_owned();
+                        let question_id = question.definition.id.clone();
+                        let choice_id = option.id.clone();
+                        let selected = question.selected.contains(&option.id);
+                        body = body.child(self.button(
+                            format!("answer-{key}-{}-{}", question_id, option.id),
+                            format!("{}{}", if selected { "✓ " } else { "" }, option.label),
+                            cx,
+                            move |view, window, cx| {
+                                let Some(question) =
+                                    view.requests.get_mut(&request_key).and_then(|inputs| {
+                                        inputs
+                                            .questions
+                                            .iter_mut()
+                                            .find(|question| question.definition.id == question_id)
+                                    })
+                                else {
+                                    return;
+                                };
+                                if question.definition.multiple {
+                                    toggle_set(&mut question.selected, &choice_id);
+                                } else {
+                                    question.selected.clear();
+                                    question.selected.insert(choice_id.clone());
+                                }
+                                question
+                                    .input
+                                    .update(cx, |input, cx| input.set_value("", window, cx));
                             },
-                        )
-                    },
-                ));
-            }
-            body = body.child(row);
-        } else if matches!(
-            request.kind,
-            agent_core::presentation::conversation::RequestKind::Permissions
-        ) {
-            for (allow, label) in [(true, "今回の権限を許可"), (false, "拒否")] {
+                        ));
+                        if !option.description.is_empty() {
+                            body = body.child(option.description.clone());
+                        }
+                    }
+                    if question.definition.allow_free_text {
+                        body = body.child(Input::new(&question.input));
+                    }
+                }
                 let key = key.to_owned();
                 let id = id.clone();
                 body = body.child(self.button(
-                    format!("permissions-{key}-{allow}"),
-                    label,
-                    cx,
-                    move |view, _, _| {
-                        view.respond(key.clone(), id.clone(), Answer::Permissions { allow })
-                    },
-                ));
-            }
-        } else {
-            let key = key.to_owned();
-            let id = id.clone();
-            body = body
-                .child("要求の形式に合わせて回答JSONを入力")
-                .child(Textarea::new(&inputs.raw))
-                .child(self.button(
-                    format!("raw-{key}"),
+                    format!("respond-{key}"),
                     "回答を送信",
                     cx,
                     move |view, _, cx| {
                         let Some(inputs) = view.requests.get(&key) else {
                             return;
                         };
-                        match serde_json::from_str::<Value>(&inputs.raw.read(cx).value()) {
-                            Ok(value) => {
-                                view.respond(key.clone(), id.clone(), Answer::Raw { value })
-                            }
-                            Err(error) => view.set_error(error.to_string()),
+                        let answers = inputs
+                            .questions
+                            .iter()
+                            .map(|question| {
+                                (
+                                    question.definition.id.clone(),
+                                    agent_core::presentation::conversation::build_question_answer(
+                                        question.definition.multiple,
+                                        question.input.read(cx).value().to_string(),
+                                        question.selected.iter().cloned().collect(),
+                                    ),
+                                )
+                            })
+                            .collect();
+                        view.respond(id.clone(), Answer::Questions { answers });
+                    },
+                ));
+            }
+            RequestBody::Approval { choices, .. } | RequestBody::Permission { choices, .. } => {
+                let permission = matches!(request.request_body, RequestBody::Permission { .. });
+                let mut row = h_flex().gap_2().flex_wrap();
+                for choice in choices {
+                    let key = key.to_owned();
+                    let id = id.clone();
+                    let choice_id = choice.id.clone();
+                    row = row.child(self.button(
+                        format!("decision-{key}-{}", choice.id),
+                        choice.label.clone(),
+                        cx,
+                        move |view, _, _| {
+                            view.respond(
+                                id.clone(),
+                                if permission {
+                                    Answer::Permission {
+                                        choice_id: choice_id.clone(),
+                                    }
+                                } else {
+                                    Answer::Approval {
+                                        choice_id: choice_id.clone(),
+                                    }
+                                },
+                            )
+                        },
+                    ));
+                    if !choice.description.is_empty() {
+                        body = body.child(choice.description.clone());
+                    }
+                }
+                body = body.child(row);
+            }
+            RequestBody::Elicitation { input, .. } => {
+                if let ElicitationInput::Url { url } = input {
+                    let url = url.clone();
+                    body = body.child(self.button(
+                        format!("elicitation-url-{key}"),
+                        "リンクを開く",
+                        cx,
+                        move |_, _, cx| cx.open_url(&url),
+                    ));
+                } else {
+                    body = body.child(Textarea::new(&inputs.response));
+                }
+                let accept_key = key.to_owned();
+                let accept_id = id.clone();
+                let request_body = request.request_body.clone();
+                body = body.child(self.button(
+                    format!("elicitation-accept-{accept_key}"),
+                    "確認して送信",
+                    cx,
+                    move |view, _, cx| {
+                        let Some(inputs) = view.requests.get(&accept_key) else {
+                            return;
+                        };
+                        match agent_core::presentation::conversation::answer_from_json(
+                            &request_body,
+                            &inputs.response.read(cx).value(),
+                        ) {
+                            Ok(answer) => view.respond(accept_id.clone(), answer),
+                            Err(error) => view.set_error(error),
                         }
                     },
                 ));
+                for (action, label) in [
+                    (ElicitationAnswer::Decline, "辞退"),
+                    (ElicitationAnswer::Cancel, "キャンセル"),
+                ] {
+                    let key = key.to_owned();
+                    let id = id.clone();
+                    body = body.child(self.button(
+                        format!("elicitation-{label}-{key}"),
+                        label,
+                        cx,
+                        move |view, _, _| {
+                            view.respond(
+                                id.clone(),
+                                Answer::Elicitation {
+                                    action: action.clone(),
+                                },
+                            )
+                        },
+                    ));
+                }
+            }
+            RequestBody::ToolExecution { .. } => {
+                let key = key.to_owned();
+                let id = id.clone();
+                let request_body = request.request_body.clone();
+                body = body
+                    .child(Textarea::new(&inputs.response))
+                    .child(self.button(
+                        format!("tool-answer-{key}"),
+                        "実行結果を送信",
+                        cx,
+                        move |view, _, cx| {
+                            let Some(inputs) = view.requests.get(&key) else {
+                                return;
+                            };
+                            match agent_core::presentation::conversation::answer_from_json(
+                                &request_body,
+                                &inputs.response.read(cx).value(),
+                            ) {
+                                Ok(answer) => view.respond(id.clone(), answer),
+                                Err(error) => view.set_error(error),
+                            }
+                        },
+                    ));
+            }
         }
         h_flex()
             .w_full()
@@ -832,30 +919,38 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) {
         self.requests
-            .retain(|key, _| self.snapshot.requests.contains_key(key));
-        for (key, request) in self.snapshot.requests.iter() {
+            .retain(|key, _| self.snapshot.request(key).is_some());
+        for request in self.snapshot.requests() {
+            let key = &request.id;
             if self.requests.contains_key(key) {
                 continue;
             }
-            let questions = array(field(&request.params, "questions"))
-                .iter()
-                .map(|question| Question {
-                    id: text(question, "id").into(),
-                    prompt: text(question, "question").into(),
-                    options: array(&question["options"])
-                        .iter()
-                        .map(|option| text(option, "label").into())
-                        .collect(),
-                    input: cx.new(|cx| InputState::new(window, cx).placeholder("回答を入力")),
-                })
-                .collect();
+            let questions = match &request.body {
+                agent_protocol::requests::RequestBody::Question { questions } => questions
+                    .iter()
+                    .map(|question| Question {
+                        definition: question.clone(),
+                        selected: HashSet::new(),
+                        input: cx.new(|cx| {
+                            InputState::new(window, cx)
+                                .placeholder("回答を入力")
+                                .masked(question.secret)
+                        }),
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
             self.requests.insert(
                 key.clone(),
                 RequestInputs {
                     questions,
-                    raw: cx.new(|cx| {
+                    response: cx.new(|cx| {
                         TextareaState::new(window, cx)
-                            .default_value("{}")
+                            .default_value(
+                                agent_core::presentation::conversation::request_input_default(
+                                    request.body.clone(),
+                                ),
+                            )
                             .auto_grow(3, 8)
                     }),
                     sent: false,
@@ -987,7 +1082,11 @@ mod rendering_tests {
     impl Render for ConversationView {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.desktop.update(cx, |desktop, cx| {
-                desktop.turn(&self.conversation.turns[0], cx)
+                desktop.turn(
+                    self.conversation.source.id.as_ref(),
+                    &self.conversation.turns[0],
+                    cx,
+                )
             })
         }
     }
@@ -1040,15 +1139,8 @@ mod rendering_tests {
     #[gpui::test]
     fn completed_response_offers_fork_but_streaming_response_does_not(cx: &mut TestAppContext) {
         let _runtime = init(cx);
-        for status in ["completed", "inProgress"] {
-            let source = serde_json::from_value(serde_json::json!({
-                "id": "fixture", "capabilities": {"additionalInput":true,"fork":true,"rename":true,"modelChange":true}, "turns": [{
-                    "id": "turn", "status": status, "items": [{
-                        "id": "answer", "type": "agentMessage", "phase": "final_answer",
-                        "text": "Answer"
-                    }]
-                }]
-            }))
+        for status in ["completed", "running"] {
+            let source = serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"fixture"},"capabilities":{"additionalInput":true,"fork":true,"rename":true,"modelChange":true},"turns":[{"id":"turn","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"Answer","phase":"final"}}}}}]}]}))
             .unwrap();
             let (_, window) = cx.add_window_view(|window, cx| {
                 ConversationView::new(Snapshot::default(), source, window, cx)
@@ -1072,12 +1164,10 @@ mod rendering_tests {
     fn conversation_navigation_returns_to_latest_and_resumes_following(cx: &mut TestAppContext) {
         let _runtime = init(cx);
         let source = serde_json::from_value(serde_json::json!({
-            "id": "fixture", "turns": (0..20).map(|i| serde_json::json!({
+            "id": {"provider":"codex","id":"fixture"}, "turns": (0..20).map(|i| serde_json::json!({
                 "id": format!("turn-{i}"), "status": "completed", "items": [
-                    {"id": format!("user-{i}"), "type": "userMessage", "content": [
-                        {"type": "inputText", "text": format!("Question {i}")}
-                    ]},
-                    {"id": format!("answer-{i}"), "type": "agentMessage", "text": "A long answer\n".repeat(10)}
+                    {"id": format!("user-{i}"), "body": {"inline":{"body":{"userMessage":{"text":format!("Question {i}"),"content":[]}}}}},
+                    {"id": format!("answer-{i}"), "body":{"inline":{"body":{"assistantText":{"text":"A long answer\n".repeat(10),"phase":"final"}}}}}
                 ]
             })).collect::<Vec<_>>()
         })).unwrap();
@@ -1090,9 +1180,18 @@ mod rendering_tests {
             };
             fixture.desktop.update(cx, |desktop, _| {
                 let snapshot = std::sync::Arc::make_mut(&mut desktop.snapshot);
-                Arc::make_mut(&mut snapshot.navigation).thread_id = Some("fixture".into());
-                std::sync::Arc::make_mut(&mut snapshot.conversations)
-                    .insert("fixture".into(), fixture.conversation.source.clone());
+                Arc::make_mut(&mut snapshot.navigation).thread_id =
+                    Some(agent_protocol::session::SessionRef {
+                        provider: agent_protocol::session::ProviderKind::Codex,
+                        id: "fixture".into(),
+                    });
+                std::sync::Arc::make_mut(&mut snapshot.conversations).insert(
+                    agent_protocol::session::SessionRef {
+                        provider: agent_protocol::session::ProviderKind::Codex,
+                        id: "fixture".into(),
+                    },
+                    fixture.conversation.source.clone(),
+                );
                 desktop.rendered = Some(fixture.conversation.clone());
                 desktop.rows = fixture
                     .conversation
@@ -1203,14 +1302,7 @@ mod rendering_tests {
     #[gpui::test]
     fn file_changes_render_and_expand_in_the_desktop_view(cx: &mut TestAppContext) {
         let _runtime = init(cx);
-        let source = serde_json::from_value(serde_json::json!({
-            "id":"fixture", "turns":[{"id":"turn", "status":"completed", "items":[{
-                "id":"files", "type":"fileChange", "status":"completed", "changes":[
-                    {"path":"/fixture/a.txt", "kind":"update", "diff":"@@ -1 +1 @@\n-old\n+new"},
-                    {"path":"/fixture/b.txt", "kind":"add", "diff":"@@ -0,0 +1 @@\n+second"}
-                ]
-            }]}]
-        }))
+        let source = serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"fixture"},"turns":[{"id":"turn","status":"completed","items":[{"id":"files","status":"completed","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[{"path":"/fixture/a.txt","kind":{"update":{"movePath":null}},"diff":"@@ -1 +1 @@\n-old\n+new","proposal":null},{"path":"/fixture/b.txt","kind":"add","diff":"@@ -0,0 +1 @@\n+second","proposal":null}],"output":""}}}}}]}]}))
         .unwrap();
         let (view, window) = cx.add_window_view(|window, cx| {
             ConversationView::new(Snapshot::default(), source, window, cx)
@@ -1259,9 +1351,7 @@ mod rendering_tests {
                 let items = if pending {
                     serde_json::json!([])
                 } else {
-                    serde_json::json!([{
-                        "id":"user", "type":"userMessage", "content":[{"type":"text","text":"caption"},{"type":"localImage","path":"/fixture/image.png"}]
-                    }])
+                    serde_json::json!([{"id":"user","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[{"text":{"text":"caption"}},{"image":{"source":"/fixture/image.png"}}]}}}}}])
                 };
                 let mut snapshot = Snapshot::default();
                 if pending {
@@ -1269,7 +1359,11 @@ mod rendering_tests {
                         "pending".into(),
                         Arc::new(agent_core::state::PendingSubmission {
                             sequence: 0,
-                            draft_key: "fixture".into(),
+                            draft_key: agent_protocol::session::SessionRef {
+                                provider: agent_protocol::session::ProviderKind::Codex,
+                                id: "fixture".into(),
+                            }
+                            .into(),
                             draft: Arc::new(agent_core::state::Draft {
                                 text: "caption".into(),
                                 attachments: vec![agent_core::state::Attachment {
@@ -1287,7 +1381,7 @@ mod rendering_tests {
                     );
                 }
                 let source = serde_json::from_value(serde_json::json!({
-                    "id":"fixture", "turns":[{"id":"turn", "status":"completed", "items":items}]
+                    "id":{"provider":"codex","id":"fixture"}, "turns":[{"id":"turn", "status":"completed", "items":items}]
                 }))
                 .unwrap();
                 let (view, window) = cx.add_window_view(|window, cx| {

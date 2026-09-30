@@ -32,7 +32,9 @@ private const val THUMBNAIL_MAX_PIXELS = 512
 
 @Composable
 internal fun AttachmentThumbnail(
-    path: String, name: String, perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+    path: String,
+    name: String,
+    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
     modifier: Modifier = Modifier.size(104.dp),
 ) {
     val context = LocalContext.current
@@ -42,28 +44,27 @@ internal fun AttachmentThumbnail(
         val target = File(context.cacheDir, "thumbnail-${UUID.randomUUID()}")
         try {
             if (path.startsWith("data:image/")) {
-                withContext(Dispatchers.IO) {
-                    target.writeBytes(Base64.getDecoder().decode(path.substringAfter(',')))
-                }
+                withContext(Dispatchers.IO) { target.writeBytes(Base64.getDecoder().decode(path.substringAfter(','))) }
             } else {
                 kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
                     perform(Intent.DownloadFile(DownloadFile(path, target.path))) { result ->
-                        if (continuation.isActive) continuation.resumeWith(result.map { Unit })
-                        else target.delete()
+                        if (continuation.isActive) continuation.resumeWith(result.map { Unit }) else target.delete()
                     }
                 }
             }
-            bitmap = withContext(Dispatchers.IO) {
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeFile(target.path, bounds)
-                val options = BitmapFactory.Options().apply {
-                    inSampleSize = 1
-                    while (maxOf(bounds.outWidth, bounds.outHeight) / inSampleSize > THUMBNAIL_MAX_PIXELS) {
-                        inSampleSize *= 2
-                    }
+            bitmap =
+                withContext(Dispatchers.IO) {
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(target.path, bounds)
+                    val options =
+                        BitmapFactory.Options().apply {
+                            inSampleSize = 1
+                            while (maxOf(bounds.outWidth, bounds.outHeight) / inSampleSize > THUMBNAIL_MAX_PIXELS) {
+                                inSampleSize *= 2
+                            }
+                        }
+                    checkNotNull(BitmapFactory.decodeFile(target.path, options)).asImageBitmap()
                 }
-                checkNotNull(BitmapFactory.decodeFile(target.path, options)).asImageBitmap()
-            }
         } catch (error: kotlinx.coroutines.CancellationException) {
             throw error
         } catch (_: Exception) {

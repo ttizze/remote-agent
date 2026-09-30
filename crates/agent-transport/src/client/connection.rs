@@ -3,7 +3,7 @@ use crate::protocol;
 use crate::{
     diagnostics::{ConnectionPhase as Phase, connection::Trace},
     framing,
-    peer::{Delivery, PeerError},
+    peer::PeerError,
     protocol::{Call, Response},
 };
 use serde::de::DeserializeOwned;
@@ -162,8 +162,8 @@ impl Client {
         query: crate::models::ListQuery,
     ) -> Result<(), PeerError> {
         let reply = self
-            .start_call(&Call::ListThreads(
-                agent_protocol::operations::ListThreads::new(query.clone()),
+            .start_call(&Call::ListSessions(
+                agent_protocol::operations::ListSessions::new(query.clone()),
             ))
             .await?;
         *self.initial_list.lock().unwrap() = Some((query, reply));
@@ -254,7 +254,7 @@ impl Client {
         &self,
         call: &Call,
     ) -> Result<(tokio_util::bytes::BytesMut, Updates), PeerError> {
-        let initial = if let Call::ListThreads(params) = call {
+        let initial = if let Call::ListSessions(params) = call {
             // A changed query discards the old read instead of publishing it or
             // retaining a semaphore slot for the lifetime of the connection.
             self.initial_list
@@ -383,9 +383,8 @@ fn response<T>(response: Response<T>) -> Result<T, PeerError> {
     match response {
         Response::Success { result } => Ok(result),
         Response::Failure { error } => Err(PeerError::Remote {
-            delivery: serde_json::from_value(error["delivery"].clone())
-                .unwrap_or(Delivery::Unknown),
-            error: error.to_string(),
+            delivery: error.delivery,
+            error: serde_json::to_string(&error).expect("failure serializes"),
             sequence: None,
         }),
     }
@@ -554,12 +553,12 @@ mod tests {
             let IncomingRequest::Call(pending) = incoming.accept_request().await.unwrap() else {
                 panic!("title read expected")
             };
-            assert!(matches!(pending.call, Call::ListThreads(_)));
+            assert!(matches!(pending.call, Call::ListSessions(_)));
             tokio::time::sleep(Duration::from_millis(120)).await;
             assert!(matches!(
                 tokio::time::timeout(
                     Duration::from_millis(50),
-                    remote.call(&agent_protocol::operations::ListThreads::new(query))
+                    remote.call(&agent_protocol::operations::ListSessions::new(query))
                 )
                 .await
                 .unwrap(),
@@ -621,15 +620,15 @@ mod tests {
                         IncomingRequest::Call(request) => {
                             requests.spawn(async move {
                                 let mut send = request.send;
-                                if request.call.method() == "malformed" {
+                                if matches!(&request.call, crate::protocol::Call::ReadVisualization(params) if params.path == "malformed") {
                                     let _ = framing::write_frame(&mut send, &[0]).await;
                                     return;
                                 }
-                                if request.call.method() == "silent" {
+                                if matches!(&request.call, crate::protocol::Call::ReadVisualization(params) if params.path == "silent") {
                                     let _ = send.stopped().await;
                                     return;
                                 }
-                                let body = if request.call.method() == "large" {
+                                let body = if matches!(&request.call, crate::protocol::Call::ReadVisualization(params) if params.path == "large") {
                                     "x".repeat(8 * 1024 * 1024)
                                 } else {
                                     "pong".into()
@@ -652,10 +651,7 @@ mod tests {
             send.write_all(&[CALL]).await.unwrap();
             crate::framing::write(
                 &mut send,
-                crate::protocol::Call::Provider(crate::protocol::ProviderCall {
-                    method: "large".into(),
-                    params: serde_json::json!({}),
-                }),
+                crate::protocol::Call::ReadVisualization(agent_protocol::operations::LoadVisualization {path:"large".into(),cwd:"/fixture".into()}),
             )
             .await
             .unwrap();
@@ -663,12 +659,7 @@ mod tests {
             recv.read_exact(&mut [0u8; 1]).await.unwrap();
             assert_eq!(
                 remote
-                    .request::<String>(&crate::protocol::Call::Provider(
-                        crate::protocol::ProviderCall {
-                            method: "ping".into(),
-                            params: serde_json::json!({})
-                        }
-                    ))
+                    .request::<String>(&crate::protocol::Call::ReadVisualization(agent_protocol::operations::LoadVisualization {path:"ping".into(),cwd:"/fixture".into()}))
                     .await
                     .unwrap(),
                 "pong"
@@ -676,34 +667,19 @@ mod tests {
             drop((send, recv));
             assert!(
                 remote
-                    .request::<String>(&crate::protocol::Call::Provider(
-                        crate::protocol::ProviderCall {
-                            method: "malformed".into(),
-                            params: serde_json::json!({})
-                        }
-                    ))
+                    .request::<String>(&crate::protocol::Call::ReadVisualization(agent_protocol::operations::LoadVisualization {path:"malformed".into(),cwd:"/fixture".into()}))
                     .await
                     .is_err()
             );
             assert!(matches!(
                 remote
-                    .request::<String>(&crate::protocol::Call::Provider(
-                        crate::protocol::ProviderCall {
-                            method: "silent".into(),
-                            params: serde_json::json!({})
-                        }
-                    ))
+                    .request::<String>(&crate::protocol::Call::ReadVisualization(agent_protocol::operations::LoadVisualization {path:"silent".into(),cwd:"/fixture".into()}))
                     .await,
                 Err(PeerError::RequestTimeout { .. })
             ));
             assert_eq!(
                 remote
-                    .request::<String>(&crate::protocol::Call::Provider(
-                        crate::protocol::ProviderCall {
-                            method: "ping".into(),
-                            params: serde_json::json!({})
-                        }
-                    ))
+                    .request::<String>(&crate::protocol::Call::ReadVisualization(agent_protocol::operations::LoadVisualization {path:"ping".into(),cwd:"/fixture".into()}))
                     .await
                     .unwrap(),
                 "pong"

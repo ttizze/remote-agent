@@ -60,12 +60,6 @@ extension JsonValue {
     }
 }
 
-extension Request {
-    var paramsJson: String {
-        JsonValue.object(fields: params).formatted
-    }
-}
-
 final class ConversationItem: Sendable {
     let source: RenderedItem
     let data: ItemPresentation

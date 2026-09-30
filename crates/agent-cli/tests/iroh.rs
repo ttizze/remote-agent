@@ -28,8 +28,7 @@ async fn exercise(command: &[&str], expected: Value) {
             .authorize(&trust)
             .unwrap();
         let (session, mut reader, writer) = host_fixture::accept(session).await;
-        let approval =
-            (mode == "approve").then(|| serde_json::from_str::<Value>(command[1]).unwrap());
+        let approval = (mode == "approve").then(|| Value::String(command[1].into()));
         let mut handled = false;
         let mut reads = 0;
         let mut lists = 0;
@@ -53,7 +52,7 @@ async fn exercise(command: &[&str], expected: Value) {
                 Some("host/session/answer") => {
                     assert_eq!(
                         request["params"],
-                        json!({"requestId":approval.as_ref().unwrap(),"result":{"decision":"decline"}})
+                        json!({"requestId":approval.as_ref().unwrap(),"answer":{"approval":{"choiceId":"decline-choice"}}})
                     );
                     assert!(!handled);
                     handled = true;
@@ -61,7 +60,7 @@ async fn exercise(command: &[&str], expected: Value) {
                 }
                 Some("model/list") => json!({"data":[],"nextCursor":null}),
                 Some("host/account/list") => json!({"accounts":[]}),
-                Some("host/thread/list") => {
+                Some("host/session/list") => {
                     lists += 1;
                     let (projects, chats, search) = if mode == "list" {
                         (9, 11, "CLI search")
@@ -76,7 +75,7 @@ async fn exercise(command: &[&str], expected: Value) {
                         assert!(!handled);
                         handled = true;
                     }
-                    json!({"data":[{"id":"fixture-thread","name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
+                    json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
                 }
                 Some("host/session/open") => {
                     reads += 1;
@@ -84,9 +83,9 @@ async fn exercise(command: &[&str], expected: Value) {
                         request["params"],
                         json!({"session":{"provider":"codex","id":"fixture-thread"},"limit":5})
                     );
-                    let mut thread = json!({"id":"fixture-thread","cwd":"/fixture","status":{"type":"idle"},"turns":[]});
+                    let mut thread = json!({"id":{"provider":"codex","id":"fixture-thread"},"cwd":"/fixture","status":"idle","turns":[]});
                     if let Some(id) = &approval {
-                        thread["requests"] = json!({id.to_string():{"id":id,"method":"item/commandExecution/requestApproval","params":{"threadId":"fixture-thread"}}});
+                        thread["requests"] = json!({id.as_str().unwrap():{"id":id,"target":"session","delivery":"awaiting","body":{"approval":{"kind":"command","description":"fixture","details":"","choices":[{"id":"accept-choice","label":"承認","description":"","meaning":"allow","scope":"once"},{"id":"session-choice","label":"セッション中","description":"","meaning":"allow","scope":"session"},{"id":"decline-choice","label":"拒否","description":"","meaning":"deny","scope":"once"}]}}}});
                     }
                     json!({"session":request["params"]["session"],"subscriptionId":"00000000-0000-0000-0000-000000000001","revision":0,"response":{"thread":thread}})
                 }
@@ -99,7 +98,7 @@ async fn exercise(command: &[&str], expected: Value) {
                     assert!(!handled);
                     assert_eq!(
                         request["params"],
-                        json!({"threadId":"fixture-thread","clientUserMessageId":"fixture-message","model":null,"effort":null,"serviceTierForTurn":null,"input":[{"type":"text","text":"hello"}]})
+                        json!({"threadId":{"provider":"codex","id":"fixture-thread"},"clientUserMessageId":"fixture-message","model":null,"effort":null,"serviceTierForTurn":null,"input":[{"text":{"text":"hello"}}]})
                     );
                     handled = true;
                     json!({"turnId":"fixture-turn"})
@@ -158,14 +157,14 @@ async fn exercise(command: &[&str], expected: Value) {
 }
 #[tokio::test]
 async fn cli_lists_over_iroh() {
-    exercise(&["list", "--project-limit", "9", "--chat-limit", "11", "--search", "CLI search"],json!({"data":[{"id":"fixture-thread","name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).await;
+    exercise(&["list", "--project-limit", "9", "--chat-limit", "11", "--search", "CLI search"],json!({"data":[{"id":{"provider":"codex","id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).await;
 }
 #[tokio::test]
 async fn cli_sends_over_iroh() {
     exercise(
         &[
             "send",
-            "fixture-thread",
+            r#"{"provider":"codex","id":"fixture-thread"}"#,
             "hello",
             "--client-message-id",
             "fixture-message",
@@ -182,7 +181,7 @@ async fn cli_answers_approval_over_iroh() {
 #[tokio::test]
 async fn cli_preserves_string_approval_ids_over_iroh() {
     exercise(
-        &["approve", r#""fixture-approval""#, "--decision", "2"],
+        &["approve", "fixture-approval", "--decision", "2"],
         Value::Null,
     )
     .await;

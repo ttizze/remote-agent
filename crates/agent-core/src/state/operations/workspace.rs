@@ -191,7 +191,7 @@ impl Operation for DownloadFile {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadSessionImages {
-    pub thread_id: String,
+    pub thread_id: crate::session::SessionRef,
 }
 impl Operation for LoadSessionImages {
     type Output = Vec<crate::client::SessionImage>;

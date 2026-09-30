@@ -236,7 +236,7 @@ impl Desktop {
                             self.button("ai-edit", "AI に編集を依頼", cx, |s, _, _| {
                                 if let Some(file) = &s.snapshot.workspace.file {
                                     s.dispatch(Intent::SetDraftText {
-                                        thread_id: s.draft_key().into(),
+                                        thread_id: s.draft_key().clone(),
                                         text: format!(
                                             "ファイル {} を編集してください。\n\n",
                                             file.path

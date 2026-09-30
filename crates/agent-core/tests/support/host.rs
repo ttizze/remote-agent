@@ -15,8 +15,6 @@ use agent_transport::{
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Mutex, time::Duration};
 use tokio::sync::mpsc;
-#[path = "provider_fixture.rs"]
-mod provider_fixture;
 
 pub struct Request {
     call: Call,
@@ -56,8 +54,8 @@ impl Session {
 }
 #[derive(Default)]
 struct State {
-    sessions: HashMap<String, uuid::Uuid>,
-    threads: HashMap<String, Value>,
+    sessions: HashMap<SessionRef, uuid::Uuid>,
+    threads: HashMap<SessionRef, Value>,
 }
 pub struct Writer {
     state: Mutex<State>,
@@ -169,7 +167,7 @@ impl Writer {
             }
         }
     }
-    pub fn current(&self, id: &str) -> Value {
+    pub fn current(&self, id: &SessionRef) -> Value {
         self.state
             .lock()
             .unwrap()
@@ -177,7 +175,7 @@ impl Writer {
             .get(id)
             .cloned()
             .unwrap_or_else(
-                || json!({"thread":{"id":id,"cwd":"/fixture","status":{"type":"idle"},"turns":[]}}),
+                || json!({"thread":{"id":id,"cwd":"/fixture","status":"idle","turns":[]}}),
             )
     }
     fn prepare(
@@ -192,14 +190,16 @@ impl Writer {
                 .filter(|result| result.get("thread").is_some())
                 .cloned()
             {
-                if let Some(id) = response["thread"]["id"].as_str() {
-                    state.threads.insert(id.into(), response.clone());
+                if let Ok(id) =
+                    serde_json::from_value::<SessionRef>(response["thread"]["id"].clone())
+                {
+                    state.threads.insert(id, response.clone());
                 }
                 if request.is_some_and(|request| request["method"] == "host/session/open") {
                     let target: SessionRef =
                         serde_json::from_value(request.unwrap()["params"]["session"].clone())?;
                     let subscription = uuid::Uuid::new_v4();
-                    state.sessions.insert(target.thread_id(), subscription);
+                    state.sessions.insert(target.clone(), subscription);
                     let mut response = response;
                     response["thread"]["capabilities"] = json!({"additionalInput":true,"fork":true,"rename":true,"modelChange":true});
                     value["result"] =
@@ -207,15 +207,22 @@ impl Writer {
                 }
             } else if value.get("method").is_some() {
                 let method = value["method"].as_str().unwrap();
-                let change = if value.get("id").is_some() {
-                    let request: agent_protocol::operations::ServerRequest =
-                        serde_json::from_value(value.clone())?;
+                let change = if method == "fixture/session/request" {
+                    let request: agent_protocol::requests::Request =
+                        serde_json::from_value(value["request"].clone())?;
                     Some((
-                        value["params"]["threadId"].as_str().unwrap().to_owned(),
+                        serde_json::from_value::<SessionRef>(value["session"].clone()).unwrap(),
                         SessionChange::Request { request },
                     ))
                 } else {
-                    provider_fixture::notification_change(method, value["params"].clone())?
+                    if method == "fixture/session/change" {
+                        Some((
+                            serde_json::from_value::<SessionRef>(value["session"].clone())?,
+                            serde_json::from_value::<SessionChange>(value["change"].clone())?,
+                        ))
+                    } else {
+                        None
+                    }
                 };
                 if let Some((id, change)) = change {
                     if let Some(response) = state.threads.get_mut(&id) {
@@ -255,24 +262,27 @@ impl Writer {
         Ok(())
     }
     pub async fn notify(&self, value: Value) -> std::io::Result<()> {
-        let activity = matches!(
-            value["method"].as_str(),
-            Some("turn/started" | "turn/completed" | "thread/status/changed")
-        )
-        .then(|| {
-            (
-                value["params"]["threadId"].as_str().unwrap().to_owned(),
-                value["method"] == "turn/completed"
-                    && value["params"]["turn"]["status"] == "completed",
-            )
-        });
+        let activity = if value["method"] == "fixture/session/change" {
+            let session = serde_json::from_value::<SessionRef>(value["session"].clone())?;
+            let change = serde_json::from_value::<SessionChange>(value["change"].clone())?;
+            match change {
+                SessionChange::Turn { turn, completed } => Some((
+                    session,
+                    completed && turn.status == agent_protocol::execution::TurnStatus::Completed,
+                )),
+                SessionChange::Status { .. } => Some((session, false)),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let prepared = self.prepare(None, value)?;
         if let Some((id, finished)) = activity {
-            let active = self.current(&id)["thread"]["status"]["type"] == "active";
+            let active = self.current(&id)["thread"]["status"] == "running";
             agent_transport::framing::write(
                 &mut *self.events.lock().await,
                 protocol::Notification::Activity {
-                    session: SessionRef::from_thread_id(&id).unwrap(),
+                    session: id.clone(),
                     active,
                     finished: finished && !active,
                 },

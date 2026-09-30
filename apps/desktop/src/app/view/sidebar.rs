@@ -287,7 +287,7 @@ impl Desktop {
         let merged = thread.worktree_merged;
         let merged_id = format!("thread-merged-{}", thread.id);
         SidebarMenuItem::new(thread.title.clone())
-            .active(id == self.selected() && self.tab != Tab::Settings)
+            .active(self.selected() == Some(&id) && self.tab != Tab::Settings)
             .disable(self.busy > 0)
             .suffix(move |_, _| {
                 div()

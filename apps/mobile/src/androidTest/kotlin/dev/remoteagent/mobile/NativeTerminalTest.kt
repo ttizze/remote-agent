@@ -1,6 +1,5 @@
 package dev.remoteagent.mobile
 
-import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import androidx.compose.material3.MaterialTheme
@@ -36,28 +35,35 @@ class NativeTerminalTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val base = instrumentation.targetContext
         val token = UUID.randomUUID().toString()
-        val isolated = object : ContextWrapper(base) {
-            override fun getFilesDir() = File(base.cacheDir, "terminal-$token").apply { mkdirs() }
-            override fun getSharedPreferences(name: String, mode: Int): SharedPreferences =
-                base.getSharedPreferences("$token-$name", mode)
-        }
+        val isolated =
+            object : ContextWrapper(base) {
+                override fun getFilesDir() = File(base.cacheDir, "terminal-$token").apply { mkdirs() }
+
+                override fun getSharedPreferences(name: String, mode: Int): SharedPreferences =
+                    base.getSharedPreferences("$token-$name", mode)
+            }
         val models = ViewModelStore()
         lateinit var model: AndroidAppModel
-        suspend fun perform(intent: Intent) = withContext(Dispatchers.Main) {
-            val complete = CompletableDeferred<Result<Outcome>>()
-            model.perform(intent) { complete.complete(it) }
-            complete.await().getOrThrow()
-        }
+        suspend fun perform(intent: Intent) =
+            withContext(Dispatchers.Main) {
+                val complete = CompletableDeferred<Result<Outcome>>()
+                model.perform(intent) { complete.complete(it) }
+                complete.await().getOrThrow()
+            }
         try {
             withContext(Dispatchers.Main) {
-                model = ViewModelProvider(models, viewModelFactory { initializer { AndroidAppModel(isolated) } })[AndroidAppModel::class.java]
+                model =
+                    ViewModelProvider(models, viewModelFactory { initializer { AndroidAppModel(isolated) } })[
+                        AndroidAppModel::class.java]
                 model.pair(File(base.cacheDir, "fixture-invitation.json").readText())
             }
             withTimeout(30_000) {
-                while (withContext(Dispatchers.Main) {
-                    assertNull("Pairing must not fail while waiting for models", model.notice)
-                    model.busy || !model.snapshot.connected() || model.snapshot.models().isEmpty()
-                }) delay(20)
+                while (
+                    withContext(Dispatchers.Main) {
+                        assertNull("Pairing must not fail while waiting for models", model.notice)
+                        model.busy || !model.snapshot.connected() || model.snapshot.models().isEmpty()
+                    }
+                ) delay(20)
             }
             val cwd = requireNotNull(InstrumentationRegistry.getArguments().getString("cwd"))
             val handle = terminalHandle(cwd)
@@ -79,7 +85,9 @@ class NativeTerminalTest {
             fun type(command: String) {
                 compose.waitUntil(10_000) { device.hasObject(By.res("dev.remoteagent.mobile", "native_terminal")) }
                 device.findObject(By.res("dev.remoteagent.mobile", "native_terminal")).click()
-                compose.waitUntil(10_000) { device.hasObject(By.res("dev.remoteagent.mobile", "native_terminal").focused(true)) }
+                compose.waitUntil(10_000) {
+                    device.hasObject(By.res("dev.remoteagent.mobile", "native_terminal").focused(true))
+                }
                 instrumentation.sendStringSync(command)
                 device.pressKeyCode(android.view.KeyEvent.KEYCODE_ENTER)
             }

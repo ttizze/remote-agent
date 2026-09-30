@@ -35,7 +35,7 @@ pub enum Intent {
     SubmitAccountLogin(SubmitAccountLogin),
     ReadAccountLogin(ReadAccountLogin),
     CancelAccountLogin(CancelAccountLogin),
-    ForkThread(ForkThread),
+    ForkSession(ForkSession),
     StartTerminal(StartTerminal),
     DetachTerminal(DetachTerminal),
     KillTerminal(KillTerminal),
@@ -51,13 +51,13 @@ pub enum Intent {
     UpdateWorktreeSettings(UpdateWorktreeSettings),
     ListWorktrees(ListWorktrees),
     RemoveWorktree(RemoveWorktree),
-    ListThreads(ListThreads),
+    ListSessions(ListSessions),
     AddProject(AddProject),
     ExpandThreadList {
         project_id: Option<String>,
         projects: bool,
     },
-    StartThread(StartThread),
+    CreateSession(CreateSession),
     ReadThread(ReadThread),
     OpenRequest(OpenRequest),
     ReadItem(ReadItem),
@@ -70,11 +70,11 @@ pub enum Intent {
         sequence: u64,
     },
     AddAttachment {
-        draft_key: String,
+        draft_key: DraftKey,
         attachment: Attachment,
     },
     RemoveAttachment {
-        draft_key: String,
+        draft_key: DraftKey,
         index: u32,
     },
     UploadAttachment(UploadAttachment),
@@ -92,48 +92,48 @@ pub enum Intent {
         text: String,
     },
     ReadOlder {
-        thread_id: String,
+        thread_id: crate::session::SessionRef,
     },
     LoadModels(LoadModels),
     SetDraft {
-        thread_id: String,
+        thread_id: DraftKey,
         draft: Draft,
     },
     EditComposer {
-        thread_id: String,
+        thread_id: DraftKey,
         text: String,
         cursor: u32,
     },
     InsertInvocation {
-        thread_id: String,
+        thread_id: DraftKey,
         text: String,
         invocation: agent_protocol::composer::Invocation,
     },
     SetDraftText {
-        thread_id: String,
+        thread_id: DraftKey,
         text: String,
     },
     SelectModel {
-        thread_id: String,
-        model: String,
+        thread_id: DraftKey,
+        model: crate::models::ModelRef,
     },
     SelectEffort {
-        thread_id: String,
+        thread_id: DraftKey,
         effort: String,
     },
     SelectServiceTier {
-        thread_id: String,
+        thread_id: DraftKey,
         service_tier: String,
     },
     Submit {
-        thread_id: Option<String>,
-        client_user_message_id: String,
+        thread_id: Option<crate::session::SessionRef>,
+        client_user_message_id: agent_protocol::ids::ClientInputId,
     },
     RestoreUnknownSubmission {
-        client_user_message_id: String,
+        client_user_message_id: agent_protocol::ids::ClientInputId,
     },
     DiscardUnknownSubmission {
-        client_user_message_id: String,
+        client_user_message_id: agent_protocol::ids::ClientInputId,
     },
     Respond(Respond),
 }
@@ -214,7 +214,7 @@ pub use threads::*;
 mod submission;
 pub use submission::*;
 
-pub(super) fn add_attachment(next: &mut Snapshot, draft_key: String, attachment: Attachment) {
+pub(super) fn add_attachment(next: &mut Snapshot, draft_key: DraftKey, attachment: Attachment) {
     Arc::make_mut(
         Arc::make_mut(&mut next.drafts)
             .entry(draft_key)

@@ -133,7 +133,7 @@ extension ThreadScreen {
                     }
                     Button { composerFocused = false; showingModelSettings = true } label: {
                         Text(model.currentModel?
-                            .displayName ?? (model.selectedModel.isEmpty ? "モデル" : model.selectedModel))
+                            .displayName ?? (model.selectedModel?.id ?? "モデル"))
                             .font(.subheadline).lineLimit(1).truncationMode(.middle)
                             .frame(minWidth: 44, minHeight: 44)
                     }

@@ -9,21 +9,21 @@ impl Operation for AddProject {
     fn apply(self, snapshot: &mut Snapshot, cwd: Self::Output) -> Vec<Effect> {
         let (next, mut effects) = reduce_intent(snapshot, Intent::NewChat { cwd });
         *snapshot = next;
-        effects.push(Effect::execute(ListThreads::new(
+        effects.push(Effect::execute(ListSessions::new(
             (*snapshot.list_query).clone(),
         )));
         effects
     }
     fn stale(self, snapshot: &mut Snapshot, _: Self::Output) -> Vec<Effect> {
-        vec![Effect::execute(ListThreads::new(
+        vec![Effect::execute(ListSessions::new(
             (*snapshot.list_query).clone(),
         ))]
     }
 }
 
-pub use agent_protocol::operations::ListThreads;
+pub use agent_protocol::operations::ListSessions;
 
-impl Operation for ListThreads {
+impl Operation for ListSessions {
     rpc_operation!();
     fn invalidates(&self, snapshot: &Snapshot) -> bool {
         self.query != *snapshot.list_query
@@ -41,12 +41,7 @@ impl Operation for ListThreads {
                 let Some(id) = cached.id.as_ref() else {
                     continue;
                 };
-                let session = cached
-                    .session
-                    .clone()
-                    .or_else(|| crate::session::SessionRef::from_thread_id(id).ok());
-                let Some(session) = session else { continue };
-                let provider = match session.provider {
+                let provider = match id.provider {
                     crate::session::ProviderKind::Codex => "codex",
                     crate::session::ProviderKind::Claude => "claude",
                 };
@@ -58,7 +53,7 @@ impl Operation for ListThreads {
                 {
                     let mut cached = cached.clone();
                     cached.list_stale = Some(true);
-                    cached.status = None;
+                    cached.status = crate::models::SessionStatus::Unknown;
                     threads.data.push(cached);
                 }
             }
@@ -117,13 +112,7 @@ fn item_source<'a>(request: &ReadItem, snapshot: &'a Snapshot) -> Option<&'a Arc
         .find(|item| item.id == request.item_id)
 }
 fn item_deferred(request: &ReadItem, snapshot: &Snapshot) -> bool {
-    snapshot
-        .conversations
-        .get(&request.thread_id)
-        .and_then(|thread| thread.turns.as_ref())
-        .and_then(|turns| turns.iter().rfind(|turn| turn.id == request.turn_id))
-        .and_then(|turn| turn.deferred_item_ids.as_ref())
-        .is_some_and(|ids| ids.contains(&request.item_id))
+    item_source(request, snapshot).is_some_and(|item| item.is_deferred())
 }
 fn apply_item_read(
     request: ReadItem,
@@ -201,7 +190,7 @@ impl Operation for ReadItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadThread {
-    pub thread_id: String,
+    pub thread_id: crate::session::SessionRef,
     #[cfg_attr(feature = "bindings", uniffi(default = false))]
     pub open: bool,
     #[serde(default)]
@@ -209,7 +198,7 @@ pub struct ReadThread {
     pub limit: u32,
 }
 impl ReadThread {
-    pub fn new(thread_id: String) -> Self {
+    pub fn new(thread_id: crate::session::SessionRef) -> Self {
         Self {
             thread_id,
             open: false,
@@ -232,7 +221,7 @@ impl ReadThread {
         self.limit = self.limit.max(5);
         self
     }
-    pub fn open(thread_id: String) -> Self {
+    pub fn open(thread_id: crate::session::SessionRef) -> Self {
         Self {
             open: true,
             ..Self::new(thread_id)
@@ -248,13 +237,12 @@ impl rpc::RpcMethod for ReadThread {
         &self,
     ) -> Result<<Self::Contract as crate::protocol::contracts::Contract>::Params, PeerError> {
         Ok(crate::session::OpenSession {
-            session: crate::session::SessionRef::from_thread_id(&self.thread_id)
-                .map_err(|error| PeerError::InvalidMessage(error.into()))?,
+            session: self.thread_id.clone(),
             limit: self.limit as usize,
         })
     }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        if output.session.thread_id() != self.thread_id {
+        if output.session != self.thread_id {
             return Err("session identity does not match");
         }
         rpc::validate_thread(&output.response, Some(&self.thread_id))
@@ -306,7 +294,7 @@ impl Operation for ReadThread {
                 .turns
                 .iter()
                 .flatten()
-                .filter(|turn| turn.status.as_deref() != Some("inProgress"))
+                .filter(|turn| turn.status != agent_protocol::execution::TurnStatus::Running)
                 .cloned()
                 .collect();
             for current in live.drain(..) {
@@ -330,12 +318,11 @@ impl Operation for ReadThread {
                     .flatten()
                     .filter(|item| {
                         matches!(
-                            item.kind.as_deref(),
-                            Some("userMessage" | "agentMessage" | "imageGeneration")
-                        ) && turn
-                            .deferred_item_ids
-                            .as_ref()
-                            .is_some_and(|ids| ids.contains(&item.id))
+                            item.body(),
+                            crate::models::ItemBody::UserMessage { .. }
+                                | crate::models::ItemBody::AssistantText { .. }
+                                | crate::models::ItemBody::ImageGeneration { .. }
+                        ) && item.is_deferred()
                     })
                     .map(|item| {
                         Effect::execute(ReadItem {
@@ -365,20 +352,20 @@ impl Operation for ReadThread {
     }
 }
 
-fn select_thread(snapshot: &mut Snapshot, id: String, cwd: String) {
+fn select_thread(snapshot: &mut Snapshot, id: crate::session::SessionRef, cwd: String) {
     if snapshot.navigation.cwd != cwd {
         clear_workspace_location(Arc::make_mut(&mut snapshot.workspace));
     }
     let navigation = Arc::make_mut(&mut snapshot.navigation);
     navigation.thread_id = Some(id.clone());
-    navigation.draft_key = id;
+    navigation.draft_key = id.into();
     navigation.cwd = cwd;
 }
 
 pub(super) fn open_thread(
     snapshot: &mut Snapshot,
     thread: Thread,
-    model: Option<String>,
+    model: Option<crate::models::ModelRef>,
 ) -> Vec<Effect> {
     let id = thread.id.clone();
     let cwd = thread.cwd.clone().unwrap_or_default();
@@ -388,7 +375,7 @@ pub(super) fn open_thread(
             snapshot,
             Navigation {
                 thread_id: Some(id.clone()),
-                draft_key: id.clone(),
+                draft_key: id.clone().into(),
                 cwd,
             },
         );
@@ -396,7 +383,7 @@ pub(super) fn open_thread(
             let (updated, _) = reduce(
                 snapshot,
                 Event::Intent(Intent::SelectModel {
-                    thread_id: id,
+                    thread_id: id.into(),
                     model,
                 }),
             );
@@ -408,21 +395,20 @@ pub(super) fn open_thread(
 }
 
 pub(super) fn refresh_thread(snapshot: &mut Snapshot, incoming: Thread) -> Vec<Effect> {
-    let Some(id) = incoming.id.clone().filter(|id| !id.trim().is_empty()) else {
+    let Some(id) = incoming.id.clone().filter(|id| id.validate().is_ok()) else {
         snapshot.error = Some("thread ID is missing".into());
         return Vec::new();
     };
     let thread = incoming;
     Arc::make_mut(&mut snapshot.conversations).insert(id.clone(), Arc::new(thread));
-    project_requests(snapshot);
     reconcile_pending(snapshot, &id);
 
     Vec::new()
 }
 
-pub use agent_protocol::operations::ForkThread;
+pub use agent_protocol::operations::ForkSession;
 
-impl Operation for ForkThread {
+impl Operation for ForkSession {
     rpc_operation!();
     const INVALIDATES: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
@@ -430,7 +416,7 @@ impl Operation for ForkThread {
         let mut effects = open_thread(snapshot, output.thread, output.model);
         effects.push(Effect::execute(ReadThread::new(id)));
         if snapshot.threads.is_some() {
-            effects.push(Effect::execute(ListThreads::new(
+            effects.push(Effect::execute(ListSessions::new(
                 (*snapshot.list_query).clone(),
             )));
         }
@@ -445,16 +431,16 @@ impl Operation for ForkThread {
         }
     }
 }
-pub use agent_protocol::operations::StartThread;
+pub use agent_protocol::operations::CreateSession;
 
-impl Operation for StartThread {
+impl Operation for CreateSession {
     rpc_operation!();
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         refresh_thread(snapshot, output.thread)
     }
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn outcome(output: &mut Self::Output) -> Outcome {
-        ForkThread::outcome(output)
+        ForkSession::outcome(output)
     }
 }
 pub use agent_protocol::operations::Interrupt;
@@ -486,13 +472,13 @@ impl Operation for LoadModels {
             let settings = supported_settings(previous_draft, &models, &errors);
             if settings
                 != (
-                    previous_draft.model.as_deref(),
+                    previous_draft.model.as_ref(),
                     previous_draft.effort.as_deref(),
                     previous_draft.service_tier.as_deref(),
                 )
                 && let Some(draft) = shared_mut(&mut snapshot.drafts, id)
             {
-                draft.model = settings.0.map(str::to_owned);
+                draft.model = settings.0.cloned();
                 draft.effort = settings.1.map(str::to_owned);
                 draft.service_tier = settings.2.map(str::to_owned);
             }
@@ -509,51 +495,93 @@ impl Operation for OpenRequest {
     type Output = crate::session::OpenedSession;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         let session = context.client.call(self).await?;
-        let id = session.thread_id();
+        let id = session.clone();
         let open = ReadThread::new(id.clone())
             .with_history(context.snapshot.conversations.get(&id).map(Arc::as_ref));
         context.call(&open).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        ReadThread::new(output.session.thread_id()).apply(snapshot, output)
+        ReadThread::new(output.session.clone()).apply(snapshot, output)
     }
     fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        ReadThread::new(output.session.thread_id()).stale(snapshot, output)
+        ReadThread::new(output.session.clone()).stale(snapshot, output)
     }
 }
 
 #[cfg(test)]
 mod item_read_tests {
+    fn item_text(item: &agent_protocol::items::Item) -> Option<&str> {
+        match item.body() {
+            agent_protocol::items::ItemBody::AssistantText { text, .. } => Some(text),
+            agent_protocol::items::ItemBody::UserMessage { text, .. } => text.as_deref(),
+            agent_protocol::items::ItemBody::Reasoning { content, .. } => {
+                content.first().map(String::as_str)
+            }
+            _ => None,
+        }
+    }
+
     use super::*;
     use crate::session::{SessionChange, TextField};
 
     fn fixture() -> (Snapshot, ReadItem) {
-        let thread = serde_json::from_value(serde_json::json!({"id":"chat","turns":[{"id":"turn","status":"inProgress","deferredItemIds":["item"],"items":[{"id":"item","type":"agentMessage","text":"summary"}]}]})).unwrap();
+        let thread = serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"chat"},"turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":{"deferred":{"summary":{"assistantText":{"text":"summary","phase":"unknown"}}}}}]}]})).unwrap();
         let snapshot = Snapshot {
-            conversations: Arc::new(BTreeMap::from([("chat".into(), Arc::new(thread))])),
+            conversations: Arc::new(BTreeMap::from([(
+                agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "chat".into(),
+                },
+                Arc::new(thread),
+            )])),
+            subscriptions: Arc::new(BTreeMap::from([(
+                agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "chat".into(),
+                },
+                uuid::Uuid::new_v4(),
+            )])),
             ..Default::default()
         };
         (
             snapshot,
             ReadItem {
-                thread_id: "chat".into(),
+                thread_id: agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "chat".into(),
+                },
                 turn_id: "turn".into(),
                 item_id: "item".into(),
             },
         )
     }
     fn read(snapshot: &Snapshot, request: &ReadItem) -> ItemRead {
-        ItemRead { source: item_source(request, snapshot).cloned(), subscription: snapshot.subscriptions.get("chat").copied(), response: Ok(rpc::ItemResponse {item: serde_json::from_value(serde_json::json!({"id":"item","type":"agentMessage","text":"old full body","status":"inProgress"})).unwrap(), transfer:None,}) }
+        ItemRead { source: item_source(request, snapshot).cloned(), subscription: snapshot.subscriptions.get(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "chat".into() }).copied(), response: Ok(rpc::ItemResponse {item: serde_json::from_value(serde_json::json!({"id":"item","status":"running","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"old full body","phase":"unknown"}}}}})).unwrap(), transfer:None,}) }
     }
     fn update(snapshot: &mut Snapshot, change: SessionChange) {
-        let thread = change.apply(&snapshot.conversations["chat"]).unwrap();
-        Arc::make_mut(&mut snapshot.conversations).insert("chat".into(), Arc::new(thread));
+        let session = agent_protocol::session::SessionRef {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            id: "chat".into(),
+        };
+        let subscription_id = snapshot.subscriptions[&session];
+        let (next, effects) = crate::state::reduce(
+            snapshot,
+            crate::state::Event::SessionUpdate(Box::new(crate::session::SessionUpdate {
+                subscription_id,
+                change,
+            })),
+        );
+        if next.error.is_some() {
+            assert_eq!(effects.len(), 1);
+            assert!(!next.subscriptions.contains_key(&session));
+        }
+        *snapshot = next;
     }
     #[test]
     fn full_item_update_wins_over_late_body_and_its_status() {
         let (mut snapshot, request) = fixture();
         let old = read(&snapshot, &request);
-        update(&mut snapshot, SessionChange::Item {turn_id:"turn".into(),item: serde_json::from_value(serde_json::json!({"id":"item","type":"agentMessage","text":"new full body","status":"completed"})).unwrap()});
+        update(&mut snapshot, SessionChange::Item {turn_id:"turn".into(),item: serde_json::from_value(serde_json::json!({"id":"item","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new full body","phase":"unknown"}}}}})).unwrap()});
         let current = snapshot.conversations.clone();
         assert!(
             apply_item_read(request, &mut snapshot, old, true)
@@ -569,15 +597,20 @@ mod item_read_tests {
             let old = read(&snapshot, &request);
             if reopen {
                 // Even a read failure retaining cached Item Arcs changes the subscription.
-                Arc::make_mut(&mut snapshot.subscriptions)
-                    .insert("chat".into(), uuid::Uuid::new_v4());
+                Arc::make_mut(&mut snapshot.subscriptions).insert(
+                    agent_protocol::session::SessionRef {
+                        provider: agent_protocol::session::ProviderKind::Codex,
+                        id: "chat".into(),
+                    },
+                    uuid::Uuid::new_v4(),
+                );
             } else {
                 update(
                     &mut snapshot,
                     SessionChange::Text {
                         turn_id: "turn".into(),
                         item_id: "item".into(),
-                        field: TextField::Message,
+                        field: TextField::AssistantText,
                         delta: "delta".into(),
                     },
                 );
@@ -586,7 +619,7 @@ mod item_read_tests {
             assert_eq!(effects.len(), 1);
             assert!(item_deferred(&request, &snapshot));
             assert_ne!(
-                item_source(&request, &snapshot).unwrap().text.as_deref(),
+                item_text(item_source(&request, &snapshot).unwrap()),
                 Some("old full body")
             );
         }
@@ -640,7 +673,7 @@ mod item_read_tests {
                     SessionChange::Text {
                         turn_id: "turn".into(),
                         item_id: "item".into(),
-                        field: TextField::Message,
+                        field: TextField::AssistantText,
                         delta: "delta".into(),
                     },
                 );

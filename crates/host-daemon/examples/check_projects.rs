@@ -1,4 +1,4 @@
-use agent_protocol::{models::ThreadList, operations::ListThreads};
+use agent_protocol::{models::ThreadList, operations::ListSessions};
 use codex_app_server::{AppServerConfig, CodexAppServer};
 use host_daemon::{HostRpcService, ProjectStore};
 use std::sync::Arc;
@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reply = service
         .dispatch(
             session.id(),
-            &agent_protocol::protocol::Call::ListThreads(ListThreads::new(Default::default())),
+            &agent_protocol::protocol::Call::ListSessions(ListSessions::new(Default::default())),
         )
         .await?;
     let response: agent_protocol::protocol::Response<ThreadList> =
@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let list = match response {
         agent_protocol::protocol::Response::Success { result } => result,
         agent_protocol::protocol::Response::Failure { error } => {
-            return Err(error.to_string().into());
+            return Err(error.message.into());
         }
     };
     println!(

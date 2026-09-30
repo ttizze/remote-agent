@@ -101,7 +101,7 @@ fn apply_selection(snapshot: &mut Snapshot, output: rpc::AccountSelection) {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SelectAccountForDraft {
     pub id: String,
-    pub thread_id: String,
+    pub thread_id: DraftKey,
 }
 
 impl Operation for SelectAccountForDraft {
@@ -138,7 +138,7 @@ impl Operation for SelectAccountForDraft {
                     }
                     let (model, effort, tier) = supported_settings(&draft, &models, &Map::new());
                     let settings = (
-                        model.map(str::to_owned),
+                        model.cloned(),
                         effort.map(str::to_owned),
                         tier.map(str::to_owned),
                     );
@@ -168,7 +168,7 @@ impl Operation for StartAccountLogin {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ReadAccountLogin {
     pub id: String,
-    pub thread_id: Option<String>,
+    pub thread_id: Option<DraftKey>,
 }
 rpc::rpc_method!(ReadAccountLogin, ReadAccountLogin, |self| {
     agent_protocol::operations::ReadAccountLogin {
@@ -300,13 +300,16 @@ mod account_model_tests {
             "accounts":[{"id":"a","provider":"codex"},{"id":"b","provider":"codex"},{"id":"claude:c","provider":"claude"}],
             "selectedId":"a","selectedClaudeId":"claude:c"
         })).unwrap()));
-        let codex: Model = serde_json::from_value(json!({"id":"gpt","model":"gpt","displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"fast"}]})).unwrap();
-        let claude: Model = serde_json::from_value(json!({"id":"claude:sonnet","model":"claude:sonnet","displayName":"Sonnet","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]})).unwrap();
+        let codex: Model = serde_json::from_value(json!({"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"fast"}]})).unwrap();
+        let claude: Model = serde_json::from_value(json!({"id":"claude:sonnet","model":{"provider": "claude", "id": "sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]})).unwrap();
         snapshot.models = Arc::new(vec![codex.clone(), claude.clone()]);
         Arc::make_mut(&mut snapshot.drafts).insert(
             "draft".into(),
             Arc::new(Draft {
-                model: Some("gpt".into()),
+                model: Some(agent_protocol::models::ModelRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "gpt".into(),
+                }),
                 effort: Some("medium".into()),
                 service_tier: Some("fast".into()),
                 ..Default::default()
@@ -339,10 +342,25 @@ mod account_model_tests {
             crate::session::ProviderKind::Codex,
             vec![codex.clone(), claude.clone()],
         );
-        assert_eq!(snapshot.drafts["draft"].model.as_deref(), Some("gpt"));
-        assert_eq!(snapshot.drafts["draft"].effort.as_deref(), Some("medium"));
         assert_eq!(
-            snapshot.drafts["draft"].service_tier.as_deref(),
+            snapshot.drafts[&crate::state::DraftKey::from("draft")]
+                .model
+                .as_ref(),
+            Some(&agent_protocol::models::ModelRef {
+                provider: agent_protocol::session::ProviderKind::Codex,
+                id: "gpt".into()
+            })
+        );
+        assert_eq!(
+            snapshot.drafts[&crate::state::DraftKey::from("draft")]
+                .effort
+                .as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            snapshot.drafts[&crate::state::DraftKey::from("draft")]
+                .service_tier
+                .as_deref(),
             Some("fast")
         );
         select(
@@ -351,8 +369,14 @@ mod account_model_tests {
             crate::session::ProviderKind::Claude,
             vec![codex.clone(), claude.clone()],
         );
-        let draft = &snapshot.drafts["draft"];
-        assert_eq!(draft.model.as_deref(), Some("claude:sonnet"));
+        let draft = &snapshot.drafts[&crate::state::DraftKey::from("draft")];
+        assert_eq!(
+            draft.model.as_ref(),
+            Some(&agent_protocol::models::ModelRef {
+                provider: agent_protocol::session::ProviderKind::Claude,
+                id: "sonnet".into()
+            })
+        );
         assert_eq!(draft.effort.as_deref(), Some("high"));
         assert_eq!(draft.service_tier.as_deref(), Some("default"));
         assert_eq!(
@@ -374,8 +398,13 @@ mod account_model_tests {
             },
         );
         assert_eq!(
-            snapshot.drafts["draft"].model.as_deref(),
-            Some("claude:sonnet")
+            snapshot.drafts[&crate::state::DraftKey::from("draft")]
+                .model
+                .as_ref(),
+            Some(&agent_protocol::models::ModelRef {
+                provider: agent_protocol::session::ProviderKind::Claude,
+                id: "sonnet".into()
+            })
         );
         let mut restricted = codex;
         restricted.supported_reasoning_efforts.truncate(1);
@@ -400,9 +429,16 @@ mod account_model_tests {
             snapshot.provider_models_matching(crate::session::ProviderKind::Codex, String::new()),
             vec![restricted]
         );
-        assert_eq!(snapshot.drafts["draft"].effort.as_deref(), Some("medium"));
         assert_eq!(
-            snapshot.drafts["draft"].service_tier.as_deref(),
+            snapshot.drafts[&crate::state::DraftKey::from("draft")]
+                .effort
+                .as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            snapshot.drafts[&crate::state::DraftKey::from("draft")]
+                .service_tier
+                .as_deref(),
             Some("default")
         );
     }

@@ -46,7 +46,7 @@ extension BexLaunchUITests {
         app.terminate(); _ = try connectedSimulatorApp()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
         let number = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
-        let row = app.descendants(matching: .any)["tasks.row.fixture-thread-\(number)"]
+        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-thread-\(number)"]
         XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
         showGeneratedImage("inline")
         showGeneratedImage("saved")
@@ -117,7 +117,7 @@ extension BexLaunchUITests {
         app.terminate(); _ = try connectedSimulatorApp()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 30))
         let threadNumber = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
-        let row = app.descendants(matching: .any)["tasks.row.fixture-thread-\(threadNumber)"]
+        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-thread-\(threadNumber)"]
         XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
         showImage(inlineImage, in: app, upward: true)
         showImage(hostImage, in: app, upward: false)

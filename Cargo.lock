@@ -188,7 +188,9 @@ name = "agent-protocol"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "chrono",
  "postcard",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -4691,6 +4693,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
  "zeroize",
 ]

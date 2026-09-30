@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+url.workspace = true
 tracing.workspace = true
 bex-process = { path = "../bex-process" }
 agent-protocol = { path = "../agent-protocol" }

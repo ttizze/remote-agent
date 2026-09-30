@@ -24,7 +24,10 @@ fn control_is_exclusive_and_stale_input_cannot_cross_handoffs() {
 
 fn request(thread: &str, frame: &BrowserFrame, action: BrowserAction) -> BrowserRequest {
     BrowserRequest {
-        thread_id: thread.into(),
+        thread_id: agent_protocol::session::SessionRef {
+            provider: agent_protocol::session::ProviderKind::Codex,
+            id: thread.into(),
+        },
         control_token: frame.control_token.clone(),
         tab_id: frame.tab_id.clone(),
         image_id: frame.image_id.clone(),

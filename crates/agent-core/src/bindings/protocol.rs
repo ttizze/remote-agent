@@ -2,7 +2,7 @@
 
 use crate::{models::*, session::*};
 use agent_protocol::permissions::*;
-use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*};
+use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
 use std::collections::BTreeMap;
 #[uniffi::remote(Record)]
@@ -28,9 +28,14 @@ struct ProjectRoot {
     pub path: String,
 }
 #[uniffi::remote(Record)]
+struct ModelRef {
+    pub provider: ProviderKind,
+    pub id: String,
+}
+#[uniffi::remote(Record)]
 struct Model {
     pub id: String,
-    pub model: String,
+    pub model: ModelRef,
     pub display_name: String,
     pub default_reasoning_effort: String,
     pub supported_reasoning_efforts: Vec<ReasoningEffort>,
@@ -93,7 +98,7 @@ struct Worktree {
 }
 #[uniffi::remote(Record)]
 struct WorktreeThread {
-    pub id: String,
+    pub id: SessionRef,
     pub name: String,
     pub active: bool,
 }
@@ -103,8 +108,13 @@ enum ProviderKind {
     Claude,
 }
 #[uniffi::remote(Record)]
+struct SessionRef {
+    pub provider: ProviderKind,
+    pub id: String,
+}
+#[uniffi::remote(Record)]
 struct BrowserRequest {
-    pub thread_id: String,
+    pub thread_id: SessionRef,
     pub control_token: String,
     pub tab_id: String,
     pub image_id: String,
@@ -323,19 +333,178 @@ struct AccountLogin {
     pub verification_url: String,
 }
 #[uniffi::remote(Enum)]
-enum Answer {
-    Decision {
-        index: u32,
+enum RequestBody {
+    Approval {
+        kind: ApprovalKind,
+        description: String,
+        details: String,
+        choices: Vec<Choice>,
     },
-    Permissions {
-        allow: bool,
+    Permission {
+        description: String,
+        details: String,
+        choices: Vec<Choice>,
+    },
+    Question {
+        questions: Vec<Question>,
+    },
+    Elicitation {
+        server: String,
+        message: String,
+        input: ElicitationInput,
+    },
+    ToolExecution {
+        tool: String,
+        namespace: Option<String>,
+        arguments: Value,
+    },
+}
+
+#[uniffi::remote(Enum)]
+enum ApprovalKind {
+    Command,
+    FileChange,
+    Tool,
+}
+
+#[uniffi::remote(Record)]
+struct Choice {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub meaning: ChoiceMeaning,
+    pub scope: ChoiceScope,
+}
+
+#[uniffi::remote(Enum)]
+enum ChoiceMeaning {
+    Allow,
+    Deny,
+    Cancel,
+}
+
+#[uniffi::remote(Enum)]
+enum ChoiceScope {
+    Once,
+    Turn,
+    Session,
+    Persistent,
+}
+
+#[uniffi::remote(Record)]
+struct Question {
+    pub id: String,
+    pub header: String,
+    pub prompt: String,
+    pub secret: bool,
+    pub allow_free_text: bool,
+    pub multiple: bool,
+    pub choices: Vec<QuestionChoice>,
+}
+
+#[uniffi::remote(Record)]
+struct QuestionChoice {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+}
+
+#[uniffi::remote(Enum)]
+enum ElicitationInput {
+    Form { fields: Vec<FormField> },
+    Url { url: String },
+}
+
+#[uniffi::remote(Record)]
+struct FormField {
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    pub required: bool,
+    pub input: FormInput,
+}
+
+#[uniffi::remote(Enum)]
+enum FormInput {
+    String {
+        min_length: Option<u64>,
+        max_length: Option<u64>,
+        format: Option<StringFormat>,
+        default: Option<String>,
+    },
+    Number {
+        integer: bool,
+        minimum: Option<f64>,
+        maximum: Option<f64>,
+        default: Option<f64>,
+    },
+    Boolean {
+        default: Option<bool>,
+    },
+    Choice {
+        choices: Vec<FormChoice>,
+        default: Option<String>,
+    },
+    Multiple {
+        choices: Vec<FormChoice>,
+        min_items: Option<u64>,
+        max_items: Option<u64>,
+        default: Vec<String>,
+    },
+}
+
+#[uniffi::remote(Enum)]
+enum StringFormat {
+    Email,
+    Uri,
+    Date,
+    DateTime,
+}
+
+#[uniffi::remote(Record)]
+struct FormChoice {
+    pub value: String,
+    pub title: String,
+}
+
+#[uniffi::remote(Enum)]
+enum Answer {
+    Approval {
+        choice_id: String,
+    },
+    Permission {
+        choice_id: String,
     },
     Questions {
-        answers: std::collections::BTreeMap<String, String>,
+        answers: std::collections::BTreeMap<String, QuestionAnswer>,
     },
-    Raw {
-        value: Value,
+    Elicitation {
+        action: ElicitationAnswer,
     },
+    ToolExecution {
+        success: bool,
+        content: Vec<ToolContent>,
+    },
+}
+
+#[uniffi::remote(Enum)]
+enum QuestionAnswer {
+    FreeText { text: String },
+    SingleChoice { choice_id: String },
+    MultipleChoices { choice_ids: Vec<String> },
+}
+
+#[uniffi::remote(Enum)]
+enum ElicitationAnswer {
+    Accept { values: Value },
+    Decline,
+    Cancel,
+}
+
+#[uniffi::remote(Enum)]
+enum ToolContent {
+    Text { text: String },
+    Image { data_url: String },
 }
 #[uniffi::remote(Record)]
 struct TerminalSize {
@@ -347,18 +516,18 @@ struct AddProject {
     pub cwd: String,
 }
 #[uniffi::remote(Record)]
-struct ListThreads {
+struct ListSessions {
     pub query: crate::models::ListQuery,
 }
 #[uniffi::remote(Record)]
 struct ReadItem {
-    pub thread_id: String,
-    pub turn_id: String,
-    pub item_id: String,
+    pub thread_id: SessionRef,
+    pub turn_id: agent_protocol::ids::TurnId,
+    pub item_id: agent_protocol::ids::ItemId,
 }
 #[uniffi::remote(Record)]
 struct OpenRequest {
-    pub request_id: Value,
+    pub request_id: agent_protocol::ids::RequestId,
 }
 #[uniffi::remote(Record)]
 struct StartTerminal {
@@ -392,21 +561,22 @@ struct LoadVisualization {
     pub cwd: String,
 }
 #[uniffi::remote(Record)]
-struct ForkThread {
-    pub thread_id: String,
-    pub last_turn_id: String,
+struct ForkSession {
+    pub thread_id: SessionRef,
+    pub last_turn_id: agent_protocol::ids::TurnId,
     #[uniffi(default = false)]
     pub exclude_turns: bool,
 }
 #[uniffi::remote(Record)]
-struct StartThread {
+struct CreateSession {
+    pub provider: ProviderKind,
     pub cwd: Option<String>,
-    pub model: Option<String>,
+    pub model: Option<crate::models::ModelRef>,
 }
 #[uniffi::remote(Record)]
 struct Interrupt {
-    pub thread_id: String,
-    pub turn_id: String,
+    pub thread_id: SessionRef,
+    pub turn_id: agent_protocol::ids::TurnId,
 }
 #[uniffi::remote(Record)]
 struct ListFiles {

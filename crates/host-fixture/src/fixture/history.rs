@@ -131,6 +131,13 @@ pub(super) fn page(
     method: &str,
     params: &Value,
 ) -> Result<()> {
+    if let Some(error) = thread.metadata.get("fixtureHistoryError") {
+        return context.error(
+            id,
+            error["code"].as_i64().unwrap().try_into().unwrap(),
+            error["message"].as_str().unwrap(),
+        );
+    }
     let persisted = persisted(thread);
     let thread = persisted.as_ref().unwrap_or(thread);
     if thread.turns.is_empty()

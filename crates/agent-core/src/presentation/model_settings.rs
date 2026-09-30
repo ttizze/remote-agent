@@ -1,10 +1,22 @@
 //! Model-picker and quick-control decisions shared by native clients.
 use crate::{
-    models::{Model, model_provider, provider_models},
+    models::{Model, ModelRef, provider_models},
     session::ProviderKind,
     state::Snapshot,
 };
 use agent_protocol::operations::UsageWindow;
+
+pub(crate) fn draft_provider(
+    key: &crate::state::DraftKey,
+    model: Option<&ModelRef>,
+) -> ProviderKind {
+    match key {
+        crate::state::DraftKey::Session { session } => session.provider,
+        crate::state::DraftKey::Local { .. } => model
+            .map(|model| model.provider)
+            .unwrap_or(ProviderKind::Codex),
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -18,12 +30,13 @@ pub struct ModelQuickControls {
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
-    pub fn model_provider_for_draft(&self, thread_id: String) -> ProviderKind {
-        self.drafts
-            .get(&thread_id)
-            .and_then(|draft| draft.model.as_deref())
-            .map(model_provider)
-            .unwrap_or(ProviderKind::Codex)
+    pub fn model_provider_for_draft(&self, thread_id: crate::state::DraftKey) -> ProviderKind {
+        draft_provider(
+            &thread_id,
+            self.drafts
+                .get(&thread_id)
+                .and_then(|draft| draft.model.as_ref()),
+        )
     }
 
     pub fn provider_models_matching(&self, provider: ProviderKind, query: String) -> Vec<Model> {
@@ -32,20 +45,24 @@ impl Snapshot {
             .into_iter()
             .filter(|model| {
                 model.display_name.to_lowercase().contains(&query)
-                    || model.model.to_lowercase().contains(&query)
+                    || model.model.id.to_lowercase().contains(&query)
             })
             .collect()
     }
 
-    pub fn model_for_provider(&self, thread_id: String, provider: ProviderKind) -> Option<String> {
+    pub fn model_for_provider(
+        &self,
+        thread_id: crate::state::DraftKey,
+        provider: ProviderKind,
+    ) -> Option<ModelRef> {
         let models = provider_models(&self.models, provider);
         let saved = self
             .drafts
             .get(&thread_id)
-            .and_then(|draft| draft.model.as_deref());
+            .and_then(|draft| draft.model.as_ref());
         models
             .iter()
-            .find(|model| Some(model.model.as_str()) == saved)
+            .find(|model| Some(&model.model) == saved)
             .or_else(|| models.iter().find(|model| model.is_default == Some(true)))
             .or(models.first())
             .map(|model| model.model.clone())
@@ -71,7 +88,7 @@ impl Snapshot {
             .unwrap_or_default()
     }
 
-    pub fn model_quick_controls(&self, thread_id: String) -> ModelQuickControls {
+    pub fn model_quick_controls(&self, thread_id: crate::state::DraftKey) -> ModelQuickControls {
         let Some(draft) = self.drafts.get(&thread_id) else {
             return ModelQuickControls::default();
         };
@@ -132,18 +149,49 @@ mod tests {
     use crate::state::Draft;
     use std::sync::Arc;
 
+    proptest::proptest! {
+        #[test]
+        fn identical_native_model_ids_keep_provider_choices_and_controls_separate(suffix in "[a-zA-Z0-9:_-]{1,40}") {
+            let id = format!("claude:{suffix}");
+            let mut snapshot = Snapshot {
+                models: Arc::new(serde_json::from_value(serde_json::json!([
+                    {"id":id,"model":{"provider":"codex","id":id},"displayName":"Codex","isDefault":true,
+                     "defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]},
+                    {"id":id,"model":{"provider":"claude","id":id},"displayName":"Claude","isDefault":true,
+                     "defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"}]}
+                ])).unwrap()),
+                ..Default::default()
+            };
+            for (provider, effort) in [(ProviderKind::Codex, "high"), (ProviderKind::Claude, "low")] {
+                let selected = ModelRef { provider, id: id.clone() };
+                for key in [crate::state::DraftKey::from("local"), crate::session::SessionRef { provider, id: "session".into() }.into()] {
+                    Arc::make_mut(&mut snapshot.drafts).insert(key.clone(), Arc::new(Draft {model:Some(selected.clone()),..Default::default()}));
+                    proptest::prop_assert_eq!(snapshot.model_provider_for_draft(key.clone()), provider);
+                    proptest::prop_assert_eq!(snapshot.model_for_provider(key.clone(), provider), Some(selected.clone()));
+                    proptest::prop_assert_eq!(snapshot.model_quick_controls(key).effort, effort);
+                }
+                let choices = snapshot.provider_models_matching(provider, id.clone());
+                proptest::prop_assert_eq!(choices.len(), 1);
+                proptest::prop_assert_eq!(&choices[0].model, &selected);
+            }
+        }
+    }
+
     #[test]
     fn quick_controls_use_capabilities_and_saved_values_without_inventing_quotas() {
         let mut snapshot = Snapshot { models: Arc::new(serde_json::from_value(serde_json::json!([
-            {"id":"gpt","model":"gpt","displayName":"GPT","defaultReasoningEffort":"medium",
+            {"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium",
              "supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
              "serviceTiers":[{"id":"priority"}]},
-            {"id":"claude:haiku","model":"claude:haiku","displayName":"Haiku","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+            {"id":"claude:haiku","model":{"provider": "claude", "id": "haiku"},"displayName":"Haiku","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
         ])).unwrap()), ..Default::default() };
         Arc::make_mut(&mut snapshot.drafts).insert(
             "draft".into(),
             Arc::new(Draft {
-                model: Some("gpt".into()),
+                model: Some(agent_protocol::models::ModelRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "gpt".into(),
+                }),
                 ..Default::default()
             }),
         );
@@ -152,7 +200,7 @@ mod tests {
         assert_eq!(controls.toggle_fast_to.as_deref(), Some("priority"));
         Arc::make_mut(
             Arc::make_mut(&mut snapshot.drafts)
-                .get_mut("draft")
+                .get_mut(&crate::state::DraftKey::from("draft"))
                 .unwrap(),
         )
         .service_tier = Some("priority".into());
@@ -165,10 +213,13 @@ mod tests {
         );
         Arc::make_mut(
             Arc::make_mut(&mut snapshot.drafts)
-                .get_mut("draft")
+                .get_mut(&crate::state::DraftKey::from("draft"))
                 .unwrap(),
         )
-        .model = Some("claude:haiku".into());
+        .model = Some(agent_protocol::models::ModelRef {
+            provider: agent_protocol::session::ProviderKind::Claude,
+            id: "haiku".into(),
+        });
         let controls = snapshot.model_quick_controls("draft".into());
         assert!(controls.efforts.is_empty());
         assert!(controls.toggle_fast_to.is_none());

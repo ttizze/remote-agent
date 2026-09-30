@@ -365,8 +365,7 @@ extension BexAppViewModel {
                 let rendered = await Task.detached(priority: .userInitiated) {
                     ConversationPresentation.project(input.source, snapshot: input.snapshot, previous: previous)
                 }.value
-                if selectedProfileId == input.host, snapshot.requestsUnchanged(other: input.snapshot),
-                   snapshot.navigation().draftKey == input.snapshot.navigation().draftKey {
+                if selectedProfileId == input.host, snapshot.conversationUnchanged(other: input.snapshot) {
                     conversation = rendered
                 }
                 // Coalesce updates off MainActor before publishing parsed, stably sized rows.

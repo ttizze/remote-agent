@@ -3,7 +3,7 @@ use crate::{models::Project, state::Snapshot};
 use std::collections::HashSet;
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadSummary {
-    pub id: String,
+    pub id: crate::session::SessionRef,
     pub title: String,
     pub project_id: Option<String>,
     pub active: bool,
@@ -60,15 +60,14 @@ impl Snapshot {
             threads: list
                 .data
                 .iter()
-                .map(|thread| {
-                    let id = thread.id.clone().unwrap_or_default();
-                    let active = self.activity.active.get(&id).copied().unwrap_or_else(|| {
-                        thread.status.as_ref().is_some_and(|status| {
-                            status.kind == crate::models::ThreadStatusKind::Active
-                        })
-                    });
+                .filter_map(|thread| {
+                    let id = thread.id.clone()?;
+                    let active =
+                        self.activity.active.get(&id).copied().unwrap_or_else(|| {
+                            thread.status == crate::models::SessionStatus::Running
+                        });
                     let unread = self.activity.unread.contains(&id);
-                    ThreadSummary {
+                    Some(ThreadSummary {
                         id,
                         title: thread
                             .name
@@ -95,7 +94,7 @@ impl Snapshot {
                         active,
                         unread,
                         worktree_merged: thread.worktree_merged.unwrap_or(false),
-                    }
+                    })
                 })
                 .collect(),
             projects: list.projects.clone(),
@@ -114,7 +113,7 @@ use agent_protocol::models::worktree_branch_merged;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::operations::ListThreads;
+    use crate::state::operations::ListSessions;
     use crate::state::operations::Operation;
     use agent_protocol::models;
     use serde_json::json;
@@ -122,14 +121,14 @@ mod tests {
     #[test]
     fn list_preserves_order_and_only_exposes_known_project_membership() {
         let mut snapshot = Snapshot::default();
-        ListThreads::new(Default::default()).apply(
+        ListSessions::new(Default::default()).apply(
             &mut snapshot,
             serde_json::from_value(json!({
                 "data": [
-                    {"id":"assigned", "projectId":"known"},
-                    {"id":"missing", "projectId":"absent"},
-                    {"id":"chat", "projectId":null},
-                    {"id":"unknown"}
+                    {"id":{"provider":"codex","id":"assigned"}, "projectId":"known"},
+                    {"id":{"provider":"codex","id":"missing"}, "projectId":"absent"},
+                    {"id":{"provider":"codex","id":"chat"}, "projectId":null},
+                    {"id":{"provider":"codex","id":"unknown"}}
                 ],
                 "projects":[{"id":"known", "name":"Project", "roots":[]}],
                 "moreProjectIds":["known"], "hasMoreChats":true, "hasMoreProjects":true
@@ -140,7 +139,7 @@ mod tests {
         let memberships: Vec<_> = list
             .threads
             .iter()
-            .map(|thread| (thread.id.as_str(), thread.project_id.as_deref()))
+            .map(|thread| (thread.id.id.as_str(), thread.project_id.as_deref()))
             .collect();
         assert_eq!(
             memberships,
@@ -162,17 +161,17 @@ mod tests {
         let page = |data, errors| {
             serde_json::from_value(serde_json::json!({"data":data,"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false,"providerErrors":errors})).unwrap()
         };
-        ListThreads::new(Default::default()).apply(
+        ListSessions::new(Default::default()).apply(
             &mut snapshot,
             page(
-                serde_json::json!([{"id":"native","name":"Cached"}]),
+                serde_json::json!([{"id":{"provider":"codex","id":"native"},"name":"Cached"}]),
                 serde_json::json!({}),
             ),
         );
-        ListThreads::new(Default::default()).apply(
+        ListSessions::new(Default::default()).apply(
             &mut snapshot,
             page(
-                serde_json::json!([{"id":"claude:uuid","name":"Available"}]),
+                serde_json::json!([{"id":{"provider":"claude","id":"uuid"},"name":"Available"}]),
                 serde_json::json!({"codex":{"message":"offline"}}),
             ),
         );
@@ -182,7 +181,11 @@ mod tests {
         assert!(
             list.threads
                 .iter()
-                .find(|thread| thread.id == "native")
+                .find(|thread| thread.id
+                    == agent_protocol::session::SessionRef {
+                        provider: agent_protocol::session::ProviderKind::Codex,
+                        id: "native".into()
+                    })
                 .unwrap()
                 .title
                 .contains("未確認")
@@ -206,14 +209,23 @@ mod tests {
         let mut snapshot = Snapshot::default();
         std::sync::Arc::make_mut(&mut snapshot.activity)
             .active
-            .insert("task".into(), active);
+            .insert(
+                agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "task".into(),
+                },
+                active,
+            );
         if unread {
             std::sync::Arc::make_mut(&mut snapshot.activity)
                 .unread
-                .insert("task".into());
+                .insert(agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "task".into(),
+                });
         }
-        let mut thread = json!({"id":"task","name":"Worktree task",
-            "status":{"type":if active { "active" } else { "idle" }}});
+        let mut thread = json!({"id":{"provider":"codex","id":"task"},"name":"Worktree task",
+            "status":if active {"running"} else {"idle"}});
         if let Some(merged) = merged {
             thread["worktreeMerged"] = json!(merged);
         }
@@ -222,7 +234,7 @@ mod tests {
             "hasMoreChats":false, "hasMoreProjects":false
         }))
         .unwrap();
-        ListThreads::new(Default::default()).apply(&mut snapshot, page);
+        ListSessions::new(Default::default()).apply(&mut snapshot, page);
         let restored: Snapshot =
             serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
         let rows = restored.thread_list().unwrap();

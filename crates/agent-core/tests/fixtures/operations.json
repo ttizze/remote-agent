@@ -12,7 +12,7 @@
     },
     "exchanges": [
       {
-        "method": "host/thread/list",
+        "method": "host/session/list",
         "params": {
           "projectLimit": 5,
           "chatLimit": 5,
@@ -23,7 +23,10 @@
           "result": {
             "data": [
               {
-                "id": "recent",
+                "id": {
+                  "provider": "codex",
+                  "id": "recent"
+                },
                 "name": "Recent title",
                 "projectId": "project",
                 "cwd": "/workspace",
@@ -54,7 +57,10 @@
     "result": {
       "data": [
         {
-          "id": "recent",
+          "id": {
+            "provider": "codex",
+            "id": "recent"
+          },
           "name": "Recent title",
           "projectId": "project",
           "cwd": "/workspace",
@@ -95,7 +101,7 @@
     },
     "exchanges": [
       {
-        "method": "host/thread/list",
+        "method": "host/session/list",
         "params": {
           "projectLimit": 15,
           "chatLimit": 25,
@@ -108,7 +114,10 @@
           "result": {
             "data": [
               {
-                "id": "recent",
+                "id": {
+                  "provider": "codex",
+                  "id": "recent"
+                },
                 "name": "Recent title",
                 "projectId": "project",
                 "cwd": "/workspace",
@@ -139,7 +148,10 @@
     "result": {
       "data": [
         {
-          "id": "recent",
+          "id": {
+            "provider": "codex",
+            "id": "recent"
+          },
           "name": "Recent title",
           "projectId": "project",
           "cwd": "/workspace",
@@ -170,47 +182,69 @@
     "command": {
       "type": "startThread",
       "cwd": "/workspace",
-      "model": "model-b"
+      "model": {
+        "provider": "codex",
+        "id": "model-b"
+      }
     },
     "exchanges": [
       {
-        "method": "host/thread/start",
+        "method": "host/session/create",
         "params": {
           "cwd": "/workspace",
-          "model": "model-b"
+          "model": {
+            "provider": "codex",
+            "id": "model-b"
+          },
+          "provider": "codex"
         },
         "response": {
           "result": {
             "thread": {
-              "id": "thread-new",
+              "id": {
+                "provider": "codex",
+                "id": "thread-new"
+              },
               "cwd": "/workspace",
               "turns": [],
               "future": {
                 "opaque": 42
               }
             },
-            "model": "model-b"
+            "model": {
+              "provider": "codex",
+              "id": "model-b"
+            }
           }
         }
       }
     ],
     "result": {
       "thread": {
-        "id": "thread-new",
+        "id": {
+          "provider": "codex",
+          "id": "thread-new"
+        },
         "cwd": "/workspace",
         "turns": [],
         "future": {
           "opaque": 42
         }
       },
-      "model": "model-b"
+      "model": {
+        "provider": "codex",
+        "id": "model-b"
+      }
     }
   },
   {
     "name": "deferred-history",
     "command": {
       "type": "readThread",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "deferItemDetails": true
     },
     "exchanges": [
@@ -232,21 +266,33 @@
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
             "response": {
               "thread": {
-                "id": "thread-1",
+                "id": {
+                  "provider": "codex",
+                  "id": "thread-1"
+                },
                 "cwd": "/workspace",
                 "turns": [
                   {
                     "id": "turn-1",
                     "status": "completed",
-                    "deferredItemIds": [
-                      "item-1"
-                    ],
                     "items": [
                       {
                         "id": "item-1",
-                        "type": "commandExecution",
-                        "command": "cat log",
-                        "status": "completed"
+                        "status": "completed",
+                        "clientInputId": null,
+                        "body": {
+                          "deferred": {
+                            "summary": {
+                              "commandExecution": {
+                                "command": "cat log",
+                                "cwd": null,
+                                "output": "",
+                                "exitCode": null,
+                                "durationMs": null
+                              }
+                            }
+                          }
+                        }
                       }
                     ]
                   }
@@ -255,7 +301,10 @@
                   "opaque": 42
                 }
               },
-              "model": "model-b"
+              "model": {
+                "provider": "codex",
+                "id": "model-b"
+              }
             }
           }
         }
@@ -263,21 +312,33 @@
     ],
     "result": {
       "thread": {
-        "id": "thread-1",
+        "id": {
+          "provider": "codex",
+          "id": "thread-1"
+        },
         "cwd": "/workspace",
         "turns": [
           {
             "id": "turn-1",
             "status": "completed",
-            "deferredItemIds": [
-              "item-1"
-            ],
             "items": [
               {
                 "id": "item-1",
-                "type": "commandExecution",
-                "command": "cat log",
-                "status": "completed"
+                "status": "completed",
+                "clientInputId": null,
+                "body": {
+                  "deferred": {
+                    "summary": {
+                      "commandExecution": {
+                        "command": "cat log",
+                        "cwd": null,
+                        "output": "",
+                        "exitCode": null,
+                        "durationMs": null
+                      }
+                    }
+                  }
+                }
               }
             ]
           }
@@ -286,14 +347,20 @@
           "opaque": 42
         }
       },
-      "model": "model-b"
+      "model": {
+        "provider": "codex",
+        "id": "model-b"
+      }
     }
   },
   {
     "name": "wrong-thread",
     "command": {
       "type": "readThread",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "deferItemDetails": true
     },
     "exchanges": [
@@ -315,14 +382,20 @@
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
             "response": {
               "thread": {
-                "id": "other",
+                "id": {
+                  "provider": "codex",
+                  "id": "other"
+                },
                 "cwd": "/workspace",
                 "turns": [],
                 "future": {
                   "opaque": 42
                 }
               },
-              "model": "model-b"
+              "model": {
+                "provider": "codex",
+                "id": "model-b"
+              }
             }
           }
         }
@@ -337,14 +410,20 @@
       "subscriptionId": "00000000-0000-0000-0000-000000000000",
       "response": {
         "thread": {
-          "id": "other",
+          "id": {
+            "provider": "codex",
+            "id": "other"
+          },
           "cwd": "/workspace",
           "turns": [],
           "future": {
             "opaque": 42
           }
         },
-        "model": "model-b"
+        "model": {
+          "provider": "codex",
+          "id": "model-b"
+        }
       }
     }
   },
@@ -352,7 +431,10 @@
     "name": "missing-thread-id",
     "command": {
       "type": "readThread",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "deferItemDetails": true
     },
     "exchanges": [
@@ -399,7 +481,10 @@
     "name": "older-turns",
     "command": {
       "type": "readOlder",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "cursor": "turns:1",
       "turnId": null,
       "deferItemDetails": true
@@ -423,7 +508,10 @@
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
             "response": {
               "thread": {
-                "id": "thread-1",
+                "id": {
+                  "provider": "codex",
+                  "id": "thread-1"
+                },
                 "cwd": "/workspace",
                 "turns": [
                   {
@@ -431,11 +519,21 @@
                     "items": [
                       {
                         "id": "item-1",
-                        "type": "agentMessage",
-                        "text": "older",
-                        "future": 17
+                        "status": "unknown",
+                        "clientInputId": null,
+                        "body": {
+                          "inline": {
+                            "body": {
+                              "assistantText": {
+                                "text": "older",
+                                "phase": "unknown"
+                              }
+                            }
+                          }
+                        }
                       }
-                    ]
+                    ],
+                    "status": "unknown"
                   }
                 ],
                 "future": {
@@ -443,7 +541,10 @@
                 },
                 "historyCursor": null
               },
-              "model": "model-b"
+              "model": {
+                "provider": "codex",
+                "id": "model-b"
+              }
             }
           }
         }
@@ -451,7 +552,10 @@
     ],
     "result": {
       "thread": {
-        "id": "thread-1",
+        "id": {
+          "provider": "codex",
+          "id": "thread-1"
+        },
         "cwd": "/workspace",
         "turns": [
           {
@@ -459,11 +563,21 @@
             "items": [
               {
                 "id": "item-1",
-                "type": "agentMessage",
-                "text": "older",
-                "future": 17
+                "status": "unknown",
+                "clientInputId": null,
+                "body": {
+                  "inline": {
+                    "body": {
+                      "assistantText": {
+                        "text": "older",
+                        "phase": "unknown"
+                      }
+                    }
+                  }
+                }
               }
-            ]
+            ],
+            "status": "unknown"
           }
         ],
         "future": {
@@ -471,14 +585,20 @@
         },
         "historyCursor": null
       },
-      "model": "model-b"
+      "model": {
+        "provider": "codex",
+        "id": "model-b"
+      }
     }
   },
   {
     "name": "older-items",
     "command": {
       "type": "readOlder",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "cursor": "items:1",
       "turnId": "turn-1",
       "deferItemDetails": true
@@ -502,7 +622,10 @@
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
             "response": {
               "thread": {
-                "id": "thread-1",
+                "id": {
+                  "provider": "codex",
+                  "id": "thread-1"
+                },
                 "cwd": "/workspace",
                 "turns": [
                   {
@@ -510,11 +633,21 @@
                     "items": [
                       {
                         "id": "item-1",
-                        "type": "agentMessage",
-                        "text": "older",
-                        "future": 17
+                        "status": "unknown",
+                        "clientInputId": null,
+                        "body": {
+                          "inline": {
+                            "body": {
+                              "assistantText": {
+                                "text": "older",
+                                "phase": "unknown"
+                              }
+                            }
+                          }
+                        }
                       }
-                    ]
+                    ],
+                    "status": "unknown"
                   }
                 ],
                 "future": {
@@ -522,7 +655,10 @@
                 },
                 "historyCursor": null
               },
-              "model": "model-b"
+              "model": {
+                "provider": "codex",
+                "id": "model-b"
+              }
             }
           }
         }
@@ -530,7 +666,10 @@
     ],
     "result": {
       "thread": {
-        "id": "thread-1",
+        "id": {
+          "provider": "codex",
+          "id": "thread-1"
+        },
         "cwd": "/workspace",
         "turns": [
           {
@@ -538,11 +677,21 @@
             "items": [
               {
                 "id": "item-1",
-                "type": "agentMessage",
-                "text": "older",
-                "future": 17
+                "status": "unknown",
+                "clientInputId": null,
+                "body": {
+                  "inline": {
+                    "body": {
+                      "assistantText": {
+                        "text": "older",
+                        "phase": "unknown"
+                      }
+                    }
+                  }
+                }
               }
-            ]
+            ],
+            "status": "unknown"
           }
         ],
         "future": {
@@ -550,22 +699,31 @@
         },
         "historyCursor": null
       },
-      "model": "model-b"
+      "model": {
+        "provider": "codex",
+        "id": "model-b"
+      }
     }
   },
   {
     "name": "full-item",
     "command": {
       "type": "readItem",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "turnId": "turn-1",
       "itemId": "item-1"
     },
     "exchanges": [
       {
-        "method": "host/thread/item/read",
+        "method": "host/session/item/read",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "turnId": "turn-1",
           "itemId": "item-1"
         },
@@ -573,12 +731,20 @@
           "result": {
             "item": {
               "id": "item-1",
-              "type": "commandExecution",
-              "command": "cat log",
               "status": "completed",
-              "aggregatedOutput": "first\nlast",
-              "future": {
-                "b": true
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "commandExecution": {
+                      "command": "cat log",
+                      "cwd": null,
+                      "output": "first\nlast",
+                      "exitCode": null,
+                      "durationMs": null
+                    }
+                  }
+                }
               }
             }
           }
@@ -588,12 +754,20 @@
     "result": {
       "item": {
         "id": "item-1",
-        "type": "commandExecution",
-        "command": "cat log",
         "status": "completed",
-        "aggregatedOutput": "first\nlast",
-        "future": {
-          "b": true
+        "clientInputId": null,
+        "body": {
+          "inline": {
+            "body": {
+              "commandExecution": {
+                "command": "cat log",
+                "cwd": null,
+                "output": "first\nlast",
+                "exitCode": null,
+                "durationMs": null
+              }
+            }
+          }
         }
       }
     }
@@ -602,15 +776,21 @@
     "name": "wrong-item",
     "command": {
       "type": "readItem",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "turnId": "turn-1",
       "itemId": "item-1"
     },
     "exchanges": [
       {
-        "method": "host/thread/item/read",
+        "method": "host/session/item/read",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "turnId": "turn-1",
           "itemId": "item-1"
         },
@@ -618,8 +798,18 @@
           "result": {
             "item": {
               "id": "other",
-              "type": "agentMessage",
-              "text": "wrong"
+              "status": "unknown",
+              "clientInputId": null,
+              "body": {
+                "inline": {
+                  "body": {
+                    "assistantText": {
+                      "text": "wrong",
+                      "phase": "unknown"
+                    }
+                  }
+                }
+              }
             }
           }
         }
@@ -629,8 +819,18 @@
     "errorRaw": {
       "item": {
         "id": "other",
-        "type": "agentMessage",
-        "text": "wrong"
+        "status": "unknown",
+        "clientInputId": null,
+        "body": {
+          "inline": {
+            "body": {
+              "assistantText": {
+                "text": "wrong",
+                "phase": "unknown"
+              }
+            }
+          }
+        }
       }
     }
   },
@@ -638,7 +838,10 @@
     "name": "first-turn",
     "command": {
       "type": "sendTurn",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "input": {
         "text": "hello",
         "attachments": [],
@@ -648,9 +851,7 @@
       "effort": null,
       "snapshot": {
         "cwd": "/workspace",
-        "status": {
-          "type": "idle"
-        },
+        "status": "idle",
         "turns": []
       },
       "listed": null
@@ -659,13 +860,17 @@
       {
         "method": "host/session/submit",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "clientUserMessageId": "client-1",
           "input": [
             {
-              "type": "text",
-              "text": "hello",
-              "text_elements": []
+              "text": {
+                "text": "hello",
+                "text_elements": []
+              }
             }
           ]
         },
@@ -682,19 +887,23 @@
     "name": "selected-options",
     "command": {
       "type": "sendTurn",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "input": {
         "text": "hello",
         "attachments": [],
         "clientUserMessageId": "client-1"
       },
-      "model": "model-b",
+      "model": {
+        "provider": "codex",
+        "id": "model-b"
+      },
       "effort": "high",
       "snapshot": {
         "cwd": "/workspace",
-        "status": {
-          "type": "idle"
-        },
+        "status": "idle",
         "turns": []
       },
       "listed": null
@@ -703,16 +912,23 @@
       {
         "method": "host/session/submit",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "clientUserMessageId": "client-1",
           "input": [
             {
-              "type": "text",
-              "text": "hello",
-              "text_elements": []
+              "text": {
+                "text": "hello",
+                "text_elements": []
+              }
             }
           ],
-          "model": "model-b",
+          "model": {
+            "provider": "codex",
+            "id": "model-b"
+          },
           "effort": "high"
         },
         "response": {
@@ -728,7 +944,10 @@
     "name": "explicit-cwd-first",
     "command": {
       "type": "sendTurn",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "input": {
         "text": "hello",
         "attachments": [],
@@ -738,9 +957,7 @@
       "effort": null,
       "snapshot": {
         "cwd": "/first",
-        "status": {
-          "type": "notLoaded"
-        },
+        "status": "unknown",
         "turns": []
       },
       "listed": null
@@ -749,13 +966,17 @@
       {
         "method": "host/session/submit",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "clientUserMessageId": "client-1",
           "input": [
             {
-              "type": "text",
-              "text": "hello",
-              "text_elements": []
+              "text": {
+                "text": "hello",
+                "text_elements": []
+              }
             }
           ]
         },
@@ -772,7 +993,10 @@
     "name": "failed-resume-stops-send",
     "command": {
       "type": "sendTurn",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "input": {
         "text": "hello",
         "attachments": [],
@@ -782,9 +1006,7 @@
       "effort": null,
       "snapshot": {
         "cwd": "/workspace",
-        "status": {
-          "type": "notLoaded"
-        },
+        "status": "unknown",
         "turns": []
       },
       "listed": null
@@ -793,42 +1015,45 @@
       {
         "method": "host/session/submit",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "input": [
             {
-              "type": "text",
-              "text": "hello"
+              "text": {
+                "text": "hello"
+              }
             }
           ],
           "clientUserMessageId": "client-1"
         },
         "response": {
           "error": {
-            "code": 400,
+            "code": "request_failed",
             "message": "resume rejected",
-            "future": [
-              1,
-              2
-            ]
+            "delivery": "unknown",
+            "execution": null
           }
         }
       }
     ],
     "errorContains": "resume rejected",
     "errorRaw": {
-      "code": 400,
+      "code": "request_failed",
       "message": "resume rejected",
-      "future": [
-        1,
-        2
-      ]
+      "delivery": "unknown",
+      "execution": null
     }
   },
   {
     "name": "steer-input",
     "command": {
       "type": "sendTurn",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "input": {
         "text": "hello",
         "attachments": [],
@@ -838,7 +1063,7 @@
         "turns": [
           {
             "id": "turn-1",
-            "status": "inProgress"
+            "status": "running"
           }
         ]
       },
@@ -850,13 +1075,17 @@
       {
         "method": "host/session/submit",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "clientUserMessageId": "client-1",
           "input": [
             {
-              "type": "text",
-              "text": "hello",
-              "text_elements": []
+              "text": {
+                "text": "hello",
+                "text_elements": []
+              }
             }
           ]
         },
@@ -873,16 +1102,17 @@
     "name": "queue-input",
     "command": {
       "type": "sendTurn",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "input": {
         "text": "hello",
         "attachments": [],
         "clientUserMessageId": "client-1"
       },
       "snapshot": {
-        "status": {
-          "type": "active"
-        }
+        "status": "running"
       },
       "listed": null,
       "model": null,
@@ -892,13 +1122,17 @@
       {
         "method": "host/session/submit",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "clientUserMessageId": "client-1",
           "input": [
             {
-              "type": "text",
-              "text": "hello",
-              "text_elements": []
+              "text": {
+                "text": "hello",
+                "text_elements": []
+              }
             }
           ]
         },
@@ -915,7 +1149,10 @@
     "name": "attachments-startTurn",
     "command": {
       "type": "sendTurn",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "input": {
         "text": "",
         "attachments": [
@@ -936,9 +1173,7 @@
       "effort": null,
       "snapshot": {
         "cwd": "/workspace",
-        "status": {
-          "type": "idle"
-        },
+        "status": "idle",
         "turns": []
       },
       "listed": null
@@ -947,16 +1182,21 @@
       {
         "method": "host/session/submit",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "input": [
             {
-              "type": "localImage",
-              "path": "/uploads/image.png"
+              "localImage": {
+                "path": "/uploads/image.png"
+              }
             },
             {
-              "type": "mention",
-              "path": "/uploads/notes.txt",
-              "name": "notes.txt"
+              "mention": {
+                "path": "/uploads/notes.txt",
+                "name": "notes.txt"
+              }
             }
           ],
           "clientUserMessageId": "client-1"
@@ -974,7 +1214,10 @@
     "name": "attachments-steerTurn",
     "command": {
       "type": "sendTurn",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "input": {
         "text": "",
         "attachments": [
@@ -995,7 +1238,7 @@
         "turns": [
           {
             "id": "turn-1",
-            "status": "inProgress"
+            "status": "running"
           }
         ]
       },
@@ -1007,16 +1250,21 @@
       {
         "method": "host/session/submit",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "input": [
             {
-              "type": "localImage",
-              "path": "/uploads/image.png"
+              "localImage": {
+                "path": "/uploads/image.png"
+              }
             },
             {
-              "type": "mention",
-              "path": "/uploads/notes.txt",
-              "name": "notes.txt"
+              "mention": {
+                "path": "/uploads/notes.txt",
+                "name": "notes.txt"
+              }
             }
           ],
           "clientUserMessageId": "client-1"
@@ -1034,7 +1282,10 @@
     "name": "attachments-queueTurn",
     "command": {
       "type": "sendTurn",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "input": {
         "text": "",
         "attachments": [
@@ -1052,9 +1303,7 @@
         "clientUserMessageId": "client-1"
       },
       "snapshot": {
-        "status": {
-          "type": "active"
-        }
+        "status": "running"
       },
       "listed": null,
       "model": null,
@@ -1064,16 +1313,21 @@
       {
         "method": "host/session/submit",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "input": [
             {
-              "type": "localImage",
-              "path": "/uploads/image.png"
+              "localImage": {
+                "path": "/uploads/image.png"
+              }
             },
             {
-              "type": "mention",
-              "path": "/uploads/notes.txt",
-              "name": "notes.txt"
+              "mention": {
+                "path": "/uploads/notes.txt",
+                "name": "notes.txt"
+              }
             }
           ],
           "clientUserMessageId": "client-1"
@@ -1091,14 +1345,20 @@
     "name": "interrupt",
     "command": {
       "type": "interruptTurn",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "turnId": "turn-1"
     },
     "exchanges": [
       {
-        "method": "turn/interrupt",
+        "method": "host/session/interrupt",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "turnId": "turn-1"
         },
         "response": {
@@ -1124,7 +1384,10 @@
             "data": [
               {
                 "id": "a",
-                "model": "model-a",
+                "model": {
+                  "provider": "codex",
+                  "id": "model-a"
+                },
                 "displayName": "Model a",
                 "defaultReasoningEffort": "medium",
                 "supportedReasoningEfforts": [
@@ -1153,7 +1416,10 @@
             "data": [
               {
                 "id": "b",
-                "model": "model-b",
+                "model": {
+                  "provider": "codex",
+                  "id": "model-b"
+                },
                 "displayName": "Model b",
                 "defaultReasoningEffort": "medium",
                 "supportedReasoningEfforts": [
@@ -1168,7 +1434,10 @@
               },
               {
                 "id": "a",
-                "model": "model-a",
+                "model": {
+                  "provider": "codex",
+                  "id": "model-a"
+                },
                 "displayName": "Updated A",
                 "defaultReasoningEffort": "medium",
                 "supportedReasoningEfforts": [
@@ -1189,7 +1458,10 @@
     "result": [
       {
         "id": "a",
-        "model": "model-a",
+        "model": {
+          "provider": "codex",
+          "id": "model-a"
+        },
         "displayName": "Updated A",
         "defaultReasoningEffort": "medium",
         "supportedReasoningEfforts": [
@@ -1204,7 +1476,10 @@
       },
       {
         "id": "b",
-        "model": "model-b",
+        "model": {
+          "provider": "codex",
+          "id": "model-b"
+        },
         "displayName": "Model b",
         "defaultReasoningEffort": "medium",
         "supportedReasoningEfforts": [
@@ -1235,7 +1510,10 @@
             "data": [
               {
                 "id": "a",
-                "model": "model-a",
+                "model": {
+                  "provider": "codex",
+                  "id": "model-a"
+                },
                 "displayName": "Model a",
                 "defaultReasoningEffort": "medium",
                 "supportedReasoningEfforts": [
@@ -1264,7 +1542,10 @@
             "data": [
               {
                 "id": "a",
-                "model": "model-a",
+                "model": {
+                  "provider": "codex",
+                  "id": "model-a"
+                },
                 "displayName": "Model a",
                 "defaultReasoningEffort": "medium",
                 "supportedReasoningEfforts": [
@@ -1290,43 +1571,50 @@
     "name": "remote-error-preserves-payload",
     "command": {
       "type": "readItem",
-      "threadId": "thread-1",
+      "threadId": {
+        "provider": "codex",
+        "id": "thread-1"
+      },
       "turnId": "turn-1",
       "itemId": "item-1"
     },
     "exchanges": [
       {
-        "method": "host/thread/item/read",
+        "method": "host/session/item/read",
         "params": {
-          "threadId": "thread-1",
+          "threadId": {
+            "provider": "codex",
+            "id": "thread-1"
+          },
           "turnId": "turn-1",
           "itemId": "item-1"
         },
         "response": {
           "error": {
-            "code": 503,
+            "code": "request_failed",
             "message": "offline",
-            "opaque": {
-              "b": 1
-            }
+            "delivery": "unknown",
+            "execution": null
           }
         }
       }
     ],
     "errorContains": "offline",
     "errorRaw": {
-      "code": 503,
+      "code": "request_failed",
       "message": "offline",
-      "opaque": {
-        "b": 1
-      }
+      "delivery": "unknown",
+      "execution": null
     }
   },
   {
     "name": "session gallery uses bounded native snapshot and deduplicates latest sources",
     "command": {
       "type": "sessionImages",
-      "threadId": "thread"
+      "threadId": {
+        "provider": "codex",
+        "id": "thread"
+      }
     },
     "exchanges": [
       {
@@ -1347,7 +1635,10 @@
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
             "response": {
               "thread": {
-                "id": "thread",
+                "id": {
+                  "provider": "codex",
+                  "id": "thread"
+                },
                 "turns": [
                   {
                     "id": "old",
@@ -1355,13 +1646,35 @@
                     "items": [
                       {
                         "id": "oldest",
-                        "type": "imageGeneration",
-                        "savedPath": "/old.png"
+                        "status": "unknown",
+                        "clientInputId": null,
+                        "body": {
+                          "inline": {
+                            "body": {
+                              "imageGeneration": {
+                                "savedPath": "/old.png",
+                                "data": null,
+                                "revisedPrompt": null
+                              }
+                            }
+                          }
+                        }
                       },
                       {
                         "id": "duplicate",
-                        "type": "imageGeneration",
-                        "savedPath": "/new.png"
+                        "status": "unknown",
+                        "clientInputId": null,
+                        "body": {
+                          "inline": {
+                            "body": {
+                              "imageGeneration": {
+                                "savedPath": "/new.png",
+                                "data": null,
+                                "revisedPrompt": null
+                              }
+                            }
+                          }
+                        }
                       }
                     ]
                   },
@@ -1371,19 +1684,51 @@
                     "items": [
                       {
                         "id": "inline",
-                        "type": "imageGeneration",
-                        "result": "AQID"
+                        "status": "unknown",
+                        "clientInputId": null,
+                        "body": {
+                          "inline": {
+                            "body": {
+                              "imageGeneration": {
+                                "savedPath": null,
+                                "data": "AQID",
+                                "revisedPrompt": null
+                              }
+                            }
+                          }
+                        }
                       },
                       {
                         "id": "n",
-                        "type": "imageGeneration",
-                        "savedPath": "/stale.png"
+                        "status": "unknown",
+                        "clientInputId": null,
+                        "body": {
+                          "inline": {
+                            "body": {
+                              "imageGeneration": {
+                                "savedPath": "/stale.png",
+                                "data": null,
+                                "revisedPrompt": null
+                              }
+                            }
+                          }
+                        }
                       },
                       {
                         "id": "n",
-                        "type": "imageGeneration",
-                        "savedPath": "/new.png",
-                        "result": "discarded"
+                        "status": "unknown",
+                        "clientInputId": null,
+                        "body": {
+                          "inline": {
+                            "body": {
+                              "imageGeneration": {
+                                "savedPath": "/new.png",
+                                "data": "discarded",
+                                "revisedPrompt": null
+                              }
+                            }
+                          }
+                        }
                       }
                     ]
                   }
@@ -1413,7 +1758,10 @@
     "name": "session gallery preserves provider read failure",
     "command": {
       "type": "sessionImages",
-      "threadId": "thread"
+      "threadId": {
+        "provider": "codex",
+        "id": "thread"
+      }
     },
     "exchanges": [
       {
@@ -1427,8 +1775,10 @@
         },
         "response": {
           "error": {
-            "code": "history_unavailable",
-            "message": "incomplete native history"
+            "code": "request_failed",
+            "message": "incomplete native history",
+            "delivery": "unknown",
+            "execution": null
           }
         }
       }
@@ -1492,41 +1842,83 @@
         },
         "response": {
           "error": {
-            "code": -9,
+            "code": "request_failed",
             "message": "transcription failed",
-            "future": true
+            "delivery": "unknown",
+            "execution": null
           }
         }
       }
     ],
     "errorContains": "transcription failed",
     "errorRaw": {
-      "code": -9,
+      "code": "request_failed",
       "message": "transcription failed",
-      "future": true
+      "delivery": "unknown",
+      "execution": null
     }
   },
   {
-    "name": "approval-default-decision-numeric-id",
+    "name": "approval-explicit-choice",
     "command": {
       "type": "respond",
       "request": {
-        "id": 7,
-        "method": "item/commandExecution/requestApproval",
-        "params": {}
+        "id": "7",
+        "target": "session",
+        "delivery": "awaiting",
+        "body": {
+          "approval": {
+            "kind": "command",
+            "description": "",
+            "details": "",
+            "choices": [
+              {
+                "id": "choice-0",
+                "label": "承認",
+                "description": "",
+                "meaning": "allow",
+                "scope": "once"
+              },
+              {
+                "id": "choice-1",
+                "label": "このセッションで承認",
+                "description": "",
+                "meaning": "allow",
+                "scope": "session"
+              },
+              {
+                "id": "choice-2",
+                "label": "拒否",
+                "description": "",
+                "meaning": "deny",
+                "scope": "once"
+              },
+              {
+                "id": "choice-3",
+                "label": "キャンセル",
+                "description": "",
+                "meaning": "cancel",
+                "scope": "once"
+              }
+            ]
+          }
+        }
       },
       "answer": {
-        "type": "decision",
-        "index": 2
+        "approval": {
+          "choiceId": "choice-2"
+        }
       }
     },
     "exchanges": [
       {
         "method": "host/session/answer",
         "params": {
-          "requestId": 7,
-          "result": {
-            "decision": "decline"
+          "requestId": "7",
+          "answer": {
+            "approval": {
+              "choiceId": "choice-2"
+            }
           }
         },
         "response": {
@@ -1542,27 +1934,36 @@
       "type": "respond",
       "request": {
         "id": "approval",
-        "method": "item/fileChange/requestApproval",
-        "params": {
-          "availableDecisions": [
-            {
-              "acceptWithExecpolicyAmendment": {
-                "execpolicy_amendment": [
-                  "git",
-                  "status"
-                ],
-                "future": {
-                  "value": 1
-                }
+        "target": "session",
+        "delivery": "awaiting",
+        "body": {
+          "approval": {
+            "kind": "fileChange",
+            "description": "",
+            "details": "",
+            "choices": [
+              {
+                "id": "choice-0",
+                "label": "実行ルールを追加して承認",
+                "description": "",
+                "meaning": "allow",
+                "scope": "persistent"
+              },
+              {
+                "id": "choice-1",
+                "label": "キャンセル",
+                "description": "",
+                "meaning": "cancel",
+                "scope": "once"
               }
-            },
-            "cancel"
-          ]
+            ]
+          }
         }
       },
       "answer": {
-        "type": "decision",
-        "index": 0
+        "approval": {
+          "choiceId": "choice-0"
+        }
       }
     },
     "exchanges": [
@@ -1570,17 +1971,9 @@
         "method": "host/session/answer",
         "params": {
           "requestId": "approval",
-          "result": {
-            "decision": {
-              "acceptWithExecpolicyAmendment": {
-                "execpolicy_amendment": [
-                  "git",
-                  "status"
-                ],
-                "future": {
-                  "value": 1
-                }
-              }
+          "answer": {
+            "approval": {
+              "choiceId": "choice-0"
             }
           }
         },
@@ -1597,57 +1990,77 @@
       "type": "respond",
       "request": {
         "id": "approval",
-        "method": "item/fileChange/requestApproval",
-        "params": {
-          "availableDecisions": [
-            {
-              "acceptWithExecpolicyAmendment": {
-                "execpolicy_amendment": [
-                  "git",
-                  "status"
-                ],
-                "future": {
-                  "value": 1
-                }
+        "target": "session",
+        "delivery": "awaiting",
+        "body": {
+          "approval": {
+            "kind": "fileChange",
+            "description": "",
+            "details": "",
+            "choices": [
+              {
+                "id": "choice-0",
+                "label": "実行ルールを追加して承認",
+                "description": "",
+                "meaning": "allow",
+                "scope": "persistent"
+              },
+              {
+                "id": "choice-1",
+                "label": "キャンセル",
+                "description": "",
+                "meaning": "cancel",
+                "scope": "once"
               }
-            },
-            "cancel"
-          ]
-        }
-      },
-      "answer": {
-        "type": "decision",
-        "index": 2
-      }
-    },
-    "exchanges": [],
-    "errorContains": "invalid approval choice",
-    "errorRaw": null
-  },
-  {
-    "name": "permission-allow-preserves-unknown-fields",
-    "command": {
-      "type": "respond",
-      "request": {
-        "id": "permissions",
-        "method": "item/permissions/requestApproval",
-        "params": {
-          "permissions": {
-            "filesystem": {
-              "write": [
-                "/fixture"
-              ]
-            },
-            "network": true,
-            "future": {
-              "scope": "special"
-            }
+            ]
           }
         }
       },
       "answer": {
-        "type": "permissions",
-        "allow": true
+        "approval": {
+          "choiceId": "choice-2"
+        }
+      }
+    },
+    "exchanges": [],
+    "errorContains": "invalid request choice",
+    "errorRaw": null
+  },
+  {
+    "name": "permission-explicit-choice",
+    "command": {
+      "type": "respond",
+      "request": {
+        "id": "permissions",
+        "target": "session",
+        "delivery": "awaiting",
+        "body": {
+          "permission": {
+            "description": "",
+            "details": "{\"filesystem\": {\"write\": [\"/fixture\"]}, \"network\": true, \"future\": {\"scope\": \"special\"}}",
+            "choices": [
+              {
+                "id": "choice-allow",
+                "label": "このターンで許可",
+                "description": "",
+                "meaning": "allow",
+                "scope": "turn"
+              },
+              {
+                "id": "choice-deny",
+                "label": "拒否",
+                "description": "",
+                "meaning": "deny",
+                "scope": "turn"
+              }
+            ]
+          }
+        }
+      },
+      "answer": {
+        "permission": {
+          "choiceId": "choice-allow"
+        }
       }
     },
     "exchanges": [
@@ -1655,19 +2068,10 @@
         "method": "host/session/answer",
         "params": {
           "requestId": "permissions",
-          "result": {
-            "permissions": {
-              "filesystem": {
-                "write": [
-                  "/fixture"
-                ]
-              },
-              "network": true,
-              "future": {
-                "scope": "special"
-              }
-            },
-            "scope": "turn"
+          "answer": {
+            "permission": {
+              "choiceId": "choice-allow"
+            }
           }
         },
         "response": {
@@ -1683,24 +2087,35 @@
       "type": "respond",
       "request": {
         "id": "permissions",
-        "method": "item/permissions/requestApproval",
-        "params": {
-          "permissions": {
-            "filesystem": {
-              "write": [
-                "/fixture"
-              ]
-            },
-            "network": true,
-            "future": {
-              "scope": "special"
-            }
+        "target": "session",
+        "delivery": "awaiting",
+        "body": {
+          "permission": {
+            "description": "",
+            "details": "{\"filesystem\": {\"write\": [\"/fixture\"]}, \"network\": true, \"future\": {\"scope\": \"special\"}}",
+            "choices": [
+              {
+                "id": "choice-allow",
+                "label": "このターンで許可",
+                "description": "",
+                "meaning": "allow",
+                "scope": "turn"
+              },
+              {
+                "id": "choice-deny",
+                "label": "拒否",
+                "description": "",
+                "meaning": "deny",
+                "scope": "turn"
+              }
+            ]
           }
         }
       },
       "answer": {
-        "type": "permissions",
-        "allow": false
+        "permission": {
+          "choiceId": "choice-deny"
+        }
       }
     },
     "exchanges": [
@@ -1708,9 +2123,10 @@
         "method": "host/session/answer",
         "params": {
           "requestId": "permissions",
-          "result": {
-            "permissions": {},
-            "scope": "turn"
+          "answer": {
+            "permission": {
+              "choiceId": "choice-deny"
+            }
           }
         },
         "response": {
@@ -1726,26 +2142,47 @@
       "type": "respond",
       "request": {
         "id": "questions",
-        "method": "item/tool/requestUserInput",
-        "params": {
-          "questions": [
-            {
-              "id": "first",
-              "question": "Question 1"
-            },
-            {
-              "id": "second",
-              "question": "Question 2"
-            }
-          ]
+        "target": "session",
+        "delivery": "awaiting",
+        "body": {
+          "question": {
+            "questions": [
+              {
+                "id": "question-0",
+                "header": "",
+                "prompt": "Question 1",
+                "secret": false,
+                "allowFreeText": true,
+                "multiple": false,
+                "choices": []
+              },
+              {
+                "id": "question-1",
+                "header": "",
+                "prompt": "Question 2",
+                "secret": false,
+                "allowFreeText": true,
+                "multiple": false,
+                "choices": []
+              }
+            ]
+          }
         }
       },
       "answer": {
-        "type": "answers",
-        "answers": {
-          "second": "second line\n",
-          "first": " first ",
-          "not-requested": "ignored"
+        "questions": {
+          "answers": {
+            "question-0": {
+              "freeText": {
+                "text": " first "
+              }
+            },
+            "question-1": {
+              "freeText": {
+                "text": "second line\n"
+              }
+            }
+          }
         }
       }
     },
@@ -1754,17 +2191,19 @@
         "method": "host/session/answer",
         "params": {
           "requestId": "questions",
-          "result": {
-            "answers": {
-              "first": {
-                "answers": [
-                  " first "
-                ]
-              },
-              "second": {
-                "answers": [
-                  "second line\n"
-                ]
+          "answer": {
+            "questions": {
+              "answers": {
+                "question-0": {
+                  "freeText": {
+                    "text": " first "
+                  }
+                },
+                "question-1": {
+                  "freeText": {
+                    "text": "second line\n"
+                  }
+                }
               }
             }
           }
@@ -1782,29 +2221,47 @@
       "type": "respond",
       "request": {
         "id": "questions",
-        "method": "item/tool/requestUserInput",
-        "params": {
-          "questions": [
-            {
-              "id": "first",
-              "question": "Question 1"
-            },
-            {
-              "id": "second",
-              "question": "Question 2"
-            }
-          ]
+        "target": "session",
+        "delivery": "awaiting",
+        "body": {
+          "question": {
+            "questions": [
+              {
+                "id": "question-0",
+                "header": "",
+                "prompt": "Question 1",
+                "secret": false,
+                "allowFreeText": true,
+                "multiple": false,
+                "choices": []
+              },
+              {
+                "id": "question-1",
+                "header": "",
+                "prompt": "Question 2",
+                "secret": false,
+                "allowFreeText": true,
+                "multiple": false,
+                "choices": []
+              }
+            ]
+          }
         }
       },
       "answer": {
-        "type": "answers",
-        "answers": {
-          "first": "one"
+        "questions": {
+          "answers": {
+            "question-0": {
+              "freeText": {
+                "text": "one"
+              }
+            }
+          }
         }
       }
     },
     "exchanges": [],
-    "errorContains": "every question requires an answer",
+    "errorContains": "every question requires one answer",
     "errorRaw": null
   },
   {
@@ -1813,49 +2270,52 @@
       "type": "respond",
       "request": {
         "id": "questions",
-        "method": "item/tool/requestUserInput",
-        "params": {
-          "questions": [
-            {
-              "id": "first",
-              "question": "Question 1"
+        "target": "session",
+        "delivery": "awaiting",
+        "body": {
+          "question": {
+            "questions": [
+              {
+                "id": "question-0",
+                "header": "",
+                "prompt": "Question 1",
+                "secret": false,
+                "allowFreeText": true,
+                "multiple": false,
+                "choices": []
+              },
+              {
+                "id": "question-1",
+                "header": "",
+                "prompt": "Question 2",
+                "secret": false,
+                "allowFreeText": true,
+                "multiple": false,
+                "choices": []
+              }
+            ]
+          }
+        }
+      },
+      "answer": {
+        "questions": {
+          "answers": {
+            "question-0": {
+              "freeText": {
+                "text": "one"
+              }
             },
-            {
-              "id": "second",
-              "question": "Question 2"
+            "question-1": {
+              "freeText": {
+                "text": " \n"
+              }
             }
-          ]
-        }
-      },
-      "answer": {
-        "type": "answers",
-        "answers": {
-          "first": "one",
-          "second": " \n"
+          }
         }
       }
     },
     "exchanges": [],
-    "errorContains": "every question requires an answer",
+    "errorContains": "invalid question answer",
     "errorRaw": null
-  },
-  {
-    "name": "unknown provider request cannot be approved",
-    "command": {
-      "type": "respond",
-      "request": {
-        "id": "future",
-        "method": "future/input",
-        "params": {
-          "future": true
-        }
-      },
-      "answer": {
-        "type": "raw",
-        "json": "{\"future\":[1,null,{\"ok\":true}]}"
-      }
-    },
-    "exchanges": [],
-    "errorContains": "unsupported provider request"
   }
 ]

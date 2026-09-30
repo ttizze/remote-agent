@@ -4,14 +4,20 @@
     "draft": {
       "text": "keep text",
       "attachments": [],
-      "model": "model-a",
+      "model": {
+        "provider": "codex",
+        "id": "model-a"
+      },
       "effort": "max",
       "service_tier": "default"
     },
     "models": [
       {
         "id": "model-a",
-        "model": "model-a",
+        "model": {
+          "provider": "codex",
+          "id": "model-a"
+        },
         "displayName": "Model A",
         "defaultReasoningEffort": "medium",
         "defaultServiceTier": "priority",
@@ -33,7 +39,10 @@
     "expected": {
       "text": "keep text",
       "attachments": [],
-      "model": "model-a",
+      "model": {
+        "provider": "codex",
+        "id": "model-a"
+      },
       "effort": "max",
       "service_tier": "default"
     }
@@ -43,14 +52,20 @@
     "draft": {
       "text": "keep text",
       "attachments": [],
-      "model": "model-a",
+      "model": {
+        "provider": "codex",
+        "id": "model-a"
+      },
       "effort": "max",
       "service_tier": "priority"
     },
     "models": [
       {
         "id": "model-a",
-        "model": "model-a",
+        "model": {
+          "provider": "codex",
+          "id": "model-a"
+        },
         "displayName": "Model A",
         "defaultReasoningEffort": "medium",
         "defaultServiceTier": "priority",
@@ -65,7 +80,10 @@
     "expected": {
       "text": "keep text",
       "attachments": [],
-      "model": "model-a",
+      "model": {
+        "provider": "codex",
+        "id": "model-a"
+      },
       "effort": "medium",
       "service_tier": "default"
     }
@@ -75,14 +93,20 @@
     "draft": {
       "text": "keep text",
       "attachments": [],
-      "model": "model-a",
+      "model": {
+        "provider": "codex",
+        "id": "model-a"
+      },
       "effort": null,
       "service_tier": null
     },
     "models": [
       {
         "id": "model-a",
-        "model": "model-a",
+        "model": {
+          "provider": "codex",
+          "id": "model-a"
+        },
         "displayName": "Model A",
         "defaultReasoningEffort": "unknown",
         "defaultServiceTier": "priority",
@@ -104,7 +128,10 @@
     "expected": {
       "text": "keep text",
       "attachments": [],
-      "model": "model-a",
+      "model": {
+        "provider": "codex",
+        "id": "model-a"
+      },
       "effort": "medium",
       "service_tier": "priority"
     }
@@ -114,7 +141,10 @@
     "draft": {
       "text": "keep text",
       "attachments": [],
-      "model": "model-a",
+      "model": {
+        "provider": "codex",
+        "id": "model-a"
+      },
       "effort": "max",
       "service_tier": "priority"
     },
@@ -122,7 +152,10 @@
     "expected": {
       "text": "keep text",
       "attachments": [],
-      "model": "model-a",
+      "model": {
+        "provider": "codex",
+        "id": "model-a"
+      },
       "effort": null
     }
   },
@@ -131,14 +164,20 @@
     "draft": {
       "text": "keep text",
       "attachments": [],
-      "model": "model-a",
+      "model": {
+        "provider": "codex",
+        "id": "model-a"
+      },
       "effort": "max",
       "service_tier": "default"
     },
     "models": [
       {
         "id": "model-a",
-        "model": "model-a",
+        "model": {
+          "provider": "codex",
+          "id": "model-a"
+        },
         "displayName": "Model A",
         "defaultReasoningEffort": "medium",
         "defaultServiceTier": "priority",
@@ -158,7 +197,10 @@
       },
       {
         "id": "model-b",
-        "model": "model-b",
+        "model": {
+          "provider": "codex",
+          "id": "model-b"
+        },
         "displayName": "Model A",
         "defaultReasoningEffort": "medium",
         "defaultServiceTier": "priority",
@@ -180,25 +222,37 @@
     "expected": {
       "text": "keep text",
       "attachments": [],
-      "model": "model-b",
+      "model": {
+        "provider": "codex",
+        "id": "model-b"
+      },
       "effort": "medium",
       "service_tier": "priority"
     },
-    "select": "model-b"
+    "select": {
+      "provider": "codex",
+      "id": "model-b"
+    }
   },
   {
     "name": "removed model selects catalog default",
     "draft": {
       "text": "keep text",
       "attachments": [],
-      "model": "removed",
+      "model": {
+        "provider": "codex",
+        "id": "removed"
+      },
       "effort": "max",
       "service_tier": "default"
     },
     "models": [
       {
         "id": "model-a",
-        "model": "model-a",
+        "model": {
+          "provider": "codex",
+          "id": "model-a"
+        },
         "displayName": "Model A",
         "defaultReasoningEffort": "medium",
         "defaultServiceTier": "priority",
@@ -218,7 +272,10 @@
       },
       {
         "id": "model-b",
-        "model": "model-b",
+        "model": {
+          "provider": "codex",
+          "id": "model-b"
+        },
         "displayName": "Model A",
         "defaultReasoningEffort": "medium",
         "defaultServiceTier": "priority",
@@ -241,7 +298,10 @@
     "expected": {
       "text": "keep text",
       "attachments": [],
-      "model": "model-b",
+      "model": {
+        "provider": "codex",
+        "id": "model-b"
+      },
       "effort": "medium",
       "service_tier": "priority"
     }

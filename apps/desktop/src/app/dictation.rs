@@ -9,7 +9,7 @@ pub(super) enum Phase {
 }
 pub(super) struct Dictation {
     pub(super) id: uuid::Uuid,
-    key: String,
+    key: DraftKey,
     generation: u64,
     pub(super) phase: Phase,
     send: bool,
@@ -118,7 +118,7 @@ impl Desktop {
                 });
                 self.dictation = Some(Dictation {
                     id,
-                    key: self.draft_key().into(),
+                    key: self.draft_key().clone(),
                     generation: self.snapshot.epoch,
                     phase: Phase::Permission,
                     send: false,
@@ -182,7 +182,7 @@ impl Desktop {
                     draft_key: state.key.clone(),
                     audio,
                     send: state.send && state.generation == self.snapshot.epoch,
-                    client_user_message_id: uuid::Uuid::new_v4().to_string(),
+                    client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
                 });
                 self.perform(intent, OperationCompletion::Dictation(id));
             }

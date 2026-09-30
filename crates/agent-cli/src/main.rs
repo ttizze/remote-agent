@@ -2,11 +2,10 @@ use agent_core::{
     state::{Draft, Intent, Navigation, Snapshot, operations as op},
     store::{Outcome, Store},
 };
-use agent_protocol::{models::ListQuery, operations::Answer};
+use agent_protocol::{models::ListQuery, requests::Answer};
 use agent_transport::transport::{Endpoint, Identity, Relays, Ticket};
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use serde_json::Value;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 #[derive(Parser)]
@@ -38,7 +37,7 @@ enum Command {
         search: String,
     },
     Send {
-        thread_id: String,
+        thread_id: agent_protocol::session::SessionRef,
         text: String,
         /// Stable identity for this submission, distinct from the RPC ID.
         #[arg(long)]
@@ -49,16 +48,11 @@ enum Command {
         effort: Option<String>,
     },
     Approve {
-        /// JSON request ID: a number or a quoted JSON string.
-        #[arg(value_parser=parse_json)]
-        request_id: Value,
+        /// Opaque request ID issued by the Host.
+        request_id: String,
         #[arg(long)]
         decision: u32,
     },
-}
-
-fn parse_json(value: &str) -> Result<Value, serde_json::Error> {
-    serde_json::from_str(value)
 }
 
 #[tokio::main]
@@ -90,7 +84,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         Command::Send { thread_id, .. } => {
             snapshot.navigation = Arc::new(Navigation {
                 thread_id: Some(thread_id.clone()),
-                draft_key: thread_id.clone(),
+                draft_key: thread_id.clone().into(),
                 ..Default::default()
             })
         }
@@ -156,10 +150,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
         } => {
             store
                 .dispatch(Intent::SetDraft {
-                    thread_id: thread_id.clone(),
+                    thread_id: thread_id.clone().into(),
                     draft: Draft {
                         text,
-                        model,
+                        model: model.map(|id| agent_protocol::models::ModelRef {
+                            provider: thread_id.provider,
+                            id,
+                        }),
                         effort,
                         ..Default::default()
                     },
@@ -168,7 +165,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             let Outcome::Submitted { turn_id: id } = store
                 .dispatch(Intent::Submit {
                     thread_id: Some(thread_id),
-                    client_user_message_id: client_message_id,
+                    client_user_message_id: client_message_id.into(),
                 })
                 .await?
             else {
@@ -182,13 +179,33 @@ async fn run(args: Args) -> anyhow::Result<()> {
         } => {
             store
                 .dispatch(Intent::OpenRequest(op::OpenRequest {
-                    request_id: request_id.clone(),
+                    request_id: request_id.clone().into(),
                 }))
                 .await?;
+            let snapshot = store.snapshot();
+            let request = snapshot
+                .request(request_id.as_str())
+                .ok_or_else(|| anyhow::anyhow!("request is unavailable"))?;
+            let choice_id = request
+                .body
+                .choices()
+                .get(decision as usize)
+                .ok_or_else(|| anyhow::anyhow!("invalid request choice"))?
+                .id
+                .clone();
+            let answer = match request.body {
+                agent_protocol::requests::RequestBody::Approval { .. } => {
+                    Answer::Approval { choice_id }
+                }
+                agent_protocol::requests::RequestBody::Permission { .. } => {
+                    Answer::Permission { choice_id }
+                }
+                _ => anyhow::bail!("request does not offer approval choices"),
+            };
             store
                 .dispatch(Intent::Respond(op::Respond {
-                    request_id,
-                    answer: Answer::Decision { index: decision },
+                    request_id: request_id.into(),
+                    answer,
                 }))
                 .await?;
             println!("null");

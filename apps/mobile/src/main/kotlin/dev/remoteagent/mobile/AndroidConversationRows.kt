@@ -22,15 +22,20 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.AgentException
 import dev.remoteagent.core.Answer
-import dev.remoteagent.core.JsonValue
+import dev.remoteagent.core.Choice
+import dev.remoteagent.core.ElicitationAnswer
+import dev.remoteagent.core.ElicitationInput
+import dev.remoteagent.core.Question
 import dev.remoteagent.core.Request
-import dev.remoteagent.core.RequestKind
-import dev.remoteagent.core.parseJsonValue
+import dev.remoteagent.core.RequestBody
+import dev.remoteagent.core.buildQuestionAnswer
+import dev.remoteagent.core.requestAnswerFromJson
+import dev.remoteagent.core.requestInputDefault
 
 @Composable
 internal fun RequestCard(request: Request, submit: (Answer, (String?) -> Unit) -> Unit) {
-    var busy by remember(request.key) { mutableStateOf(false) }
-    var error by remember(request.key) { mutableStateOf<String?>(null) }
+    var busy by remember(request.id) { mutableStateOf(false) }
+    var error by remember(request.id) { mutableStateOf<String?>(null) }
     fun respond(answer: Answer) {
         busy = true
         submit(answer) {
@@ -38,32 +43,35 @@ internal fun RequestCard(request: Request, submit: (Answer, (String?) -> Unit) -
             error = it
         }
     }
+    val disabled = busy || !request.canRespond
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(request.title, style = MaterialTheme.typography.labelLarge)
             Text(request.body)
-            when (request.kind) {
-                RequestKind.COMMAND_APPROVAL,
-                RequestKind.FILE_APPROVAL ->
-                    request.decisionLabels.forEachIndexed { index, label ->
-                        Button(
-                            onClick = { respond(Answer.Decision(index.toUInt())) },
-                            enabled = !busy && request.canRespond,
-                        ) { Text(label) }
-                    }
-                RequestKind.PERMISSIONS ->
+            if (request.details.isNotEmpty()) Text(request.details, style = MaterialTheme.typography.bodySmall)
+            when (val body = request.requestBody) {
+                is RequestBody.Approval -> ChoiceButtons(body.choices, false, disabled, ::respond)
+                is RequestBody.Permission -> ChoiceButtons(body.choices, true, disabled, ::respond)
+                is RequestBody.Question -> QuestionAnswers(request.id, body.questions, disabled, ::respond)
+                is RequestBody.Elicitation -> {
+                    ElicitationDescription(body.input, !disabled)
+                    StructuredAnswer(request, disabled, ::respond) { error = it }
                     Row {
-                        Button(
-                            onClick = { respond(Answer.Permissions(true)) },
-                            enabled = !busy && request.canRespond,
-                        ) { Text("このターンで許可") }
-                        Button(
-                            onClick = { respond(Answer.Permissions(false)) },
-                            enabled = !busy && request.canRespond,
-                        ) { Text("拒否") }
+                        TextButton(
+                            onClick = { respond(Answer.Elicitation(ElicitationAnswer.Decline)) },
+                            enabled = !disabled,
+                        ) {
+                            Text("辞退")
+                        }
+                        TextButton(
+                            onClick = { respond(Answer.Elicitation(ElicitationAnswer.Cancel)) },
+                            enabled = !disabled,
+                        ) {
+                            Text("キャンセル")
+                        }
                     }
-                RequestKind.QUESTIONS -> QuestionAnswers(request, busy || !request.canRespond, ::respond)
-                else -> RawAnswer(busy || !request.canRespond, ::respond) { error = it }
+                }
+                is RequestBody.ToolExecution -> StructuredAnswer(request, disabled, ::respond) { error = it }
             }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
@@ -71,47 +79,117 @@ internal fun RequestCard(request: Request, submit: (Answer, (String?) -> Unit) -
 }
 
 @Composable
-private fun QuestionAnswers(request: Request, busy: Boolean, respond: (Answer) -> Unit) {
-    var answers by remember(request.key) { mutableStateOf(emptyMap<String, String>()) }
-    val questions = request.params["questions"]?.values.orEmpty()
-    questions.forEach { question ->
-        val id = question["id"]?.text.orEmpty()
-        Text(question["question"]?.text ?: "回答")
-        question["options"]?.values.orEmpty().forEach { option ->
-            val label = option["label"]?.text.orEmpty()
-            TextButton(onClick = { answers = answers + (id to label) }, enabled = !busy) { Text(label) }
+private fun ElicitationDescription(input: ElicitationInput, enabled: Boolean) {
+    when (input) {
+        is ElicitationInput.Url -> {
+            val context = androidx.compose.ui.platform.LocalContext.current
+            TextButton(
+                onClick = {
+                    context.startActivity(
+                        android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(input.url))
+                    )
+                },
+                enabled = enabled,
+            ) {
+                Text("リンクを開く")
+            }
         }
-        OutlinedTextField(
-            answers[id].orEmpty(),
-            { answers = answers + (id to it) },
-            enabled = !busy,
-            visualTransformation =
-                if ((question["isSecret"] as? JsonValue.Boolean)?.value == true) PasswordVisualTransformation()
-                else VisualTransformation.None,
-        )
+        is ElicitationInput.Form ->
+            input.fields.forEach { field ->
+                Text("${field.title} (${field.name})${if (field.required) " *" else ""}")
+                if (field.description.isNotEmpty()) Text(field.description)
+            }
+    }
+}
+
+@Composable
+private fun ChoiceButtons(choices: List<Choice>, permission: Boolean, disabled: Boolean, respond: (Answer) -> Unit) {
+    choices.forEach { choice ->
+        Button(
+            onClick = { respond(if (permission) Answer.Permission(choice.id) else Answer.Approval(choice.id)) },
+            enabled = !disabled,
+        ) {
+            Text(choice.label)
+        }
+        if (choice.description.isNotEmpty()) Text(choice.description)
+    }
+}
+
+@Composable
+private fun QuestionAnswers(key: String, questions: List<Question>, disabled: Boolean, respond: (Answer) -> Unit) {
+    var answers by remember(key) { mutableStateOf(emptyMap<String, String>()) }
+    var selections by remember(key) { mutableStateOf(emptyMap<String, List<String>>()) }
+    questions.forEach { question ->
+        val id = question.id
+        Text(question.prompt)
+        question.choices.forEach { choice ->
+            val selected = selections[id].orEmpty()
+            TextButton(
+                onClick = {
+                    selections =
+                        selections +
+                            (id to
+                                if (question.multiple) {
+                                    if (choice.id in selected) selected - choice.id else selected + choice.id
+                                } else listOf(choice.id))
+                    answers = answers + (id to "")
+                },
+                enabled = !disabled,
+            ) {
+                Text("${if (choice.id in selected) "✓ " else ""}${choice.label}")
+            }
+            if (choice.description.isNotEmpty()) Text(choice.description)
+        }
+        if (question.allowFreeText)
+            OutlinedTextField(
+                answers[id].orEmpty(),
+                { answers = answers + (id to it) },
+                enabled = !disabled,
+                visualTransformation =
+                    if (question.secret) PasswordVisualTransformation() else VisualTransformation.None,
+            )
     }
     Button(
-        onClick = { respond(Answer.Questions(answers)) },
-        enabled = !busy && questions.all { !answers[it["id"]?.text].isNullOrBlank() },
+        onClick = {
+            respond(
+                Answer.Questions(
+                    questions.associate { question ->
+                        question.id to
+                            buildQuestionAnswer(
+                                question.multiple,
+                                answers[question.id].orEmpty(),
+                                selections[question.id].orEmpty(),
+                            )
+                    }
+                )
+            )
+        },
+        enabled = !disabled,
     ) {
         Text("回答を送信")
     }
 }
 
 @Composable
-private fun RawAnswer(busy: Boolean, respond: (Answer) -> Unit, onError: (String?) -> Unit) {
-    var raw by remember { mutableStateOf("{}") }
-    OutlinedTextField(raw, { raw = it }, Modifier.fillMaxWidth(), enabled = !busy, label = { Text("応答 JSON") })
+private fun StructuredAnswer(
+    request: Request,
+    disabled: Boolean,
+    respond: (Answer) -> Unit,
+    onError: (String?) -> Unit,
+) {
+    var text by remember(request.id) { mutableStateOf(requestInputDefault(request.requestBody)) }
+    val urlConfirmation = (request.requestBody as? RequestBody.Elicitation)?.input is ElicitationInput.Url
+    if (!urlConfirmation) OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth(), enabled = !disabled)
     Button(
         onClick = {
             try {
-                respond(Answer.Raw(parseJsonValue(raw)))
+                respond(requestAnswerFromJson(request.requestBody, text))
             } catch (failure: AgentException) {
                 onError(failure.message)
             }
         },
-        enabled = !busy,
+        enabled = !disabled,
     ) {
-        Text("応答を送信")
+        Text(if (urlConfirmation) "確認して送信" else "回答を送信")
     }
 }
