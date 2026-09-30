@@ -18,9 +18,21 @@ CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER=/usr/bin/clang \
 cargo build --locked -p agent-ffi --release --target "$rust_target"
 bindings="$PWD/target/agent-bindings"
 output="$target/$rust_target/release"
+swift_key=$({
+    shasum -a 256 "$bindings/AgentCore.swift" "$bindings/AgentCoreFFI.h" "$bindings/AgentCoreFFI.modulemap" "$0"
+    xcrun --sdk "$sdk" swiftc --version
+    xcrun --sdk "$sdk" --show-sdk-build-version
+    printf '%s\n' "$swift_target" "$(xcrun --sdk "$sdk" --show-sdk-path)"
+} | shasum -a 256 | cut -d ' ' -f 1)
+if [[ -f "$output/libAgentCore.a" && -f "$output/AgentCore.swiftmodule" && -f "$output/AgentCore.swiftdoc" \
+    && -f "$output/agent-core-swift.sha256" && $(cat "$output/agent-core-swift.sha256") == "$swift_key" ]]; then
+    echo 'Reusing unchanged AgentCore Swift bindings'
+    exit 0
+fi
 xcrun --sdk "$sdk" swiftc "$bindings/AgentCore.swift" \
     -parse-as-library -O -emit-library -static -module-name AgentCore \
     -emit-module -emit-module-path "$output/AgentCore.swiftmodule" \
     -o "$output/libAgentCore.a" -I "$bindings" \
     -Xcc "-fmodule-map-file=$bindings/AgentCoreFFI.modulemap" \
     -sdk "$(xcrun --sdk "$sdk" --show-sdk-path)" -target "$swift_target"
+printf '%s\n' "$swift_key" > "$output/agent-core-swift.sha256"

@@ -177,7 +177,16 @@ transfer server just to delete that check would reverse A14.
   -p host-daemon -p host-fixture` covers the integration tests omitted by the
   library-only quality invocation.
 - `nix develop . --command just conversation-ui` runs the maintained native
-  conversation contracts on a fresh isolated Simulator/Host. `just ios-e2e`
+  conversation contracts on two fresh isolated Simulator/Host pairs, sharing
+  one build. Each pair owns its history, failure controls and app storage.
+  Set `BEX_IOS_TEST_WORKERS=1` for a serial audit, or 2–4 for parallel runs.
+  The runner retains Xcode derived data under the Cargo target's
+  `qa/ios-derived-data`, always builds the current revision, and holds a lock
+  through test completion so another run cannot replace the active binaries.
+  Unchanged bindings preserve their timestamps; the compiled Swift bindings
+  are reused only with matching sources, SDK, compiler and build script.
+  Per-worker logs, result bundles and a timing summary remain under `qa/Bex-*`.
+  `just ios-e2e`
   also covers pagination, foreground refresh, files, dictation, and images.
   Missing or skipped requested tests fail the runner.
 - Run the retained real-time soak explicitly with

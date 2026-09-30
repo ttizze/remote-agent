@@ -74,15 +74,15 @@ final class BexLaunchUITests: XCTestCase {
 
         let taskList = app.descendants(matching: .any)["tasks.list"]
         let taskDetail = app.descendants(matching: .any)["task.detail"]
-        if taskDetail.waitForExistence(timeout: 2) {
+        let manualPairing = app.buttons["pairing.manual"]
+        let ready = expectation(for: NSPredicate { _, _ in
+            taskList.exists || taskDetail.exists || manualPairing.exists
+        }, evaluatedWith: app)
+        wait(for: [ready], timeout: 30)
+        if taskDetail.exists {
             app.navigationBars.buttons.element(boundBy: 0).tap()
         }
-        if taskList.waitForExistence(timeout: 3) {
-            return app
-        }
-
-        let manualPairing = app.buttons["pairing.manual"]
-        if manualPairing.waitForExistence(timeout: 3) {
+        if manualPairing.exists {
             let payload = try simulatorPairingPayload()
             for _ in 0 ..< 5 where !manualPairing.isHittable {
                 app.swipeUp()

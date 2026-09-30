@@ -9,6 +9,13 @@ case "$(uname -s)" in
     *) library="$target/debug/agent_ffi.dll" ;;
 esac
 cargo build --locked -p agent-ffi --features bindgen --lib --bin agent-bindgen
-# A namespace change must not leave obsolete generated Kotlin beside its replacement.
-rm -rf target/agent-bindings
-"$target/debug/agent-bindgen" generate "$library" --language swift --language kotlin --out-dir target/agent-bindings --no-format
+# Preserve timestamps for unchanged bindings, but replace the complete directory
+# after a schema change so retired generated files cannot survive.
+mkdir -p target
+generated=$(mktemp -d target/agent-bindings.XXXXXX)
+trap 'rm -rf "$generated"' EXIT
+"$target/debug/agent-bindgen" generate "$library" --language swift --language kotlin --out-dir "$generated" --no-format
+if [[ ! -d target/agent-bindings ]] || ! diff -qr target/agent-bindings "$generated" >/dev/null; then
+    rm -rf target/agent-bindings
+    mv "$generated" target/agent-bindings
+fi
