@@ -6,7 +6,7 @@ pub(crate) fn bundled_codex_path() -> Option<&'static Path> {
     #[cfg(target_os = "macos")]
     {
         Some(Path::new(
-            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
         ))
     }
     #[cfg(not(target_os = "macos"))]

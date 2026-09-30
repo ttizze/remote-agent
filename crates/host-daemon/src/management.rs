@@ -26,7 +26,7 @@ pub(crate) async fn run(mode: Mode, state_dir: Option<PathBuf>, isolated: bool) 
     })
     .await??;
     // This client manages a Host on the same machine. It needs no public relay.
-    let endpoint = Endpoint::bind(identity, Relays::Disabled).await?;
+    let endpoint = Endpoint::bind(identity, Relays::Loopback).await?;
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         let session = endpoint.connect(&ticket).await?;
         let (client, _events) = session.open_peer(Duration::from_secs(15), 8).await?;

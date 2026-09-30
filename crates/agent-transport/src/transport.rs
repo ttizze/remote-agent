@@ -8,7 +8,7 @@ use crate::{
     },
     peer::PeerError,
 };
-use iroh::{EndpointAddr, RelayMode, SecretKey, endpoint::presets};
+use iroh::{EndpointAddr, RelayMode, SecretKey, TransportAddr, endpoint::presets};
 use iroh_tickets::endpoint::EndpointTicket;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -76,6 +76,8 @@ pub enum Relays {
     #[default]
     Default,
     Disabled,
+    /// Same-machine connections, without relay, lookup or interface addresses.
+    Loopback,
     Custom(Vec<String>),
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,9 +150,15 @@ impl Endpoint {
         let mut builder = iroh::Endpoint::builder(presets::N0)
             .secret_key(identity.0)
             .alpns(vec![ALPN.to_vec()]);
+        if matches!(relays, Relays::Loopback) {
+            builder = builder
+                .clear_ip_transports()
+                .bind_addr("127.0.0.1:0")
+                .map_err(connection)?;
+        }
         builder = match relays {
             Relays::Default => builder,
-            Relays::Disabled => builder
+            Relays::Disabled | Relays::Loopback => builder
                 .relay_mode(RelayMode::Disabled)
                 .clear_address_lookup(),
             Relays::Custom(urls) => {
@@ -171,6 +179,18 @@ impl Endpoint {
     }
     pub fn ticket(&self) -> Ticket {
         Ticket(EndpointTicket::new(self.0.addr()))
+    }
+    /// The wildcard Host socket also accepts loopback traffic; local discovery
+    /// supplies its port with a loopback IP instead of the advertised LAN IPs.
+    pub fn local_ticket(&self) -> Ticket {
+        Ticket(EndpointTicket::new(EndpointAddr::from_parts(
+            self.0.id(),
+            self.0
+                .bound_sockets()
+                .into_iter()
+                .filter(|addr| addr.is_ipv4())
+                .map(|addr| TransportAddr::Ip((std::net::Ipv4Addr::LOCALHOST, addr.port()).into())),
+        )))
     }
     pub async fn online(&self) {
         self.0.online().await;

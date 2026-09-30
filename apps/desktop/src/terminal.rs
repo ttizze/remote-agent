@@ -85,8 +85,7 @@ impl Terminal {
             StoreSession::publish(
                 connections
                     .connect(remote.as_deref(), Snapshot::default())
-                    .await
-                    .map(Arc::new),
+                    .await,
                 session_runtime,
                 updates,
                 Event::Connected,

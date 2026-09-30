@@ -94,10 +94,7 @@ impl Hosts {
         let runtime = self.runtime.clone();
         self.runtime.handle.spawn(async move {
             StoreSession::publish(
-                connections
-                    .connect(None, Snapshot::default())
-                    .await
-                    .map(Arc::new),
+                connections.connect(None, Snapshot::default()).await,
                 runtime,
                 updates,
                 Update::Connected,

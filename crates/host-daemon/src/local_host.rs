@@ -276,11 +276,11 @@ mod tests {
         let endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Disabled)
             .await
             .unwrap();
-        lease.publish(&endpoint.ticket()).unwrap();
+        lease.publish(&endpoint.local_ticket()).unwrap();
         let location = registry.resolve(&desktop).unwrap();
         assert_eq!(location.directory, host.canonicalize().unwrap());
         assert!(
-            matches!(location.state, LocalHostState::Ready(ref ticket) if *ticket == endpoint.ticket())
+            matches!(location.state, LocalHostState::Ready(ref ticket) if *ticket == endpoint.local_ticket())
         );
         assert_eq!(
             crate::load_local_identity(&location.directory)

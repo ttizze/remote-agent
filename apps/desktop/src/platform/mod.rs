@@ -4,6 +4,7 @@ use host_daemon::local_host::{LocalHost, LocalHostRegistry, LocalHostState};
 use std::{
     path::PathBuf,
     process::{Command, Stdio},
+    sync::Arc,
     time::Duration,
 };
 
@@ -39,47 +40,62 @@ pub(crate) fn state_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "application data directory unavailable".into())
 }
 
-/// One identity and endpoint per app. Views own independent sessions.
+/// One identity with separate local and remote endpoints. Views own sessions.
 #[derive(Default)]
 pub(crate) struct Connections {
     endpoint: tokio::sync::OnceCell<(PathBuf, Endpoint)>,
+    local_endpoint: tokio::sync::OnceCell<(PathBuf, Endpoint)>,
     startup: tokio::sync::Mutex<()>,
 }
 impl Connections {
     pub(crate) async fn connect(
-        &self,
+        self: &Arc<Self>,
         remote: Option<&str>,
         snapshot: Snapshot,
-    ) -> anyhow::Result<Store> {
+    ) -> anyhow::Result<Arc<Store>> {
         let startup = self.startup.lock().await;
         if let Some(remote) = remote {
             let ticket = remote.parse::<Ticket>()?;
             let endpoint = match self.endpoint.get() {
                 Some((_, endpoint)) => endpoint,
                 None => {
-                    self.endpoint_for(&discover_local_host().await?.directory)
+                    self.endpoint_for(&discover_local_host().await?.directory, false)
                         .await?
                 }
             };
             drop(startup);
-            return Store::connect(endpoint, &ticket, snapshot, None)
-                .await
-                .map_err(Into::into);
+            return Ok(Arc::new(
+                Store::connect(endpoint, &ticket, snapshot, None).await?,
+            ));
         }
-        self.connect_local(snapshot).await
+        let store = Arc::new(self.connect_local(snapshot).await?);
+        self.recover_local(store.clone());
+        Ok(store)
     }
 
-    async fn endpoint_for(&self, directory: &std::path::Path) -> anyhow::Result<&Endpoint> {
+    async fn endpoint_for(
+        &self,
+        directory: &std::path::Path,
+        local: bool,
+    ) -> anyhow::Result<&Endpoint> {
         let directory = tokio::fs::canonicalize(directory).await?;
-        let (identity_directory, endpoint) = self
-            .endpoint
+        let cell = if local {
+            &self.local_endpoint
+        } else {
+            &self.endpoint
+        };
+        let (identity_directory, endpoint) = cell
             .get_or_try_init(|| async {
                 let identity_directory = directory.clone();
                 let identity = tokio::task::spawn_blocking(move || {
                     host_daemon::load_local_identity(&identity_directory)
                 })
                 .await??;
-                let endpoint = Endpoint::bind(identity, Relays::Default).await?;
+                let endpoint = if local {
+                    Endpoint::bind(identity, Relays::Loopback).await?
+                } else {
+                    Endpoint::bind(identity, Relays::Default).await?
+                };
                 Ok::<_, anyhow::Error>((directory.clone(), endpoint))
             })
             .await?;
@@ -101,7 +117,7 @@ impl Connections {
                 let location = discover_local_host().await?;
                 match &location.state {
                     LocalHostState::Ready(ticket) => {
-                        let endpoint = self.endpoint_for(&location.directory).await?;
+                        let endpoint = self.endpoint_for(&location.directory, true).await?;
                         let attempt = tokio::time::timeout(
                             Duration::from_secs(1),
                             Store::connect(endpoint, ticket, snapshot.clone(), None),
@@ -141,9 +157,48 @@ impl Connections {
         ready
     }
 
+    fn recover_local(self: &Arc<Self>, store: Arc<Store>) {
+        let connections = self.clone();
+        tokio::spawn(async move {
+            let mut snapshots = store.subscribe();
+            let mut delay = Duration::from_millis(250);
+            while snapshots
+                .wait_for(|snapshot| !snapshot.connected)
+                .await
+                .is_ok()
+            {
+                tokio::time::sleep(delay).await;
+                if snapshots.has_changed().is_err() {
+                    break;
+                }
+                if snapshots.borrow().connected {
+                    delay = Duration::from_millis(250);
+                    continue;
+                }
+                let result = tokio::time::timeout(Duration::from_secs(10), async {
+                    let location = discover_local_host().await?;
+                    let LocalHostState::Ready(ticket) = &location.state else {
+                        return Err(anyhow::anyhow!("Local Host is not ready"));
+                    };
+                    let endpoint = connections.endpoint_for(&location.directory, true).await?;
+                    store.resume(endpoint, ticket).await?;
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await;
+                delay = if matches!(result, Ok(Ok(()))) {
+                    Duration::from_millis(250)
+                } else {
+                    (delay * 2).min(Duration::from_secs(5))
+                };
+            }
+        });
+    }
+
     pub(crate) async fn close(&self) {
-        if let Some((_, endpoint)) = self.endpoint.get() {
-            endpoint.close().await;
+        for cell in [&self.local_endpoint, &self.endpoint] {
+            if let Some((_, endpoint)) = cell.get() {
+                endpoint.close().await;
+            }
         }
     }
 }

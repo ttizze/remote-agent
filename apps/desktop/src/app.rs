@@ -613,7 +613,7 @@ impl Desktop {
                     )
                     .await
                     .map_err(|error| format!("{error:#}"))?;
-                Ok::<_, String>((Arc::new(store), path))
+                Ok::<_, String>((store, path))
             }
             .await;
             match result {

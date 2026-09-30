@@ -12,9 +12,9 @@ pub fn command(provider: &str, session: Option<&str>, model: Option<&str>) -> Re
         None => {
             let mut candidates = Vec::new();
             if provider == "codex" {
-                candidates.extend(["ChatGPT", "Codex"].map(|app| {
-                    PathBuf::from(format!("/Applications/{app}.app/Contents/Resources/codex"))
-                }));
+                candidates.push(PathBuf::from(
+                    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+                ));
             }
             candidates.extend(
                 env::split_paths(&env::var_os("PATH").unwrap_or_default())
