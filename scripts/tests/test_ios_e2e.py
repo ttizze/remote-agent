@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import plistlib
+import signal
 import sys
 import tempfile
 from threading import Event, Thread
@@ -75,6 +76,30 @@ class IosRunnerTest(unittest.TestCase):
                 trigger.join()
             self.assertTrue((root / "ready").is_file())
             self.assertTrue((root / "stopped").is_file())
+
+    def test_host_shutdown_leaves_supervisors_alive_to_close_owned_providers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            supervisor = (
+                "import pathlib, signal, sys; root=pathlib.Path(sys.argv[1]); "
+                "signal.signal(signal.SIGINT, lambda *_: (root.joinpath('interrupted').touch(), sys.exit(1))); "
+                "root.joinpath('ready').touch(); sys.stdin.read(); root.joinpath('closed').touch()"
+            )
+            host = (
+                "import signal, subprocess, sys, time\n"
+                "child=subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]], stdin=subprocess.PIPE)\n"
+                "def stop(*_):\n"
+                " child.stdin.close(); child.wait(timeout=5); sys.exit(0)\n"
+                "signal.signal(signal.SIGINT, stop)\n"
+                "time.sleep(60)\n"
+            )
+            with runner.process([sys.executable, "-c", host, supervisor, str(root)], stop_signal=signal.SIGINT):
+                deadline = time.monotonic() + 5
+                while not (root / "ready").exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue((root / "ready").is_file())
+            self.assertTrue((root / "closed").is_file())
+            self.assertFalse((root / "interrupted").exists())
 
 
 if __name__ == "__main__":

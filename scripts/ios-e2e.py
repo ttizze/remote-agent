@@ -24,9 +24,13 @@ def process(args, stdout=None, stop_signal=signal.SIGTERM):
     try:
         yield child
     finally:
-        # Include native provider descendants, even if their parent has exited.
         try:
-            os.killpg(child.pid, stop_signal)
+            if stop_signal == signal.SIGINT:
+                # Let the Host close the supervisors' lifetime pipes. Signalling
+                # supervisors directly would strand their separate provider groups.
+                child.send_signal(stop_signal)
+            else:
+                os.killpg(child.pid, stop_signal)
         except ProcessLookupError:
             pass
         try:
@@ -34,6 +38,7 @@ def process(args, stdout=None, stop_signal=signal.SIGTERM):
         except subprocess.TimeoutExpired:
             pass
         try:
+            # Include remaining direct descendants after the owner has shut down.
             os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
