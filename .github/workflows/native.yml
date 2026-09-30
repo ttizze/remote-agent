@@ -62,6 +62,8 @@ jobs:
       # Hetzner ci-1 has no KVM. Build instrumentation tests here; run them
       # explicitly with just android-e2e on a machine with emulator acceleration.
       - name: Check Android and build app and test APKs
+        env:
+          GRADLE_USER_HOME: ${{ runner.temp }}/gradle
         run: >-
           nix develop . --command ./gradlew
           :apps:mobile:ktfmtCheck :apps:mobile:detekt
