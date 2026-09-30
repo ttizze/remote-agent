@@ -12,16 +12,16 @@ extension BexLaunchUITests {
         let project = app.buttons["tasks.project.simulator-project"]
         XCTAssertTrue(project.waitForExistence(timeout: 10))
         project.tap()
-        let running = app.descendants(matching: .any)["tasks.running.merge-active"]
+        let running = app.descendants(matching: .any)["tasks.running.codex:merge-active"]
         XCTAssertTrue(running.waitForExistence(timeout: 10))
-        let merged = app.descendants(matching: .any)["tasks.merged.merge-active"]
+        let merged = app.descendants(matching: .any)["tasks.merged.codex:merge-active"]
         XCTAssertFalse(merged.exists)
         try simulatorFixture("merge-worktree/merged")
         refresh()
         XCTAssertTrue(merged.waitForExistence(timeout: 10))
         XCTAssertTrue(running.exists)
         XCTAssertGreaterThan(merged.frame.minX, running.frame.maxX)
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.merged.merge-idle"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["tasks.merged.codex:merge-idle"].exists)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Merged worktree session list"
         screenshot.lifetime = .keepAlways
