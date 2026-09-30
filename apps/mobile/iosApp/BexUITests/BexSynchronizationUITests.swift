@@ -3,6 +3,21 @@ import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
+    private func createBackgroundTaskRowIdentifier() throws -> String {
+        struct Session: Decodable {
+            let provider: String
+            let id: String
+        }
+
+        struct CreatedTask: Decodable {
+            let threadId: Session
+        }
+
+        let response = try simulatorFixture("background-task", expectedStatus: 200, timeout: 15)
+        let session = try JSONDecoder().decode(CreatedTask.self, from: response).threadId
+        return "tasks.row.\(session.provider):\(session.id)"
+    }
+
     func testSimulatorOpensTasksBeforeHistoryReadFinishes() throws {
         let app = try connectedSimulatorApp()
         try useSimulatorListFixture("external-conversation")
@@ -48,12 +63,10 @@ extension BexLaunchUITests {
 
     func testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft() throws {
         let app = try connectedSimulatorApp()
-        let response = try simulatorFixture("background-task", expectedStatus: 200, timeout: 15)
-        let created = try JSONSerialization.jsonObject(with: response) as? [String: String]
-        let id = try XCTUnwrap(created?["threadId"])
+        let identifier = try createBackgroundTaskRowIdentifier()
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
-        let row = app.buttons["tasks.row.codex:\(id)"]
+        let row = app.buttons[identifier]
         XCTAssertTrue(row.waitForExistence(timeout: 15))
         try simulatorFixture("background-reply")
         try simulatorFixture("fail-next-history-read")
@@ -177,17 +190,15 @@ extension BexLaunchUITests {
         let app = try connectedSimulatorApp()
         XCUIDevice.shared.press(.home)
         XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5))
-        let response = try simulatorFixture("background-task", expectedStatus: 200, timeout: 15)
-        let created = try JSONSerialization.jsonObject(with: response) as? [String: String]
-        let identifier = try XCTUnwrap(created?["threadId"])
+        let identifier = try createBackgroundTaskRowIdentifier()
         app.activate()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.row.codex:\(identifier)"].waitForExistence(timeout: 20),
+        XCTAssertTrue(app.descendants(matching: .any)[identifier].waitForExistence(timeout: 20),
                       "Foreground return did not fetch the conversation created by another client")
         XCTAssertFalse(app.staticTexts["notice"].exists)
         let project = prefixedButton(app, prefix: "tasks.project.")
         XCTAssertTrue(project.waitForExistence(timeout: 10)); project.tap()
-        let row = app.descendants(matching: .any)["tasks.row.codex:\(identifier)"]
+        let row = app.descendants(matching: .any)[identifier]
         let hidden = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: row)
         wait(for: [hidden], timeout: 10)
         project.tap()
@@ -202,12 +213,10 @@ extension BexLaunchUITests {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "[success] Keep another conversation open")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
-        let response = try simulatorFixture("background-task", expectedStatus: 200, timeout: 15)
-        let created = try JSONSerialization.jsonObject(with: response) as? [String: String]
-        let identifier = try XCTUnwrap(created?["threadId"])
+        let identifier = try createBackgroundTaskRowIdentifier()
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.row.codex:\(identifier)"].waitForExistence(timeout: 20),
+        XCTAssertTrue(app.descendants(matching: .any)[identifier].waitForExistence(timeout: 20),
                       "Returning to the list did not fetch the conversation created by another client")
         captureScreen(app, named: "New conversation fetched when returning to the list")
     }
