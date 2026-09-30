@@ -1783,3 +1783,30 @@ fn item_text(item: &agent_protocol::items::Item) -> Option<&str> {
         _ => None,
     }
 }
+
+#[tokio::test]
+async fn creating_default_claude_chat_does_not_launch_the_cli_or_read_models() {
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("missing-claude-cli");
+    let fixture = host(root.path(), Arc::new(Memory::default()), &missing).await;
+    let local = fixture.local().await.unwrap();
+    let response = local
+        .peer
+        .call(&op::CreateSession {
+            provider: ProviderKind::Claude,
+            cwd: Some(root.path().to_string_lossy().into()),
+            model: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        response.model.unwrap(),
+        models::ModelRef {
+            provider: ProviderKind::Claude,
+            id: "default".into()
+        }
+    );
+    assert_eq!(response.thread.id.unwrap().provider, ProviderKind::Claude);
+    local.close().await;
+    fixture.close().await.unwrap();
+}

@@ -87,9 +87,7 @@ pub enum UpdateError {
     MissingItem,
     #[error("text field does not match item body")]
     WrongBody,
-    #[error("item details must be read before appending")]
-    DeferredBody,
-    #[error("reasoning part index is not contiguous")]
+    #[error("reasoning part index exceeds the allocation bound")]
     InvalidPartIndex,
     #[error("request is no longer pending")]
     MissingRequest,
@@ -317,10 +315,10 @@ impl SessionChange {
                     .as_mut()
                     .and_then(|items| items.iter_mut().find(|item| &item.id == item_id))
                     .ok_or(UpdateError::MissingItem)?;
-                if item.is_deferred() {
-                    return Err(UpdateError::DeferredBody);
-                }
                 let item = Arc::make_mut(item);
+                if item.is_deferred() {
+                    return Ok(next);
+                }
                 match (field, item.body_mut()) {
                     (TextField::AssistantText, ItemBody::AssistantText { text, .. }) => {
                         text.push_str(delta)
@@ -351,11 +349,11 @@ impl SessionChange {
                     .as_mut()
                     .and_then(|items| items.iter_mut().find(|item| &item.id == item_id))
                     .ok_or(UpdateError::MissingItem)?;
+                let item = Arc::make_mut(item);
                 if item.is_deferred() {
-                    return Err(UpdateError::DeferredBody);
+                    return Ok(next);
                 }
-                let ItemBody::Reasoning { content, summary } = Arc::make_mut(item).body_mut()
-                else {
+                let ItemBody::Reasoning { content, summary } = item.body_mut() else {
                     return Err(UpdateError::WrongBody);
                 };
                 append_part(
@@ -480,13 +478,13 @@ impl HistoryReadState {
 
 fn append_part(parts: &mut Vec<String>, index: u32, delta: &str) -> Result<(), UpdateError> {
     let index = index as usize;
-    if index == parts.len() {
-        parts.push(delta.into());
-    } else {
-        parts
-            .get_mut(index)
-            .ok_or(UpdateError::InvalidPartIndex)?
-            .push_str(delta);
+    // Native summaries can announce indexes out of order. Bound sparse allocation.
+    if index >= 4096 {
+        return Err(UpdateError::InvalidPartIndex);
     }
+    if index >= parts.len() {
+        parts.resize_with(index + 1, String::new);
+    }
+    parts[index].push_str(delta);
     Ok(())
 }

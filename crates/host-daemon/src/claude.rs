@@ -695,10 +695,8 @@ impl Claude {
             .model
             .as_ref()
             .map(|model| model.id.as_str())
-            .unwrap_or(&state.model);
-        let model_name = model;
-        let model_name = model_name.to_owned();
-        let model = model.to_owned();
+            .unwrap_or(&state.model)
+            .to_owned();
         let effort = params.effort.as_deref();
         // Core's "default" means the backend's normal service. Claude has no
         // equivalent of Codex's explicit priority/flex tiers.
@@ -737,7 +735,7 @@ impl Claude {
                 &auth_home,
                 Path::new(&cwd),
                 Some((&session, state.resumable)),
-                Some((&model_name, effort)),
+                Some((&model, effort)),
                 self.browser
                     .as_ref()
                     .map(|browser| {
@@ -829,21 +827,6 @@ impl Claude {
     }
 }
 
-pub(crate) async fn send_response(
-    input: &mpsc::Sender<Command>,
-    id: &Value,
-    result: Value,
-) -> Result<(), String> {
-    let request_id = id.as_str().ok_or("Claude request ID must be a string")?;
-    let (delivered, receipt) = tokio::sync::oneshot::channel();
-    input.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}), user: None, delivered: Some(delivered) }).await.map_err(|_| "Claude Code input is closed")?;
-    tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
-        .await
-        .map_err(|_| "Claude answer delivery is unknown")?
-        .map_err(|_| "Claude exited before confirming the answer write")??;
-    Ok(())
-}
-
 struct Worker {
     instance: Uuid,
     auth_revision: u64,
@@ -853,7 +836,7 @@ struct Worker {
     turn_id: agent_protocol::ids::TurnId,
     input: mpsc::Sender<Command>,
     stop: CancellationToken,
-    stream: HashMap<String, (String, usize)>,
+    stream: HashMap<String, String>,
     interrupt: watch::Sender<Option<Result<(), String>>>,
     model: String,
     effort: Option<String>,
@@ -1068,6 +1051,27 @@ impl Worker {
             return Ok(());
         }
         if message["type"] == "system" && message["subtype"] == "api_retry" {
+            if let Some(id) = self.stream.remove(scope)
+                && let Some(turn) = self.router.current_turn(&self.session, &self.turn_id)
+            {
+                let prefix = format!("{id}:");
+                for item in turn.items.iter().flatten().filter(|item| {
+                    item.id.starts_with(&prefix)
+                        && item.status == ItemStatus::Running
+                        && matches!(
+                            item.body(),
+                            ItemBody::AssistantText { .. } | ItemBody::Reasoning { .. }
+                        )
+                }) {
+                    self.router.session_change(
+                        &self.session,
+                        SessionChange::RemoveItem {
+                            turn_id: self.turn_id.clone(),
+                            item_id: item.id.clone(),
+                        },
+                    );
+                }
+            }
             self.router.session_change(
                 &self.session,
                 SessionChange::Error {
@@ -1111,20 +1115,15 @@ impl Worker {
         for (index, block) in blocks.iter().enumerate() {
             // Claude emits one assistant envelope per completed block, often
             // with the same message ID. Preserve the stream's block index.
-            let id = if let Some((stream_id, block)) = self.stream.get(scope)
-                && Some(stream_id.as_str()) == message_id
-                && blocks.len() == 1
-            {
-                format!("{stream_id}:{block}")
-            } else {
-                format!(
-                    "{}:{index}",
-                    message["uuid"]
-                        .as_str()
-                        .or(message_id)
-                        .unwrap_or("tool-result")
-                )
-            };
+            let id = message_item_id(
+                items,
+                message_id
+                    .or_else(|| message["uuid"].as_str())
+                    .unwrap_or("tool-result"),
+                index,
+                blocks.len(),
+                block,
+            );
             let item = match block["type"].as_str() {
                 Some("tool_result") => {
                     let item = items
@@ -1184,21 +1183,18 @@ impl Worker {
             Some("message_start") => {
                 self.stream.insert(
                     scope.into(),
-                    (
-                        event["message"]["id"]
-                            .as_str()
-                            .ok_or("Claude stream message ID is missing")?
-                            .into(),
-                        0,
-                    ),
+                    event["message"]["id"]
+                        .as_str()
+                        .ok_or("Claude stream message ID is missing")?
+                        .into(),
                 );
             }
             Some("content_block_start") => {
-                let (message, index) = self
+                let message = self
                     .stream
-                    .get_mut(scope)
+                    .get(scope)
                     .ok_or("Claude stream started a block without a message")?;
-                *index = event["index"]
+                let index = event["index"]
                     .as_u64()
                     .ok_or("Claude block index is missing")? as usize;
                 let body = match event["content_block"]["type"].as_str() {
@@ -1234,7 +1230,7 @@ impl Worker {
                     }
                     _ => return Ok(()),
                 };
-                let (message, _) = self
+                let message = self
                     .stream
                     .get(scope)
                     .ok_or("Claude stream delta has no message")?;
@@ -1259,6 +1255,50 @@ impl Worker {
         }
         Ok(())
     }
+}
+
+// Final assistant envelopes can lag the start of subsequent blocks. Match
+// their completed text, rather than assigning the stream's most recent index.
+fn message_item_id(
+    items: &[Arc<Item>],
+    message: &str,
+    index: usize,
+    count: usize,
+    block: &Value,
+) -> String {
+    if count == 1 {
+        let prefix = format!("{message}:");
+        let candidates = items.iter().filter(|item| item.id.starts_with(&prefix));
+        let matches = |item: &Item| match (block["type"].as_str(), item.body()) {
+            (Some("text"), ItemBody::AssistantText { text, .. }) => {
+                block["text"].as_str() == Some(text)
+            }
+            (Some("thinking"), ItemBody::Reasoning { content, .. }) => {
+                block["thinking"].as_str() == Some(content.join("").as_str())
+            }
+            _ => false,
+        };
+        if let Some(item) = candidates
+            .clone()
+            .filter(|item| matches(item))
+            .min_by_key(|item| item.status != ItemStatus::Running)
+        {
+            return item.id.to_string();
+        }
+        if let Some(item) = candidates
+            .filter(|item| item.status == ItemStatus::Running)
+            .find(|item| {
+                matches!(
+                    (block["type"].as_str(), item.body()),
+                    (Some("text"), ItemBody::AssistantText { .. })
+                        | (Some("thinking"), ItemBody::Reasoning { .. })
+                )
+            })
+        {
+            return item.id.to_string();
+        }
+    }
+    format!("{message}:{index}")
 }
 
 /// Classify native evidence before reducing it to a user-facing message.
@@ -1593,6 +1633,156 @@ fn now() -> u64 {
 #[cfg(test)]
 mod execution_tests {
     use super::*;
+
+    #[test]
+    fn final_blocks_match_content_kind_and_native_message_before_falling_back() {
+        let text = |id: &str, status, value: &str| {
+            Arc::new(Item::new(
+                id.into(),
+                status,
+                ItemBody::AssistantText {
+                    text: value.into(),
+                    phase: AssistantPhase::Unknown,
+                    citation: None,
+                },
+            ))
+        };
+        let thinking = |id: &str, content| {
+            Arc::new(Item::new(
+                id.into(),
+                ItemStatus::Running,
+                ItemBody::Reasoning {
+                    content,
+                    summary: vec![],
+                },
+            ))
+        };
+        let items = [
+            text("other:0", ItemStatus::Running, "changed"),
+            text("message:0", ItemStatus::Completed, "same"),
+            text("message:1", ItemStatus::Running, "same"),
+            thinking("message:2", vec!["one".into(), "two".into()]),
+            text("message:3", ItemStatus::Running, "later"),
+            thinking("message:4", vec!["later".into()]),
+        ];
+        for (block, expected) in [
+            (json!({"type":"text","text":"same"}), "message:1"),
+            (json!({"type":"text","text":"changed"}), "message:1"),
+            (json!({"type":"text","text":"later"}), "message:3"),
+            (json!({"type":"thinking","thinking":"onetwo"}), "message:2"),
+            (json!({"type":"thinking","thinking":"changed"}), "message:2"),
+            (json!({"type":"thinking","thinking":"later"}), "message:4"),
+        ] {
+            assert_eq!(
+                message_item_id(&items, "message", 0, 1, &block),
+                expected,
+                "{block}"
+            );
+        }
+        assert_eq!(
+            message_item_id(
+                &items,
+                "message",
+                3,
+                2,
+                &json!({"type":"text","text":"same"})
+            ),
+            "message:3"
+        );
+        assert_eq!(
+            message_item_id(&items, "message", 3, 1, &json!({"type":"future"})),
+            "message:3"
+        );
+        assert_eq!(
+            message_item_id(
+                &items[..2],
+                "message",
+                3,
+                1,
+                &json!({"type":"text","text":"changed"})
+            ),
+            "message:3"
+        );
+        assert_eq!(
+            message_item_id(
+                &items[..2],
+                "message",
+                3,
+                1,
+                &json!({"type":"text","text":"same"})
+            ),
+            "message:0"
+        );
+    }
+    #[tokio::test]
+    async fn late_blocks_and_api_retry_preserve_only_valid_stream_items() {
+        let router = SessionRouter::new();
+        let uuid = Uuid::new_v4();
+        let session = SessionRef::new(ProviderKind::Claude, uuid.to_string()).unwrap();
+        router.session_change(
+            &session,
+            SessionChange::Turn {
+                turn: agent_protocol::models::Turn {
+                    id: "turn".into(),
+                    ..Default::default()
+                },
+                completed: false,
+            },
+        );
+        let (input, _receiver) = mpsc::channel(1);
+        let (interrupt, _) = watch::channel(None);
+        let mut worker = Worker {
+            instance: Uuid::new_v4(),
+            auth_revision: 0,
+            record: Arc::new(AsyncMutex::new(Record {
+                cwd: "/work".into(),
+                model: "default".into(),
+                session_id: uuid,
+                resumable: false,
+                running: None,
+                idle: None,
+            })),
+            router: router.clone(),
+            session: session.clone(),
+            turn_id: "turn".into(),
+            input,
+            stop: CancellationToken::new(),
+            stream: HashMap::new(),
+            interrupt,
+            model: "default".into(),
+            effort: None,
+        };
+        for event in [
+            json!({"type":"message_start","message":{"id":"message"}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"thinking"}}),
+        ] {
+            worker.stream_event(&event, "").await.unwrap();
+        }
+        worker.message(json!({"type":"assistant","uuid":"envelope","message":{"id":"message","content":[{"type":"text","text":"answer"}]}})).await.unwrap();
+        worker.stream_event(&json!({"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"abandoned"}}),"").await.unwrap();
+        let turn = router.current_turn(&session, "turn").unwrap();
+        let items = turn.items.unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id.as_str(), "message:0");
+        assert_eq!(items[0].status, ItemStatus::Completed);
+        assert!(
+            matches!(items[1].body(),ItemBody::Reasoning {content,..} if content == &["abandoned"])
+        );
+        worker
+            .message(json!({"type":"system","subtype":"api_retry","attempt":1}))
+            .await
+            .unwrap();
+        let items = router
+            .current_turn(&session, "turn")
+            .unwrap()
+            .items
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id.as_str(), "message:0");
+        assert!(worker.stream.is_empty());
+    }
     #[test]
     fn native_error_evidence_distinguishes_quota_retry_auth_and_warning() {
         for (message, category) in [

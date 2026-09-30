@@ -441,7 +441,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         }
         Intent::NewChat { cwd } => {
             next.epoch += 1;
-            let key = DraftKey::Local { key: cwd.clone() };
+            let key = DraftKey::Local { key: format!("new:{cwd}") };
             if !previous.drafts.contains_key(&key) {
                 let draft = Draft::default();
                 let (model, effort, tier) = supported_settings(&draft, &previous.models, &previous.model_errors);

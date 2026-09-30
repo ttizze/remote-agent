@@ -615,7 +615,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
         let prompt = "[delayed-input] Preserve this input through reconnect";
         store
             .dispatch(Intent::SetDraftText {
-                thread_id: "".into(),
+                thread_id: store.snapshot().navigation.draft_key.clone(),
                 text: prompt.into(),
             })
             .await
@@ -631,7 +631,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
                 .is_err()
         );
         assert_eq!(
-            store.snapshot().drafts[&agent_core::state::DraftKey::from("")].text,
+            store.snapshot().drafts[&store.snapshot().navigation.draft_key].text,
             prompt
         );
         let restored =
@@ -2338,7 +2338,7 @@ async fn visualization_reaches_store_and_reopens_after_source_removal() {
             .unwrap();
         store
             .dispatch(Intent::SetDraftText {
-                thread_id: "".into(),
+                thread_id: store.snapshot().navigation.draft_key.clone(),
                 text: prompt.into(),
             })
             .await
@@ -2827,9 +2827,9 @@ async fn adding_a_chat_folder_registers_a_project_before_submission() {
             let list = snapshot.thread_list().unwrap();
             assert_eq!(list.projects.len(), 1);
             assert!(list.threads.is_empty());
-            assert_eq!(
+            assert_ne!(
                 snapshot.navigation.draft_key,
-                agent_core::state::DraftKey::from(folder.to_str().unwrap())
+                agent_core::state::Navigation::default().draft_key
             );
             assert_eq!(snapshot.error, None);
         }

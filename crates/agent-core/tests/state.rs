@@ -519,7 +519,7 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
         }
         let draft = current
             .drafts
-            .get(&DraftKey::from("/fixture"))
+            .get(&current.navigation.draft_key)
             .expect("new chat draft");
         assert_eq!(
             draft.model.as_ref(),
@@ -533,7 +533,7 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
         let (edited, _) = reduce(
             &current,
             Event::Intent(Intent::SetDraftText {
-                thread_id: "/fixture".into(),
+                thread_id: current.navigation.draft_key.clone(),
                 text: "keep".into(),
             }),
         );
@@ -544,7 +544,7 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
             }),
         );
         assert!(Arc::ptr_eq(&edited.drafts, &returned.drafts));
-        assert_eq!(returned.drafts[&DraftKey::from("/fixture")].text, "keep");
+        assert_eq!(returned.drafts[&returned.navigation.draft_key].text, "keep");
     }
 }
 
@@ -746,7 +746,7 @@ fn serialized_events_preserve_operation_inputs_and_replay_state() {
             cwd: "/fixture".into(),
         }),
         Event::Intent(op::Intent::SetDraftText {
-            thread_id: "/fixture".into(),
+            thread_id: "new:/fixture".into(),
             text: "再生する下書き".into(),
         }),
         Event::Intent(op::Intent::ReadFile(op::ReadFile {
@@ -776,7 +776,7 @@ fn serialized_events_preserve_operation_inputs_and_replay_state() {
     };
     assert_eq!(replay(events.clone()), replay(decoded));
     assert_eq!(
-        replay(events).drafts[&DraftKey::from("/fixture")].text,
+        replay(events).drafts[&DraftKey::from("new:/fixture")].text,
         "再生する下書き"
     );
 }
@@ -885,7 +885,7 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         )
         .0;
         assert_eq!(
-            state.drafts[&DraftKey::from("/fresh")].model.as_ref(),
+            state.drafts[&state.navigation.draft_key].model.as_ref(),
             Some(&agent_protocol::models::ModelRef {
                 provider: agent_protocol::session::ProviderKind::Claude,
                 id: "default".into()
@@ -1033,7 +1033,7 @@ fn project_registration_navigates_only_while_current() {
     assert_eq!(opened.navigation.cwd, "/resolved-project");
     assert_eq!(
         opened.navigation.draft_key,
-        DraftKey::from("/resolved-project")
+        DraftKey::from("new:/resolved-project")
     );
     assert_eq!(effects.len(), 2); // Workspace review and project-list refresh.
     let (mut elsewhere, _) = reduce(
@@ -1446,4 +1446,40 @@ fn item_text(item: &agent_protocol::items::Item) -> Option<&str> {
         }
         _ => None,
     }
+}
+
+#[test]
+fn empty_directory_chat_keeps_its_draft_separate_from_the_list() {
+    let previous = Snapshot {
+        workspace: Arc::new(agent_core::state::Workspace {
+            directory: Some(Arc::new(agent_protocol::models::FileList {
+                path: "/workspace".into(),
+                entries: vec![],
+                truncated: false,
+            })),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let (opened, _) = reduce(
+        &previous,
+        Event::Intent(op::Intent::NewChat { cwd: String::new() }),
+    );
+    assert_eq!(opened.workspace.directory, previous.workspace.directory);
+    let key = opened.navigation.draft_key.clone();
+    assert_ne!(key, Snapshot::default().navigation.draft_key);
+    let (edited, _) = reduce(
+        &opened,
+        Event::Intent(op::Intent::SetDraftText {
+            thread_id: key.clone(),
+            text: "keep".into(),
+        }),
+    );
+    let (listed, _) = reduce(&edited, Event::Intent(op::Intent::ShowThreadList));
+    let (reopened, _) = reduce(
+        &listed,
+        Event::Intent(op::Intent::NewChat { cwd: String::new() }),
+    );
+    assert_eq!(reopened.navigation.draft_key, key);
+    assert_eq!(reopened.drafts[&key].text, "keep");
 }

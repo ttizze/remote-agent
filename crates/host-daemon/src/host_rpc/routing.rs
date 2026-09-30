@@ -811,16 +811,7 @@ fn change_locked(
                 actor.live = match change.apply(&actor.live) {
                     Ok(next) => next,
                     Err(reason) => {
-                        let connections: Vec<_> = state
-                            .subscriptions
-                            .values()
-                            .filter(|(id, _, _)| id == target)
-                            .map(|(_, connection, _)| *connection)
-                            .collect();
                         tracing::warn!(target: "bex", operation = "host.session.invalid_update", message = %reason);
-                        for connection in connections {
-                            remove_session_locked(state, connection);
-                        }
                         state.executions.retain(|_, actor| actor.release());
                         return;
                     }
@@ -951,6 +942,109 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn malformed_delta_keeps_all_subscriptions_and_the_last_valid_item() {
+        let router = SessionRouter::new();
+        let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+        let connections = [router.open_session(), router.open_session()];
+        let response = ThreadResponse {
+            thread: Thread {
+                id: Some(target.clone()),
+                ..Default::default()
+            },
+            model: None,
+        };
+        let mut streams = Vec::new();
+        for connection in &connections {
+            streams.push(
+                router
+                    .finish_session_read(open(&router, "native"), connection.id(), response.clone())
+                    .unwrap()
+                    .updates
+                    .unwrap(),
+            );
+        }
+        turn(&router, false);
+        router.session_change(
+            &target,
+            SessionChange::Item {
+                turn_id: "run".into(),
+                item: Arc::new(Item::new(
+                    "item".into(),
+                    agent_protocol::execution::ItemStatus::Running,
+                    agent_protocol::items::ItemBody::AssistantText {
+                        text: "kept".into(),
+                        phase: agent_protocol::items::AssistantPhase::Unknown,
+                        citation: None,
+                    },
+                )),
+            },
+        );
+        for stream in &mut streams {
+            stream.recv().await.unwrap();
+            stream.recv().await.unwrap();
+        }
+        for (item, field) in [
+            ("missing", TextField::AssistantText),
+            ("item", TextField::CommandOutput),
+        ] {
+            router.session_change(
+                &target,
+                SessionChange::Text {
+                    turn_id: "run".into(),
+                    item_id: item.into(),
+                    field,
+                    delta: "bad".into(),
+                },
+            );
+        }
+        router.session_change(
+            &target,
+            SessionChange::Text {
+                turn_id: "run".into(),
+                item_id: "item".into(),
+                field: TextField::AssistantText,
+                delta: " good".into(),
+            },
+        );
+        for (connection, stream) in connections.iter().zip(&mut streams) {
+            router.ensure_session(connection.id()).unwrap();
+            stream.recv().await.unwrap();
+        }
+        let turn = router.current_turn(&target, "run").unwrap();
+        assert!(
+            matches!(turn.items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::AssistantText {text,..} if text == "kept good")
+        );
+    }
+
+    #[test]
+    fn resolving_unsubscribed_elicitation_releases_its_execution_immediately() {
+        use super::super::requests::{RequestDestination, RequestOrigin};
+        let router = SessionRouter::new();
+        let target = SessionRef::new(ProviderKind::Claude, "native".into()).unwrap();
+        let (input, _receiver) = tokio::sync::mpsc::channel(1);
+        let instance = uuid::Uuid::new_v4();
+        let adapted = super::super::requests::claude(
+            "request".into(),
+            &"turn".into(),
+            &json!({"subtype":"elicitation","requested_schema":{"type":"object","properties":{}}}),
+        )
+        .unwrap();
+        router
+            .request(
+                target.clone(),
+                RequestOrigin {
+                    instance,
+                    native_id: json!("native-request"),
+                    destination: RequestDestination::Claude { input },
+                },
+                adapted,
+            )
+            .unwrap();
+        assert!(lock_state(&router.state).executions.contains_key(&target));
+        router.resolve_native_request(instance, &json!("native-request"));
+        assert!(!lock_state(&router.state).executions.contains_key(&target));
+    }
     #[tokio::test]
     async fn history_is_not_retained_or_trimmed_and_subscriptions_do_not_pin_execution() {
         let router = SessionRouter::new();

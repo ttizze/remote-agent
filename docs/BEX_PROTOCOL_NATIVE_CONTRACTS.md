@@ -168,8 +168,9 @@ notLoaded は adapter の resume 判断で必要だが、通信切断や履歴�
 | commandExecution/outputDelta | CommandOutput | exitCode や command へ書き込まない |
 | fileChange/outputDelta | FileOutput | diff や変更パスへ書き込まない |
 
-adapter は native の part を作るイベントを正規化してから append を発行する。
-上限のない添字へ resize せず、異常な添字は typed error と再取得の対象にする。
+part の通知順に依存せず、native の添字を保持する。0〜4095 の sparse index は空の part を用意し、
+それ以上は typed error とする。Host は不正な差分を診断に残し、最後の正常な状態と全購読を保持する。
+遅延本文への差分では購読を維持し、進行中の本文取得だけを無効化して同じ item を再取得する。
 前案の単一 Reasoning フィールドでは、この区別が消えるため修正した。
 
 ## 6. エラーと再試行の写像
@@ -203,25 +204,25 @@ Claude の system/api_retry には attempt、max_retries、retry_delay_ms、erro
 
 確認した実装は
 `agent-transport/src/peer.rs` の enqueue/write_loop、同 jsonl.rs の write_line、
-`host-daemon/src/claude.rs` の respond/Worker、同 claude/process.rs の write、
+`host-daemon/src/claude.rs` の Worker、同 claude/process.rs の write、
 `host-daemon/src/host_rpc/service.rs` の answer_request。
 
 Codex の send_raw 成功は JSONL の全体・改行を書いて flush が終わった証拠。
-Claude の respond receipt も Worker が process.write を完了した証拠。
+Claude の command receipt も Worker が process.write を完了した証拠。
 どちらにも回答を受理した ACK という意味はない。
 Claude も receipt 後は Sent を保ち、tool の実行・結果や対象の終了を解決の証拠として扱う。
 
 | 失敗地点・観測 | 証拠 | BEX の結果 |
 | --- | --- | --- |
 | 検証・encode・宛先選択で拒否、まだ送信処理を始めていない | NotSent | 有効な要求を保持する |
-| queue への enqueue が失敗して command が渡っていない | NotSent | 有効なら Awaiting に戻す |
+| 宛先不一致・停止・不正 native ID、queue 待機中の cancellation、enqueue 失敗で command が渡っていない | NotSent | 有効なら Awaiting に戻す |
 | queue に渡した後のタイムアウト・caller cancellation | 書込みが進んでいる可能性 | Unknown。再 enqueue しない |
 | write/flush が失敗または writer cancellation | 一部書込みの可能性 | Unknown。0 byte と証明できる API がなければ未送信扱いにしない |
 | 完全な write/flush が成功 | 完全な書込み | Sent。再回答不能、解決待ち |
 | Codex serverRequest/resolved | native 解決 | 要求を閉じる。成功実行したことまでは推測しない |
 | Claude tool 実行/結果、control cancellation、対象の終了 | 要求の継続が不要または不可能 | 同じ要求を閉じる |
 
-send_raw/respond が未送信の証拠を返せない失敗は Unknown に倒す。
+native write が未送信の証拠を返せない失敗は Unknown に倒す。
 診断文字列の文言や、caller のタイムアウトだけを証拠に NotSent を返さない。
 native I/O を途中で取り消しても、キューに残った command は送られる場合がある。
 claim を消して別端末の再送を許すと重複実行になる。
@@ -244,7 +245,7 @@ fixture は表示・操作の回帰を検証する材料であり、native の�
   BEX の typed Answer のテストと、native 回答の境界テストを分けた。
 - iOS・Android・desktop は五種類の RequestBody を扱い、未分類要求への Raw 回答を削除した。
   JSON 編集は intrinsically open な form 値・tool result に限り、core で型付き Answer を生成・検証する。
-- reasoning の contentIndex/summaryIndex を保持し、不正な差分は状態を変更せず再取得する。
+- reasoning の contentIndex/summaryIndex を保持し、不正な差分では最後の正常な状態と購読を保持する。
 - Claude の未知 block を Custom に保持し、FileChange の提案・実行結果を区別した。
 - Claude の native uuid と ClientInputId を揃え、live overlay なしの履歴取得と Host 再起動後の照合を検証した。
 - Swift/Kotlin の保存・一覧・会話テストを、構造化 SessionRef と ItemContent に移した。
@@ -311,3 +312,45 @@ Android API 37 の隔離エミュレータで、ネットワーク許可・保�
 認証済み Codex/Claude CLI による実際の推論、physical device、公開 relay の soak は今回実行していない。
 稼働中の Host は再起動せず、UI 検証にはこの作業ツリーからビルドした隔離 fixture を使った。
 「全 native 機能の実行が検証済み」という意味ではない。
+
+
+## 10. レビュー後の回帰確認
+
+遅延本文の Text/ReasoningPart は会話の購読を維持し、進行中の本文転送だけを無効化する。
+実際の Store・バイナリ転送で、コマンド出力差分、同じ item の取得の合流、古い本文の破棄、
+同じ item の再取得と転送タイムアウト中の制御操作を確認した。
+不正な差分は Host の全接続を切断せず、最後の正常な item と購読を保持する。
+
+Claude は確定 block を native message ID・本文の種類・内容で照合する。
+後続 block の開始後に届く確定本文と、同じ種類の複数 block を検証した。
+API retry は放棄された実行中の text/thinking を除去し、確定済みの本文を保持する。
+モデル未指定の会話作成は CLI の model catalog を起動せず、backend の default を使う。
+存在しない CLI を指定した Host の結合テストでも作成が成功した。
+
+回答配送の owner に native enqueue と write receipt の判定を集約し、一度しか使われない中継関数を除去した。
+不正 native ID、閉じた Claude 入力、Codex の取得不能・停止は Awaiting を保持し、NotSent を返す。
+queue 枠の待機中の取消しも Awaiting に戻す。enqueue 後の取消しは Unknown、write 成功後は Sent を保持する。
+購読のない elicitation の解決時には、既存の cleanup が直ちに実行状態を解放することも確認した。
+
+core の新規チャットは一覧と別の local draft を持つ。空の作業ディレクトリでも一覧への遷移扱いにならず、
+同じ場所で開いた workspace と下書きを保持する。
+利用側は core の navigation が返すキーを使う。dispatch の二重 SessionRef 検証、不要な model のコピー、
+配送エラー変換の重複も除去した。表示の受け入れ条件は変更していない。
+
+レビュー後の focused cargo-mutants の結果：
+
+| 対象 | caught | missed | unviable | timeout |
+| --- | ---: | ---: | ---: | ---: |
+| sparse reasoning append_part | 5 | 0 | 0 | 0 |
+| Host submission_target / Claude block 照合（初回） | 11 | 3 | 1 | 0 |
+| Claude 内容照合（補足監査） | 6 | 0 | 0 | 0 |
+
+初回の三 survivor は text/thinking の内容照合 arm の削除と、thinking の等値比較の反転だった。
+同じ種類の複数 block と確定済み block の再通知を追加し、三件を含む六 mutation が失敗することを確認した。
+unviable は Default を持たない SubmissionTarget に Ok(Default::default()) を返す変異であり、
+assertion による検出には数えない。隔離された Host 監査では隣接 supervisor binary を必要とする terminal
+テストを除外した。通常の Host テストでは supervisor をビルドして実行し、terminal のテストも成功した。
+
+通常の protocol/core テストには proptest を含む。core の state 27 件、Store 46 件と別途実行した
+120 秒の実転送テスト、Host service 10 件、Claude の unit test 4 件、Claude の結合テスト 17 件、
+iroh Host の結合テスト 35 件が成功し、影響する全 target の Clippy も成功した。

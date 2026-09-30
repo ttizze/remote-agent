@@ -731,9 +731,10 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
     for navigate_away in [false, true] {
         let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
         new_chat(&store, &mut reader, &mut writer, "/fixture").await;
+        let key = store.snapshot().navigation.draft_key.clone();
         store
             .dispatch(Intent::SetDraft {
-                thread_id: "/fixture".into(),
+                thread_id: key.clone(),
                 draft: Draft {
                     text: "sent".into(),
                     ..Default::default()
@@ -757,7 +758,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
         assert_eq!(create["params"]["cwd"], "/fixture");
         store
             .dispatch(Intent::SetDraft {
-                thread_id: "/fixture".into(),
+                thread_id: key.clone(),
                 draft: Draft {
                     text: "newer".into(),
                     ..Default::default()
@@ -791,7 +792,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
         if navigate_away {
             assert_eq!(state.navigation.cwd, "/other");
             assert_eq!(state.navigation.thread_id, None);
-            assert_eq!(state.drafts[&DraftKey::from("/fixture")].text, "newer");
+            assert_eq!(state.drafts[&key].text, "newer");
             assert!(
                 state.drafts[&DraftKey::from(SessionRef {
                     provider: ProviderKind::Codex,
@@ -817,7 +818,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
                     .text,
                 "newer"
             );
-            assert!(!state.drafts.contains_key(&DraftKey::from("/fixture")));
+            assert!(!state.drafts.contains_key(&key));
         }
         store.close().await.unwrap();
     }
@@ -830,7 +831,7 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
         new_chat(&store, &mut reader, &mut writer, "/fixture").await;
         store
             .dispatch(Intent::SetDraft {
-                thread_id: "/fixture".into(),
+                thread_id: store.snapshot().navigation.draft_key.clone(),
                 draft: Draft {
                     text: "retry me".into(),
                     ..Default::default()
@@ -1579,7 +1580,7 @@ async fn a_late_open_reply_caches_the_thread_without_leaving_a_new_chat() {
     assert_eq!(snapshot.navigation.cwd, "/new-project");
     assert_eq!(
         snapshot.navigation.draft_key,
-        DraftKey::from("/new-project")
+        DraftKey::from("new:/new-project")
     );
     assert_eq!(loaded_text(&snapshot), Some("loaded"));
 }
@@ -1892,7 +1893,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
         .unwrap();
     store
         .dispatch(Intent::SetDraftText {
-            thread_id: "/fixture".into(),
+            thread_id: store.snapshot().navigation.draft_key.clone(),
             text: "message".into(),
         })
         .await
@@ -2296,7 +2297,7 @@ async fn disconnected_store_keeps_editing_and_persisting_drafts() {
         .unwrap();
     store
         .dispatch(Intent::SetDraftText {
-            thread_id: "/offline".into(),
+            thread_id: store.snapshot().navigation.draft_key.clone(),
             text: "切断中の下書き".into(),
         })
         .await
@@ -2304,7 +2305,7 @@ async fn disconnected_store_keeps_editing_and_persisting_drafts() {
     let serialized = serde_json::to_vec(&store.snapshot()).unwrap();
     let restored: Snapshot = serde_json::from_slice(&serialized).unwrap();
     assert_eq!(
-        restored.drafts[&DraftKey::from("/offline")].text,
+        restored.drafts[&restored.navigation.draft_key].text,
         "切断中の下書き"
     );
     assert!(
@@ -2318,7 +2319,7 @@ async fn disconnected_store_keeps_editing_and_persisting_drafts() {
     );
     assert!(store.snapshot().pending_submissions.is_empty());
     assert_eq!(
-        store.snapshot().drafts[&DraftKey::from("/offline")].text,
+        store.snapshot().drafts[&store.snapshot().navigation.draft_key].text,
         "切断中の下書き"
     );
     store.close().await.unwrap();
@@ -2446,7 +2447,7 @@ async fn reconnect_preserves_edits_made_during_pairing() {
             .unwrap();
         store
             .dispatch(Intent::SetDraftText {
-                thread_id: "/pairing".into(),
+                thread_id: store.snapshot().navigation.draft_key.clone(),
                 text: "接続待ち中の編集".into(),
             })
             .await
@@ -2474,7 +2475,7 @@ async fn reconnect_preserves_edits_made_during_pairing() {
         wait_for(&store, |state| state.connected).await;
         assert!(Arc::ptr_eq(&drafts, &store.snapshot().drafts));
         assert_eq!(
-            store.snapshot().drafts[&DraftKey::from("/pairing")].text,
+            store.snapshot().drafts[&store.snapshot().navigation.draft_key].text,
             "接続待ち中の編集"
         );
         assert_eq!(store.snapshot().navigation.cwd, "/pairing");
@@ -2561,37 +2562,26 @@ async fn dispatch_publishes_edits_before_returning_to_the_native_input_control()
     let navigation = store.dispatch(Intent::NewChat {
         cwd: "/input".into(),
     });
-    assert_eq!(
-        store.snapshot().navigation.draft_key,
-        DraftKey::from("/input")
-    );
+    let key = store.snapshot().navigation.draft_key.clone();
+    assert_ne!(key, Snapshot::default().navigation.draft_key);
     let edit = store.dispatch(Intent::SetDraftText {
-        thread_id: "/input".into(),
+        thread_id: key.clone(),
         text: "入力を戻さない".into(),
     });
-    assert_eq!(
-        store.snapshot().drafts[&DraftKey::from("/input")].text,
-        "入力を戻さない"
-    );
+    assert_eq!(store.snapshot().drafts[&key].text, "入力を戻さない");
     let second = store.dispatch(Intent::SetDraftText {
-        thread_id: "/input".into(),
+        thread_id: key.clone(),
         text: "second".into(),
     });
     second.await.unwrap();
     edit.await.unwrap();
     navigation.await.unwrap();
-    assert_eq!(
-        store.snapshot().drafts[&DraftKey::from("/input")].text,
-        "second"
-    );
+    assert_eq!(store.snapshot().drafts[&key].text, "second");
     drop(store.dispatch(Intent::SetDraftText {
-        thread_id: "/input".into(),
+        thread_id: key.clone(),
         text: "last".into(),
     }));
-    assert_eq!(
-        store.snapshot().drafts[&DraftKey::from("/input")].text,
-        "last"
-    );
+    assert_eq!(store.snapshot().drafts[&key].text, "last");
     store.close().await.unwrap();
 }
 
@@ -2948,7 +2938,7 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
             .unwrap();
     }
     wait_for(&store, |state| {
-        state.drafts[&DraftKey::from("")].model.as_ref()
+        state.drafts[&state.navigation.draft_key].model.as_ref()
             == Some(&agent_protocol::models::ModelRef {
                 provider: agent_protocol::session::ProviderKind::Codex,
                 id: "fresh".into(),
@@ -3114,6 +3104,12 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             output.lock().await.reply(&request, json!({"result":{}})).await.unwrap();
             completion.await.unwrap();
         }
+        let subscription = store.snapshot().subscriptions[&read_item.thread_id];
+        let source = store.snapshot().conversations[&read_item.thread_id].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].clone();
+        output.lock().await.notify(json!({"method":"host/session/update","params":{"subscriptionId":subscription_a,"change":SessionChange::Text {turn_id:"turn".into(),item_id:"item".into(),field:TextField::CommandOutput,delta:"live suffix".into()}}})).await.unwrap();
+        wait_for(&store, |s| !Arc::ptr_eq(&source, &s.conversations[&read_item.thread_id].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])).await;
+        assert_eq!(store.snapshot().subscriptions[&read_item.thread_id],subscription);
+        assert!(store.snapshot().error.is_none());
         // New deferred metadata invalidates the in-flight source; a complete read must retry.
         output.lock().await.notify(json!({"method":"host/session/update","params":{"subscriptionId":subscription_a,"change":SessionChange::Item {turn_id:"turn".into(),item: serde_json::from_value(json!({"id":"item","status":"running","clientInputId":null,"body":{"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"new suffix","exitCode":null,"durationMs":null}}}}})).unwrap()}}})).await.unwrap();
         wait_for(&store, |s| matches!(s.conversations[&SessionRef { provider: ProviderKind::Codex, id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::CommandExecution { output, .. } if output == "new suffix")).await;

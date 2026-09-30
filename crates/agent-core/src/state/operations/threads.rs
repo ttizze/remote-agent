@@ -615,6 +615,8 @@ mod item_read_tests {
                     },
                 );
             }
+            assert!(snapshot.error.is_none());
+            assert!(snapshot.subscriptions.contains_key(&request.thread_id));
             let effects = apply_item_read(request.clone(), &mut snapshot, old, true).unwrap();
             assert_eq!(effects.len(), 1);
             assert!(item_deferred(&request, &snapshot));

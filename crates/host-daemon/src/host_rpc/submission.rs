@@ -15,9 +15,6 @@ pub(super) fn submission_target<'a>(
     turns: &'a [Arc<Turn>],
     cwd: Option<&'a str>,
 ) -> Result<SubmissionTarget<'a>, &'static str> {
-    if status == SessionStatus::Unavailable {
-        return Err("provider execution is unavailable");
-    }
     if status == SessionStatus::Running {
         if let Some(turn) = turns
             .iter()
@@ -83,6 +80,10 @@ mod tests {
         }
         assert_eq!(
             submission_target(unloaded, &running, Some("/project")).unwrap(),
+            SubmissionTarget::Start { cwd: "/project" }
+        );
+        assert_eq!(
+            submission_target(SessionStatus::Unavailable, &running, Some("/project")).unwrap(),
             SubmissionTarget::Start { cwd: "/project" }
         );
         assert!(submission_target(idle, &[], Some(" ")).is_err());

@@ -82,6 +82,9 @@ impl Failure {
         let value: serde_json::Value = serde_json::from_str(native.get()).unwrap_or_default();
         let mut execution = super::native::codex_error(&value, false);
         execution.message = agent_transport::diagnostics::sanitize(&execution.message);
+        if execution.message.trim().is_empty() {
+            execution.message = "接続先で操作に失敗しました。もう一度お試しください。".into();
+        }
         execution.details = execution
             .details
             .map(|text| agent_transport::diagnostics::sanitize(&text));
@@ -360,11 +363,6 @@ impl HostRpcService {
         }
         let result = async {
             let (target, input_id) = session_target(message);
-            if let Some(target) = target {
-                target
-                    .validate()
-                    .map_err(|error| Failure::new("invalid_params", error))?;
-            }
             let target = target.cloned();
             let submission = target.as_ref().zip(input_id);
             // Keep the execution alive and serialize decisions through the
@@ -594,32 +592,59 @@ impl HostRpcService {
             .router
             .claim_response(session, &id, &answer)
             .map_err(|error| Failure::new("invalid_answer", error))?;
-        let unknown = scopeguard::guard(id.clone(), |id| {
-            self.inner
-                .router
-                .response_delivery(&id, RequestDelivery::Unknown)
+        // Until a native command is admitted, cancellation is proven not sent.
+        let mut delivery = scopeguard::guard((id, RequestDelivery::Awaiting), |(id, state)| {
+            self.inner.router.response_delivery(&id, state)
         });
-        let sent = match origin.destination {
+        match origin.destination {
             RequestDestination::Claude { input } => {
-                crate::claude::send_response(&input, &origin.native_id, result).await
+                let request_id = origin.native_id.as_str().ok_or_else(|| {
+                    Failure::new("invalid_answer", "Claude request ID must be a string")
+                })?;
+                let permit = input
+                    .reserve()
+                    .await
+                    .map_err(|_| Failure::new("answer_not_sent", "Claude Code input is closed"))?;
+                let (delivered, receipt) = tokio::sync::oneshot::channel();
+                delivery.1 = RequestDelivery::Unknown;
+                permit.send(crate::claude::Command {
+                    value: serde_json::json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}),
+                    user: None,
+                    delivered: Some(delivered),
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
+                    .await
+                    .map_err(|_| "Claude answer delivery timed out".to_owned())
+                    .and_then(|receipt| {
+                        receipt.map_err(|_| {
+                            "Claude exited before confirming the answer write".to_owned()
+                        })
+                    })
+                    .flatten()
+                    .map_err(|error| Failure::unknown("answer_delivery_unknown", error))?;
             }
-            RequestDestination::Codex { .. } => match self.inner.codex.server() {
-                Ok(codex) if origin.instance == self.inner.codex.instance => codex
+            RequestDestination::Codex { .. } => {
+                let codex = self
+                    .inner
+                    .codex
+                    .server()
+                    .map_err(|error| Failure::new("answer_not_sent", error))?;
+                if origin.instance != self.inner.codex.instance {
+                    return Err(Failure::new(
+                        "answer_not_sent",
+                        "request source has changed",
+                    ));
+                }
+                delivery.1 = RequestDelivery::Unknown;
+                codex
                     .send_raw(
                         &serde_json::json!({"id":origin.native_id,"result":result}).to_string(),
                     )
                     .await
-                    .map_err(|e| e.to_string()),
-                _ => Err("request source is unavailable".into()),
-            },
-        };
-        if let Err(error) = sent {
-            return Err(Failure::unknown("answer_delivery_unknown", error));
+                    .map_err(|error| Failure::unknown("answer_delivery_unknown", error))?;
+            }
         }
-        self.inner
-            .router
-            .response_delivery(&id, RequestDelivery::Sent);
-        scopeguard::ScopeGuard::into_inner(unknown);
+        delivery.1 = RequestDelivery::Sent;
         Ok(agent_protocol::models::Empty {})
     }
 
@@ -1438,24 +1463,12 @@ impl HostRpcService {
                     "このHostではClaude Codeが有効になっていません。",
                 )
             })?;
-            let model = match params.model {
-                Some(model) => model.id,
-                None => {
-                    claude
-                        .models()
-                        .await
-                        .map_err(|error| Failure::new("claude_unavailable", error))?
-                        .into_iter()
-                        .next()
-                        .ok_or_else(|| {
-                            Failure::new("claude_unavailable", "Claude model catalog is empty")
-                        })?
-                        .model
-                        .id
-                }
-            };
+            let model = params
+                .model
+                .as_ref()
+                .map_or("default", |model| model.id.as_str());
             claude
-                .create(params.cwd.as_deref().unwrap_or_default(), &model)
+                .create(params.cwd.as_deref().unwrap_or_default(), model)
                 .await
                 .map_err(|error| Failure::new("claude_unavailable", error))?
         } else {
@@ -1665,7 +1678,7 @@ mod tests {
         use super::*;
         use agent_protocol::{
             requests::{Answer, ElicitationAnswer},
-            session::{RequestDelivery, SessionChange, SessionRef},
+            session::{RequestDelivery, SessionChange},
         };
         use futures_util::FutureExt;
         let root = tempfile::tempdir().unwrap();
@@ -1675,7 +1688,9 @@ mod tests {
         );
         let connection = service.open_session();
         let router = &service.inner.router;
-        let target = SessionRef::new(ProviderKind::Claude, "native".into()).unwrap();
+        let target =
+            agent_protocol::session::SessionRef::new(ProviderKind::Claude, "native".into())
+                .unwrap();
         let (input, mut receiver) = tokio::sync::mpsc::channel(1);
         let instance = uuid::Uuid::new_v4();
         let answer = Answer::Elicitation {
@@ -1695,7 +1710,7 @@ mod tests {
                 .get(id)
                 .map(|request| request.delivery)
         };
-        for native in ["cancelled", "written"] {
+        for native in ["cancelled", "interrupted", "written"] {
             let adapted = super::super::requests::claude(uuid::Uuid::new_v4().to_string().into(), &"unrelated".into(), &serde_json::json!({"subtype":"elicitation","mcp_server_name":"server","requested_schema":{"type":"object","properties":{}}})).unwrap();
             let id = adapted.request.id.clone();
             router
@@ -1746,24 +1761,148 @@ mod tests {
             let command = receiver.try_recv().unwrap();
             if native == "cancelled" {
                 drop(operation);
-                assert_eq!(delivery(&id), Some(RequestDelivery::Unknown));
+                assert_eq!(delivery(&id), Some(RequestDelivery::Awaiting));
                 assert!(command.delivered.is_none());
+            } else if native == "interrupted" {
+                drop(operation);
+                assert_eq!(delivery(&id), Some(RequestDelivery::Unknown));
+                assert!(command.delivered.is_some());
             } else {
                 assert_eq!(command.value["response"]["request_id"], native);
                 command.delivered.unwrap().send(Ok(())).unwrap();
                 operation.await.unwrap();
                 assert_eq!(delivery(&id), Some(RequestDelivery::Sent));
             }
-            assert!(
-                router
-                    .claim_response(connection.id(), &id, &answer)
-                    .is_err()
-            );
+            if native != "cancelled" {
+                assert!(
+                    router
+                        .claim_response(connection.id(), &id, &answer)
+                        .is_err()
+                );
+            }
             router.resolve_native_request(instance, &serde_json::json!(native));
             assert_eq!(delivery(&id), None);
         }
     }
 
+    #[test]
+    fn empty_provider_errors_keep_a_localized_recovery_message() {
+        for message in ["", "  "] {
+            let raw =
+                serde_json::value::to_raw_value(&serde_json::json!({"message":message})).unwrap();
+            let failure = super::Failure::upstream(&raw);
+            assert_eq!(
+                failure.message,
+                "接続先で操作に失敗しました。もう一度お試しください。"
+            );
+            assert_eq!(failure.execution.unwrap().message, failure.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn answer_preflight_failures_keep_awaiting_and_prove_non_delivery() {
+        use super::super::requests::{RequestDestination, RequestOrigin};
+        use super::*;
+        use agent_protocol::requests::{Answer, ElicitationAnswer};
+        for case in [
+            "invalidClaudeId",
+            "closedClaude",
+            "unavailableCodex",
+            "stoppedCodex",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let service = HostRpcService::new(
+                Err("unavailable".into()),
+                ProjectStore::new(root.path().join("worktrees.json")),
+            );
+            let connection = service.open_session();
+            let claude = case.ends_with("Claude") || case == "invalidClaudeId";
+            let provider = if claude {
+                ProviderKind::Claude
+            } else {
+                ProviderKind::Codex
+            };
+            let target =
+                agent_protocol::session::SessionRef::new(provider, "native".into()).unwrap();
+            let (input, mut receiver) = tokio::sync::mpsc::channel(1);
+            let stopped = tokio_util::sync::CancellationToken::new();
+            let adapted = if claude {
+                super::super::requests::claude("request".into(), &"turn".into(), &serde_json::json!({"subtype":"elicitation","requested_schema":{"type":"object","properties":{}}}))
+            } else {
+                super::super::requests::codex("request".into(),"mcpServer/elicitation/request",&serde_json::json!({"mode":"form","requestedSchema":{"type":"object","properties":{}}}))
+            }.unwrap();
+            let id = adapted.request.id.clone();
+            let instance = uuid::Uuid::new_v4();
+            let native_id = if case == "invalidClaudeId" {
+                serde_json::json!(1)
+            } else {
+                serde_json::json!("native-request")
+            };
+            let destination = if claude {
+                RequestDestination::Claude { input }
+            } else {
+                RequestDestination::Codex {
+                    stopped: stopped.clone(),
+                }
+            };
+            service
+                .inner
+                .router
+                .request(
+                    target.clone(),
+                    RequestOrigin {
+                        instance,
+                        native_id: native_id.clone(),
+                        destination,
+                    },
+                    adapted,
+                )
+                .unwrap();
+            if case == "closedClaude" {
+                receiver.close();
+            }
+            if case == "stoppedCodex" {
+                stopped.cancel();
+            }
+            for _ in 0..2 {
+                let failure = service
+                    .answer_request(
+                        connection.id(),
+                        id.clone(),
+                        Answer::Elicitation {
+                            action: ElicitationAnswer::Accept {
+                                values: serde_json::json!({}),
+                            },
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    failure.delivery,
+                    agent_transport::peer::Delivery::NotSent,
+                    "{case}"
+                );
+                let mut response = ThreadResponse {
+                    thread: Thread::default(),
+                    model: None,
+                };
+                service
+                    .inner
+                    .router
+                    .overlay_execution(&target, &mut response);
+                assert_eq!(
+                    response.thread.requests[&id].delivery,
+                    agent_protocol::session::RequestDelivery::Awaiting,
+                    "{case}"
+                );
+                assert!(receiver.try_recv().is_err());
+            }
+            service
+                .inner
+                .router
+                .resolve_native_request(instance, &native_id);
+        }
+    }
     #[test]
     fn native_error_fields_never_prove_non_delivery() {
         let native = serde_json::json!({"code":123,"message":"not sent","delivery":"notSent","details":{"kept":true}});
