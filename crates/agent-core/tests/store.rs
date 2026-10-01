@@ -3304,6 +3304,96 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
     }).await.unwrap();
 }
 
+#[rstest::rstest]
+#[case::restored(true)]
+#[case::read_failed(false)]
+#[tokio::test]
+async fn session_update_gap_preserves_history_and_only_reports_failed_recovery(
+    #[case] restored: bool,
+) {
+    use agent_protocol::session::{SessionChange, TextField};
+    let id = SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap();
+    let mut conversation = thread("cached");
+    conversation.cwd = None;
+    conversation.history_limit = Some(24);
+    let mut initial = Snapshot::default();
+    Arc::make_mut(&mut initial.conversations).insert(id.clone(), Arc::new(conversation.clone()));
+    Arc::make_mut(&mut initial.drafts).insert(
+        id.clone().into(),
+        Arc::new(Draft {
+            text: "unsent draft".into(),
+            ..Default::default()
+        }),
+    );
+    let (store, mut reader, writer) = setup(initial).await;
+    let old_subscription = store.snapshot().subscriptions[&id];
+    writer
+        .notify(
+            json!({"method":"fixture/session/change", "session":id, "change":SessionChange::Text {
+                turn_id: "turn".into(), item_id: "missing".into(),
+                field: TextField::AssistantText, delta: "unapplied".into(),
+            }}),
+        )
+        .await
+        .unwrap();
+    let recovery = read(&mut reader).await;
+    assert_eq!(recovery["method"], "host/session/open");
+    assert_eq!(recovery["params"]["limit"], 24);
+    assert!(!store.snapshot().subscriptions.contains_key(&id));
+    assert!(store.snapshot().error.is_none());
+    assert_eq!(
+        store.snapshot().conversations[&id].turns,
+        conversation.turns
+    );
+    assert_eq!(store.snapshot().conversations[&id].history_limit, Some(24));
+
+    if restored {
+        let mut recovered = thread("authoritative");
+        recovered.cwd = None;
+        recovered.history_limit = Some(24);
+        writer
+            .reply(&recovery, json!({"result":{"thread":recovered}}))
+            .await
+            .unwrap();
+        wait_for(&store, |state| state.subscriptions.contains_key(&id)).await;
+        assert_ne!(store.snapshot().subscriptions[&id], old_subscription);
+        writer.notify(json!({"method":"fixture/session/change", "session":id, "change":SessionChange::Text {
+            turn_id: "turn".into(), item_id: "item".into(),
+            field: TextField::AssistantText, delta: " updated".into(),
+        }})).await.unwrap();
+        wait_for(&store, |state| matches!(state.conversations[&id].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "authoritative updated")).await;
+        assert!(store.snapshot().error.is_none());
+        assert_eq!(store.snapshot().conversations[&id].history_limit, Some(24));
+    } else {
+        writer
+            .reply(
+                &recovery,
+                json!({"error":{"code":"history_unavailable","message":"history read failed"}}),
+            )
+            .await
+            .unwrap();
+        wait_for(&store, |state| state.error.is_some()).await;
+        assert!(
+            store
+                .snapshot()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("history read failed")
+        );
+        assert!(!store.snapshot().subscriptions.contains_key(&id));
+        assert_eq!(
+            store.snapshot().conversations[&id].turns,
+            conversation.turns
+        );
+    }
+    assert_eq!(
+        store.snapshot().drafts[&DraftKey::from(id)].text,
+        "unsent draft"
+    );
+    store.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn completed_login_selects_its_account_before_refreshing_without_client_logic() {
     for (provider, id) in [("codex", "added"), ("claude", "claude:added")] {
