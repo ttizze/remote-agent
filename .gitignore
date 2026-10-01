@@ -1,4 +1,9 @@
 /target/
+/output/
+node_modules/
+/apps/mobile/src/androidMain/jniLibs/
+/tmp*-IMG_*.png
+/tmp*-ScreenRecording_*.mp4
 /.gradle/
 /.kotlin/
 /.idea/

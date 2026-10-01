@@ -3349,6 +3349,238 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
 }
 
 #[tokio::test]
+async fn composer_catalog_prefetch_and_refresh_keep_candidates_available() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    reader.script_composer_catalog();
+    let navigation = store.dispatch(Intent::NewChat {
+        cwd: "/project".into(),
+    });
+    let mut prefetch = None;
+    for _ in 0..2 {
+        let request = read(&mut reader).await;
+        match request["method"].as_str().unwrap() {
+            "host/composer/catalog" => {
+                assert_eq!(request["params"]["cwd"], "/project");
+                prefetch = Some(request);
+            }
+            "host/workspace/review" => writer
+                .reply(&request, json!({"result":review()}))
+                .await
+                .unwrap(),
+            method => panic!("unexpected prefetch request: {method}"),
+        }
+    }
+    navigation.await.unwrap();
+    let key = store.snapshot().navigation.draft_key.clone();
+    store
+        .dispatch(Intent::EditComposer {
+            thread_id: key.clone(),
+            text: "/".into(),
+            cursor: 1,
+        })
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), reader.read_request())
+            .await
+            .is_err(),
+        "opening the picker must share the pending prefetch"
+    );
+    let catalog = json!({"cwd":"/project","loading":false,"candidates":[{
+        "invocation":{"kind":"Skill","name":"review","path":"/project/review/SKILL.md"},
+        "description":"Review changes"
+    }],"errors":[]});
+    writer
+        .reply(&prefetch.unwrap(), json!({"result":catalog}))
+        .await
+        .unwrap();
+    wait_for(&store, |snapshot| {
+        snapshot
+            .composer_catalog
+            .as_ref()
+            .is_some_and(|c| !c.loading)
+    })
+    .await;
+    let suggestions = store
+        .snapshot()
+        .composer_suggestions("/".into(), 1)
+        .unwrap();
+    assert_eq!(suggestions.candidates[0].invocation.name, "review");
+    assert!(suggestions.status.is_none());
+
+    store
+        .dispatch(Intent::EditComposer {
+            thread_id: key.clone(),
+            text: String::new(),
+            cursor: 0,
+        })
+        .await
+        .unwrap();
+    let refresh = store.dispatch(Intent::EditComposer {
+        thread_id: key.clone(),
+        text: "/".into(),
+        cursor: 1,
+    });
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/composer/catalog");
+    tokio::time::timeout(Duration::from_secs(2), refresh)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(store.snapshot().composer_catalog.as_ref().unwrap().loading);
+    let suggestions = store
+        .snapshot()
+        .composer_suggestions("/".into(), 1)
+        .unwrap();
+    assert_eq!(suggestions.candidates[0].invocation.name, "review");
+    assert!(
+        suggestions.status.is_none(),
+        "cached candidates should display immediately during refresh"
+    );
+    store
+        .dispatch(Intent::EditComposer {
+            thread_id: key,
+            text: "/rev".into(),
+            cursor: 4,
+        })
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), reader.read_request())
+            .await
+            .is_err()
+    );
+    writer
+        .reply(
+            &request,
+            json!({"error":{"code":"unavailable","message":"offline"}}),
+        )
+        .await
+        .unwrap();
+    wait_for(&store, |snapshot| {
+        snapshot
+            .composer_catalog
+            .as_ref()
+            .is_some_and(|c| !c.loading)
+    })
+    .await;
+    let suggestions = store
+        .snapshot()
+        .composer_suggestions("/rev".into(), 4)
+        .unwrap();
+    assert_eq!(suggestions.candidates[0].invocation.name, "review");
+    assert!(
+        suggestions
+            .status
+            .unwrap()
+            .contains("候補を取得できませんでした")
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    reader.script_composer_catalog();
+    let mut pending = Vec::new();
+    for cwd in ["/first", "/second"] {
+        let navigation = store.dispatch(Intent::NewChat { cwd: cwd.into() });
+        for _ in 0..2 {
+            let request = read(&mut reader).await;
+            match request["method"].as_str().unwrap() {
+                "host/composer/catalog" => {
+                    assert_eq!(request["params"]["cwd"], cwd);
+                    pending.push(request);
+                }
+                "host/workspace/review" => writer
+                    .reply(&request, json!({"result":review()}))
+                    .await
+                    .unwrap(),
+                method => panic!("unexpected navigation request: {method}"),
+            }
+        }
+        navigation.await.unwrap();
+    }
+    writer
+        .reply(
+            &pending[0],
+            json!({"result":{"cwd":"/first","loading":false,"candidates":[],"errors":[]}}),
+        )
+        .await
+        .unwrap();
+    store
+        .dispatch(Intent::SetDraftText {
+            thread_id: store.snapshot().navigation.draft_key.clone(),
+            text: "draft".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.snapshot().composer_catalog.as_ref().unwrap().cwd,
+        "/second"
+    );
+    assert!(store.snapshot().composer_catalog.as_ref().unwrap().loading);
+
+    let selection = store.dispatch(Intent::SelectAccount(op::SelectAccount {
+        id: "new".into(),
+    }));
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/account/select");
+    writer
+        .reply(
+            &request,
+            json!({"result":{"provider":"codex","selectedId":"new","persistenceError":null}}),
+        )
+        .await
+        .unwrap();
+    selection.await.unwrap();
+    let mut refreshed = None;
+    for _ in 0..3 {
+        let request = read(&mut reader).await;
+        match request["method"].as_str().unwrap() {
+            "host/account/list" => writer
+                .reply(&request, json!({"result":{"accounts":[]}}))
+                .await
+                .unwrap(),
+            "model/list" => writer
+                .reply(&request, json!({"result":{"data":[]}}))
+                .await
+                .unwrap(),
+            "host/composer/catalog" => refreshed = Some(request),
+            method => panic!("unexpected account refresh: {method}"),
+        }
+    }
+    writer.reply(&pending[1], json!({"result":{"cwd":"/second","loading":false,"candidates":[{
+        "invocation":{"kind":"Skill","name":"old-account","path":"/old/SKILL.md"},"description":"Old"
+    }],"errors":[]}})).await.unwrap();
+    let catalog = json!({"cwd":"/second","loading":false,"candidates":[{
+        "invocation":{"kind":"Skill","name":"new-account","path":"/new/SKILL.md"},"description":"New"
+    }],"errors":[]});
+    writer
+        .reply(&refreshed.unwrap(), json!({"result":catalog}))
+        .await
+        .unwrap();
+    wait_for(&store, |snapshot| {
+        snapshot
+            .composer_catalog
+            .as_ref()
+            .is_some_and(|c| !c.loading)
+    })
+    .await;
+    assert_eq!(
+        store
+            .snapshot()
+            .composer_suggestions("/".into(), 1)
+            .unwrap()
+            .candidates[0]
+            .invocation
+            .name,
+        "new-account"
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn selected_invocations_reach_submission_and_return_after_failure() {
     use agent_core::composer::insert_invocation;
     use agent_protocol::composer::Invocation;
