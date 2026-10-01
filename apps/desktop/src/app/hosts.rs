@@ -1,7 +1,6 @@
 use super::view::section_heading;
 use crate::{Runtime, store_session::StoreSession};
 use agent_core::{
-    presentation::connections::{AgentAvailability, ConnectionAgent},
     state::{Intent, Snapshot, operations as op},
     store::Outcome,
 };
@@ -21,7 +20,6 @@ use std::{io::Write, sync::Arc};
 pub(super) enum HostEvent {
     Selected(Option<RemoteHost>),
     Removed(String),
-    SetupAgent(agent_protocol::session::ProviderKind, AgentAvailability),
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConnectionLayout {
@@ -244,10 +242,11 @@ impl Hosts {
         layout: ConnectionLayout,
         current: Option<&str>,
         connected: bool,
-        agents: &[ConnectionAgent],
+        agent_controls: Div,
         cx: &Context<Self>,
     ) -> Div {
         let cards = layout == ConnectionLayout::Onboarding;
+        let mut agent_controls = Some(agent_controls);
         let mut choices = v_flex()
             .when(cards, |view| view.gap_3())
             .when(!cards, |view| {
@@ -345,7 +344,7 @@ impl Hosts {
                         }),
                 );
             if selected {
-                let mut details = v_flex()
+                let details = v_flex()
                     .gap_2()
                     .when(cards, |view| {
                         view.pt_3().border_t_1().border_color(rgb(0x292929))
@@ -353,51 +352,7 @@ impl Hosts {
                     .when(!cards, |view| {
                         view.ml_8().p_3().rounded(px(6.)).bg(rgb(0x191c20))
                     })
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x949494))
-                            .child("この環境で使えるAI"),
-                    );
-                for agent in agents {
-                    let provider = agent.provider;
-                    let availability = agent.availability;
-                    let mut row = h_flex()
-                        .items_center()
-                        .gap_3()
-                        .py_1()
-                        .child(div().flex_1().child(agent.name.clone()))
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(if availability == AgentAvailability::Ready {
-                                    rgb(0x88c9a0)
-                                } else {
-                                    rgb(0x949494)
-                                })
-                                .child(agent.label.clone()),
-                        );
-                    if matches!(
-                        availability,
-                        AgentAvailability::LoginRequired | AgentAvailability::Unavailable
-                    ) {
-                        row = row.child(
-                            Button::new(format!("onboarding-agent-{index}-{}", agent.name))
-                                .label(if availability == AgentAvailability::LoginRequired {
-                                    "ログイン"
-                                } else {
-                                    "設定"
-                                })
-                                .small()
-                                .ghost()
-                                .disabled(!connected)
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.emit(HostEvent::SetupAgent(provider, availability));
-                                })),
-                        );
-                    }
-                    details = details.child(row);
-                }
+                    .children(agent_controls.take());
                 card = card.child(details);
             }
             choices = choices.child(card);

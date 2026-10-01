@@ -82,10 +82,7 @@ impl Desktop {
     pub(super) fn account_controls(&self, manage: bool, cx: &Context<Self>) -> AnyElement {
         let in_settings = self.tab == Tab::Settings;
         let accounts = self.snapshot.account.accounts.as_ref();
-        let provider = self.model_provider.unwrap_or_else(|| {
-            self.snapshot
-                .model_provider_for_draft(self.draft_key().clone())
-        });
+        let provider = self.account_provider();
         let disabled = self.account_busy
             || self.busy > 0
             || self.snapshot.account.login.is_some()
@@ -122,7 +119,7 @@ impl Desktop {
             .when(in_settings, |body| body.gap_5())
             .when(manage, |body| body.child(services));
         if self.snapshot.account.login.is_some() {
-            body = body.child(self.account_login_controls(cx));
+            body = body.child(self.account_login_controls(None, cx));
         } else {
             if let Some(accounts) = accounts {
                 let mut found = false;
@@ -251,9 +248,7 @@ impl Desktop {
                                 "account-start-login",
                                 "アカウントを追加",
                                 cx,
-                                move |s, window, cx| {
-                                    s.account_code
-                                        .update(cx, |input, cx| input.set_value("", window, cx));
+                                move |s, _, _| {
                                     s.account_operation(Intent::StartAccountLogin(
                                         op::StartAccountLogin { provider },
                                     ));
@@ -331,89 +326,169 @@ impl Desktop {
 }
 
 impl Desktop {
+    pub(super) fn account_provider(&self) -> ProviderKind {
+        self.model_provider.unwrap_or_else(|| {
+            self.snapshot
+                .model_provider_for_draft(self.draft_key().clone())
+        })
+    }
+
     pub(in crate::app) fn account_operation(&mut self, intent: Intent) {
         if self.account_busy || self.session.is_none() || !self.snapshot.connected {
             return;
         }
-        if matches!(intent, Intent::StartAccountLogin(_)) {
+        if let Intent::StartAccountLogin(start) = &intent {
+            self.model_provider = Some(start.provider);
             self.account_login_draft = Some(self.draft_key().clone());
         }
         self.account_busy = true;
         self.perform(intent, OperationCompletion::Account);
     }
 
-    fn account_login_controls(&self, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn account_login_controls(
+        &self,
+        title: Option<&str>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let Some(login) = &self.snapshot.account.login else {
+            return div().into_any_element();
+        };
         let disabled = !self.snapshot.connected || self.account_busy || self.busy > 0;
-        let mut body = v_flex().gap_3();
-        if let Some(login) = &self.snapshot.account.login {
-            let code = login.user_code.clone();
-            let url = login.verification_url.clone();
-            let cancel_id = login.login_id.clone();
-            if login.requires_code_submission {
-                let submit_id = login.login_id.clone();
-                body = body.child("ブラウザで Claude にログインし、表示された認証コードを貼り付けてください。")
-                    .child(Input::new(&self.account_code))
-                    .child(self.button("account-submit-code", "認証コードを送信", cx, move |s, window, cx| {
-                        let code = s.account_code.read(cx).value().to_string();
-                        if code.trim().is_empty() { return; }
-                        s.account_operation(Intent::SubmitAccountLogin(op::SubmitAccountLogin { id: submit_id.clone(), code }));
-                        s.account_code.update(cx, |input, cx| input.set_value("", window, cx));
-                    }).disabled(disabled));
-            }
-            body = body
-                .when(!login.requires_code_submission, |body| {
-                    body.child("ブラウザでログインし、次のコードを入力してください。")
-                })
-                .child(div().text_xl().child(login.user_code.clone()))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .flex_wrap()
-                        .when(!login.requires_code_submission, |row| {
-                            row.child(self.button(
-                                "account-copy-code",
-                                "コードをコピー",
-                                cx,
-                                move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                                },
-                            ))
-                        })
-                        .child(self.button(
-                            "account-open-login",
-                            "ブラウザでログイン",
-                            cx,
-                            move |_, _, cx| cx.open_url(&url),
-                        ))
-                        .child(
-                            self.button(
-                                "account-cancel-login",
-                                "キャンセル",
-                                cx,
-                                move |s, _, _| {
-                                    s.account_operation(Intent::CancelAccountLogin(
-                                        op::CancelAccountLogin {
-                                            id: cancel_id.clone(),
-                                        },
-                                    ));
-                                },
-                            )
-                            .disabled(disabled),
-                        ),
+        let url = login.verification_url.clone();
+        let cancel_id = login.login_id.clone();
+        let cancel = self
+            .button(
+                "account-cancel-login",
+                "キャンセル",
+                cx,
+                move |s, _, _| {
+                    s.account_operation(Intent::CancelAccountLogin(op::CancelAccountLogin {
+                        id: cancel_id.clone(),
+                    }));
+                },
+            )
+            .debug_selector(|| "account-cancel-login".into())
+            .small()
+            .ghost()
+            .disabled(disabled);
+        let mut form = v_flex()
+            .gap_3()
+            .text_sm()
+            .child(if login.requires_code_submission {
+                "ブラウザでログインし、認証コードを貼り付けてください。"
+            } else {
+                "ブラウザでログインし、次のコードを入力してください。"
+            })
+            .child(
+                self.button(
+                    "account-open-login",
+                    "ブラウザでログイン",
+                    cx,
+                    move |_, _, cx| {
+                        cx.open_url(&url);
+                    },
                 )
-                .child(
+                .debug_selector(|| "account-open-login".into())
+                .small(),
+            );
+        if login.requires_code_submission {
+            let submit_id = login.login_id.clone();
+            form = form.child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&self.account_code)),
+                    )
+                    .child(
+                        self.button("account-submit-code", "接続", cx, move |s, window, cx| {
+                            let code = s.account_code.read(cx).value().to_string();
+                            if code.trim().is_empty() {
+                                return;
+                            }
+                            s.account_operation(Intent::SubmitAccountLogin(
+                                op::SubmitAccountLogin {
+                                    id: submit_id.clone(),
+                                    code,
+                                },
+                            ));
+                            s.account_code
+                                .update(cx, |input, cx| input.set_value("", window, cx));
+                        })
+                        .debug_selector(|| "account-submit-code".into())
+                        .disabled(disabled || self.account_code.read(cx).value().trim().is_empty()),
+                    ),
+            );
+        } else {
+            let code = login.user_code.clone();
+            form = form.child(
+                h_flex()
+                    .gap_3()
+                    .child(div().text_xl().child(login.user_code.clone()))
+                    .child(
+                        self.button(
+                            "account-copy-code",
+                            "コードをコピー",
+                            cx,
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                            },
+                        )
+                        .small()
+                        .ghost(),
+                    ),
+            );
+        }
+        form = form
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x949494))
+                    .child("ログインが完了すると、自動で接続されます。"),
+            )
+            .when(!self.account_polling && !self.account_busy, |form| {
+                form.child(
                     self.button(
-                        "account-check-login",
-                        "ログイン状態を確認",
+                        "account-retry-login",
+                        "接続状態を再確認",
                         cx,
                         |s, _, _| {
                             s.account_polling = true;
                         },
                     )
+                    .small()
+                    .ghost()
                     .disabled(disabled),
-                );
+                )
+            });
+        match title {
+            Some(title) => v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .py_1()
+                        .child(div().flex_1().child(title.to_owned()))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x949494))
+                                .child("ログイン中"),
+                        )
+                        .child(cancel),
+                )
+                .child(
+                    form.p_3()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(rgb(0x303030))
+                        .bg(rgb(0x191919)),
+                )
+                .into_any_element(),
+            None => form.child(cancel).into_any_element(),
         }
-        body.into_any_element()
     }
 }
 

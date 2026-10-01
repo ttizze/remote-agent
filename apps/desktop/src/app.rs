@@ -316,6 +316,11 @@ impl Desktop {
         });
         let editor_input = cx.new(|cx| EditorState::new(window, cx));
         let model_search = cx.new(|cx| InputState::new(window, cx).placeholder("モデルを検索"));
+        let account_code = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("認証コードを貼り付け")
+                .masked(true)
+        });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("会話を検索"));
         let path = cx.new(|cx| InputState::new(window, cx).placeholder("絶対パス"));
         let worktree_copy_paths = cx.new(|cx| {
@@ -402,6 +407,11 @@ impl Desktop {
                     cx.notify();
                 }
             }),
+            cx.subscribe(&account_code, |_, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&search, |view, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
                     let value = input.read(cx).value();
@@ -443,9 +453,6 @@ impl Desktop {
                             if view.remote.as_ref().is_some_and(|remote| &remote.id == id) =>
                         {
                             view.switch_host(None, window, cx)
-                        }
-                        HostEvent::SetupAgent(provider, availability) => {
-                            view.setup_agent(*provider, *availability);
                         }
                         _ => {}
                     }
@@ -515,11 +522,7 @@ impl Desktop {
             worktree_save_pending: false,
             worktree_removal: None,
             worktree_busy: false,
-            account_code: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("ブラウザに表示された認証コード")
-                    .masked(true)
-            }),
+            account_code,
             account_busy: false,
             account_polling: false,
             expanded_projects: HashSet::new(),
@@ -910,6 +913,17 @@ impl Desktop {
         let snapshot = store.snapshot();
         let changed = !Arc::ptr_eq(&snapshot, &self.snapshot);
         let previous = std::mem::replace(&mut self.snapshot, snapshot);
+        if previous.account.login.as_ref().map(|login| &login.login_id)
+            != self
+                .snapshot
+                .account
+                .login
+                .as_ref()
+                .map(|login| &login.login_id)
+        {
+            self.account_code
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
         if let Some(request) = self
             .snapshot
             .permission_control(self.draft_key())

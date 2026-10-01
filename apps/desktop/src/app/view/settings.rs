@@ -4,7 +4,9 @@ impl Desktop {
     pub(super) fn open_settings(&mut self) {
         self.tab = Tab::Settings;
         self.settings_page = SettingsPage::Accounts;
-        self.model_provider = None;
+        if self.snapshot.account.login.is_none() {
+            self.model_provider = None;
+        }
         self.account_sign_out = None;
         self.refresh_accounts_and_models();
         self.worktree_removal = None;
@@ -66,16 +68,9 @@ impl Desktop {
                     .px_3()
                     .pt_3()
                     .child(
-                        self.button(
-                            "settings-back",
-                            if self.onboarding {
-                                "接続画面に戻る"
-                            } else {
-                                "会話に戻る"
-                            },
-                            cx,
-                            |s, _, _| s.tab = Tab::Chat,
-                        )
+                        self.button("settings-back", "会話に戻る", cx, |s, _, _| {
+                            s.tab = Tab::Chat
+                        })
                         .icon(IconName::ArrowLeft)
                         .h(px(36.)),
                     )
@@ -142,6 +137,7 @@ impl Desktop {
                 SettingsPage::Accounts => body.child(self.account_controls(true, cx)),
                 SettingsPage::Connections => {
                     let setup = self.snapshot.connection_setup();
+                    let agent_controls = self.connection_agent_controls(&setup.agents, cx);
                     let header = section_heading(
                         "作業するコンピューター",
                         "このPCや、自分のクラウドVMを選びます。",
@@ -155,7 +151,7 @@ impl Desktop {
                                         ConnectionLayout::Settings,
                                         self.remote.as_ref().map(|host| host.id.as_str()),
                                         self.snapshot.connected,
-                                        &setup.agents,
+                                        agent_controls,
                                         cx,
                                     ),
                                 ))

@@ -1,22 +1,73 @@
 use super::*;
-use agent_core::presentation::connections::AgentAvailability;
+use agent_core::presentation::connections::{AgentAvailability, ConnectionAgent};
 
 impl Desktop {
-    pub(in crate::app) fn setup_agent(
-        &mut self,
-        provider: agent_protocol::session::ProviderKind,
-        availability: AgentAvailability,
-    ) {
-        self.open_settings();
-        self.model_provider = Some(provider);
-        if availability == AgentAvailability::LoginRequired {
-            self.account_operation(Intent::StartAccountLogin(op::StartAccountLogin {
-                provider,
-            }));
+    pub(super) fn connection_agent_controls(
+        &self,
+        agents: &[ConnectionAgent],
+        cx: &Context<Self>,
+    ) -> Div {
+        let login_provider = self.account_provider();
+        let login = self.snapshot.account.login.is_some();
+        let disabled = !self.snapshot.connected || self.account_busy || login;
+        let mut body = v_flex().gap_2().child(
+            div()
+                .text_xs()
+                .text_color(rgb(0x949494))
+                .child("この環境で使えるAI"),
+        );
+        for agent in agents {
+            let provider = agent.provider;
+            if login && provider == login_provider {
+                body = body.child(self.account_login_controls(Some(&agent.name), cx));
+                continue;
+            }
+            let pending = self.account_busy && provider == login_provider;
+            let mut row = h_flex()
+                .items_center()
+                .gap_3()
+                .py_1()
+                .child(div().flex_1().child(agent.name.clone()))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(if agent.availability == AgentAvailability::Ready {
+                            rgb(0x88c9a0)
+                        } else {
+                            rgb(0x949494)
+                        })
+                        .child(if pending {
+                            "接続中…".into()
+                        } else {
+                            agent.label.clone()
+                        }),
+                );
+            if matches!(
+                agent.availability,
+                AgentAvailability::LoginRequired | AgentAvailability::Unavailable
+            ) {
+                let id = format!("connection-agent-{}", agent.name);
+                row = row.child(
+                    self.button(id.clone(), "ログイン", cx, move |view, _, _| {
+                        view.account_operation(Intent::StartAccountLogin(op::StartAccountLogin {
+                            provider,
+                        }));
+                    })
+                    .debug_selector(move || id.clone())
+                    .small()
+                    .ghost()
+                    .disabled(disabled),
+                );
+            }
+            body = body.child(row);
         }
+        body
     }
 
     fn complete_onboarding(&mut self) {
+        if !self.snapshot.connection_setup().can_start {
+            return;
+        }
         let directory = match platform::state_dir() {
             Ok(directory) => directory,
             Err(error) => {
@@ -41,13 +92,14 @@ impl Desktop {
         let setup = self.snapshot.connection_setup();
         let current = self.remote.as_ref().map(|host| host.id.as_str());
         let connected = self.snapshot.connected;
+        let agent_controls = self.connection_agent_controls(&setup.agents, cx);
         let choices = self.hosts.as_ref().map(|hosts| {
             hosts.update(cx, |hosts, cx| {
                 hosts.connection_choices(
                     ConnectionLayout::Onboarding,
                     current,
                     connected,
-                    &setup.agents,
+                    agent_controls,
                     cx,
                 )
             })
@@ -90,9 +142,8 @@ impl Desktop {
         } else if checking {
             "AIを確認中…"
         } else {
-            "AIを設定"
+            "AIにログインしてください"
         };
-        let can_start = setup.can_start;
         let footer = h_flex()
             .flex_shrink_0()
             .items_center()
@@ -110,16 +161,13 @@ impl Desktop {
                     .child("既存の会話とプロジェクトは自動で表示されます。"),
             )
             .child(
-                self.button("onboarding-start", start_label, cx, move |view, _, _| {
-                    if can_start {
-                        view.complete_onboarding();
-                    } else {
-                        view.open_settings();
-                    }
+                self.button("onboarding-start", start_label, cx, |view, _, _| {
+                    view.complete_onboarding();
                 })
+                .debug_selector(|| "onboarding-start".into())
                 .primary()
                 .icon(IconName::ArrowRight)
-                .disabled(!connected || self.connecting || (!can_start && checking)),
+                .disabled(self.connecting || !setup.can_start),
             );
         v_flex()
             .size_full()
@@ -184,5 +232,143 @@ impl Desktop {
                     .child(body)
                     .child(footer),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Desktop, Hosts, Mode, Snapshot, Tab};
+    use crate::{Runtime, store_session::StoreSession};
+    use agent_core::store::Store;
+    use gpui_kit as gpui;
+    use gpui_kit::{
+        AppContext, Context, Entity, IntoElement, Modifiers, Render, TestAppContext, Window,
+    };
+    use std::sync::Arc;
+
+    struct SetupView(Entity<Desktop>);
+
+    impl Render for SetupView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0
+                .update(cx, |view, cx| view.onboarding_view(window, cx))
+        }
+    }
+
+    #[gpui::test]
+    fn onboarding_login_stays_in_the_environment_card_and_requires_a_code(cx: &mut TestAppContext) {
+        // Keep external connection and authentication tasks parked.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let app_runtime = Runtime {
+            handle: runtime.handle().clone(),
+            connections: Arc::default(),
+            closing: tokio_util::task::TaskTracker::new(),
+            logging_error: None,
+        };
+        let session = runtime.block_on(async {
+            let (send, receive) = async_channel::unbounded();
+            tokio::spawn(StoreSession::publish(
+                Ok(Arc::new(Store::offline(Snapshot::default()))),
+                app_runtime.clone(),
+                send,
+                Some,
+                |_| None,
+            ));
+            receive.recv().await.unwrap().unwrap().unwrap()
+        });
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(app_runtime);
+        });
+        let (view, window) = cx.add_window_view(|window, cx| {
+            let desktop = cx.new(|cx| Desktop::new(Mode::SideChat {
+                remote: None, cwd: "/fixture".into(),
+            }, window, cx));
+            desktop.update(cx, |view, cx| {
+                view.hosts = Some(cx.new(|cx| Hosts::new(window, cx)));
+                view.session = Some(session);
+                view.connecting = false;
+                let snapshot = Arc::make_mut(&mut view.snapshot);
+                snapshot.connected = true;
+                snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
+                    {"id":"gpt","model":{"provider":"codex","id":"gpt"},"displayName":"GPT","defaultReasoningEffort":"","supportedReasoningEfforts":[]},
+                    {"id":"sonnet","model":{"provider":"claude","id":"sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+                ])).unwrap());
+                Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(serde_json::json!({"accounts":[]})).unwrap()));
+            });
+            cx.observe(&desktop, |_, _, cx| cx.notify()).detach();
+            SetupView(desktop)
+        });
+        window.run_until_parked();
+        let start = window.debug_bounds("onboarding-start").unwrap();
+        window.simulate_click(start.center(), Modifiers::default());
+        window.update(|_, cx| assert!(view.read(cx).0.read(cx).tab == Tab::Chat));
+        let login = window.debug_bounds("connection-agent-Claude Code").unwrap();
+        window.simulate_click(login.center(), Modifiers::default());
+        window.update(|_, cx| {
+            let desktop = view.read(cx).0.read(cx);
+            assert!(desktop.tab == Tab::Chat);
+            assert_eq!(
+                desktop.model_provider,
+                Some(agent_protocol::session::ProviderKind::Claude)
+            );
+            assert!(desktop.account_busy);
+        });
+        window.update(|_, cx| {
+            view.read(cx).0.clone().update(cx, |view, cx| {
+                view.account_busy = false;
+                view.account_polling = true;
+                Arc::make_mut(&mut Arc::make_mut(&mut view.snapshot).account).login =
+                    Some(Arc::new(agent_protocol::operations::AccountLogin {
+                        login_id: "fixture-login".into(),
+                        requires_code_submission: true,
+                        user_code: String::new(),
+                        verification_url: "https://example.invalid/login".into(),
+                    }));
+                cx.notify();
+            })
+        });
+        window.run_until_parked();
+        assert!(
+            window
+                .debug_bounds("connection-agent-Claude Code")
+                .is_none()
+        );
+        assert!(window.debug_bounds("connection-agent-Codex").is_some());
+        assert!(window.debug_bounds("account-open-login").is_some());
+        let submit = window.debug_bounds("account-submit-code").unwrap();
+        window.simulate_click(submit.center(), Modifiers::default());
+        window.update(|_, cx| assert!(!view.read(cx).0.read(cx).account_busy));
+        window.update(|window, cx| {
+            view.read(cx).0.clone().update(cx, |view, cx| {
+                view.account_code
+                    .update(cx, |input, cx| input.set_value("fixture-code", window, cx));
+            })
+        });
+        window.run_until_parked();
+        window.simulate_click(submit.center(), Modifiers::default());
+        window.update(|_, cx| {
+            let desktop = view.read(cx).0.read(cx);
+            assert!(desktop.tab == Tab::Chat);
+            assert!(desktop.account_busy);
+            assert!(desktop.account_code.read(cx).value().is_empty());
+        });
+        window.update(|_, cx| {
+            view.read(cx).0.clone().update(cx, |view, cx| {
+                view.account_busy = false;
+                cx.notify();
+            })
+        });
+        window.run_until_parked();
+        let cancel = window.debug_bounds("account-cancel-login").unwrap();
+        window.simulate_click(cancel.center(), Modifiers::default());
+        window.update(|_, cx| {
+            let desktop = view.read(cx).0.read(cx);
+            assert!(desktop.tab == Tab::Chat);
+            assert!(desktop.account_busy);
+        });
     }
 }
