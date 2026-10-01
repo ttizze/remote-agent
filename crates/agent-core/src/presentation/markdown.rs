@@ -396,10 +396,14 @@ mod tests {
         assert!(rows[3][2].runs[0].strikethrough);
     }
 
-    #[test]
-    fn markdown_table_streaming_and_non_table_source_remain_valid() {
-        for (end, _) in TABLE.char_indices() {
-            let blocks = markdown_blocks(TABLE[..end].into());
+    #[rstest::rstest]
+    #[case::lf("\n")]
+    #[case::crlf("\r\n")]
+    fn markdown_table_streaming_and_non_table_source_remain_valid(#[case] line_ending: &str) {
+        // Construct both variants regardless of the checkout's fixture line endings.
+        let table = TABLE.replace("\r\n", "\n").replace('\n', line_ending);
+        for (end, _) in table.char_indices() {
+            let blocks = markdown_blocks(table[..end].into());
             for block in blocks {
                 if let MarkdownBlock::Table { columns, rows } = block {
                     assert!(rows.iter().all(|row| row.len() == columns.len()));
@@ -409,12 +413,16 @@ mod tests {
         for (source, expected) in [
             ("No table | here".to_owned(), "No table | here".to_owned()),
             (
-                format!("```text\n{TABLE}```"),
-                TABLE.trim_end_matches('\n').to_owned(),
+                format!("```text{line_ending}{table}```"),
+                table.strip_suffix(line_ending).unwrap().to_owned(),
             ),
             (
-                "| incomplete |\n| text".into(),
-                "| incomplete |\n| text".into(),
+                format!("```text{line_ending}keep trailing spaces \t{line_ending}{line_ending}```"),
+                format!("keep trailing spaces \t{line_ending}"),
+            ),
+            (
+                format!("| incomplete |{line_ending}| text"),
+                format!("| incomplete |{line_ending}| text"),
             ),
         ] {
             let blocks = markdown_blocks(source);
@@ -423,10 +431,13 @@ mod tests {
         }
         // A single hyphen is already a valid GFM delimiter while streaming.
         assert!(
-            matches!(markdown_blocks("| incomplete |\n| -".into()).as_slice(),
+            matches!(markdown_blocks(format!("| incomplete |{line_ending}| -")).as_slice(),
             [MarkdownBlock::Table { rows, .. }] if rows.len() == 1)
         );
-        assert_eq!(markdown_blocks(format!("{TABLE}\n{TABLE}")).len(), 2);
+        assert_eq!(
+            markdown_blocks(format!("{table}{line_ending}{table}")).len(),
+            2
+        );
     }
     #[test]
     fn markdown_document_preserves_shared_prose_semantics() {

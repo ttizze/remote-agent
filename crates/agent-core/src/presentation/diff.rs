@@ -286,6 +286,36 @@ mod tests {
         assert!(file_names(&rows).is_empty());
     }
 
+    #[rstest::rstest]
+    #[case::bell(r"\a", "\u{7}")]
+    #[case::backspace(r"\b", "\u{8}")]
+    #[case::tab(r"\t", "\t")]
+    #[case::newline(r"\n", "\n")]
+    #[case::vertical_tab(r"\v", "\u{b}")]
+    #[case::form_feed(r"\f", "\u{c}")]
+    #[case::carriage_return(r"\r", "\r")]
+    #[case::backslash(r"\\", "\\")]
+    #[case::quote(r#"\""#, "\"")]
+    fn named_quoted_escapes_preserve_navigation_targets(
+        #[case] encoded: &str,
+        #[case] decoded: &str,
+    ) {
+        // Exercise Git escapes even where the decoded names are not legal filesystem paths.
+        let encoded = format!("before{encoded}after.txt");
+        let expected = format!("before{decoded}after.txt");
+        for patch in [
+            format!("diff --git \"a/{encoded}\" \"b/{encoded}\"\nBinary files differ\n"),
+            format!("--- \"a/{encoded}\"\told timestamp\n+++ /dev/null\n"),
+            format!("--- /dev/null\n+++ \"b/{encoded}\"\tnew timestamp\n"),
+            format!("rename to \"{encoded}\"\n"),
+            format!("copy to \"{encoded}\"\n"),
+        ] {
+            let names = file_names(&parse(&patch));
+            assert_eq!(names.len(), 1, "{patch:?}");
+            assert_eq!(names.values().next(), Some(&expected), "{patch:?}");
+        }
+    }
+
     #[test]
     fn file_navigation_matches_real_git_paths_including_renames_binary_and_unicode() {
         let directory = tempfile::tempdir().unwrap();
@@ -308,9 +338,14 @@ mod tests {
             "a.txt",
             "space name.txt",
             "日本語.txt",
+            // Windows forbids these names; parser-only cases above retain their escape coverage.
+            #[cfg(not(windows))]
             "tab\tname.txt",
+            #[cfg(not(windows))]
             "quoted\"name.txt",
+            #[cfg(not(windows))]
             "line\nname.txt",
+            #[cfg(not(windows))]
             "controls\u{7}\u{8}\u{b}\u{c}\r\\.txt",
         ];
         for name in names {
