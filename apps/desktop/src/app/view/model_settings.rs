@@ -1,24 +1,29 @@
 use super::*;
 use agent_protocol::session::ProviderKind;
 
+fn provider_icon(provider: ProviderKind) -> Icon {
+    Icon::default().path(match provider {
+        ProviderKind::Codex => "bex/openai.svg",
+        ProviderKind::Claude => "bex/anthropic.svg",
+    })
+}
+
 fn account_identity(provider: Option<ProviderKind>, identity: &str) -> Div {
     h_flex()
         .min_w_0()
         .gap_1()
         .when_some(provider, |row, provider| {
-            row.child(
-                Icon::default()
-                    .path(match provider {
-                        ProviderKind::Codex => "bex/openai.svg",
-                        ProviderKind::Claude => "bex/anthropic.svg",
-                    })
-                    .size(px(12.)),
-            )
+            row.child(provider_icon(provider).size(px(12.)))
         })
         .child(div().min_w_0().text_ellipsis().child(identity.to_owned()))
 }
 
 impl Desktop {
+    pub(super) fn refresh_accounts_and_models(&self) {
+        self.dispatch(Intent::ListAccounts(op::ListAccounts {}));
+        self.dispatch(Intent::LoadModels(op::LoadModels {}));
+    }
+
     pub(super) fn model_menu(&self, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
         let opening = entity.clone();
@@ -58,8 +63,7 @@ impl Desktop {
                         view.model_search
                             .update(cx, |input, cx| input.set_value("", window, cx));
                         view.account_sign_out = None;
-                        view.dispatch(Intent::ListAccounts(op::ListAccounts {}));
-                        view.dispatch(Intent::LoadModels(op::LoadModels {}));
+                        view.refresh_accounts_and_models();
                     });
                 }
             })
@@ -76,6 +80,7 @@ impl Desktop {
             .into_any_element()
     }
     pub(super) fn account_controls(&self, manage: bool, cx: &Context<Self>) -> AnyElement {
+        let in_settings = self.tab == Tab::Settings;
         let accounts = self.snapshot.account.accounts.as_ref();
         let provider = self.model_provider.unwrap_or_else(|| {
             self.snapshot
@@ -85,7 +90,9 @@ impl Desktop {
             || self.busy > 0
             || self.snapshot.account.login.is_some()
             || !self.snapshot.connected;
-        let mut services = h_flex().gap_1();
+        let mut services = h_flex()
+            .gap_1()
+            .when(in_settings, |row| row.max_w(px(320.)));
         for (value, label) in [
             (ProviderKind::Codex, "Codex"),
             (ProviderKind::Claude, "Claude"),
@@ -102,6 +109,9 @@ impl Desktop {
                 )
                 .debug_selector(move || format!("model-provider-{label}"))
                 .selected(provider == value)
+                .when(in_settings, |button| {
+                    button.small().ghost().icon(provider_icon(value))
+                })
                 .disabled(disabled)
                 .flex_1(),
             );
@@ -109,6 +119,7 @@ impl Desktop {
         let mut body = v_flex()
             .id("model-account-controls")
             .gap_3()
+            .when(in_settings, |body| body.gap_5())
             .when(manage, |body| body.child(services));
         if self.snapshot.account.login.is_some() {
             body = body.child(self.account_login_controls(cx));
@@ -129,7 +140,10 @@ impl Desktop {
                         .gap_2()
                         .p_3()
                         .rounded(px(10.))
-                        .bg(rgb(0x333333))
+                        .when(!in_settings, |row| row.bg(rgb(0x333333)))
+                        .when(in_settings, |row| {
+                            row.p_4().border_1().border_color(rgb(0x2b2f35))
+                        })
                         .child(
                             Button::new(format!("account-choice-{index}"))
                                 .accessibility_label(identity.to_owned())
@@ -204,16 +218,20 @@ impl Desktop {
                                     ),
                             );
                     } else if manage {
-                        row = row.child(
-                            self.button(
+                        let logout = self
+                            .button(
                                 format!("account-logout-{index}"),
                                 "サインアウト",
                                 cx,
                                 move |s, _, _| s.account_sign_out = Some(logout_id.clone()),
                             )
                             .debug_selector(move || format!("account-logout-{index}"))
-                            .disabled(disabled),
-                        );
+                            .disabled(disabled);
+                        row = if in_settings {
+                            row.child(h_flex().justify_end().child(logout))
+                        } else {
+                            row.child(logout)
+                        };
                     }
                     body = body.child(row);
                 }
@@ -246,8 +264,7 @@ impl Desktop {
                         )
                         .child(
                             self.button("accounts-refresh", "更新", cx, |s, _, _| {
-                                s.dispatch(Intent::ListAccounts(op::ListAccounts {}));
-                                s.dispatch(Intent::LoadModels(op::LoadModels {}));
+                                s.refresh_accounts_and_models();
                             })
                             .tooltip("モデルと使用量を更新")
                             .disabled(disabled),

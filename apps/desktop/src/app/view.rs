@@ -2,6 +2,7 @@ mod composer;
 mod conversation;
 mod media;
 mod model_settings;
+mod onboarding;
 mod permissions;
 mod settings;
 mod sidebar;
@@ -28,6 +29,13 @@ const CHAT_WIDTH: f32 = 780.;
 
 fn new_chat_icon() -> Icon {
     Icon::default().path("bex/square-pen.svg")
+}
+
+pub(super) fn section_heading(title: &'static str, description: &'static str) -> Div {
+    v_flex()
+        .gap_1()
+        .child(div().text_lg().font_semibold().child(title))
+        .child(div().text_sm().text_color(rgb(0x949ca8)).child(description))
 }
 
 fn sidebar_header(expanded: bool, cx: &Context<Desktop>) -> Div {
@@ -152,12 +160,15 @@ impl Render for Desktop {
             return h_flex()
                 .size_full()
                 .items_stretch()
-                .bg(rgb(0x191919))
+                .bg(rgb(0x111315))
                 .text_color(rgb(0xececec))
                 .text_size(px(14.))
                 .font_weight(FontWeight::NORMAL)
                 .child(self.settings_sidebar(cx))
                 .child(self.settings(cx));
+        }
+        if self.onboarding {
+            return self.onboarding_view(window, cx);
         }
         let wide = window.viewport_size().width >= px(1080.);
         let title = self

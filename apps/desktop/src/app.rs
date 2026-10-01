@@ -30,7 +30,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use hosts::{HostEvent, Hosts};
+use hosts::{ConnectionLayout, HostEvent, Hosts};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -69,6 +69,7 @@ enum Update {
     },
     Recording(uuid::Uuid, platform::RecordingEvent),
     PersistenceError(String),
+    OnboardingCompleted(Result<(), String>),
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -185,6 +186,7 @@ pub(crate) struct Desktop {
     remote: Option<RemoteHost>,
     hosts: Option<Entity<Hosts>>,
     side_chat_mode: bool,
+    onboarding: bool,
     initial_cwd: Option<String>,
     busy: usize,
     error: String,
@@ -432,6 +434,7 @@ impl Desktop {
             }),
         ];
         if let Some(hosts) = &hosts {
+            subscriptions.push(cx.observe(hosts, |_, _, cx| cx.notify()));
             subscriptions.push(
                 cx.subscribe_in(hosts, window, |view, _, event, window, cx| {
                     match event {
@@ -440,6 +443,9 @@ impl Desktop {
                             if view.remote.as_ref().is_some_and(|remote| &remote.id == id) =>
                         {
                             view.switch_host(None, window, cx)
+                        }
+                        HostEvent::SetupAgent(provider, availability) => {
+                            view.setup_agent(*provider, *availability);
                         }
                         _ => {}
                     }
@@ -474,6 +480,9 @@ impl Desktop {
             remote,
             hosts,
             side_chat_mode,
+            onboarding: !side_chat_mode
+                && !platform::state_dir()
+                    .is_ok_and(|directory| directory.join("onboarding.completed").is_file()),
             initial_cwd,
             busy: 0,
             error: String::new(),
@@ -701,6 +710,10 @@ impl Desktop {
             Update::Completed(kind, result) => self.operation_completed(kind, result, window, cx),
             Update::Recording(id, event) => self.recording_update(id, event, window, cx),
             Update::PersistenceError(error) => self.set_error(error),
+            Update::OnboardingCompleted(result) => match result {
+                Ok(()) => self.onboarding = false,
+                Err(error) => self.set_error(error),
+            },
             Update::Folder(result) => {
                 self.busy = self.busy.saturating_sub(1);
                 match result {
