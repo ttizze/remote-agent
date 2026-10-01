@@ -228,21 +228,18 @@ impl Desktop {
                     .gap_2()
                     .justify_between()
                     .py_2()
-                    .child(
-                        self.icon_button(
-                            "sidebar-settings",
-                            IconName::Settings,
-                            "設定を開く",
-                            cx,
-                            |s, _, cx| {
-                                s.open_settings();
-                                if let Some(hosts) = &s.hosts {
-                                    hosts.update(cx, |hosts, _| hosts.refresh());
-                                }
-                            },
-                        )
-                        .selected(self.tab == Tab::Settings),
-                    )
+                    .child(self.icon_button(
+                        "sidebar-settings",
+                        IconName::Settings,
+                        "設定を開く",
+                        cx,
+                        |s, _, cx| {
+                            s.open_settings();
+                            if let Some(hosts) = &s.hosts {
+                                hosts.update(cx, |hosts, _| hosts.refresh());
+                            }
+                        },
+                    ))
                     .child(self.icon_button(
                         "refresh-threads",
                         IconName::RotateCw,
