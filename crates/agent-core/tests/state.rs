@@ -1293,7 +1293,7 @@ fn file_navigation_rejects_empty_and_relative_paths_before_rpc() {
     let (snapshot, effects) = reduce(
         &Snapshot::default(),
         Event::Intent(agent_core::state::Intent::ListFiles(op::ListFiles {
-            path: "/".into(),
+            path: if cfg!(windows) { r"C:\" } else { "/" }.into(),
         })),
     );
     assert!(snapshot.error.is_none());
