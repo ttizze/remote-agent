@@ -1,5 +1,5 @@
-//! Codex native protocol boundary: one shared process, ordered request
-//! completion, native cursors, deferred item hydration and detail reads.
+//! Codex native protocol boundary: execution operations, one shared process,
+//! ordered request completion, native cursors and deferred item reads.
 use super::{routing::SessionRouter, service::Failure};
 use agent_protocol::{
     models::{Item, Thread, ThreadResponse, Turn},
@@ -7,9 +7,15 @@ use agent_protocol::{
     session::{ProviderKind, SessionChange, SessionRef, TextField},
 };
 use agent_transport::peer::{RpcMessage, RpcMessageKind};
-use codex_app_server::CodexAppServer;
+use codex_app_server::{CodexAppServer, Error as AppServerError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+impl From<AppServerError> for Failure {
+    fn from(error: AppServerError) -> Self {
+        Self::unknown("codex_unavailable", error)
+    }
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,6 +128,7 @@ impl Codex {
             .map_err(|error| Failure::new("codex_unavailable", error))
     }
 
+    // Also used by the Codex catalog and permission adapter implementations.
     pub(super) async fn request<P: Serialize, T: serde::de::DeserializeOwned>(
         &self,
         method: &str,
@@ -133,13 +140,10 @@ impl Codex {
             .await
             .map_err(Failure::from)?;
         self.wait_for_events(reply.sequence).await?;
-        reply
-            .value
-            .outcome
-            .map_err(|error| Failure::upstream(&error))
+        reply.value.outcome.map_err(|error| native_failure(&error))
     }
 
-    pub(super) async fn thread_response<P: Serialize>(
+    async fn thread_response<P: Serialize>(
         &self,
         method: &str,
         params: &P,
@@ -157,6 +161,156 @@ impl Codex {
             _ = self.stopped.cancelled() => return Err(Failure::unknown("codex_unavailable", "Codex event stream is unavailable")),
         }
         Ok(())
+    }
+
+    /// Read current routing evidence without loading conversation history.
+    pub(super) async fn submission_state(
+        &self,
+        id: &str,
+    ) -> Result<(ThreadResponse, bool), Failure> {
+        let native: Value = self
+            .request(
+                "thread/read",
+                &serde_json::json!({"threadId":id,"includeTurns":false}),
+            )
+            .await
+            .map_err(Failure::before_submission)?;
+        let requires_resume = native["thread"]["status"]["type"] == "notLoaded";
+        let response = super::native::codex_thread_response(native)
+            .map_err(|error| Failure::new("invalid_thread", error))?;
+        Ok((response, requires_resume))
+    }
+
+    pub(super) async fn steer(
+        &self,
+        id: &str,
+        turn_id: &str,
+        client_input_id: &str,
+        input: &[op::Input],
+    ) -> Result<(), Failure> {
+        self.request::<_, agent_protocol::models::Empty>(
+            "turn/steer",
+            &serde_json::json!({
+                "threadId":id,
+                "expectedTurnId":turn_id,
+                "clientUserMessageId":client_input_id,
+                "input":super::native::codex_input(input),
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(super) async fn queue_input(
+        &self,
+        id: &str,
+        client_input_id: &str,
+        input: &[op::Input],
+    ) -> Result<(), Failure> {
+        let reply: Value = self
+            .request(
+                "thread/queue/add",
+                &serde_json::json!({
+                    "threadId":id,
+                    "clientUserMessageId":client_input_id,
+                    "input":super::native::codex_input(input),
+                }),
+            )
+            .await?;
+        native_turn_id(reply["queuedSubmission"]["id"].as_str())?;
+        Ok(())
+    }
+
+    pub(super) async fn start_turn(
+        &self,
+        input: &op::Submission,
+        cwd: &str,
+        resume: bool,
+        browser_config: Option<Value>,
+    ) -> Result<agent_protocol::ids::TurnId, Failure> {
+        if resume {
+            self.thread_response(
+                "thread/resume",
+                &with_browser_config(
+                    serde_json::json!({"threadId":input.thread_id.id,"cwd":cwd}),
+                    browser_config,
+                ),
+            )
+            .await
+            .map_err(Failure::before_submission)?;
+        }
+        let reply: Value = self
+            .request(
+                "turn/start",
+                &serde_json::json!({
+                    "threadId":input.thread_id.id,
+                    "clientUserMessageId":input.client_user_message_id,
+                    "input":super::native::codex_input(&input.input),
+                    "model":input.model.as_ref().map(|model| &model.id),
+                    "effort":input.effort,
+                    "serviceTierForTurn":input.service_tier,
+                }),
+            )
+            .await?;
+        native_turn_id(reply["turn"]["id"].as_str())
+    }
+
+    pub(super) async fn create(
+        &self,
+        cwd: Option<&str>,
+        model: Option<&str>,
+        project_id: Option<&str>,
+        browser_config: Option<Value>,
+    ) -> Result<ThreadResponse, Failure> {
+        self.thread_response(
+            "thread/start",
+            &with_browser_config(
+                serde_json::json!({"cwd":cwd,"model":model,"projectId":project_id}),
+                browser_config,
+            ),
+        )
+        .await
+    }
+
+    pub(super) async fn fork(
+        &self,
+        id: &str,
+        last_turn_id: &str,
+        exclude_turns: bool,
+        browser_config: Option<Value>,
+    ) -> Result<ThreadResponse, Failure> {
+        self.thread_response(
+            "thread/fork",
+            &with_browser_config(
+                serde_json::json!({"threadId":id,"lastTurnId":last_turn_id,"excludeTurns":exclude_turns}),
+                browser_config,
+            ),
+        )
+        .await
+    }
+
+    pub(super) async fn interrupt(
+        &self,
+        id: &str,
+        turn_id: &str,
+    ) -> Result<agent_protocol::models::Empty, Failure> {
+        self.request(
+            "turn/interrupt",
+            &serde_json::json!({"threadId":id,"turnId":turn_id}),
+        )
+        .await
+    }
+
+    pub(super) async fn rename(
+        &self,
+        id: &str,
+        name: &str,
+    ) -> Result<agent_protocol::models::Empty, Failure> {
+        self.request(
+            "thread/name/set",
+            &serde_json::json!({"threadId":id,"name":name}),
+        )
+        .await
     }
 
     pub(super) async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
@@ -184,7 +338,7 @@ impl Codex {
                 .await
                 .map_err(Failure::from)?
                 .outcome
-                .map_err(|error| Failure::upstream(&error))?;
+                .map_err(|error| native_failure(&error))?;
             projects.extend(page.data);
             match page.next_cursor {
                 None => return Ok(projects),
@@ -204,7 +358,7 @@ impl Codex {
             "idempotencyKey":uuid::Uuid::new_v4().to_string(),
             "name":root.file_name().map(|name| name.to_string_lossy()).unwrap_or_else(|| root.to_string_lossy()),
             "roots":[{"path":root}],
-        })).await.map_err(Failure::from)?.outcome.map_err(|error| Failure::upstream(&error))?;
+        })).await.map_err(Failure::from)?.outcome.map_err(|error| native_failure(&error))?;
         Ok(())
     }
 
@@ -524,9 +678,7 @@ impl Codex {
                 .request::<_, Page<HistoryItem>>("thread/items/list", &query)
                 .await
                 .map_err(Failure::from)?;
-            let page = response
-                .outcome
-                .map_err(|error| Failure::upstream(&error))?;
+            let page = response.outcome.map_err(|error| native_failure(&error))?;
             if let Some(entry) = page.data.into_iter().find(|entry| {
                 entry.turn_id.as_deref() == Some(params.turn_id.as_str())
                     && entry.item.id == params.item_id
@@ -551,6 +703,46 @@ impl Codex {
             }
         }
     }
+}
+
+fn native_failure(native: &serde_json::value::RawValue) -> Failure {
+    let value: Value = serde_json::from_str(native.get()).unwrap_or_default();
+    let mut execution = super::native::codex_error(&value, false);
+    execution.message = agent_transport::diagnostics::sanitize(&execution.message);
+    if execution.message.trim().is_empty() {
+        execution.message = "接続先で操作に失敗しました。もう一度お試しください。".into();
+    }
+    execution.details = execution
+        .details
+        .map(|text| agent_transport::diagnostics::sanitize(&text));
+    if execution.provider_code.is_none() {
+        execution.provider_code = value["code"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| value["code"].as_i64().map(|code| code.to_string()));
+    }
+    let mut failure = Failure::unknown("provider_failed", &execution.message);
+    failure.execution = Some(Box::new(execution));
+    failure
+}
+
+fn with_browser_config(mut params: Value, browser: Option<Value>) -> Value {
+    if let Some(mut browser) = browser {
+        browser["tool_timeout_sec"] = 1800.into();
+        params["config"] = serde_json::json!({"mcp_servers.bex_browser":browser});
+    }
+    params
+}
+
+fn native_turn_id(id: Option<&str>) -> Result<agent_protocol::ids::TurnId, Failure> {
+    id.filter(|id| !id.trim().is_empty())
+        .map(Into::into)
+        .ok_or_else(|| {
+            Failure::unknown(
+                "invalid_submission_reply",
+                "native submission ID is missing",
+            )
+        })
 }
 
 /// Decode only native conversation events. Every other message keeps its owner.
@@ -727,6 +919,41 @@ pub(super) fn request(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_provider_errors_keep_a_localized_recovery_message() {
+        for message in ["", "  "] {
+            let raw =
+                serde_json::value::to_raw_value(&serde_json::json!({"message":message})).unwrap();
+            let failure: agent_protocol::error::RpcFailure = super::native_failure(&raw).into();
+            assert_eq!(
+                failure.message,
+                "接続先で操作に失敗しました。もう一度お試しください。"
+            );
+            assert_eq!(failure.execution.unwrap().message, failure.message);
+        }
+    }
+
+    #[test]
+    fn native_error_fields_never_prove_non_delivery() {
+        let native = serde_json::json!({"code":123,"message":"not sent","delivery":"notSent","details":{"kept":true}});
+        let response = super::native_failure(&serde_json::value::to_raw_value(&native).unwrap());
+        let response = agent_protocol::protocol::Response::from_result::<(), _>(Err(response))
+            .unwrap()
+            .into_value();
+        assert_eq!(response["error"]["delivery"], "unknown");
+        assert!(response["error"].get("providerError").is_none());
+        assert_eq!(response["error"]["execution"]["providerCode"], "123");
+        assert_eq!(response["error"]["execution"]["category"], "other");
+        assert_eq!(response["error"]["message"], "not sent");
+    }
+
+    #[test]
+    fn malformed_provider_reply_does_not_prove_non_delivery() {
+        let error: agent_protocol::error::RpcFailure =
+            super::native_turn_id(None).unwrap_err().into();
+        assert_eq!(error.delivery, agent_protocol::error::Delivery::Unknown);
+    }
+
     #[tokio::test]
     async fn provider_process_events_cannot_mutate_host_owned_terminals() {
         use futures_util::FutureExt;

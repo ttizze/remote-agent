@@ -16,9 +16,8 @@ use agent_transport::peer::RpcMessage;
 
 use agent_protocol::protocol::{Body, Call, Response};
 use agent_transport::peer::{RpcMessageError, RpcMessageKind};
-use codex_app_server::{CodexAppServer, Error as AppServerError};
+use codex_app_server::CodexAppServer;
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 use tokio::sync::broadcast;
 
 use super::codex::ThreadListParams;
@@ -67,39 +66,10 @@ impl From<crate::claude::OperationError> for Failure {
     }
 }
 
-impl From<AppServerError> for Failure {
-    fn from(error: AppServerError) -> Self {
-        Self::unknown("codex_unavailable", error)
-    }
-}
-
 impl Failure {
-    fn before_submission(mut self) -> Self {
+    pub(super) fn before_submission(mut self) -> Self {
         self.delivery = agent_protocol::error::Delivery::NotSent;
         self
-    }
-    pub(super) fn upstream(native: &RawValue) -> Self {
-        let value: serde_json::Value = serde_json::from_str(native.get()).unwrap_or_default();
-        let mut execution = super::native::codex_error(&value, false);
-        execution.message = agent_transport::diagnostics::sanitize(&execution.message);
-        if execution.message.trim().is_empty() {
-            execution.message = "接続先で操作に失敗しました。もう一度お試しください。".into();
-        }
-        execution.details = execution
-            .details
-            .map(|text| agent_transport::diagnostics::sanitize(&text));
-        if execution.provider_code.is_none() {
-            execution.provider_code = value["code"]
-                .as_str()
-                .map(str::to_owned)
-                .or_else(|| value["code"].as_i64().map(|code| code.to_string()));
-        }
-        Self {
-            code: "provider_failed",
-            message: execution.message.clone(),
-            delivery: agent_protocol::error::Delivery::Unknown,
-            execution: Some(Box::new(execution)),
-        }
     }
     pub(super) fn unknown(code: &'static str, error: impl std::fmt::Display) -> Self {
         Self {
@@ -248,11 +218,9 @@ impl HostRpcService {
             .browser
             .get()
             .map(|browser| {
-                let mut config = browser
+                browser
                     .provider_config(thread)
-                    .map_err(|e| Failure::new("browser_unavailable", e))?;
-                config["tool_timeout_sec"] = 1800.into();
-                Ok(serde_json::json!({"mcp_servers.bex_browser":config}))
+                    .map_err(|e| Failure::new("browser_unavailable", e))
             })
             .transpose()
     }
@@ -472,23 +440,7 @@ impl HostRpcService {
                     .map_err(|e| Failure::new("session_read_failed", e))?,
                 false,
             ),
-            None => {
-                let native: serde_json::Value = self
-                    .inner
-                    .codex
-                    .request(
-                        "thread/read",
-                        &serde_json::json!({"threadId":target.id,"includeTurns":false}),
-                    )
-                    .await
-                    .map_err(Failure::before_submission)?;
-                let requires_resume = native["thread"]["status"]["type"] == "notLoaded";
-                (
-                    super::native::codex_thread_response(native)
-                        .map_err(|e| Failure::new("invalid_thread", e))?,
-                    requires_resume,
-                )
-            }
+            None => self.inner.codex.submission_state(&target.id).await?,
         };
         if response.thread.id.as_ref() != Some(target) {
             return Err(Failure::new(
@@ -517,7 +469,15 @@ impl HostRpcService {
                         .await
                         .map_err(Failure::from)?;
                 } else {
-                    self.inner.codex.request::<_, agent_protocol::models::Empty>("turn/steer", &serde_json::json!({"threadId":target.id,"expectedTurnId":turn_id,"clientUserMessageId":input.client_user_message_id,"input":super::native::codex_input(&input.input)})).await?;
+                    self.inner
+                        .codex
+                        .steer(
+                            &target.id,
+                            turn_id,
+                            &input.client_user_message_id,
+                            &input.input,
+                        )
+                        .await?;
                 }
                 Some(turn_id.into())
             }
@@ -533,8 +493,10 @@ impl HostRpcService {
                         .await
                         .map_err(Failure::from)?;
                 } else {
-                    let reply: serde_json::Value = self.inner.codex.request("thread/queue/add", &serde_json::json!({"threadId":target.id,"clientUserMessageId":input.client_user_message_id,"input":super::native::codex_input(&input.input)})).await?;
-                    native_turn_id(reply["queuedSubmission"]["id"].as_str())?;
+                    self.inner
+                        .codex
+                        .queue_input(&target.id, &input.client_user_message_id, &input.input)
+                        .await?;
                 }
                 None
             }
@@ -559,20 +521,15 @@ impl HostRpcService {
                         .await
                         .map_err(Failure::from)?
                 } else {
-                    // Native resume is part of Host submission, never a client operation.
-                    let mut params = serde_json::json!({"threadId":target.id,"cwd":cwd});
-                    if let Some(config) = self.browser_config(&target.to_string())? {
-                        params["config"] = config;
-                    }
-                    if requires_resume || recreated.is_some() {
-                        self.inner
-                            .codex
-                            .thread_response("thread/resume", &params)
-                            .await
-                            .map_err(Failure::before_submission)?;
-                    }
-                    let reply: serde_json::Value = self.inner.codex.request("turn/start", &serde_json::json!({"threadId":target.id,"clientUserMessageId":input.client_user_message_id,"input":super::native::codex_input(&input.input),"model":input.model.as_ref().map(|model| &model.id),"effort":input.effort,"serviceTierForTurn":input.service_tier})).await?;
-                    native_turn_id(reply["turn"]["id"].as_str())?
+                    self.inner
+                        .codex
+                        .start_turn(
+                            input,
+                            cwd,
+                            requires_resume || recreated.is_some(),
+                            self.browser_config(&target.to_string())?,
+                        )
+                        .await?
                 })
             }
         };
@@ -930,18 +887,13 @@ impl HostRpcService {
 
             Call::ListModels(params) => {
                 let first_page = params.cursor.is_none();
-                let (codex, claude) = tokio::join!(
-                    self.inner
-                        .codex
-                        .models(params),
-                    async {
-                        if first_page && let Some(claude) = self.inner.claude.get() {
-                            claude.models().await
-                        } else {
-                            Ok(Vec::new())
-                        }
+                let (codex, claude) = tokio::join!(self.inner.codex.models(params), async {
+                    if first_page && let Some(claude) = self.inner.claude.get() {
+                        claude.models().await
+                    } else {
+                        Ok(Vec::new())
                     }
-                );
+                });
                 let mut page = codex.unwrap_or_else(|error| op::ModelPage {
                     data: Vec::new(),
                     next_cursor: None,
@@ -1095,15 +1047,46 @@ impl HostRpcService {
             Call::ForkSession(params) => {
                 let target = target_session.expect("session-scoped fork");
                 let scope = uuid::Uuid::new_v4().to_string();
-                let mut native = serde_json::json!({"threadId":target.id,"lastTurnId":params.last_turn_id,"excludeTurns":params.exclude_turns});
-                if let Some(config) = self.browser_config(&scope)? { native["config"] = config; }
-                let mut response = self.inner.codex.thread_response("thread/fork", &native).await?;
-                if let Some(browser) = self.inner.browser.get() && let Some(id) = &response.thread.id { browser.bind_scope(scope, id.to_string()).await; }
-                describe_thread(&mut response.thread, ProviderKind::Codex, &self.project_snapshot().await?);
+                let mut response = self
+                    .inner
+                    .codex
+                    .fork(
+                        &target.id,
+                        &params.last_turn_id,
+                        params.exclude_turns,
+                        self.browser_config(&scope)?,
+                    )
+                    .await?;
+                if let Some(browser) = self.inner.browser.get()
+                    && let Some(id) = &response.thread.id
+                {
+                    browser.bind_scope(scope, id.to_string()).await;
+                }
+                describe_thread(
+                    &mut response.thread,
+                    ProviderKind::Codex,
+                    &self.project_snapshot().await?,
+                );
                 response.into()
             }
-            Call::Interrupt(params) => self.inner.codex.request::<_, agent_protocol::models::Empty>("turn/interrupt", &serde_json::json!({"threadId":target_session.expect("session-scoped interrupt").id,"turnId":params.turn_id})).await?.into(),
-            Call::RenameSession(params) => self.inner.codex.request::<_, agent_protocol::models::Empty>("thread/name/set", &serde_json::json!({"threadId":target_session.expect("session-scoped rename").id,"name":params.name})).await?.into(),
+            Call::Interrupt(params) => self
+                .inner
+                .codex
+                .interrupt(
+                    &target_session.expect("session-scoped interrupt").id,
+                    &params.turn_id,
+                )
+                .await?
+                .into(),
+            Call::RenameSession(params) => self
+                .inner
+                .codex
+                .rename(
+                    &target_session.expect("session-scoped rename").id,
+                    &params.name,
+                )
+                .await?
+                .into(),
             _ => {
                 return Err(Failure::new(
                     "method_not_found",
@@ -1473,14 +1456,15 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("claude_unavailable", error))?
         } else {
             let scope = uuid::Uuid::new_v4().to_string();
-            let mut request = serde_json::json!({"cwd":params.cwd,"model":params.model.map(|model| model.id),"projectId":project_id});
-            if let Some(config) = self.browser_config(&scope)? {
-                request["config"] = config;
-            }
-            let response: ThreadResponse = self
+            let response = self
                 .inner
                 .codex
-                .thread_response("thread/start", &request)
+                .create(
+                    params.cwd.as_deref(),
+                    params.model.as_ref().map(|model| model.id.as_str()),
+                    project_id.as_deref(),
+                    self.browser_config(&scope)?,
+                )
                 .await?;
             if let Some(browser) = self.inner.browser.get()
                 && let Some(id) = &response.thread.id
@@ -1659,17 +1643,6 @@ fn describe_thread(
     thread.capabilities = Some(provider_capabilities(provider));
 }
 
-fn native_turn_id(id: Option<&str>) -> Result<agent_protocol::ids::TurnId, Failure> {
-    id.filter(|id| !id.trim().is_empty())
-        .map(Into::into)
-        .ok_or_else(|| {
-            Failure::unknown(
-                "invalid_submission_reply",
-                "native submission ID is missing",
-            )
-        })
-}
-
 #[cfg(test)]
 mod tests {
     #[tokio::test]
@@ -1785,20 +1758,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_provider_errors_keep_a_localized_recovery_message() {
-        for message in ["", "  "] {
-            let raw =
-                serde_json::value::to_raw_value(&serde_json::json!({"message":message})).unwrap();
-            let failure = super::Failure::upstream(&raw);
-            assert_eq!(
-                failure.message,
-                "接続先で操作に失敗しました。もう一度お試しください。"
-            );
-            assert_eq!(failure.execution.unwrap().message, failure.message);
-        }
-    }
-
     #[tokio::test]
     async fn answer_preflight_failures_keep_awaiting_and_prove_non_delivery() {
         use super::super::requests::{RequestDestination, RequestOrigin};
@@ -1904,21 +1863,6 @@ mod tests {
         }
     }
     #[test]
-    fn native_error_fields_never_prove_non_delivery() {
-        let native = serde_json::json!({"code":123,"message":"not sent","delivery":"notSent","details":{"kept":true}});
-        let response = super::Failure::upstream(&serde_json::value::to_raw_value(&native).unwrap());
-
-        assert_eq!(response.delivery, agent_transport::peer::Delivery::Unknown);
-        let response = super::Response::from_result::<(), _>(Err(response))
-            .unwrap()
-            .into_value();
-        assert_eq!(response["error"]["delivery"], "unknown");
-        assert!(response["error"].get("providerError").is_none());
-        assert_eq!(response["error"]["execution"]["providerCode"], "123");
-        assert_eq!(response["error"]["execution"]["category"], "other");
-        assert_eq!(response["error"]["message"], "not sent");
-    }
-    #[test]
     fn unknown_and_native_methods_are_rejected_before_dispatch() {
         for method in [
             "not/public",
@@ -1990,12 +1934,6 @@ mod tests {
                 assert_eq!(response["error"]["delivery"], "notSent");
             }
         }
-    }
-
-    #[test]
-    fn malformed_provider_reply_does_not_prove_non_delivery() {
-        let error = super::native_turn_id(None).unwrap_err();
-        assert_eq!(error.delivery, agent_transport::peer::Delivery::Unknown);
     }
 
     #[tokio::test]

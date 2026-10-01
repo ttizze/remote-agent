@@ -39,6 +39,11 @@ Codex retains one shared app-server process. Native pagination, cursor use,
 item hydration, repeated turn IDs, details and response/event ordering belong
 to `host_rpc/codex.rs`. Clients request a larger window rather than merging
 native cursor pages. Accounts share this process and existing switch guards.
+The Codex adapter also owns native execution RPCs, input/reply conversion and
+browser MCP configuration encoding. The Host chooses the submission route,
+owns worktree preparation, browser scopes and delivery evidence, and passes
+the required values to the adapter. Execution RPC names and payloads stay inside
+the adapter.
 
 Claude reads native project JSONL without launching the CLI. It resolves exact
 UUIDs across actual configured project directories, checks native identities,
