@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Transparent header logo is the source for app icons. Requires macOS Apple tools.
+# Transparent logo is the source for app icons. Requires macOS Apple tools.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source=apps/desktop/assets/logo.png
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT
-# All launcher icons use a white backdrop; the header keeps source alpha.
+# All launcher icons use a white backdrop; the source keeps alpha.
 cat > "$temporary/app-icon.swift" <<'SWIFT'
 import Foundation
 import CoreGraphics
