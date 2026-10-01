@@ -1170,14 +1170,12 @@ mod tests {
     #[tokio::test]
     async fn completion_during_native_read_is_overlaid_before_live_updates() {
         let router = SessionRouter::new();
+        let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
         let connection = router.open_session();
         let read = open(&router, "native");
         turn(&router, false);
         router.session_change(
-            &SessionRef {
-                provider: ProviderKind::Codex,
-                id: "native".into(),
-            },
+            &target,
             SessionChange::Item {
                 turn_id: "run".into(),
                 item: Item::new(
@@ -1193,10 +1191,7 @@ mod tests {
             },
         );
         router.session_change(
-            &SessionRef {
-                provider: ProviderKind::Codex,
-                id: "native".into(),
-            },
+            &target,
             SessionChange::Text {
                 turn_id: "run".into(),
                 item_id: "answer".into(),
@@ -1204,7 +1199,19 @@ mod tests {
                 delta: " final".into(),
             },
         );
-        turn(&router, true);
+        router.session_change(&target, SessionChange::Turn {
+            turn: serde_json::from_value(json!({"id":"run","status":"completed","itemsView":"full","items":[{"id":"other","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"done","phase":"final"}}}}}]})).unwrap(),
+            completed: true,
+        });
+        router.session_change(
+            &target,
+            SessionChange::Text {
+                turn_id: "run".into(),
+                item_id: "answer".into(),
+                field: TextField::AssistantText,
+                delta: " suffix".into(),
+            },
+        );
         let response = router
             .finish_session_read(
                 read,
@@ -1222,7 +1229,7 @@ mod tests {
         assert_eq!(current["status"], "completed");
         assert_eq!(
             current["items"][0]["body"]["inline"]["body"]["assistantText"]["text"],
-            "start final"
+            "start final suffix"
         );
         assert!(lock_state(&router.state).executions.is_empty());
     }

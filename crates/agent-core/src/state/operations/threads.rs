@@ -205,20 +205,15 @@ impl ReadThread {
             limit: 5,
         }
     }
-    pub(super) fn with_history(mut self, thread: Option<&Thread>) -> Self {
-        if let Some(thread) = thread {
-            let requested = thread.history_limit.unwrap_or(5);
-            self.limit = self
-                .limit
-                .max(u32::try_from(requested).unwrap_or(u32::MAX))
-                .max(
-                    thread
-                        .turns
-                        .as_ref()
-                        .map_or(0, |turns| u32::try_from(turns.len()).unwrap_or(u32::MAX)),
-                );
-        }
-        self.limit = self.limit.max(5);
+    pub(in crate::state) fn with_history(
+        mut self,
+        history_limit: Option<usize>,
+        loaded_turns: usize,
+    ) -> Self {
+        self.limit = self
+            .limit
+            .max(u32::try_from(history_limit.unwrap_or(5).max(loaded_turns)).unwrap_or(u32::MAX))
+            .max(5);
         self
     }
     pub fn open(thread_id: crate::session::SessionRef) -> Self {
@@ -255,9 +250,13 @@ impl Operation for ReadThread {
         self.open
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
-        *self = self
-            .clone()
-            .with_history(snapshot.conversations.get(&self.thread_id).map(Arc::as_ref));
+        let cached = snapshot.conversations.get(&self.thread_id);
+        *self = self.clone().with_history(
+            cached.and_then(|thread| thread.history_limit),
+            cached
+                .and_then(|thread| thread.turns.as_ref())
+                .map_or(0, Vec::len),
+        );
         if self.open {
             let cwd = snapshot
                 .conversations
@@ -494,10 +493,14 @@ pub use agent_protocol::operations::OpenRequest;
 impl Operation for OpenRequest {
     type Output = crate::session::OpenedSession;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        let session = context.client.call(self).await?;
-        let id = session.clone();
-        let open = ReadThread::new(id.clone())
-            .with_history(context.snapshot.conversations.get(&id).map(Arc::as_ref));
+        let id = context.client.call(self).await?;
+        let cached = context.snapshot.conversations.get(&id);
+        let open = ReadThread::new(id).with_history(
+            cached.and_then(|thread| thread.history_limit),
+            cached
+                .and_then(|thread| thread.turns.as_ref())
+                .map_or(0, Vec::len),
+        );
         context.call(&open).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
