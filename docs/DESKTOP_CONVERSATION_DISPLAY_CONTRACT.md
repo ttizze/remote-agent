@@ -38,6 +38,10 @@ hydration must not change this default.
 
 - List query limits and search are not persisted; reopening restores five-item
   defaults. Live navigation and reconnection retain the current query.
+- While a list refresh is running, coalesce further refreshes into one follow-up
+  using the latest query. A reply for that query remains valid after task
+  navigation; a reply for an older search or display limit must not replace it.
+  List publication must preserve the selected task and draft.
 
 - Load the latest bounded page first; request older pages using the server's
   opaque cursor. A refresh must not fetch the entire conversation.

@@ -271,7 +271,6 @@ impl Desktop {
         let merged_id = format!("thread-merged-{}", thread.id);
         SidebarMenuItem::new(thread.title.clone())
             .active(self.selected() == Some(&id) && self.tab != Tab::Settings)
-            .disable(self.busy > 0)
             .suffix(move |_, _| {
                 div()
                     .flex()
@@ -299,5 +298,120 @@ impl Desktop {
                 view.open_chat(id.clone(), window, cx);
                 cx.notify();
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Arc, Desktop, Mode, RemoteHost, Runtime, Snapshot, StoreSession};
+    use agent_core::store::Store;
+    use gpui_kit as gpui;
+    use gpui_kit::{
+        AppContext, Context, Entity, InteractiveElement, IntoElement, Modifiers, ParentElement,
+        Render, Styled, TestAppContext, Window,
+        component::{sidebar::SidebarItem, v_flex},
+        div, px,
+    };
+
+    struct TaskNavigation(Entity<Desktop>);
+    impl Render for TaskNavigation {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.update(cx, |desktop, cx| {
+                let page = desktop.snapshot.thread_list().unwrap();
+                v_flex()
+                    .w(px(272.))
+                    .children(page.threads.iter().enumerate().map(|(index, thread)| {
+                        div().debug_selector(move || format!("task-{index}")).child(
+                            desktop.thread_button(thread, cx).render(
+                                format!("task-button-{index}"),
+                                window,
+                                cx,
+                            ),
+                        )
+                    }))
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn pending_operations_do_not_block_task_navigation(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let app_runtime = Runtime {
+            handle: runtime.handle().clone(),
+            connections: Arc::default(),
+            closing: tokio_util::task::TaskTracker::new(),
+            logging_error: None,
+        };
+        let snapshot = Snapshot {
+            threads: Some(Arc::new(
+                serde_json::from_value(serde_json::json!({
+                    "data":[{"id":{"provider":"codex","id":"first"},"name":"First task"},
+                            {"id":{"provider":"codex","id":"second"},"name":"Second task"}],
+                    "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
+                }))
+                .unwrap(),
+            )),
+            ..Default::default()
+        };
+        let session = runtime.block_on(async {
+            let store = Arc::new(Store::offline(snapshot));
+            let (updates, receive) = async_channel::unbounded();
+            tokio::spawn(StoreSession::publish(
+                Ok(store),
+                app_runtime.clone(),
+                updates,
+                Some,
+                |_| None,
+            ));
+            receive.recv().await.unwrap().unwrap().unwrap()
+        });
+        let store = session.store.clone();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(app_runtime);
+        });
+        let (view, window) = cx.add_window_view(|window, cx| {
+            let desktop = cx.new(|cx| {
+                Desktop::new(
+                    Mode::SideChat {
+                        remote: Some(RemoteHost {
+                            id: "fixture".into(),
+                            name: "fixture".into(),
+                            ticket: "invalid-fixture-ticket".into(),
+                        }),
+                        cwd: String::new(),
+                    },
+                    window,
+                    cx,
+                )
+            });
+            desktop.update(cx, |desktop, _| {
+                desktop.snapshot = store.snapshot();
+                desktop.session = Some(session);
+                desktop.busy = 1;
+            });
+            TaskNavigation(desktop)
+        });
+        window.run_until_parked();
+        // Leave the Tokio executor parked so both task reads remain pending.
+        for (id, selector) in [("first", "task-0"), ("second", "task-1")] {
+            let button = window.debug_bounds(selector).unwrap().center();
+            window.simulate_click(button, Modifiers::default());
+            window.run_until_parked();
+            assert_eq!(
+                store.snapshot().navigation.thread_id.as_ref().unwrap().id,
+                id
+            );
+            view.update(window, |view, cx| {
+                assert_eq!(
+                    view.0.read(cx).busy,
+                    1,
+                    "opening a task must not block later navigation"
+                );
+            });
+        }
     }
 }

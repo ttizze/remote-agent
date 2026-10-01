@@ -2,6 +2,7 @@
 use crate::{
     client::{ClientExt, SessionImage},
     diagnostics::{ConnectionPerformance, ConnectionPhase as Phase},
+    models::ListQuery,
     peer::PeerError,
     state::{Event, Intent, Snapshot, operations as op, reduce},
 };
@@ -136,7 +137,7 @@ impl Receipt {
             if waiters.len() >= 128 {
                 drop(waiters);
                 other.send(Err(PeerError::InvalidMessage(
-                    "too many waiters for item read".into(),
+                    "too many waiters for operation".into(),
                 )));
             } else {
                 waiters.extend(other.0.lock().unwrap().drain(..));
@@ -152,6 +153,7 @@ impl Receipt {
 struct Completed {
     subscriptions: Vec<(uuid::Uuid, agent_transport::client::Updates)>,
     item_read: Option<op::ReadItem>,
+    list_query: Option<ListQuery>,
     delivery_attempted: bool,
     epoch: u64,
     result: Result<Applied, PeerError>,
@@ -652,9 +654,12 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
     let mut scheduled = Vec::new();
     let mut result = Ok(Outcome::Applied);
     updates.send_if_modified(|snapshot| {
-        // Dispatch and completion share this lock: navigation cannot change
-        // between the epoch comparison and publication.
-        let current = completed.epoch == snapshot.epoch;
+        // Dispatch and completion share this lock. List results and failures
+        // belong to their query; view work belongs to the navigation epoch.
+        let current = completed.list_query.as_ref().map_or_else(
+            || completed.epoch == snapshot.epoch,
+            |query| query == snapshot.list_query.as_ref(),
+        );
         let mut next = snapshot.as_ref().clone();
         result = match completed.result {
             Ok(applied) => match applied.application.apply(&mut next, current) {
@@ -824,6 +829,8 @@ async fn run(
     let mut terminal_commands = VecDeque::new();
     let mut item_reads = ItemReads::default();
     let mut terminal_running = false;
+    let mut list_running = false;
+    let mut pending_list: Option<Receipt> = None;
     let mut disconnected = None;
     let reason = loop {
         let unused: Vec<_> = subscriptions
@@ -846,6 +853,16 @@ async fn run(
             complete,
         } in effects.drain(..)
         {
+            if effect.0.list_query().is_some() {
+                if list_running {
+                    let receipt = pending_list.get_or_insert_default();
+                    if let Some(complete) = complete {
+                        receipt.join(complete);
+                    }
+                    continue;
+                }
+                list_running = true;
+            }
             if effect.0.terminal_handle().is_some() {
                 terminal_commands.push_back(Scheduled {
                     effect,
@@ -956,6 +973,17 @@ async fn run(
                     Err(std::io::Error::other("subscription ended"))
                 })).boxed()); }
                 if result.terminal.is_some() { terminal_running = false; }
+                if result.list_query.is_some() {
+                    list_running = false;
+                    if let Some(complete) = pending_list.take() {
+                        let snapshot = updates.borrow().clone();
+                        effects.push(Scheduled {
+                            effect: Effect::execute(op::ListSessions::new((*snapshot.list_query).clone())),
+                            snapshot,
+                            complete: Some(complete),
+                        });
+                    }
+                }
                 effects.extend(item_reads.finish(&updates, result));
             }
             Some((id, update)) = subscriptions.next(), if !subscriptions.is_empty() => {
@@ -1060,6 +1088,7 @@ async fn perform(
     complete: Option<Receipt>,
 ) -> Completed {
     let item_read = effect.0.item_read().cloned();
+    let list_query = effect.0.list_query().cloned();
     let terminal = effect.0.terminal_handle().map(str::to_owned);
     let failed_submission = effect
         .0
@@ -1081,6 +1110,7 @@ async fn perform(
     Completed {
         subscriptions,
         item_read,
+        list_query,
         delivery_attempted: client.is_some(),
         epoch: snapshot.epoch,
         result,
@@ -1147,6 +1177,7 @@ impl Effect {
 }
 trait Pending: Application {
     fn item_read(&self) -> Option<&op::ReadItem>;
+    fn list_query(&self) -> Option<&ListQuery>;
     fn submission_id(&self) -> Option<&str>;
     fn terminal_handle(&self) -> Option<&str>;
     fn run<'a>(
@@ -1157,6 +1188,9 @@ trait Pending: Application {
 impl<O: op::Operation> Pending for Completion<O> {
     fn item_read(&self) -> Option<&op::ReadItem> {
         self.operation.item_read()
+    }
+    fn list_query(&self) -> Option<&ListQuery> {
+        self.operation.list_query()
     }
     fn submission_id(&self) -> Option<&str> {
         self.operation.submission_id()

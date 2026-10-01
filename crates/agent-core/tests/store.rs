@@ -36,6 +36,137 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 #[tokio::test]
+async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_navigation() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let first = store.dispatch(Intent::ListSessions(op::ListSessions::new(
+        Default::default(),
+    )));
+    let first_request = read(&mut reader).await;
+    assert_eq!(first_request["method"], "host/session/list");
+    let navigation_epoch = store.snapshot().epoch;
+    let mut receipts = Vec::new();
+    for index in 0..40 {
+        receipts.push(if index == 10 || index == 20 {
+            store.dispatch(Intent::ExpandThreadList {
+                project_id: None,
+                projects: true,
+            })
+        } else {
+            store.dispatch(Intent::ListSessions(op::ListSessions::new(
+                (*store.snapshot().list_query).clone(),
+            )))
+        });
+    }
+    assert_eq!(
+        store.snapshot().epoch,
+        navigation_epoch,
+        "list queries must not invalidate conversation reads"
+    );
+    let id = SessionRef::new(ProviderKind::Codex, "selected".to_owned()).unwrap();
+    let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())));
+    assert_eq!(store.snapshot().navigation.thread_id.as_ref(), Some(&id));
+    let open_request = read(&mut reader).await;
+    assert_eq!(
+        open_request["method"], "host/session/open",
+        "refreshes must not fan out while the first list is pending"
+    );
+    receipts.push(store.dispatch(Intent::ExpandThreadList {
+        project_id: None,
+        projects: true,
+    }));
+    writer
+        .reply(
+            &open_request,
+            json!({"result":{"thread":{"id":id,"status":"idle","turns":[]}}}),
+        )
+        .await
+        .unwrap();
+    opening.await.unwrap();
+    assert!(
+        store.snapshot().subscriptions.contains_key(&id),
+        "expanding projects must retain the in-flight conversation subscription"
+    );
+    writer.reply(&first_request, json!({"result":{"data":[],"projects":[{"id":"obsolete","name":"Old project","roots":[]}],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false}})).await.unwrap();
+    first.await.unwrap();
+    assert!(
+        store
+            .snapshot()
+            .threads
+            .as_ref()
+            .unwrap()
+            .projects
+            .is_empty(),
+        "an older query must not replace the expanded list"
+    );
+    let latest = read(&mut reader).await;
+    assert_eq!(latest["method"], "host/session/list");
+    assert_eq!(latest["params"]["projectLimit"], 35);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), reader.read_request())
+            .await
+            .is_err()
+    );
+    writer.reply(&latest, json!({"result":{"data":[],"projects":[{"id":"latest","name":"Expanded project","roots":[]}],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false}})).await.unwrap();
+    for receipt in receipts {
+        receipt.await.unwrap();
+    }
+    assert_eq!(
+        store.snapshot().threads.as_ref().unwrap().projects[0].id,
+        "latest"
+    );
+    assert_eq!(store.snapshot().navigation.thread_id.as_ref(), Some(&id));
+
+    // A list result remains useful after a navigation-only epoch change.
+    let refresh = store.dispatch(Intent::ListSessions(op::ListSessions::new(
+        (*store.snapshot().list_query).clone(),
+    )));
+    let request = read(&mut reader).await;
+    store.dispatch(Intent::ShowThreadList).await.unwrap();
+    writer.reply(&request, json!({"result":{"data":[],"projects":[{"id":"after-navigation","name":"Current project","roots":[]}],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false}})).await.unwrap();
+    refresh.await.unwrap();
+    assert_eq!(
+        store.snapshot().threads.as_ref().unwrap().projects[0].id,
+        "after-navigation"
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_list_refresh_releases_the_next_request_and_close_releases_its_waiters() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let refresh = || {
+        store.dispatch(Intent::ListSessions(op::ListSessions::new(
+            Default::default(),
+        )))
+    };
+    let first = refresh();
+    let request = read(&mut reader).await;
+    let second = refresh();
+    let joined = refresh();
+    // This independent RPC is also a barrier: the queued refreshes were admitted.
+    let models = store.dispatch(Intent::LoadModels(op::LoadModels {}));
+    let model_request = read(&mut reader).await;
+    assert_eq!(model_request["method"], "model/list");
+    writer
+        .reply(
+            &model_request,
+            json!({"result":{"data":[],"nextCursor":null}}),
+        )
+        .await
+        .unwrap();
+    models.await.unwrap();
+    writer.reply(&request, json!({"error":{"code":"provider_failed","message":"list failed","delivery":"notSent"}})).await.unwrap();
+    assert!(first.await.is_err());
+    let second_request = read(&mut reader).await;
+    assert_eq!(second_request["method"], "host/session/list");
+    let pending = refresh();
+    store.close().await.unwrap();
+    for receipt in [second, joined, pending] {
+        assert!(receipt.await.is_err());
+    }
+}
+
+#[tokio::test]
 async fn browser_frames_are_ephemeral_and_pending_reads_end_with_the_connection() {
     use agent_protocol::browser::{BrowserAction, BrowserFrame, BrowserRequest};
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
@@ -1655,50 +1786,49 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
 #[tokio::test]
 async fn a_late_list_reply_cannot_replace_a_new_search() {
     use agent_protocol::models::ListQuery;
-    let (store, mut reader, writer) = setup(Snapshot::default()).await;
-    let old = tokio::spawn({
-        let store = store.clone();
-        async move {
-            store
-                .dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery {
-                    search_term: "old".into(),
-                    ..Default::default()
-                })))
-                .await
-        }
-    });
-    let old_request = read(&mut reader).await;
-    let new = tokio::spawn({
-        let store = store.clone();
-        async move {
-            store
-                .dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery {
-                    search_term: "new".into(),
-                    ..Default::default()
-                })))
-                .await
-        }
-    });
-    let new_request = read(&mut reader).await;
-    let result = |id| json!({"data":[{"id":{"provider":"codex","id":id}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false});
-    writer
-        .reply(&new_request, json!({"result":result("new")}))
+    for failure in [false, true] {
+        let (store, mut reader, writer) = setup(Snapshot::default()).await;
+        let old = store.dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery {
+            search_term: "old".into(),
+            ..Default::default()
+        })));
+        let old_request = read(&mut reader).await;
+        let new = store.dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery {
+            search_term: "new".into(),
+            ..Default::default()
+        })));
+        let requested = store.snapshot();
+        let result = |id| json!({"data":[{"id":{"provider":"codex","id":id}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false});
+        writer
+        .reply(&old_request, if failure {
+            json!({"error":{"code":"provider_failed","message":"old search failed","delivery":"notSent"}})
+        } else {
+            json!({"result":result("old")})
+        })
         .await
         .unwrap();
-    new.await.unwrap().unwrap();
-    writer
-        .reply(&old_request, json!({"result":result("old")}))
-        .await
-        .unwrap();
-    old.await.unwrap().unwrap();
-    assert_eq!(
-        store.snapshot().threads.as_ref().unwrap().data[0]
-            .id
-            .as_ref()
-            .map(|session| session.id.as_str()),
-        Some("new")
-    );
-    assert_eq!(store.snapshot().list_query.search_term, "new");
+        assert_eq!(old.await.is_err(), failure);
+        assert_eq!(
+            store.snapshot(),
+            requested,
+            "the old query must not publish while the new search is pending"
+        );
+        let new_request = read(&mut reader).await;
+        writer
+            .reply(&new_request, json!({"result":result("new")}))
+            .await
+            .unwrap();
+        new.await.unwrap();
+        assert_eq!(
+            store.snapshot().threads.as_ref().unwrap().data[0]
+                .id
+                .as_ref()
+                .map(|session| session.id.as_str()),
+            Some("new")
+        );
+        assert_eq!(store.snapshot().list_query.search_term, "new");
+        store.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -2812,10 +2942,6 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
         (
             Intent::ListAccounts(op::ListAccounts {}),
             json!({"accounts":[],"selectedId":null,"error":null}),
-        ),
-        (
-            Intent::ListSessions(op::ListSessions::new(Default::default())),
-            json!({"data":[{"id":{"provider":"codex","id":"old"}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
         ),
     ] {
         let (store, mut reader, mut writer) = setup(Snapshot::default()).await;

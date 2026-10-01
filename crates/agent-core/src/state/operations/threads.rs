@@ -25,8 +25,8 @@ pub use agent_protocol::operations::ListSessions;
 
 impl Operation for ListSessions {
     rpc_operation!();
-    fn invalidates(&self, snapshot: &Snapshot) -> bool {
-        self.query != *snapshot.list_query
+    fn list_query(&self) -> Option<&crate::models::ListQuery> {
+        Some(&self.query)
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         snapshot.error = None;

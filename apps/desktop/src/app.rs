@@ -40,7 +40,6 @@ use std::{
 };
 
 enum OperationCompletion {
-    Refresh,
     Busy,
     Download,
     Composer(u64),
@@ -661,7 +660,9 @@ impl Desktop {
         );
     }
     fn dispatch(&self, intent: Intent) {
-        self.perform(intent, OperationCompletion::Refresh);
+        if let Some(session) = &self.session {
+            drop(session.store.dispatch(intent));
+        }
     }
     fn receive(
         &mut self,
@@ -829,7 +830,6 @@ impl Desktop {
                 }
                 return;
             }
-            OperationCompletion::Refresh => {}
             OperationCompletion::RemoveWorktree => {
                 self.worktree_busy = false;
                 match result {
@@ -1219,11 +1219,7 @@ impl Desktop {
     fn open_chat(&mut self, id: SessionRef, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = Tab::Chat;
         self.cancel_recording();
-        self.busy += 1;
-        self.perform(
-            Intent::ReadThread(op::ReadThread::open(id)),
-            OperationCompletion::Busy,
-        );
+        self.dispatch(Intent::ReadThread(op::ReadThread::open(id)));
         self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
     fn older(&mut self, _: &mut Window, cx: &mut Context<Self>) {

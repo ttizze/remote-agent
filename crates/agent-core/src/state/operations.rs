@@ -145,7 +145,7 @@ pub enum StalePolicy {
     Retry,
 }
 
-/// Typed state application after the Store has checked its single epoch.
+/// Typed state application after Store checks the navigation epoch or list query.
 pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     type Output: Send + std::fmt::Debug + 'static;
     const INVALIDATES: bool = false;
@@ -157,6 +157,9 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
         None
     }
     fn item_read(&self) -> Option<&ReadItem> {
+        None
+    }
+    fn list_query(&self) -> Option<&crate::models::ListQuery> {
         None
     }
     fn terminal_handle(&self) -> Option<&str> {
