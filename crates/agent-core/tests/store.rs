@@ -2787,6 +2787,7 @@ async fn stores_share_an_endpoint_without_closing_each_others_transport() {
 
 #[tokio::test]
 async fn navigation_invalidates_all_view_reads_and_their_errors() {
+    let directory = if cfg!(windows) { r"C:\old" } else { "/old" };
     for (intent, output) in [
         (
             Intent::ReadFile(op::ReadFile {
@@ -2797,9 +2798,9 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
         ),
         (
             Intent::ListFiles(op::ListFiles {
-                path: "/old".into(),
+                path: directory.into(),
             }),
-            json!({"path":"/old","entries":[],"truncated":false}),
+            json!({"path":directory,"entries":[],"truncated":false}),
         ),
         (
             Intent::ReviewWorkspace(op::ReviewWorkspace { cwd: "/old".into() }),
@@ -2838,7 +2839,7 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
     }
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
     let loading = store.dispatch(Intent::ListFiles(op::ListFiles {
-        path: "/old".into(),
+        path: directory.into(),
     }));
     let request = read(&mut reader).await;
     new_chat(&store, &mut reader, &mut writer, "/new").await;
