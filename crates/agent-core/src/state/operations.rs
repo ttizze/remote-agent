@@ -149,6 +149,8 @@ pub enum StalePolicy {
 pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     type Output: Send + std::fmt::Debug + 'static;
     const INVALIDATES: bool = false;
+    /// Metadata refreshes publish later without holding the initiating receipt.
+    const BACKGROUND: bool = false;
     const STALE_POLICY: StalePolicy = StalePolicy::Discard;
     /// Identifies a submission step whose completion and failure belong to the same dispatch.
     fn submission_id(&self) -> Option<&str> {

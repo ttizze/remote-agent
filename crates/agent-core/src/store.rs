@@ -710,6 +710,7 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
                 Err(error)
             }
         };
+        effects.extend(op::prefetch_composer_catalog(&mut next));
         let changed = publish_locked(snapshot, next, Vec::new()).1;
         scheduled = effects
             .drain(..)
@@ -721,9 +722,10 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
             .collect();
         changed
     });
-    let continuation = scheduled
-        .iter()
-        .position(|scheduled| scheduled.effect.1 || scheduled.effect.0.submission_id().is_some());
+    let continuation = scheduled.iter().position(|scheduled| {
+        scheduled.effect.1 == ReceiptPolicy::Continue
+            || scheduled.effect.0.submission_id().is_some()
+    });
     let mut complete = completed.complete;
     if continuation.is_none()
         && let Some(complete) = complete.take()
@@ -750,7 +752,7 @@ impl ItemReads {
             if let Some(complete) = scheduled.complete.take() {
                 receipt.join(complete);
             }
-            if !scheduled.effect.1 {
+            if scheduled.effect.1 != ReceiptPolicy::Continue {
                 return Ok(());
             }
             scheduled.complete = Some(receipt.clone());
@@ -768,7 +770,7 @@ impl ItemReads {
             let receipt = scheduled.complete.get_or_insert_default().clone();
             self.receipts.insert(key, receipt);
         }
-        if scheduled.effect.1 {
+        if scheduled.effect.1 == ReceiptPolicy::Continue {
             // Continue the same item before issuing new grants. Its slot covers
             // the control response, body transfer, and final application.
             self.pending.push_front(scheduled);
@@ -795,9 +797,9 @@ impl ItemReads {
         let key = completed.item_read.clone();
         let effects = finish(updates, completed);
         if let Some(key) = key
-            && !effects
-                .iter()
-                .any(|s| s.effect.1 && s.effect.0.item_read() == Some(&key))
+            && !effects.iter().any(|s| {
+                s.effect.1 == ReceiptPolicy::Continue && s.effect.0.item_read() == Some(&key)
+            })
         {
             self.running.remove(&key);
             self.receipts.remove(&key);
@@ -937,7 +939,11 @@ async fn run(
                 };
                 let mut complete = Some(Receipt::new(command.complete));
                 for effect in command.effects {
-                    effects.push(Scheduled { effect, snapshot: command.snapshot.clone(), complete: complete.take() });
+                    let receipt = if effect.1 == ReceiptPolicy::Background { None } else { complete.take() };
+                    effects.push(Scheduled { effect, snapshot: command.snapshot.clone(), complete: receipt });
+                }
+                if let Some(complete) = complete {
+                    complete.send(Ok(Outcome::Applied));
                 }
             }
             _ = browser_jobs.next(), if !browser_jobs.is_empty() => {},
@@ -1031,14 +1037,12 @@ async fn run_offline(
         };
         let mut complete = Some(Receipt::new(command.complete));
         for effect in command.effects {
-            let result = perform(
-                None,
-                None,
-                command.snapshot.clone(),
-                effect,
-                complete.take(),
-            )
-            .await;
+            let receipt = if effect.1 == ReceiptPolicy::Background {
+                None
+            } else {
+                complete.take()
+            };
+            let result = perform(None, None, command.snapshot.clone(), effect, receipt).await;
             drop(finish(updates, result));
         }
         if let Some(complete) = complete {
@@ -1113,12 +1117,18 @@ impl<O: op::Operation> Application for Completion<O> {
 // Intent is replayable data. Only the effect queue erases an operation's type;
 // the same allocation carries its output until its result is applied.
 #[derive(Debug)]
-pub struct Effect(Box<dyn Pending>, bool);
+pub struct Effect(Box<dyn Pending>, ReceiptPolicy);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiptPolicy {
+    First,
+    Continue,
+    Background,
+}
 impl Effect {
     /// Continue the dispatch receipt after this step is applied.
     pub(crate) fn continuation<O: op::Operation>(operation: O) -> Self {
         let mut effect = Self::execute(operation);
-        effect.1 = true;
+        effect.1 = ReceiptPolicy::Continue;
         effect
     }
     pub fn execute<O: op::Operation>(operation: O) -> Self {
@@ -1127,7 +1137,11 @@ impl Effect {
                 operation,
                 output: None,
             }),
-            false,
+            if O::BACKGROUND {
+                ReceiptPolicy::Background
+            } else {
+                ReceiptPolicy::First
+            },
         )
     }
 }

@@ -501,6 +501,13 @@ checks for both providers, and iOS
   opens enabled skill candidates from the selected Host and working directory.
   Full-width `＠` and `／` also open the picker. Names and descriptions filter the
   list; loading, empty and partial catalog failures remain visible.
+- Prefetch candidates on connection and when opening a Codex conversation or
+  draft in a working directory. Opening the picker refreshes in the background,
+  keeps candidates available, and shows loading only when no matching candidates
+  are available. Host/account changes invalidate the catalog; late replies never
+  restore candidates from an invalidated catalog.
+- Desktop candidates show a book icon before skill names, with the name and
+  secondary description on one line. Long text is truncated to fit the picker.
 - Desktop supports clicking, Up/Down, Enter/Tab to select, and Escape to dismiss.
   IME confirmation never selects a candidate or sends the message. Mobile uses
   tappable candidates. Skill selection inserts `$name`; plugin selection inserts
@@ -511,7 +518,10 @@ checks for both providers, and iOS
   attachments, and newer draft content.
 
 Acceptance: core `composer::tests`,
+`composer_catalog_prefetch_and_refresh_keep_candidates_available`,
+`composer_catalog_ignores_replies_from_previous_directories_and_accounts`,
 `selected_invocations_reach_submission_and_return_after_failure`, Host
 `composer_catalog_uses_host_provider_and_excludes_disabled_entries`, desktop
-`invocation_completion_preserves_suffix_and_does_not_accept_ime`, and iOS
+`invocation_completion_preserves_suffix_and_does_not_accept_ime`,
+`completion_candidates_keep_names_and_descriptions_on_one_line`, and iOS
 `testSimulatorSelectsPluginAndSkillFromComposer`.

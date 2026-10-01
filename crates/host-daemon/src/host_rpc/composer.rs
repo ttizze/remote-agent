@@ -49,7 +49,7 @@ struct PluginInterface {
 impl Codex {
     pub(super) async fn composer_catalog(&self, cwd: &str) -> ComposerCatalog {
         let cwds: Vec<&str> = if cwd.is_empty() { vec![] } else { vec![cwd] };
-        let skills_params = json!({"cwds":cwds,"forceReload":true});
+        let skills_params = json!({"cwds":cwds});
         let plugin_params = json!({"cwds":cwds});
         let (skills, plugins) = tokio::join!(
             self.request::<_, Skills>("skills/list", &skills_params),

@@ -319,13 +319,15 @@ fn clear_workspace_location(workspace: &mut Workspace) {
 }
 
 pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
-    match event {
+    let (mut next, mut effects) = match event {
         Event::Intent(intent) => reduce_intent(previous, intent),
 
         Event::Notification(message) => notification(previous, message),
         Event::SessionUpdate(update) => notifications::session_update(previous, *update),
         event => reduce_event(previous, event),
-    }
+    };
+    effects.extend(op::prefetch_composer_catalog(&mut next));
+    (next, effects)
 }
 macro_rules! prepare_operations {
     ($intent:expr, $previous:expr, $next:ident, [$($variant:ident),* $(,)?], {$($local:tt)*}) => {
@@ -493,9 +495,15 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         }
         Intent::EditComposer { thread_id, text, cursor } => {
             let load_catalog = thread_id == previous.navigation.draft_key
+                && previous.connected
                 && previous.composer_query(&text, cursor as usize).is_some_and(|(_, _, filter)| {
-                    previous.composer_catalog.as_ref().is_none_or(|catalog| catalog.cwd != previous.navigation.cwd)
-                        || (filter.is_empty() && previous.drafts.get(&thread_id).is_none_or(|draft| draft.text != text))
+                    crate::composer::should_refresh_catalog(
+                        previous.composer_catalog.as_ref()
+                            .filter(|catalog| catalog.cwd == previous.navigation.cwd)
+                            .map(|catalog| catalog.loading),
+                        filter,
+                        previous.drafts.get(&thread_id).is_none_or(|draft| draft.text != text),
+                    )
                 });
             set_draft_text(&mut next, thread_id, text);
             if load_catalog {
