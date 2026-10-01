@@ -12,6 +12,45 @@ fn conversation() -> Thread {
     serde_json::from_value(json!({"id":{"provider":"codex","id":"native"},"turns":[{"id":"run","status":"running","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"partial","phase":"unknown"}}}}}]}]})).unwrap()
 }
 
+#[rstest::rstest]
+#[case::minimum(0, None, 0, 5)]
+#[case::recorded_window(5, Some(24), 1, 24)]
+#[case::loaded_window(5, None, 8, 8)]
+#[case::larger_request(40, Some(24), 8, 40)]
+#[case::bounded_wire_limit(5, Some(u64::MAX), 1, u32::MAX)]
+fn history_refresh_preserves_the_requested_and_loaded_windows(
+    #[case] requested: u32,
+    #[case] history_limit: Option<u64>,
+    #[case] loaded_turns: usize,
+    #[case] expected: u32,
+) {
+    use agent_core::state::{
+        Snapshot,
+        operations::{Operation, ReadThread},
+    };
+    let id = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+    let mut cached = conversation();
+    cached.history_limit = history_limit;
+    cached.turns = Some(
+        (0..loaded_turns)
+            .map(|index| {
+                Arc::new(Turn {
+                    id: format!("turn-{index}").into(),
+                    ..Default::default()
+                })
+            })
+            .collect(),
+    );
+    let mut snapshot = Snapshot::default();
+    Arc::make_mut(&mut snapshot.conversations).insert(id.clone(), Arc::new(cached));
+    let mut read = ReadThread {
+        limit: requested,
+        ..ReadThread::new(id)
+    };
+    read.prepare(&mut snapshot).unwrap();
+    assert_eq!(read.limit, expected);
+}
+
 #[test]
 fn session_error_survives_binary_transport_and_updates_the_turn() {
     for retrying in [false, true] {

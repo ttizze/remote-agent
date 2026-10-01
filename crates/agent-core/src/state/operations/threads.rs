@@ -207,12 +207,13 @@ impl ReadThread {
     }
     pub(in crate::state) fn with_history(
         mut self,
-        history_limit: Option<usize>,
+        history_limit: Option<u64>,
         loaded_turns: usize,
     ) -> Self {
         self.limit = self
             .limit
-            .max(u32::try_from(history_limit.unwrap_or(5).max(loaded_turns)).unwrap_or(u32::MAX))
+            .max(u32::try_from(history_limit.unwrap_or(5)).unwrap_or(u32::MAX))
+            .max(u32::try_from(loaded_turns).unwrap_or(u32::MAX))
             .max(5);
         self
     }
