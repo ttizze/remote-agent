@@ -1,20 +1,12 @@
 #!/usr/bin/env bash
-# Desktop PNG is the source for platform icon assets. Requires macOS sips/iconutil.
+# Transparent header logo is the source for app icons. Requires macOS Apple tools.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source=apps/desktop/assets/icon.png
+source=apps/desktop/assets/logo.png
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT
-iconset="$temporary/Bex.iconset"
-mkdir -p "$iconset"
-for size in 16 32 128 256 512; do
-    sips -z "$size" "$size" "$source" --out "$iconset/icon_${size}x${size}.png" >/dev/null
-    doubled=$((size * 2))
-    sips -z "$doubled" "$doubled" "$source" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
-done
-iconutil -c icns "$iconset" -o apps/desktop/assets/icon.icns
-# Mobile launcher icons use a white backdrop; Desktop preserves source alpha.
-cat > "$temporary/mobile-icon.swift" <<'SWIFT'
+# All launcher icons use a white backdrop; the header keeps source alpha.
+cat > "$temporary/app-icon.swift" <<'SWIFT'
 import Foundation
 import CoreGraphics
 import ImageIO
@@ -32,6 +24,16 @@ let destination = CGImageDestinationCreateWithURL(
 CGImageDestinationAddImage(destination, context.makeImage()!, nil)
 precondition(CGImageDestinationFinalize(destination))
 SWIFT
-xcrun swiftc "$temporary/mobile-icon.swift" -o "$temporary/mobile-icon"
-"$temporary/mobile-icon" "$source" apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png
-sips -z 192 192 apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png --out apps/mobile/src/main/res/drawable/bex_icon.png >/dev/null
+xcrun swiftc "$temporary/app-icon.swift" -o "$temporary/app-icon"
+icon=apps/desktop/assets/icon.png
+"$temporary/app-icon" "$source" "$icon"
+cp "$icon" apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+sips -z 192 192 "$icon" --out apps/mobile/src/main/res/drawable/bex_icon.png >/dev/null
+iconset="$temporary/Bex.iconset"
+mkdir -p "$iconset"
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$icon" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+    doubled=$((size * 2))
+    sips -z "$doubled" "$doubled" "$icon" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o apps/desktop/assets/icon.icns

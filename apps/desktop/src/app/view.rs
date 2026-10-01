@@ -55,7 +55,7 @@ fn sidebar_header(expanded: bool, cx: &Context<Desktop>) -> Div {
                 .gap_1p5()
                 .text_sm()
                 .font_semibold()
-                .child(img("bex/icon.png").size_5())
+                .child(img("bex/logo.png").size_5())
                 .child("Bex"),
         )
         .when(expanded, |header| {
