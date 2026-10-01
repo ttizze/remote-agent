@@ -226,39 +226,22 @@ impl Desktop {
                 h_flex()
                     .w_full()
                     .gap_2()
-                    .border_t_1()
-                    .border_color(rgb(0x383838))
+                    .justify_between()
                     .py_2()
                     .child(
-                        div()
-                            .size_2()
-                            .rounded_full()
-                            .bg(rgb(if self.snapshot.connected {
-                                0x37cf77
-                            } else {
-                                0x999999
-                            })),
-                    )
-                    .child(
-                        div().flex_1().min_w_0().child(
-                            self.button(
-                                "sidebar-settings",
-                                self.remote
-                                    .as_ref()
-                                    .map_or("この端末", |remote| remote.name.as_str())
-                                    .to_owned(),
-                                cx,
-                                |s, _, cx| {
-                                    s.open_settings();
-                                    if let Some(hosts) = &s.hosts {
-                                        hosts.update(cx, |hosts, _| hosts.refresh());
-                                    }
-                                },
-                            )
-                            .accessibility_label("設定を開く")
-                            .tooltip("設定を開く")
-                            .selected(self.tab == Tab::Settings),
-                        ),
+                        self.icon_button(
+                            "sidebar-settings",
+                            IconName::Settings,
+                            "設定を開く",
+                            cx,
+                            |s, _, cx| {
+                                s.open_settings();
+                                if let Some(hosts) = &s.hosts {
+                                    hosts.update(cx, |hosts, _| hosts.refresh());
+                                }
+                            },
+                        )
+                        .selected(self.tab == Tab::Settings),
                     )
                     .child(self.icon_button(
                         "refresh-threads",
