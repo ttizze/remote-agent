@@ -1,5 +1,5 @@
 use super::*;
-use agent_core::composer::{ComposerSuggestions, insert_invocation};
+use agent_core::composer::{ComposerSuggestions, candidate_label, insert_invocation};
 use agent_protocol::composer::Invocation;
 
 impl Desktop {
@@ -143,8 +143,8 @@ impl Desktop {
                             .max_w(relative(0.5))
                             .flex_shrink_0()
                             .text_sm()
-                            .text_ellipsis()
-                            .child(candidate.invocation.name.clone()),
+                            .truncate()
+                            .child(candidate_label(&candidate.invocation.name)),
                     )
                     .child(
                         div()
@@ -154,9 +154,9 @@ impl Desktop {
                             .flex_1()
                             .min_w_0()
                             .text_sm()
-                            .text_ellipsis()
+                            .truncate()
                             .text_color(rgb(0xaaaaaa))
-                            .child(candidate.description.clone()),
+                            .child(candidate_label(&candidate.description)),
                     )
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(cx.listener(move |s, _, window, cx| {
@@ -207,9 +207,12 @@ mod tests {
                     snapshot.connected = true;
                     snapshot.composer_catalog = Some(Arc::new(ComposerCatalog {
                         cwd: snapshot.navigation.cwd.clone(), loading: true,
-                        candidates: ["Review", "Analyze Data Quality With A Very Long Skill Name"].into_iter().map(|name| ComposerCandidate {
+                        candidates: [
+                            ("Review", "Investigate whether structured datasets and query results are trustworthy enough to use, including freshness, duplicates and missing values"),
+                            ("Analyze Data Quality With A Very Long Skill Name", "First line\nSecond line"),
+                        ].into_iter().map(|(name, description)| ComposerCandidate {
                             invocation: Invocation { kind: InvocationKind::Skill, name: name.into(), path: format!("/fixture/{name}/SKILL.md") },
-                            description: "Investigate whether structured datasets and query results are trustworthy enough to use, including freshness, duplicates and missing values".into(),
+                            description: description.into(),
                         }).collect(), ..Default::default()
                     }));
                     view.composer.update(cx, |input, cx| {

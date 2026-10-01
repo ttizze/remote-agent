@@ -1,6 +1,10 @@
 use crate::state::Snapshot;
 use agent_protocol::composer::*;
 
+pub fn candidate_label(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub(crate) fn should_refresh_catalog(
     loading: Option<bool>,
     filter: &str,
@@ -119,6 +123,15 @@ mod tests {
             name: "review".into(),
             path: "/project/.agents/skills/review/SKILL.md".into(),
         }
+    }
+
+    #[rstest::rstest]
+    #[case("Review code", "Review code")]
+    #[case("  First line\nSecond line\r\n", "First line Second line")]
+    #[case("Review\t\u{2028}code", "Review code")]
+    #[case("\n\t  ", "")]
+    fn candidate_labels_keep_words_on_one_line(#[case] text: &str, #[case] expected: &str) {
+        assert_eq!(candidate_label(text), expected);
     }
 
     #[rstest::rstest]
