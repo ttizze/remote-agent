@@ -13,5 +13,25 @@ for size in 16 32 128 256 512; do
     sips -z "$doubled" "$doubled" "$source" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o apps/desktop/assets/icon.icns
-sips -z 1024 1024 "$source" --out apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png >/dev/null
-sips -z 192 192 "$source" --out apps/mobile/src/main/res/drawable/bex_icon.png >/dev/null
+# Mobile launcher icons use a white backdrop; Desktop preserves source alpha.
+cat > "$temporary/mobile-icon.swift" <<'SWIFT'
+import Foundation
+import CoreGraphics
+import ImageIO
+let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: CommandLine.arguments[1]) as CFURL, nil)!
+let image = CGImageSourceCreateImageAtIndex(source, 0, nil)!
+let context = CGContext(data: nil, width: 1024, height: 1024, bitsPerComponent: 8,
+    bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+    bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+let bounds = CGRect(x: 0, y: 0, width: 1024, height: 1024)
+context.setFillColor(CGColor(gray: 1, alpha: 1))
+context.fill(bounds)
+context.draw(image, in: bounds)
+let destination = CGImageDestinationCreateWithURL(
+    URL(fileURLWithPath: CommandLine.arguments[2]) as CFURL, "public.png" as CFString, 1, nil)!
+CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+precondition(CGImageDestinationFinalize(destination))
+SWIFT
+xcrun swiftc "$temporary/mobile-icon.swift" -o "$temporary/mobile-icon"
+"$temporary/mobile-icon" "$source" apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+sips -z 192 192 apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png --out apps/mobile/src/main/res/drawable/bex_icon.png >/dev/null
