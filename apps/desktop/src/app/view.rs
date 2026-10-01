@@ -26,6 +26,55 @@ fn file_name(path: &str) -> String {
 
 const CHAT_WIDTH: f32 = 780.;
 
+fn new_chat_icon() -> Icon {
+    Icon::default().path("bex/square-pen.svg")
+}
+
+fn sidebar_header(expanded: bool, cx: &Context<Desktop>) -> Div {
+    let (id, icon, label) = if expanded {
+        (
+            "collapse-sidebar",
+            IconName::PanelLeftClose,
+            "サイドバーを閉じる",
+        )
+    } else {
+        (
+            "expand-sidebar",
+            IconName::PanelLeftOpen,
+            "サイドバーを開く",
+        )
+    };
+    h_flex()
+        .h(px(crate::WINDOW_HEADER_HEIGHT))
+        .flex_shrink_0()
+        .pl(px(88.))
+        .gap_2()
+        .child(
+            h_flex()
+                .flex_shrink_0()
+                .gap_1p5()
+                .text_sm()
+                .font_semibold()
+                .child(img("bex/icon.png").size_5())
+                .child("Bex"),
+        )
+        .when(expanded, |header| {
+            header.w_full().pr_3().child(div().flex_1())
+        })
+        .child(
+            Button::new(id)
+                .icon(icon)
+                .small()
+                .ghost()
+                .tooltip(label)
+                .accessibility_label(label)
+                .on_click(cx.listener(move |desktop, _, _, cx| {
+                    desktop.sidebar = !expanded;
+                    cx.notify();
+                })),
+        )
+}
+
 fn fitted_image(source: ImageSource, height: f32) -> Img {
     img(source)
         .w_full()
@@ -135,15 +184,13 @@ impl Render for Desktop {
             })
             .unwrap_or("新しいチャット")
             .to_owned();
-        let mut header = h_flex().h(px(48.)).flex_shrink_0().px_4().gap_2();
+        let mut header = h_flex()
+            .h(px(crate::WINDOW_HEADER_HEIGHT))
+            .flex_shrink_0()
+            .px_4()
+            .gap_2();
         if !self.sidebar {
-            header = header.pl(px(88.)).child(self.icon_button(
-                "expand-sidebar",
-                IconName::PanelLeftOpen,
-                "サイドバーを開く",
-                cx,
-                |s, _, _| s.sidebar = true,
-            ));
+            header = header.pl_0().child(sidebar_header(false, cx));
         }
         header = header.child(
             div()
@@ -251,7 +298,7 @@ impl Render for Desktop {
             .text_size(px(14.))
             .font_weight(FontWeight::NORMAL)
             .when(self.sidebar && !self.side_chat_mode, |body| {
-                body.child(self.sidebar(window, cx))
+                body.child(self.sidebar(cx))
             })
             .child(main)
     }

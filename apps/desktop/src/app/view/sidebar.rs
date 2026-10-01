@@ -59,17 +59,8 @@ impl SidebarItem for SidebarSection {
 }
 
 impl Desktop {
-    pub(super) fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn sidebar(&self, cx: &Context<Self>) -> AnyElement {
         let list = self.snapshot.thread_list();
-        let navigation = SidebarMenu::new().gap_1().child(
-            SidebarMenuItem::new("新しいチャット")
-                .icon(IconName::Plus)
-                .disable(!self.snapshot.connected)
-                .on_click(cx.listener(|s, _, window, cx| {
-                    s.new_chat(String::new(), window, cx);
-                    cx.notify();
-                })),
-        );
         let mut projects = SidebarMenu::new().gap_1();
         for project in list
             .as_ref()
@@ -102,7 +93,7 @@ impl Desktop {
                         let entity = entity.clone();
                         let path = new_root.clone();
                         Button::new("new-project-chat")
-                            .icon(IconName::Plus)
+                            .icon(new_chat_icon())
                             .xsmall()
                             .ghost()
                             .tooltip("このプロジェクトで新しいチャット")
@@ -178,41 +169,44 @@ impl Desktop {
                 },
             )));
         }
-        let navigation = navigation
-            .render("primary-navigation", window, cx)
-            .into_any_element();
-        Sidebar::new("desktop-sidebar")
-            .w(px(272.))
+        let sidebar = Sidebar::new("desktop-sidebar")
+            .w_full()
+            .h_auto()
+            .flex_1()
+            .min_h_0()
+            .border_r_0()
             .bg(rgb(0x242424))
             .header(
                 v_flex()
                     .w_full()
                     .gap_3()
-                    .child(
-                        h_flex()
-                            .h_8()
-                            .pl(px(72.))
-                            .justify_end()
-                            .child(self.icon_button(
-                                "collapse-sidebar",
-                                IconName::PanelLeftClose,
-                                "サイドバーを閉じる",
-                                cx,
-                                |s, _, _| s.sidebar = false,
-                            )),
-                    )
-                    .child(div().w_full().text_lg().font_semibold().child("Bex"))
                     .when_some(
                         list.as_ref().and_then(|list| list.notice.clone()),
                         |this, notice| this.child(div().px_3().py_2().text_sm().child(notice)),
                     )
-                    .child(navigation)
                     .child(
-                        Input::new(&self.search)
-                            .small()
-                            .prefix(IconName::Search)
-                            .appearance(false)
-                            .aria_label("会話を検索"),
+                        h_flex()
+                            .w_full()
+                            .gap_1()
+                            .child(
+                                div().flex_1().min_w_0().child(
+                                    Input::new(&self.search)
+                                        .small()
+                                        .prefix(IconName::Search)
+                                        .appearance(false)
+                                        .aria_label("会話を検索"),
+                                ),
+                            )
+                            .child(
+                                self.icon_button(
+                                    "new-chat",
+                                    new_chat_icon(),
+                                    "新しいチャット",
+                                    cx,
+                                    |s, window, cx| s.new_chat(String::new(), window, cx),
+                                )
+                                .disabled(!self.snapshot.connected),
+                            ),
                     ),
             )
             .child(SidebarSection {
@@ -273,7 +267,16 @@ impl Desktop {
                         cx,
                         |s, _, _| s.refresh_threads(),
                     )),
-            )
+            );
+        v_flex()
+            .w(px(272.))
+            .h_full()
+            .flex_shrink_0()
+            .bg(rgb(0x242424))
+            .border_r_1()
+            .border_color(cx.theme().sidebar_border)
+            .child(sidebar_header(true, cx))
+            .child(sidebar)
             .into_any_element()
     }
     pub(super) fn thread_button(
