@@ -424,6 +424,9 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
 
 ## Image preview and draft attachments
 
+- Desktop generated images display only the clickable image, without a
+  “生成画像” heading or a separate “画像を開く” button. Activating the image
+  opens the gallery; generation failures retain their error message.
 - Desktop, iPhone and Android image generation without an image source shows a
   rounded skeleton with a pulse animation while the item is in progress. It fits
   the conversation width (up to 320 px), yields to the image when available,

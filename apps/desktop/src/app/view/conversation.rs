@@ -209,23 +209,12 @@ impl Desktop {
                     .first()
                     .map(String::as_str)
                     .unwrap_or_default();
-                let mut body = v_flex()
-                    .gap_2()
-                    .w_full()
-                    .when(!projected.data.title.is_empty(), |body| {
-                        body.child(div().text_sm().child(projected.data.title.clone()))
-                    });
+                let mut body = v_flex().gap_2().w_full().when(
+                    path.is_empty() && !projected.data.title.is_empty(),
+                    |body| body.child(div().text_sm().child(projected.data.title.clone())),
+                );
                 if !path.is_empty() {
                     body = body.child(self.image(path, false, 320., true, cx));
-                    let path = path.to_owned();
-                    body = body.child(self.button(
-                        format!("open-image-{id}"),
-                        "画像を開く",
-                        cx,
-                        move |s, _, cx| {
-                            s.open_image_gallery(std::sync::Arc::new(path.clone()), false, cx)
-                        },
-                    ));
                 } else if projected.data.image_placeholder {
                     body = body.child(
                         skeleton::Skeleton::new()
