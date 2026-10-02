@@ -16,7 +16,7 @@ Verified on **2026-09-13**:
 | macOS desktop, Host and CLI | macOS Tahoe 26 | Rust deployment target and app/helper bundle minimum 26.0; Swift helper target 26.0 |
 | Android | Android 17 (API 37) | Minimum, compile and target SDK 37; Nix build and test SDK platform 37 |
 | Windows desktop, Host and CLI | Windows 11; Windows Server 2025 | Existing `windows-2025` CI builds/tests on Server 2025, not a Windows 11 UI acceptance test |
-| Linux desktop, Host and CLI | Existing CI environment retained | Existing self-hosted `nix-ci` runner and pinned `nix develop .#native` userspace; no distribution or kernel minimum change |
+| Linux desktop, Host and CLI | Ubuntu 24.04 CI baseline | GitHub-hosted `ubuntu-24.04` runner and pinned `nix develop .#native` userspace |
 
 Sources: [Apple security releases](https://support.apple.com/en-ca/100100), [Android 17 release](https://android-developers.googleblog.com/2026/06/Android-17.html), [API 37 SDK configuration](https://developer.android.com/about/versions/17/setup-sdk), [Windows client releases](https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information), and [Windows Server releases](https://learn.microsoft.com/en-us/windows/release-health/windows-server-release-info). Windows feature updates such as 25H2/26H1 do not constitute a new Windows major.
 
@@ -199,9 +199,9 @@ nix develop . --command just quality [rust|kotlin|swift]  # lint, core/desktop t
 
 Claude contracts run with `nix develop . --command cargo test --locked -p host-fixture --test claude`. Build the companion supervisor first (see above). The tests use a deterministic external CLI boundary with real Store, iroh, Host routing, native transcript files and isolated Git/filesystem state. An anonymized transcript from Claude Code 2.1.266 also exercises native format compatibility. The opt-in `live_claude_subscription_completes_and_resumes_through_store_and_host` test uses the real authenticated CLI; set `BEX_LIVE_CLAUDE_PROGRAM` to its absolute path and run that test with `-- --ignored --exact` to verify subscription inference, resumption across a Host restart, interruption and successful input after interruption.
 
-Linux CI uses the `nix develop .#native` shell. Install Lefthook once per clone (`lefthook install`) to queue quality checks after each commit; read the result with `cargo xtask quality-status --wait`. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
+Linux CI uses GitHub-hosted Ubuntu 24.04 runners and the `nix develop .#native` shell. Toolchain lookup runs on the same Ubuntu baseline, and Windows consumes the Rust version from the pinned flake. Install Lefthook once per clone (`lefthook install`) to queue quality checks after each commit; read the result with `cargo xtask quality-status --wait`. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
 
-Android CI on `nix-ci` runs Kotlin checks and unit tests and builds both app and instrumentation APKs. Emulator acceptance remains available through `just android-e2e` and the local quality suite.
+Android CI runs on GitHub-hosted Ubuntu 24.04 with the pinned Nix SDK. It runs Kotlin checks and unit tests and builds both app and instrumentation APKs. Emulator acceptance remains available through `just android-e2e` and the local quality suite.
 
 Development and test builds keep filename/line-number backtraces without full variable debug information. Use `CARGO_PROFILE_DEV_DEBUG=full` when a debugger needs variables. Quality checks disable Rust incremental compilation; normal local builds retain it.
 
