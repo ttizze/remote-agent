@@ -173,6 +173,14 @@ async fn cancelled_mcp_call_keeps_the_bridge_responsive() {
         .unwrap();
     let mut input = JsonlWriter::new(child.stdin.take().unwrap());
     let mut output = JsonlReader::new(child.stdout.take().unwrap());
+    // Complete MCP initialization before timing bridge cancellation.
+    input.write_line(&json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cancel-test","version":"1"}}}).to_string()).await.unwrap();
+    let initialized = tokio::time::timeout(Duration::from_secs(5), output.read_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(serde_json::from_str::<Value>(&initialized).unwrap()["result"].is_object());
     input.write_line(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bex_browser","arguments":{"action":"screenshot"}}}).to_string()).await.unwrap();
     let (connection, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
         .await
