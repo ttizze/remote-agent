@@ -50,8 +50,7 @@ impl Process {
         if let Some(browser) = browser {
             command
                 .arg("--mcp-config")
-                .arg(json!({"mcpServers":{"bex_browser":browser}}).to_string())
-                .env("MCP_TOOL_TIMEOUT", "1800000");
+                .arg(json!({"mcpServers":{"bex_browser":browser}}).to_string());
         }
         if let Some((session, resume)) = session {
             command

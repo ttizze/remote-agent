@@ -176,7 +176,6 @@ async fn browser_frames_are_ephemeral_and_pending_reads_end_with_the_connection(
             provider: ProviderKind::Codex,
             id: "browser-thread".into(),
         },
-        control_token: String::new(),
         tab_id: String::new(),
         image_id: String::new(),
         action: BrowserAction::Read,

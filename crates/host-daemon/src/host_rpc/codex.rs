@@ -727,8 +727,7 @@ fn native_failure(native: &serde_json::value::RawValue) -> Failure {
 }
 
 fn with_browser_config(mut params: Value, browser: Option<Value>) -> Value {
-    if let Some(mut browser) = browser {
-        browser["tool_timeout_sec"] = 1800.into();
+    if let Some(browser) = browser {
         params["config"] = serde_json::json!({"mcp_servers.bex_browser":browser});
     }
     params
