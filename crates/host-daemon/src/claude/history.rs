@@ -641,7 +641,11 @@ mod tests {
             );
             let presentation =
                 agent_core::presentation::item_presentation(item, Some(ProviderKind::Claude));
-            assert!(presentation.visible && presentation.collapsible);
+            assert!(presentation.collapsible);
+            assert!(matches!(
+                agent_core::presentation::ItemMetadata::from(item.as_ref()).kind,
+                agent_core::presentation::GroupKind::Activity
+            ));
             let body = agent_core::presentation::body::expanded_body(item);
             assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), *attachment);
         }

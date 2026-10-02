@@ -728,8 +728,11 @@ async fn new_conversation_moves_draft_to_pending_before_creation_reply() {
     let rendered =
         agent_core::presentation::conversation::project_conversation(&pending, source, &None);
     assert_eq!(rendered.queued.len(), 1);
-    assert_eq!(rendered.queued[0].data.body, "first message");
-    assert_eq!(rendered.queued[0].data.title, "送信中…");
+    assert_eq!(
+        rendered.queued[0].data.body.as_deref(),
+        Some("first message")
+    );
+    assert_eq!(rendered.queued[0].data.title.as_deref(), Some("送信中…"));
     writer.reply(&request, json!({ "result": {"thread": {"id":{"provider":"codex","id":"created"}, "cwd":"/fixture", "status":"idle", "turns":[]}}})).await.unwrap();
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "host/session/submit");

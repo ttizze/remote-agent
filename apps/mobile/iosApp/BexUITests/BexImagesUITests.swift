@@ -22,6 +22,7 @@ extension BexLaunchUITests {
             }
             XCTAssertTrue(image.waitForExistence(timeout: 10), "Generated image did not decode")
             XCTAssertTrue(image.isHittable)
+            XCTAssertFalse(app.staticTexts["生成画像"].exists, "Generated images must not render a redundant caption")
         }
         func openLink(_ label: String) {
             let link = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch

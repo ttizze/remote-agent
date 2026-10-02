@@ -9,8 +9,8 @@ pub mod model_settings;
 pub mod permissions;
 
 use crate::models::{
-    ApprovalReviewStatus, AssistantPhase, AttachmentKind, Item, ItemBody, ItemStatus, ToolKind,
-    Turn, TurnStatus,
+    ApprovalReviewStatus, AssistantPhase, AttachmentKind, Item, ItemBody, ToolKind, Turn,
+    TurnStatus,
 };
 use serde::Serialize;
 pub mod body;
@@ -325,54 +325,47 @@ use agent_protocol::models::compact_title;
 #[serde(rename_all = "camelCase")]
 pub struct ItemPresentation {
     pub kind: &'static str,
-    pub title: String,
+    pub title: Option<String>,
     pub collapsible: bool,
-    pub visible: bool,
 }
 pub fn item_presentation(
     item: &Item,
     provider: Option<crate::session::ProviderKind>,
 ) -> ItemPresentation {
     let (kind, title, collapsible) = match item.body() {
-        ItemBody::UserMessage { .. } => ("user", "You".into(), false),
+        ItemBody::UserMessage { .. } => ("user", Some("You".into()), false),
         ItemBody::AssistantText { phase, .. } => (
             if *phase == AssistantPhase::Commentary {
                 "commentary"
             } else {
                 "agent"
             },
-            match provider {
-                Some(crate::session::ProviderKind::Codex) => "Codex",
-                Some(crate::session::ProviderKind::Claude) => "Claude",
-                None => "Assistant",
-            }
-            .into(),
+            Some(
+                match provider {
+                    Some(crate::session::ProviderKind::Codex) => "Codex",
+                    Some(crate::session::ProviderKind::Claude) => "Claude",
+                    None => "Assistant",
+                }
+                .into(),
+            ),
             false,
         ),
-        ItemBody::Reasoning { .. } => ("reasoning", "作業の詳細".into(), true),
-        ItemBody::CommandExecution { command, .. } => ("command", compact_title(command), true),
+        ItemBody::Reasoning { .. } => ("reasoning", Some("作業の詳細".into()), true),
+        ItemBody::CommandExecution { command, .. } => {
+            ("command", Some(compact_title(command)), true)
+        }
         ItemBody::FileChange { changes, .. } => (
             "fileChange",
-            format!("{}件のファイル変更", changes.len()),
+            Some(format!("{}件のファイル変更", changes.len())),
             true,
         ),
-        ItemBody::ImageGeneration { .. } => (
-            "imageGeneration",
-            match item.status {
-                ItemStatus::Running => "",
-                ItemStatus::Failed => "画像を生成できませんでした",
-                _ => "生成画像",
-            }
-            .into(),
-            false,
-        ),
-        _ => ("unknown", tool_title(item.body()), true),
+        ItemBody::ImageGeneration { .. } => ("imageGeneration", None, false),
+        _ => ("unknown", Some(tool_title(item.body())), true),
     };
     ItemPresentation {
         kind,
         title,
         collapsible,
-        visible: ItemMetadata::from(item).kind != GroupKind::Hidden,
     }
 }
 fn tool_title(body: &ItemBody) -> String {
@@ -471,13 +464,12 @@ mod presentation_tests {
             segment.role(1, turn.items.as_ref().unwrap()[1].as_ref().into()),
             Role::Response
         );
-        assert!(
-            !item_presentation(
-                turn.items.as_ref().unwrap()[1].as_ref(),
-                Some(crate::session::ProviderKind::Codex)
-            )
-            .collapsible
+        let presentation = item_presentation(
+            turn.items.as_ref().unwrap()[1].as_ref(),
+            Some(crate::session::ProviderKind::Codex),
         );
+        assert!(!presentation.collapsible);
+        assert!(presentation.title.is_none());
     }
 
     fn rows<'a>(part: &'a Segment, turn: &'a Turn, role: Role) -> impl Iterator<Item = &'a Item> {
@@ -679,14 +671,18 @@ mod projection_tests {
     fn titles_keep_one_bounded_unicode_line() {
         let command: Item = serde_json::from_value(json!({"id":"command","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"  cargo test\nsecret second line","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}})).unwrap();
         assert_eq!(
-            item_presentation(&command, Some(crate::session::ProviderKind::Codex)).title,
-            "cargo test"
+            item_presentation(&command, Some(crate::session::ProviderKind::Codex))
+                .title
+                .as_deref(),
+            Some("cargo test")
         );
         let command: Item = serde_json::from_value(
             json!({"id":"command","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"日".repeat(121),"cwd":null,"output":"","exitCode":null,"durationMs":null}}}}}),
         )
         .unwrap();
-        let title = item_presentation(&command, Some(crate::session::ProviderKind::Codex)).title;
+        let title = item_presentation(&command, Some(crate::session::ProviderKind::Codex))
+            .title
+            .unwrap();
         assert_eq!(title.chars().count(), 121);
         assert!(title.ends_with('…'));
     }
@@ -695,6 +691,7 @@ mod projection_tests {
 #[cfg(test)]
 mod deferred_item_tests {
     use super::*;
+    use crate::models::ItemStatus;
     #[test]
     fn deferred_command_keeps_its_display_title_without_hidden_output() {
         for command in [
@@ -719,15 +716,17 @@ mod deferred_item_tests {
                 &item,
                 Some(crate::session::ProviderKind::Codex),
             )
-            .title;
+            .title
+            .unwrap();
             item.defer();
             assert_eq!(
                 crate::presentation::item_presentation(
                     &item,
                     Some(crate::session::ProviderKind::Codex)
                 )
-                .title,
-                title
+                .title
+                .as_deref(),
+                Some(title.as_str())
             );
             assert!(item.is_deferred());
             let ItemBody::CommandExecution {

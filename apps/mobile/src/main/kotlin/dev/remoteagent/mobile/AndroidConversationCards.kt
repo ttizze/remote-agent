@@ -87,19 +87,19 @@ internal fun ThreadMessageCard(
                 }
             }
         }
-        if (content.body.isNotEmpty() || (!isUser && content.imageSources.isNotEmpty())) {
+        if (!isUser) {
+            content.imageSources.forEach { source ->
+                AttachmentThumbnail(source, "生成画像", perform, imageFrame)
+            }
+        }
+        content.body?.takeIf { it.isNotEmpty() }?.let { body ->
             Card {
                 Column(Modifier.padding(12.dp)) {
-                    if (isUser) Text(content.body) else ConversationBody(content.body, cwd, perform)
-                    if (!isUser) {
-                        content.imageSources.forEach { source ->
-                            AttachmentThumbnail(source, "生成画像", perform, imageFrame)
-                        }
-                    }
+                    if (isUser) Text(body) else ConversationBody(body, cwd, perform)
                 }
             }
         }
-        if (isUser && content.nativeId == null) Text(content.title, style = MaterialTheme.typography.bodySmall)
+        if (isUser && content.nativeId == null) content.title?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
     }
 }
 
@@ -122,11 +122,13 @@ internal fun ThreadActivityCard(item: RenderedItem, loadDetails: (String) -> Uni
             )
     ) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(
-                (if (content.collapsible) if (expanded) "⌄ " else "› " else "") + content.title,
-                style = MaterialTheme.typography.labelLarge,
-            )
-            Text(if (expanded) detail.orEmpty() else content.body, maxLines = if (expanded) Int.MAX_VALUE else 1)
+            content.title?.let { title ->
+                Text(
+                    (if (content.collapsible) if (expanded) "⌄ " else "› " else "") + title,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+            }
+            (if (expanded) detail else content.body)?.let { Text(it, maxLines = if (expanded) Int.MAX_VALUE else 1) }
         }
     }
 }
