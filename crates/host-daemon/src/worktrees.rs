@@ -172,9 +172,9 @@ impl Worktrees {
                 return Ok(None);
             }
             let cwd = dunce::canonicalize(&cwd)?;
-            let root = dunce::canonicalize(PathBuf::from(
+            let root = dunce::canonicalize(
                 crate::git::text(&cwd, &["rev-parse", "--show-toplevel"])?.trim_end(),
-            ))?;
+            )?;
             let relative_cwd = cwd.strip_prefix(&root)?;
             let original = match state
                 .workspace_roots
