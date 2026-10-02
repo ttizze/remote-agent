@@ -142,8 +142,7 @@ pub(super) fn update_claude_permissions(
     let settings_path = home.join("settings.json");
     // Preserve a native config symlink instead of replacing it with a BEX file.
     let path = if settings_path.symlink_metadata().is_ok() {
-        settings_path
-            .canonicalize()
+        dunce::canonicalize(&settings_path)
             .map_err(|_| failure("Claude の設定の参照先を開けませんでした。"))?
     } else {
         settings_path

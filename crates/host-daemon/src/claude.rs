@@ -262,7 +262,7 @@ impl Claude {
     }
 
     pub(crate) async fn create(&self, cwd: &str, model: &str) -> anyhow::Result<ThreadResponse> {
-        let cwd = tokio::fs::canonicalize(cwd).await?;
+        let cwd = dunce::simplified(&tokio::fs::canonicalize(cwd).await?).to_owned();
         if !cwd.is_dir() {
             return Err(anyhow::anyhow!("Claudeの作業フォルダがありません。"));
         }

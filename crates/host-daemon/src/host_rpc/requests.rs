@@ -1022,7 +1022,8 @@ mod tests {
 
     #[test]
     fn permissions_keep_turn_and_session_scope_without_granting_unknown_permissions() {
-        let permissions = json!({"network":{"enabled":true},"fileSystem":{"entries":[{"access":"write","path":{"type":"path","path":"/workspace"}}]}});
+        let path = std::env::temp_dir().to_string_lossy().into_owned();
+        let permissions = json!({"network":{"enabled":true},"fileSystem":{"entries":[{"access":"write","path":{"type":"path","path":path}}]}});
         let adapted = codex(
             "request".into(),
             "item/permissions/requestApproval",
@@ -1044,7 +1045,7 @@ mod tests {
                     .unwrap(),
                 json!({"permissions":permissions,"scope":scope})
             );
-            assert!(choice.description.contains("/workspace"));
+            assert!(choice.description.contains(&path));
         }
         for permissions in [
             json!({"future":true}),

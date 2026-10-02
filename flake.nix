@@ -98,6 +98,7 @@
             JAVA_HOME = pkgs.jdk21.home;
             ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
             ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
+            ANDROID_NDK_HOME = "${androidSdk}/libexec/android-sdk/ndk-bundle";
 
             shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
               export MOBILE_CARGO="${rustToolchain}/bin/cargo"

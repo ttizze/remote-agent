@@ -151,7 +151,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let second = status["result"]["accountId"].as_str().unwrap();
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
-        assert_eq!(server.initialize_response().codex_home, home.canonicalize().unwrap(), "account selection must retain the conversation configuration home");
+        assert_eq!(server.initialize_response().codex_home, dunce::canonicalize(&home).unwrap(), "account selection must retain the conversation configuration home");
         let refreshed = rpc(&server, "fixture/account/refresh", json!({"previousAccountId":"desktop"})).await;
         assert_eq!(refreshed, json!({"accountId":"desktop","hasToken":true}));
         let after = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
@@ -179,7 +179,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
         let mut session = service.open_session();
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
-        assert_eq!(server.initialize_response().codex_home, home.canonicalize().unwrap(), "account selection must retain the conversation configuration home");
+        assert_eq!(server.initialize_response().codex_home, dunce::canonicalize(&home).unwrap(), "account selection must retain the conversation configuration home");
         let missing = rpc(&server, "fixture/account/refresh", json!({"previousAccountId":"missing"})).await;
         assert_eq!(missing["hasToken"], false);
         let refreshed = rpc(&server, "fixture/account/refresh", json!({"previousAccountId":"desktop"})).await;

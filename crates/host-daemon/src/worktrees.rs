@@ -171,24 +171,23 @@ impl Worktrees {
             if !state.settings.create_on_new_session {
                 return Ok(None);
             }
-            let cwd = cwd.canonicalize()?;
-            let root = PathBuf::from(
+            let cwd = dunce::canonicalize(&cwd)?;
+            let root = dunce::canonicalize(
                 crate::git::text(&cwd, &["rev-parse", "--show-toplevel"])?.trim_end(),
-            )
-            .canonicalize()?;
+            )?;
             let relative_cwd = cwd.strip_prefix(&root)?;
             let original = match state
                 .workspace_roots
                 .get(root.to_str().context("project path is not UTF-8")?)
             {
                 Some(project) => PathBuf::from(project),
-                None => PathBuf::from(
-                    crate::git::text(&root, &["worktree", "list", "--porcelain", "-z"])?
-                        .split('\0')
-                        .next()
-                        .and_then(|line| line.strip_prefix("worktree "))
-                        .context("Git did not return the original repository")?,
-                ),
+                None => dunce::canonicalize(
+                    worktree_path(&crate::git::text(
+                        &root,
+                        &["worktree", "list", "--porcelain", "-z"],
+                    )?)
+                    .context("Git did not return the original repository")?,
+                )?,
             };
             let parent = if state.settings.worktree_directory.is_empty() {
                 let exclude = PathBuf::from(
@@ -222,7 +221,7 @@ impl Worktrees {
             };
             fs::create_dir_all(&parent)?;
             // Resolve aliases such as /tmp before checking copy destination ancestors.
-            let parent = parent.canonicalize()?;
+            let parent = dunce::canonicalize(&parent)?;
             let session = crate::platform::worktree_directory(&parent)?.keep();
             scopeguard::defer! { let _ = fs::remove_dir(&session); }
             let destination = session.join(
@@ -319,24 +318,27 @@ fn merged_into_main(cwd: &Path) -> Result<bool> {
     ))
 }
 
+fn worktree_path(entry: &str) -> Option<&Path> {
+    entry
+        .split('\0')
+        .next()?
+        .strip_prefix("worktree ")
+        .map(Path::new)
+}
+
 fn inspect(path: &str, project: &str) -> Result<(String, Option<String>)> {
     if already_removed(path, project)? {
         return Ok(("削除済み".into(), None));
     }
-    let target = Path::new(path)
-        .canonicalize()
-        .context("ワークツリーを確認できません")?;
-    let project = Path::new(project)
-        .canonicalize()
-        .context("元のリポジトリを確認できません")?;
+    let target = dunce::canonicalize(path).context("ワークツリーを確認できません")?;
+    let project = dunce::canonicalize(project).context("元のリポジトリを確認できません")?;
     if target != Path::new(path) || target == project {
         return Err(anyhow!("登録されたワークツリーの場所が変わっています。"));
     }
     let listing = crate::git::text(&project, &["worktree", "list", "--porcelain", "-z"])?;
-    let expected = format!("worktree {path}");
     let entry = listing
         .split("\0\0")
-        .find(|entry| entry.split('\0').next() == Some(expected.as_str()))
+        .find(|entry| worktree_path(entry) == Some(target.as_path()))
         .context("元のリポジトリに登録されたワークツリーではありません。")?;
     let branch = entry
         .split('\0')
@@ -381,8 +383,9 @@ fn already_removed(path: &str, project: &str) -> Result<bool> {
         Path::new(project),
         &["worktree", "list", "--porcelain", "-z"],
     )?;
-    let expected = format!("worktree {path}");
-    Ok(!listing.split('\0').any(|field| field == expected))
+    Ok(!listing
+        .split("\0\0")
+        .any(|entry| worktree_path(entry) == Some(Path::new(path))))
 }
 
 pub(crate) async fn workspace_roots(project_state: &Path) -> Result<HashMap<String, String>> {
@@ -598,6 +601,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         crate::git::text(root, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        crate::git::text(root, &["config", "core.autocrlf", "false"]).unwrap();
         fs::write(root.join("tracked.txt"), "committed\n").unwrap();
         fs::write(root.join("config.txt"), "default\n").unwrap();
         fs::write(root.join(".gitignore"), ".env\nlocal/\n").unwrap();
@@ -625,7 +629,7 @@ mod tests {
     async fn deleted_worktrees_are_recreated_on_send_even_when_creation_is_disabled() {
         for removal in ["managed", "git", "filesystem"] {
             let repository = repository();
-            let root = repository.path().canonicalize().unwrap();
+            let root = dunce::canonicalize(repository.path()).unwrap();
             let directory = tempfile::tempdir().unwrap();
             let projects = directory.path().join("projects.json");
             let store = Worktrees::new(&projects);
@@ -780,7 +784,7 @@ mod tests {
     #[tokio::test]
     async fn managed_removal_rechecks_changes_locks_and_ownership_and_preserves_commits() {
         let repository = repository();
-        let root = repository.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(repository.path()).unwrap();
         let state = root.join("projects.json");
         let worktrees = Worktrees::new(&state);
         worktrees
@@ -875,7 +879,7 @@ mod tests {
     #[tokio::test]
     async fn settings_persist_and_toggles_control_real_worktree_creation_and_copying() {
         let directory = repository();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let projects = root.join("projects.json");
         let store = Worktrees::new(&projects);
         assert!(store.prepare(None).await.unwrap().is_none());
@@ -1038,9 +1042,9 @@ mod tests {
     #[tokio::test]
     async fn configured_directory_supports_symlinked_parents_and_preserves_existing_worktrees() {
         let directory = repository();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let storage = tempfile::tempdir().unwrap();
-        let real_parent = storage.path().canonicalize().unwrap();
+        let real_parent = dunce::canonicalize(storage.path()).unwrap();
         symlink(&real_parent, root.join("storage")).unwrap();
         fs::write(root.join(".env"), "FIXTURE_VALUE=isolated\n").unwrap();
         let projects = root.join("projects.json");
@@ -1081,7 +1085,7 @@ mod tests {
     async fn existing_checkouts_keep_original_name_location_and_selected_subdirectory() {
         for registered in [false, true] {
             let repository = repository();
-            let root = repository.path().canonicalize().unwrap();
+            let root = dunce::canonicalize(repository.path()).unwrap();
             let state_directory = tempfile::tempdir().unwrap();
             let projects = state_directory.path().join("projects.json");
             let legacy = root.join(".git/bex-worktrees/session-legacy");

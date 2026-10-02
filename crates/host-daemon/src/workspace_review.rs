@@ -28,9 +28,7 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview> {
 }
 
 fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
-    let cwd = cwd
-        .canonicalize()
-        .context("working directory is unavailable")?;
+    let cwd = dunce::canonicalize(cwd).context("working directory is unavailable")?;
     if !cwd.is_dir() {
         return Err(anyhow!("working directory is not a directory"));
     }
@@ -262,9 +260,14 @@ mod tests {
     fn file_counts_follow_renames_deletions_and_binary_changes() {
         let directory = tempfile::tempdir().unwrap();
         let cwd = directory.path();
+        let (deleted, renamed) = if cfg!(windows) {
+            ("gone file.txt", "new name.txt")
+        } else {
+            ("gone\tfile\n.txt", "new\tname\n.txt")
+        };
         crate::git::text(cwd, &["init", "--initial-branch=main"]).unwrap();
         std::fs::write(cwd.join("old.txt"), "first\nsecond\nthird\n").unwrap();
-        std::fs::write(cwd.join("gone\tfile\n.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(cwd.join(deleted), "one\ntwo\n").unwrap();
         std::fs::write(cwd.join("binary.dat"), b"before\0").unwrap();
         crate::git::text(cwd, &["add", "."]).unwrap();
         crate::git::text(
@@ -282,20 +285,16 @@ mod tests {
             ],
         )
         .unwrap();
-        crate::git::text(cwd, &["mv", "old.txt", "new\tname\n.txt"]).unwrap();
-        std::fs::write(
-            cwd.join("new\tname\n.txt"),
-            "first\nsecond\nthird\nfourth\n",
-        )
-        .unwrap();
-        std::fs::remove_file(cwd.join("gone\tfile\n.txt")).unwrap();
+        crate::git::text(cwd, &["mv", "old.txt", renamed]).unwrap();
+        std::fs::write(cwd.join(renamed), "first\nsecond\nthird\nfourth\n").unwrap();
+        std::fs::remove_file(cwd.join(deleted)).unwrap();
         std::fs::write(cwd.join("binary.dat"), b"after\0").unwrap();
         let review = collect_workspace_review(cwd.to_path_buf()).unwrap();
         assert_eq!((review.additions, review.deletions), (1, 2));
         assert_eq!(review.files.len(), 3);
         for (path, status, additions, deletions) in [
-            ("new\tname\n.txt", "renamed", Some(1), Some(0)),
-            ("gone\tfile\n.txt", "deleted", Some(0), Some(2)),
+            (renamed, "renamed", Some(1), Some(0)),
+            (deleted, "deleted", Some(0), Some(2)),
             ("binary.dat", "modified", None, None),
         ] {
             let file = review.files.iter().find(|file| file.path == path).unwrap();

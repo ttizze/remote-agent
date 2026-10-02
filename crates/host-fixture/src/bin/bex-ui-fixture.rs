@@ -17,7 +17,7 @@ async fn main() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let directory = directory.canonicalize().unwrap();
+    let directory = dunce::canonicalize(&directory).unwrap();
     let workspace = directory.join("project");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(

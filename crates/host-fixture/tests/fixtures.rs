@@ -17,7 +17,7 @@ async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configur
     tokio::time::timeout(Duration::from_secs(10), async {
         let fixture = tempfile::tempdir().unwrap();
         let ambient = tempfile::tempdir().unwrap();
-        let root = fixture.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(fixture.path()).unwrap();
         let expected = root.clone();
         let program = Config {
             trace: true,
@@ -83,7 +83,7 @@ async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configur
 async fn pairing_controls_restore_the_original_project_store_and_survive_rejected_host_requests() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let fixture = tempfile::tempdir().unwrap();
-        let root = fixture.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(fixture.path()).unwrap();
         let original = b"[]\n";
         fs::write(root.join("projects.json"), original).unwrap();
         let host = HostFixture::start(

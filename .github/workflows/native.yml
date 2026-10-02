@@ -9,10 +9,12 @@ permissions:
 concurrency:
   group: native-${{ github.ref }}
   cancel-in-progress: true
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
 jobs:
   toolchain:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, linux, x64, nix-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       rust-version: ${{ steps.rust.outputs.version }}
@@ -20,47 +22,48 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - id: rust
         name: Read the pinned flake toolchain
         run: echo "version=$(nix eval --raw .#devShells.x86_64-linux.native.RUST_TOOLCHAIN_VERSION)" >> "$GITHUB_OUTPUT"
-  # Linux intentionally retains the existing self-hosted environment.
   linux:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, linux, x64, nix-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Free space for Nix and Cargo builds
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cmd-format: nix develop .#native --command {0}
           key: ${{ hashFiles('flake.lock') }}
+          cache-on-failure: true
       - name: Build desktop, Host and CLI
         run: nix develop .#native --command cargo build --locked -p codex-app-server -p bex-process -p bex-desktop -p host-daemon -p agent-cli
       - name: Core contracts and isolated iroh Host
-        run: nix develop .#native --command cargo test --locked --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
+        run: nix develop .#native --command cargo test --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
         run: nix develop .#native --command cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
   android:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, linux, x64, nix-ci]
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Free space for the pinned Nix SDK
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cmd-format: nix develop . --command {0}
           key: android-${{ hashFiles('flake.lock') }}
-      # Hetzner ci-1 has no KVM. Build instrumentation tests here; run them
-      # explicitly with just android-e2e on a machine with emulator acceleration.
+          cache-on-failure: true
+      # Build instrumentation tests here; run them with just android-e2e.
       - name: Check Android and build app and test APKs
         env:
           GRADLE_USER_HOME: ${{ runner.temp }}/gradle
@@ -85,10 +88,12 @@ jobs:
         with:
           toolchain: ${{ needs.toolchain.outputs.rust-version }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cache-on-failure: true
       - name: Build desktop, Host and CLI
         run: cargo build --locked -p codex-app-server -p bex-process -p bex-desktop -p host-daemon -p agent-cli
       - name: Core contracts and isolated iroh Host
-        run: cargo test --locked --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
+        run: cargo test --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
         run: cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored

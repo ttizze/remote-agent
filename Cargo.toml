@@ -26,6 +26,7 @@ debug = "line-tables-only"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["registry", "std"] }
 anyhow = "1.0.104"
+dunce = "1.0.5"
 base64 = "0.23.1"
 futures-util = "0.3.31"
 ring = "0.17.14"

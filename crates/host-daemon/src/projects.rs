@@ -55,7 +55,9 @@ impl ProjectStore {
             }
             match tokio::fs::canonicalize(&root.path).await {
                 Ok(path) => {
-                    snapshot.resolved_roots.insert(root.path.clone(), path);
+                    snapshot
+                        .resolved_roots
+                        .insert(root.path.clone(), dunce::simplified(&path).to_owned());
                 }
                 Err(error)
                     if matches!(
@@ -67,7 +69,7 @@ impl ProjectStore {
         }
         snapshot.worktree_roots = crate::worktrees::workspace_roots(&self.path).await?;
         snapshot.chat_directory = match tokio::fs::canonicalize(self.chat_directory()).await {
-            Ok(path) => Some(path),
+            Ok(path) => Some(dunce::simplified(&path).to_owned()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error.into()),
         };
@@ -81,7 +83,7 @@ mod tests {
     #[tokio::test]
     async fn native_catalog_cache_keeps_claude_groups_and_refreshes_worktree_roots() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let project = root.join("project");
         std::fs::create_dir(&project).unwrap();
         let store = ProjectStore::new(root.join("bex-worktrees.json"));

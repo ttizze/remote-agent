@@ -25,7 +25,7 @@ const MAX_FILES: usize = 20_000;
 
 pub(super) fn home() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        return fs::canonicalize(path).context("Claude storage is unavailable");
+        return dunce::canonicalize(path).context("Claude storage is unavailable");
     }
     directories::BaseDirs::new()
         .map(|base| base.home_dir().join(".claude"))
@@ -210,10 +210,10 @@ pub(super) fn read_related(
     }
     let transcript = resolve(home, session_id)?;
     let directory = transcript.with_extension("").join("subagents");
-    let root = fs::canonicalize(&directory).context("native subagent history is unavailable")?;
-    let path = fs::canonicalize(directory.join(format!("agent-{agent_id}.jsonl")))
+    let root = dunce::canonicalize(&directory).context("native subagent history is unavailable")?;
+    let path = dunce::canonicalize(directory.join(format!("agent-{agent_id}.jsonl")))
         .context("native subagent history is unavailable")?;
-    if !root.starts_with(fs::canonicalize(
+    if !root.starts_with(dunce::canonicalize(
         transcript.parent().context("invalid native session path")?,
     )?) || path.parent() != Some(root.as_path())
     {

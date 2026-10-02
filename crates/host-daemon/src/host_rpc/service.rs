@@ -1158,6 +1158,7 @@ impl HostRpcService {
             let cwd = tokio::fs::canonicalize(cwd)
                 .await
                 .unwrap_or_else(|_| std::path::PathBuf::from(cwd));
+            let cwd = dunce::simplified(&cwd);
             for worktree in &mut worktrees {
                 if !cwd.starts_with(&worktree.path) {
                     continue;
@@ -1239,7 +1240,7 @@ impl HostRpcService {
             std::path::Path::new(cwd).is_absolute(),
             "project directory must be absolute"
         );
-        let root = tokio::fs::canonicalize(cwd).await?;
+        let root = dunce::simplified(&tokio::fs::canonicalize(cwd).await?).to_owned();
         anyhow::ensure!(
             tokio::fs::metadata(&root).await?.is_dir(),
             "project path must be a directory"
@@ -1425,6 +1426,7 @@ impl HostRpcService {
             let directory = tokio::fs::canonicalize(directory)
                 .await
                 .map_err(|error| Failure::new("chat_directory_unavailable", error))?;
+            let directory = dunce::simplified(&directory).to_owned();
             params.cwd = Some(directory.into_os_string().into_string().map_err(|_| {
                 Failure::new("chat_directory_unavailable", "chat path is not UTF-8")
             })?);
@@ -1601,7 +1603,7 @@ fn invalid_message(error: impl std::fmt::Display) -> String {
 // Resolve existing ancestors too: a newly created native directory must not
 // change a scope merely because /var is a symlink to /private/var on macOS.
 fn canonical_storage_path(path: &std::path::Path) -> std::path::PathBuf {
-    if let Ok(path) = std::fs::canonicalize(path) {
+    if let Ok(path) = dunce::canonicalize(path) {
         return path;
     }
     match (path.parent(), path.file_name()) {

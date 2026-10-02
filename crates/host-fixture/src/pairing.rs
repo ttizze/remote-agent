@@ -26,7 +26,7 @@ pub struct PairingServer {
 
 impl PairingServer {
     pub fn start(root: &Path, ticket: Ticket, identity: Identity) -> Result<Self> {
-        let root = root.canonicalize()?;
+        let root = dunce::canonicalize(root)?;
         let server = Server::http((Ipv4Addr::LOCALHOST, 0))?;
         let port = server
             .server_addr()
