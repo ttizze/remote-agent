@@ -99,7 +99,9 @@ internal fun ThreadMessageCard(
                 }
             }
         }
-        if (isUser && content.nativeId == null) content.title?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        if (isUser && content.nativeId == null) {
+            content.title?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        }
     }
 }
 
