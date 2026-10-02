@@ -1,56 +1,95 @@
+use alacritty_terminal::{
+    Term,
+    event::{Event, EventListener, WindowSize},
+    event_loop::{EventLoop, Msg},
+    grid::Dimensions,
+    sync::FairMutex,
+    term::Config,
+    tty::{self, Options, Shell},
+    vte::ansi::Rgb,
+};
 use bex_process::{PtyCommand, PtyEvent};
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use std::io::{self, Read, Write};
+use std::{
+    io,
+    sync::{Arc, Mutex},
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[cfg(unix)]
 #[path = "pty_session.rs"]
 mod session;
 
-struct OwnedPty {
-    #[cfg(not(unix))]
-    killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
-    #[cfg(unix)]
-    pid: Option<u32>,
+#[derive(Clone)]
+struct Events {
+    output: tokio::sync::mpsc::Sender<Event>,
+    replies: Arc<Mutex<Vec<Event>>>,
 }
-impl Drop for OwnedPty {
-    fn drop(&mut self) {
-        let _ = self.cleanup();
-    }
-}
-impl OwnedPty {
-    fn cleanup(&mut self) -> io::Result<()> {
-        #[cfg(unix)]
-        if let Some(pid) = self.pid {
-            session::terminate(pid as libc::pid_t)?;
-            self.pid = None;
+impl EventListener for Events {
+    fn send_event(&self, event: Event) {
+        match event {
+            Event::PtyWrite(_)
+            | Event::ColorRequest(..)
+            | Event::TextAreaSizeRequest(_)
+            | Event::ClipboardLoad(..) => {
+                self.replies.lock().unwrap().push(event);
+            }
+            Event::PtyOutput(_)
+            | Event::Checkpoint { .. }
+            | Event::OperationComplete { .. }
+            | Event::PtyError(_)
+            | Event::ChildExit(_)
+            | Event::Exit => {
+                let _ = self.output.blocking_send(event);
+            }
+            _ => {}
         }
-        #[cfg(not(unix))]
-        // The Host's Job Object also owns the descendants. The shell may
-        // already have exited naturally before we reach this point.
-        let _ = self.killer.kill();
-        Ok(())
+    }
+    fn take_replies(&self, term: &Term<Self>) -> Vec<u8> {
+        std::mem::take(&mut *self.replies.lock().unwrap())
+            .into_iter()
+            .flat_map(|event| {
+                match event {
+                    Event::PtyWrite(data) => data,
+                    Event::ColorRequest(index, format) => {
+                        let value = agent_protocol::operations::terminal_color(index as u16);
+                        format(term.colors()[index].unwrap_or(Rgb {
+                            r: (value >> 16) as u8,
+                            g: (value >> 8) as u8,
+                            b: value as u8,
+                        }))
+                    }
+                    Event::TextAreaSizeRequest(format) => format(WindowSize {
+                        num_lines: term.screen_lines() as u16,
+                        num_cols: term.columns() as u16,
+                        cell_width: 0,
+                        cell_height: 0,
+                    }),
+                    Event::ClipboardLoad(_, format) => format(""),
+                    _ => unreachable!(),
+                }
+                .into_bytes()
+            })
+            .collect()
     }
 }
-
 async fn emit(output: &mut tokio::io::Stdout, event: PtyEvent) -> io::Result<()> {
     let mut bytes = serde_json::to_vec(&event)?;
     bytes.push(b'\n');
     output.write_all(&bytes).await?;
     output.flush().await
 }
-fn io_error(error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(error.to_string())
-}
-fn size(rows: u16, cols: u16) -> io::Result<PtySize> {
+fn size(rows: u16, cols: u16) -> io::Result<WindowSize> {
     if rows == 0 || cols == 0 {
-        return Err(io_error("terminal size must be nonzero"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "terminal size must be nonzero",
+        ));
     }
-    Ok(PtySize {
-        rows,
-        cols,
-        pixel_width: 0,
-        pixel_height: 0,
+    Ok(WindowSize {
+        num_lines: rows,
+        num_cols: cols,
+        cell_width: 0,
+        cell_height: 0,
     })
 }
 
@@ -60,7 +99,7 @@ pub async fn run() -> io::Result<i32> {
     let line = input
         .next_line()
         .await?
-        .ok_or_else(|| io_error("terminal initialization missing"))?;
+        .ok_or_else(|| io::Error::other("terminal initialization missing"))?;
     let PtyCommand::Start {
         command,
         cwd,
@@ -68,123 +107,109 @@ pub async fn run() -> io::Result<i32> {
         cols,
     } = serde_json::from_str(&line)?
     else {
-        return Err(io_error("expected terminal initialization"));
+        return Err(io::Error::other("expected terminal initialization"));
     };
     let program = command
         .first()
-        .ok_or_else(|| io_error("terminal command missing"))?;
-    let pair = native_pty_system()
-        .openpty(size(rows, cols)?)
-        .map_err(io_error)?;
-    let mut command_builder = CommandBuilder::new(program);
-    command_builder.args(&command[1..]);
-    command_builder.cwd(cwd);
-    command_builder.env("TERM", "xterm-256color");
-    command_builder.env("COLORTERM", "truecolor");
-    let mut child = pair
-        .slave
-        .spawn_command(command_builder)
-        .map_err(io_error)?;
-    let mut owned = OwnedPty {
-        #[cfg(not(unix))]
-        killer: child.clone_killer(),
-        #[cfg(unix)]
-        pid: child.process_id(),
+        .ok_or_else(|| io::Error::other("terminal command missing"))?;
+    let window_size = size(rows, cols)?;
+    let options = Options {
+        shell: Some(Shell::new(program.clone(), command[1..].to_vec())),
+        working_directory: Some(cwd.into()),
+        env: [
+            ("TERM".into(), "xterm-256color".into()),
+            ("COLORTERM".into(), "truecolor".into()),
+        ]
+        .into(),
+        #[cfg(windows)]
+        escape_args: true,
+        ..Options::default()
     };
-    drop(pair.slave);
-    let mut reader = pair.master.try_clone_reader().map_err(io_error)?;
-    let mut writer = pair.master.take_writer().map_err(io_error)?;
-    let (send, mut received) = tokio::sync::mpsc::channel(16);
-    let (write_input, write_commands) = std::sync::mpsc::sync_channel::<(u64, Vec<u8>)>(1);
-    let written = send.clone();
-    std::thread::spawn(move || {
-        while let Ok((id, data)) = write_commands.recv() {
-            let error = writer.write_all(&data).err().map(|error| error.to_string());
-            if written.blocking_send(PtyEvent::Ack { id, error }).is_err() {
-                break;
-            }
-        }
-    });
-    std::thread::spawn(move || {
-        let mut bytes = [0; 8192];
+    #[allow(unused_mut)]
+    let mut pty = tty::new(&options, window_size, 0)?;
+    // The caller owns reaping. Dropping the backend on any constructor/loop
+    // failure cannot release this session ID before whole-session cleanup.
+    #[cfg(unix)]
+    let mut session = Some(session::Session::new(
+        pty.take_child().expect("new PTY child"),
+    ));
+    #[cfg(unix)]
+    let mut cleanup = None;
+    let (send, mut events) = tokio::sync::mpsc::channel(16);
+    let listener = Events {
+        output: send,
+        replies: Arc::default(),
+    };
+    let screen = Arc::new(FairMutex::new(Term::new(
+        Config::default(),
+        &window_size,
+        listener.clone(),
+    )));
+    let event_loop = EventLoop::new(screen, listener, pty, true, false)?;
+    let commands = event_loop.channel();
+    emit(&mut output, PtyEvent::Started).await?;
+    let worker = event_loop.spawn();
+    let mut exit_code = 0;
+    let interaction: io::Result<()> = async {
         loop {
-            match reader.read(&mut bytes) {
-                Ok(0) | Err(_) => break,
-                Ok(length) => {
-                    if send
-                        .blocking_send(PtyEvent::Output {
-                            data: bytes[..length].to_vec(),
-                        })
-                        .is_err()
-                    {
-                        break;
+            tokio::select! {
+                event = events.recv() => {
+                    match event.ok_or_else(|| io::Error::other("terminal event loop disappeared"))? {
+                        Event::PtyOutput(data) => emit(&mut output, PtyEvent::Output { data }).await?,
+                        Event::Checkpoint { id, data, size } => emit(&mut output, PtyEvent::Checkpoint { id, data, rows: size.num_lines, cols: size.num_cols }).await?,
+                        Event::OperationComplete { id, error } => emit(&mut output, PtyEvent::Ack { id, error }).await?,
+                        Event::PtyError(message) => return Err(io::Error::other(message)),
+                        Event::ChildExit(status) => {
+                            exit_code = status.code().unwrap_or(1) as u32;
+                            #[cfg(unix)]
+                            if let Some(mut owned) = session.take() {
+                                cleanup = Some(tokio::task::spawn_blocking(move || owned.finish()));
+                            }
+                        }
+                        Event::Exit => return Ok(()),
+                        _ => unreachable!(),
+                    }
+                }
+                line = input.next_line() => {
+                    let Some(line) = line? else { return Ok(()); };
+                    let command: PtyCommand = serde_json::from_str(&line)?;
+                    let (id, command) = match command {
+                        PtyCommand::Write { id, data } => (id, Ok(Msg::InputWithAck { id, data: data.into() })),
+                        PtyCommand::Resize { id, rows, cols } => (id, size(rows, cols).map(|size| Msg::ResizeWithAck { id, size })),
+                        PtyCommand::Checkpoint { id, rows, cols } => (id, size(rows, cols).map(|size| Msg::Checkpoint { id, size })),
+                        PtyCommand::Start { .. } => return Err(io::Error::other("terminal already started")),
+                    };
+                    if let Err(error) = command.and_then(|command| commands.send(command).map_err(io::Error::other)) {
+                        emit(&mut output, PtyEvent::Ack { id, error: Some(error.to_string()) }).await?;
                     }
                 }
             }
         }
-    });
-    // Keep the session leader unreaped until all its jobs are gone. Its PID
-    // must not be reused while we identify processes by their session ID.
+    }.await;
+    // Shutdown is out-of-band from the bounded command queue. Stop forwarding
+    // before joining so a full output queue cannot hold the loop during cleanup.
+    let _ = commands.send(Msg::Shutdown);
+    drop(events);
     #[cfg(unix)]
-    let mut exited = {
-        let pid = child
-            .process_id()
-            .ok_or_else(|| io_error("PTY PID missing"))?;
-        tokio::task::spawn_blocking(move || session::wait_without_reaping(pid))
+    let cleanup_result = {
+        let cleanup = cleanup.unwrap_or_else(|| {
+            let mut session = session.take().expect("session cleanup owner");
+            tokio::task::spawn_blocking(move || session.finish())
+        });
+        cleanup.await.map_err(io::Error::other)?
     };
     #[cfg(not(unix))]
-    let mut exited = tokio::task::spawn_blocking(move || child.wait());
-    let result: io::Result<u32> = async {
-        emit(&mut output, PtyEvent::Started).await?;
-        let mut reading = true;
-        loop {
-            tokio::select! {
-                bytes = received.recv(), if reading => match bytes {
-                    Some(event) => emit(&mut output, event).await?,
-                    None => reading = false,
-                },
-                status = &mut exited => return status.map_err(io_error)?.map(|status| status.exit_code()),
-                line = input.next_line() => {
-                    let Some(line) = line? else { return Ok(0) };
-                    let command: PtyCommand = serde_json::from_str(&line)?;
-                    let (id, result) = match command {
-                        PtyCommand::Write { id, data } => {
-                            match write_input.try_send((id, data)) {
-                                Ok(()) => continue,
-                                Err(error) => (id, Err(io_error(error))),
-                            }
-                        },
-                        PtyCommand::Resize { id, rows, cols } => (id, size(rows, cols).and_then(|size| pair.master.resize(size).map_err(io_error))),
-                        PtyCommand::Start { .. } => return Err(io_error("terminal already started")),
-                    };
-                    emit(&mut output, PtyEvent::Ack { id, error: result.err().map(|error| error.to_string()) }).await?;
-                }
-            }
-        }
-    }.await;
-    owned.cleanup()?;
-    drop(write_input);
-    drop(pair.master);
-    if !exited.is_finished() {
-        let _ = (&mut exited).await;
-    }
-    #[cfg(unix)]
-    child.wait()?;
-    // The child can exit before the final PTY read arrives. Drain those bytes
-    // before publishing its exit, with a bound for descendants holding handles.
-    let drain = async {
-        while let Some(event) = received.recv().await {
-            emit(&mut output, event).await?;
-        }
-        Ok::<_, io::Error>(())
-    };
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), drain).await;
-    match result {
-        Ok(code) => {
-            // The Host closes the output pipe when cancelling. Cleanup has
-            // succeeded even if the final event cannot reach that connection.
-            let _ = emit(&mut output, PtyEvent::Exited { code }).await;
-            Ok(0)
+    let cleanup_result = Ok::<(), io::Error>(());
+    // Closing ConPTY happens after output draining; the Host's existing Job
+    // Object remains the Windows supervisor/descendant ownership boundary.
+    let joined = tokio::task::spawn_blocking(move || worker.join())
+        .await
+        .map_err(io::Error::other)?;
+    drop(joined.map_err(|_| io::Error::other("terminal event loop panicked"))?);
+    cleanup_result?;
+    match interaction {
+        Ok(()) => {
+            let _ = emit(&mut output, PtyEvent::Exited { code: exit_code }).await;
         }
         Err(error) => {
             let _ = emit(
@@ -194,7 +219,7 @@ pub async fn run() -> io::Result<i32> {
                 },
             )
             .await;
-            Ok(0)
         }
     }
+    Ok(0)
 }

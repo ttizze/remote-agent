@@ -3,7 +3,6 @@ use std::io::{self, Result};
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 use std::sync::Arc;
-use std::sync::mpsc::TryRecvError;
 
 use crate::event::{OnResize, WindowSize};
 use crate::tty::windows::child::ChildExitWatcher;
@@ -31,6 +30,15 @@ pub struct Pty {
     conout: ReadPipe,
     conin: WritePipe,
     child_watcher: ChildExitWatcher,
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        // Backend destruction calls ClosePseudoConsole, which blocks until its
+        // output is drained. The event loop no longer consumes the bounded
+        // buffer, so switch the reader to discarding before dropping backend.
+        self.conout.drain_on_shutdown();
+    }
 }
 
 pub fn new(config: &Options, window_size: WindowSize, _window_id: u64) -> Result<Pty> {
@@ -111,16 +119,12 @@ impl EventedReadWrite for Pty {
 
 impl EventedPty for Pty {
     fn next_child_event(&mut self) -> Option<ChildEvent> {
-        match self.child_watcher.event_rx().try_recv() {
-            Ok(ev) => Some(ev),
-            Err(TryRecvError::Empty) => None,
-            Err(TryRecvError::Disconnected) => Some(ChildEvent::Exited(None)),
-        }
+        self.child_watcher.next_event()
     }
 }
 
 impl OnResize for Pty {
-    fn on_resize(&mut self, window_size: WindowSize) {
+    fn on_resize(&mut self, window_size: WindowSize) -> io::Result<()> {
         self.backend.on_resize(window_size)
     }
 }

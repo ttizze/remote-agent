@@ -79,13 +79,33 @@ pub enum PtyCommand {
         rows: u16,
         cols: u16,
     },
+    Checkpoint {
+        id: u64,
+        rows: u16,
+        cols: u16,
+    },
 }
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum PtyEvent {
     Started,
-    Output { data: Vec<u8> },
-    Ack { id: u64, error: Option<String> },
-    Exited { code: u32 },
-    Failed { message: String },
+    Output {
+        data: Vec<u8>,
+    },
+    Ack {
+        id: u64,
+        error: Option<String>,
+    },
+    Checkpoint {
+        id: u64,
+        data: Vec<u8>,
+        rows: u16,
+        cols: u16,
+    },
+    Exited {
+        code: u32,
+    },
+    Failed {
+        message: String,
+    },
 }

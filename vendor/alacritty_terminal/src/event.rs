@@ -12,6 +12,14 @@ use crate::vte::ansi::Rgb;
 /// itself.
 #[derive(Clone)]
 pub enum Event {
+    /// PTY bytes, after parsing, ordered with checkpoints.
+    PtyOutput(Vec<u8>),
+    /// A requested write or resize completed, or failed before completion.
+    OperationComplete { id: u64, error: Option<String> },
+    /// Size-matched screen and unfinished parser state, ordered with output.
+    Checkpoint { id: u64, data: Vec<u8>, size: WindowSize },
+    /// Fatal I/O or queue failure in the terminal owner.
+    PtyError(String),
     /// Grid has changed possibly requiring a mouse cursor shape change.
     MouseCursorDirty,
 
@@ -61,6 +69,10 @@ pub enum Event {
 impl Debug for Event {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Event::PtyOutput(data) => write!(f, "PtyOutput({} bytes)", data.len()),
+            Event::OperationComplete { id, error } => write!(f, "OperationComplete({id}, {error:?})"),
+            Event::Checkpoint { id, data, size } => write!(f, "Checkpoint({id}, {} bytes, {size:?})", data.len()),
+            Event::PtyError(error) => write!(f, "PtyError({error})"),
             Event::ClipboardStore(ty, text) => write!(f, "ClipboardStore({ty:?}, {text})"),
             Event::ClipboardLoad(ty, _) => write!(f, "ClipboardLoad({ty:?})"),
             Event::TextAreaSizeRequest(_) => write!(f, "TextAreaSizeRequest"),
@@ -96,12 +108,20 @@ pub struct WindowSize {
 
 /// Types that are interested in when the display is resized.
 pub trait OnResize {
-    fn on_resize(&mut self, window_size: WindowSize);
+    fn on_resize(&mut self, window_size: WindowSize) -> std::io::Result<()>;
 }
 
 /// Event Loop for notifying the renderer about terminal events.
 pub trait EventListener {
     fn send_event(&self, _event: Event) {}
+
+    /// Drain owner-generated terminal query replies while the parsed screen is locked.
+    fn take_replies(&self, _terminal: &crate::term::Term<Self>) -> Vec<u8>
+    where
+        Self: Sized,
+    {
+        Vec::new()
+    }
 }
 
 /// Null sink for events.
