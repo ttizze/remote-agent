@@ -59,3 +59,20 @@ fn missing_or_invalid_user_work_is_not_silently_discarded() {
     assert!(persistence::decode(b"{").is_err());
     assert_eq!(persistence::decode(b"").unwrap(), Snapshot::default());
 }
+
+#[test]
+fn unset_model_preferences_restore_user_work_with_automatic_defaults() {
+    let mut snapshot = Snapshot::default();
+    Arc::make_mut(&mut snapshot.drafts).insert(
+        "draft".into(),
+        Arc::new(Draft {
+            text: "keep unsent input".into(),
+            ..Default::default()
+        }),
+    );
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&persistence::encode(&snapshot).unwrap()).unwrap();
+    saved.as_object_mut().unwrap().remove("model_defaults");
+    let restored = persistence::decode(&serde_json::to_vec(&saved).unwrap()).unwrap();
+    assert_eq!(restored, snapshot);
+}

@@ -1,7 +1,7 @@
 //! Device storage is an explicit subset of runtime state. Host results and
 //! connection authority are fetched again, never restored from this format.
 use crate::state::{
-    Activity, Draft, FileDraft, Navigation, PendingSubmission, ScopedData, Snapshot,
+    Activity, Draft, FileDraft, ModelDefaults, Navigation, PendingSubmission, ScopedData, Snapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
@@ -10,6 +10,8 @@ use std::{collections::BTreeMap, sync::Arc};
 /// an empty draft. Runtime Snapshot fields cannot change the storage contract.
 #[derive(Serialize, Deserialize)]
 pub struct PersistedState {
+    #[serde(default)]
+    model_defaults: ModelDefaults,
     storage_scope: String,
     archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(with = "entries")]
@@ -23,6 +25,7 @@ pub struct PersistedState {
 impl PersistedState {
     pub fn capture(snapshot: &Snapshot) -> Self {
         Self {
+            model_defaults: snapshot.model_defaults.clone(),
             storage_scope: snapshot.storage_scope.clone(),
             archived_scopes: snapshot.archived_scopes.clone(),
             drafts: snapshot.drafts.clone(),
@@ -44,6 +47,7 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     }
     let saved: PersistedState = serde_json::from_slice(bytes)?;
     Ok(Snapshot {
+        model_defaults: saved.model_defaults,
         storage_scope: saved.storage_scope,
         archived_scopes: saved.archived_scopes,
         drafts: saved.drafts,

@@ -469,7 +469,13 @@ impl Operation for LoadModels {
             .unwrap_or_default();
         let drafts = snapshot.drafts.clone();
         for (id, previous_draft) in drafts.iter() {
-            let settings = supported_settings(previous_draft, &models, &errors);
+            let settings = supported_settings(
+                previous_draft.model.as_ref(),
+                previous_draft.effort.as_deref(),
+                previous_draft.service_tier.as_deref(),
+                &models,
+                &errors,
+            );
             if settings
                 != (
                     previous_draft.model.as_ref(),

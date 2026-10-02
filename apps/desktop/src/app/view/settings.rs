@@ -18,6 +18,12 @@ impl Desktop {
         let mut navigation = v_flex().gap_1();
         for (id, label, icon, page) in [
             (
+                "settings-models",
+                "モデル",
+                IconName::Settings,
+                SettingsPage::Models,
+            ),
+            (
                 "settings-accounts",
                 "アカウント",
                 IconName::User,
@@ -81,6 +87,7 @@ impl Desktop {
 
     pub(super) fn settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let (title, subtitle) = match self.settings_page {
+            SettingsPage::Models => ("モデル", "新しい会話で使うモデルの初期値を設定します。"),
             SettingsPage::Accounts => (
                 "アカウント",
                 "選択した環境のAIアカウントと使用量を管理します。",
@@ -98,7 +105,10 @@ impl Desktop {
             .gap_2()
             .child(div().text_size(px(26.)).font_semibold().child(title))
             .child(div().text_sm().text_color(rgb(0x949ca8)).child(subtitle));
-        if self.settings_page != SettingsPage::Connections {
+        if !matches!(
+            self.settings_page,
+            SettingsPage::Connections | SettingsPage::Models
+        ) {
             heading = heading.child(div().pt_2().text_xs().text_color(rgb(0x949ca8)).child(
                 format!(
                         "設定する環境 · {}",
@@ -134,6 +144,7 @@ impl Desktop {
         }
         body =
             match self.settings_page {
+                SettingsPage::Models => body.child(self.default_model_settings(cx)),
                 SettingsPage::Accounts => body.child(self.account_controls(true, cx)),
                 SettingsPage::Connections => {
                     let setup = self.snapshot.connection_setup();
@@ -181,6 +192,7 @@ impl Desktop {
             .child(
                 div()
                     .id(match self.settings_page {
+                        SettingsPage::Models => "settings-models-scroll",
                         SettingsPage::Accounts => "settings-accounts-scroll",
                         SettingsPage::Connections => "settings-connections-scroll",
                         SettingsPage::Worktrees => "settings-worktrees-scroll",

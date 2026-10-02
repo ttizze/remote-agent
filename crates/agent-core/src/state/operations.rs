@@ -95,6 +95,15 @@ pub enum Intent {
         thread_id: crate::session::SessionRef,
     },
     LoadModels(LoadModels),
+    SelectDefaultModel {
+        model: Option<crate::models::ModelRef>,
+    },
+    SelectDefaultEffort {
+        effort: Option<String>,
+    },
+    SelectDefaultServiceTier {
+        service_tier: Option<String>,
+    },
     SetDraft {
         thread_id: DraftKey,
         draft: Draft,
