@@ -71,6 +71,44 @@ jobs:
           :apps:mobile:testDebugUnitTest
           :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest
           --no-daemon --no-parallel --max-workers=2 --console=plain
+  ios:
+    needs: toolchain
+    # Standard Apple Silicon runner; simulator build only, no signing secrets.
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 3
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # Match the pinned flake, as the native Windows job does.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: ${{ needs.toolchain.outputs.rust-version }}
+          targets: aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ios-simulator-xcode-26.6-${{ hashFiles('flake.lock') }}
+      - name: Verify Apple build tools
+        run: |
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          xcrun --sdk iphonesimulator --show-sdk-version
+          cmake --version
+          jq --version
+      - name: Regenerate and compile Rust and Swift bindings
+        run: scripts/build-agent-ios.sh simulator
+      # Compile the app and UI-test bundle, but do not claim UI execution.
+      - name: Build unsigned iOS simulator app and UI tests
+        run: |
+          target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
+          xcodebuild -project apps/mobile/iosApp/Bex.xcodeproj \
+            -scheme Bex -destination 'generic/platform=iOS Simulator' \
+            -configuration Debug -derivedDataPath "$RUNNER_TEMP/ios-derived-data" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            "BEX_CARGO_TARGET_DIR=$target" build-for-testing
   windows:
     needs: toolchain
     # Latest stable Windows Server major; Windows 11 UI acceptance is separate.
