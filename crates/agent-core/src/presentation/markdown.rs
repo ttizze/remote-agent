@@ -410,7 +410,7 @@ mod tests {
             ("No table | here".to_owned(), "No table | here".to_owned()),
             (
                 format!("```text\n{TABLE}```"),
-                TABLE.trim_end_matches('\n').to_owned(),
+                TABLE.trim_end_matches(['\r', '\n']).to_owned(),
             ),
             (
                 "| incomplete |\n| text".into(),

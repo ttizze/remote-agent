@@ -308,9 +308,13 @@ mod tests {
             "a.txt",
             "space name.txt",
             "日本語.txt",
+            #[cfg(unix)]
             "tab\tname.txt",
+            #[cfg(unix)]
             "quoted\"name.txt",
+            #[cfg(unix)]
             "line\nname.txt",
+            #[cfg(unix)]
             "controls\u{7}\u{8}\u{b}\u{c}\r\\.txt",
         ];
         for name in names {
