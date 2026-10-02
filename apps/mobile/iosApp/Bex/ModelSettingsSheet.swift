@@ -29,7 +29,7 @@ struct ModelSettingsSheet: View {
                         }
                         .pickerStyle(.segmented)
                         .accessibilityIdentifier("model.provider")
-                        .disabled(!model.isConnected)
+                        .disabled(!model.isConnected || model.sending)
                     }
                 }
                 modelSection
