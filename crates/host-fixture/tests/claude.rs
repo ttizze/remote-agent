@@ -284,7 +284,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
             for selected in [false, true] {
                 for attachment in ["none", "image", "file"] {
                     let root = tempfile::tempdir().unwrap();
-                    let root = root.path().canonicalize().unwrap();
+                    let root = dunce::canonicalize(root.path()).unwrap();
                     let workspace = root.join("project");
                     std::fs::create_dir(&workspace).unwrap();
                     git(&workspace, &["init", "--quiet"]);
@@ -771,7 +771,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
         for automatic in [false, true] {
             for selected in [false, true] {
                 let root = tempfile::tempdir().unwrap();
-                let root = root.path().canonicalize().unwrap();
+                let root = dunce::canonicalize(root.path()).unwrap();
                 let workspace = root.join("project");
                 std::fs::create_dir(&workspace).unwrap();
                 git(&workspace, &["init", "--quiet"]);
@@ -1202,7 +1202,7 @@ async fn consecutive_claude_inputs_reuse_one_native_process() {
 async fn deleted_claude_worktree_restarts_the_retained_process_and_continues_the_conversation() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let project = root.join("project");
         std::fs::create_dir(&project).unwrap();
         git(&project, &["init", "--quiet", "--initial-branch=main"]);
@@ -1375,7 +1375,7 @@ async fn missing_codex_terminal_is_owned_by_its_connection_and_supports_io_resiz
 async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
     tokio::time::timeout(Duration::from_secs(90), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let native = root.join("claude-native");
         std::fs::create_dir_all(&native).unwrap();
         std::fs::write(native.join("fixture-auth.json"), json!({"loggedIn":true,"authMethod":"claude.ai","email":"native@example.invalid","subscriptionType":"pro"}).to_string()).unwrap();

@@ -136,7 +136,7 @@ impl WorkspaceFiles {
                 Ok(Body::from(visualization_document(fragment)))
             }
             Call::ListFiles(params) => {
-                let path = absolute_path(&params.path)?.canonicalize()?;
+                let path = dunce::canonicalize(absolute_path(&params.path)?)?;
                 let mut entries = Vec::new();
                 let mut truncated = false;
                 for entry in fs::read_dir(&path)? {
@@ -165,11 +165,11 @@ impl WorkspaceFiles {
                 }))
             }
             Call::ReadFile(params) => {
-                let path = absolute_path(&params.path)?.canonicalize()?;
+                let path = dunce::canonicalize(absolute_path(&params.path)?)?;
                 read_editable(&path).map(Body::from)
             }
             Call::WriteFile(params) => {
-                let path = absolute_path(&params.path)?.canonicalize()?;
+                let path = dunce::canonicalize(absolute_path(&params.path)?)?;
                 let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
                 let original = read_bounded(&path, EDIT_LIMIT)?;
                 if hash(&original) != params.revision {
@@ -223,7 +223,7 @@ impl WorkspaceFiles {
                 } else {
                     absolute_path(&params.directory)?
                 };
-                let directory = directory.canonicalize()?;
+                let directory = dunce::canonicalize(&directory)?;
                 if !directory.is_dir() {
                     return Err(anyhow!("upload directory is unavailable"));
                 }

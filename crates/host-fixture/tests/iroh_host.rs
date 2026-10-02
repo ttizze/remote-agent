@@ -464,9 +464,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         );
         assert!(
             uploaded.starts_with(
-                directory
-                    .path()
-                    .canonicalize()
+                dunce::canonicalize(directory.path())
                     .unwrap()
                     .join("bex-attachments")
             )
@@ -758,7 +756,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
             for project in [false, true] {
                 for photo in [true, false] {
                     let directory = tempfile::tempdir().unwrap();
-                    let root = directory.path().canonicalize().unwrap();
+                    let root = dunce::canonicalize(directory.path()).unwrap();
                     assert!(std::process::Command::new("git").args(["init", "--quiet"]).current_dir(&root).status().unwrap().success());
                     let workspace = root.join("project");
                     std::fs::create_dir(&workspace).unwrap();
@@ -1014,7 +1012,7 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
     use agent_core::store::Store;
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&json!([
             {"id":"selected","name":"Selected task","cwd":root,"historyMode":"paginated","createdAt":1,"updatedAt":1}
         ])).unwrap()).unwrap();
@@ -1471,7 +1469,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
 async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_membership() {
     tokio::time::timeout(Duration::from_secs(40), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let workspace = root.join("project");
         std::fs::create_dir(&workspace).unwrap();
         let git = |args: &[&str]| {
@@ -1735,7 +1733,12 @@ async fn expired_invitation_is_rejected_by_daemon_and_remains_unconsumed() {
         let saved_keys = fixture.memory.clone();
         local.close().await;
         fixture.close().await.unwrap();
-        std::fs::remove_file(directory.path().join("bex-codex-fixture")).unwrap();
+        std::fs::remove_file(
+            directory
+                .path()
+                .join(format!("bex-codex-fixture{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .unwrap();
         let path = directory.path().join("state/trust.json");
         let mut trust: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         trust["trust"]["invitations"][invitation.invitation.to_string()] = json!(0);
@@ -1896,7 +1899,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
     }
     tokio::time::timeout(Duration::from_secs(40), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let mobile_state = root.join("mobile-host");
         let desktop_state = root.join("desktop");
         let registry = LocalHostRegistry::new(desktop_state.clone());
@@ -2152,7 +2155,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
         for automatic in [false, true] {
             for scoped in [false, true] {
                 let directory = tempfile::tempdir().unwrap();
-                let root = directory.path().canonicalize().unwrap();
+                let root = dunce::canonicalize(directory.path()).unwrap();
                 let project = root.join("project");
                 std::fs::create_dir(&project).unwrap();
                 let git = |args: &[&str]| {
@@ -2219,7 +2222,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
     use agent_core::store::Store;
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let project = root.join("project");
         std::fs::create_dir(&project).unwrap();
         let git = |args: &[&str]| {
@@ -2473,7 +2476,7 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
     }
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let repo = root.join("repo");
         let checkout = root.join("checkout");
         std::fs::create_dir(&repo).unwrap();
@@ -2794,7 +2797,7 @@ async fn adding_a_chat_folder_registers_a_project_before_submission() {
     use agent_core::store::Store;
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let folder = root.join("new-project");
         std::fs::create_dir(&folder).unwrap();
         let fixture = start_host(&root).await;

@@ -10,6 +10,7 @@ publish = false
 agent-protocol = { path = "../agent-protocol" }
 agent-transport = { path = "../agent-transport" }
 anyhow.workspace = true
+dunce.workspace = true
 agent-core = { path = "../agent-core" }
 base64.workspace = true
 codex-app-server = { path = "../codex-app-server" }
