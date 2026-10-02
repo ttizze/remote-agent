@@ -4,6 +4,7 @@
 
 - Move Linux and Android CI and Rust toolchain lookup from Hetzner to GitHub-hosted Ubuntu 24.04 runners with the pinned Nix environments. Keep native Windows CI and fix filesystem and CRLF assumptions in its shared presentation fixtures.
 - Use native Windows paths consistently for Host worktrees and provider configuration, compare Git worktree registrations as paths, and preserve JSON escapes in visualization references.
+- Prevent background Host Git status reads from refreshing the index and racing with worktree checkout or recovery.
 
 - Keep Host connections alive through bursts of small session updates. Bound outbound queues by a shared 16 MiB allocation budget instead of a 128-message cutoff, and record the reason when a queue or invalid update closes a connection.
 

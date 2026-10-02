@@ -181,12 +181,13 @@ impl Worktrees {
                 .get(root.to_str().context("project path is not UTF-8")?)
             {
                 Some(project) => PathBuf::from(project),
-                None => worktree_path(&crate::git::text(
-                    &root,
-                    &["worktree", "list", "--porcelain", "-z"],
-                )?)
-                .context("Git did not return the original repository")?
-                .to_owned(),
+                None => dunce::canonicalize(
+                    worktree_path(&crate::git::text(
+                        &root,
+                        &["worktree", "list", "--porcelain", "-z"],
+                    )?)
+                    .context("Git did not return the original repository")?,
+                )?,
             };
             let parent = if state.settings.worktree_directory.is_empty() {
                 let exclude = PathBuf::from(
@@ -600,6 +601,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         crate::git::text(root, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        crate::git::text(root, &["config", "core.autocrlf", "false"]).unwrap();
         fs::write(root.join("tracked.txt"), "committed\n").unwrap();
         fs::write(root.join("config.txt"), "default\n").unwrap();
         fs::write(root.join(".gitignore"), ".env\nlocal/\n").unwrap();

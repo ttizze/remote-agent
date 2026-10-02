@@ -288,6 +288,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                     let workspace = root.join("project");
                     std::fs::create_dir(&workspace).unwrap();
                     git(&workspace, &["init", "--quiet"]);
+                    git(&workspace, &["config", "core.autocrlf", "false"]);
                     std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
                     git(&workspace, &["add", "tracked.txt"]);
                     git(&workspace, &["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","-c","commit.gpgsign=false","commit","--quiet","-m","fixture"]);
@@ -775,6 +776,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                 let workspace = root.join("project");
                 std::fs::create_dir(&workspace).unwrap();
                 git(&workspace, &["init", "--quiet"]);
+                git(&workspace, &["config", "core.autocrlf", "false"]);
                 std::fs::write(workspace.join("tracked.txt"), "fixture\n").unwrap();
                 git(&workspace, &["add", "tracked.txt"]);
                 git(&workspace, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
@@ -1198,6 +1200,8 @@ async fn consecutive_claude_inputs_reuse_one_native_process() {
     fixture.close().await.unwrap();
 }
 
+// Windows holds a live process's cwd open; checkout recovery itself is tested on all OSes.
+#[cfg(unix)]
 #[tokio::test]
 async fn deleted_claude_worktree_restarts_the_retained_process_and_continues_the_conversation() {
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -1206,6 +1210,7 @@ async fn deleted_claude_worktree_restarts_the_retained_process_and_continues_the
         let project = root.join("project");
         std::fs::create_dir(&project).unwrap();
         git(&project, &["init", "--quiet", "--initial-branch=main"]);
+        git(&project, &["config", "core.autocrlf", "false"]);
         git(
             &project,
             &[
@@ -1424,7 +1429,7 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         until(&store, |snapshot| snapshot.account.accounts.as_ref().is_some_and(|accounts| accounts.selected_claude_id.as_ref() == Some(&login.login_id))).await;
         send(&store, "second account, same history", "account-second").await;
         completed(&store, &thread, 2, "completed").await;
-        let profile = root.join("claude/accounts").join(login.login_id.strip_prefix("claude:").unwrap());
+        let profile = root.join("claude").join("accounts").join(login.login_id.strip_prefix("claude:").unwrap());
         assert!(!profile.join("projects").exists(), "credential helpers do not own conversation history");
         let snapshot = (*store.snapshot()).clone();
         drop(store); endpoint.close().await; fixture.close().await.unwrap();
@@ -1438,7 +1443,7 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin { provider: agent_protocol::session::ProviderKind::Claude })).await.unwrap();
         let canceled = store.snapshot().account.login.clone().unwrap();
         store.dispatch(Intent::CancelAccountLogin(op::CancelAccountLogin { id: canceled.login_id.clone() })).await.unwrap();
-        assert!(!root.join("claude/accounts").join(canceled.login_id.strip_prefix("claude:").unwrap()).exists());
+        assert!(!root.join("claude").join("accounts").join(canceled.login_id.strip_prefix("claude:").unwrap()).exists());
         assert!(native.join("projects").exists(), "cancel must preserve shared history");
         store.dispatch(Intent::LogoutAccount(op::LogoutAccount { id: login.login_id.clone() })).await.unwrap();
         store.dispatch(Intent::ListAccounts(op::ListAccounts {})).await.unwrap();
@@ -1509,7 +1514,8 @@ async fn live_claude_account_login_url_and_cancellation() {
     assert!(
         !root
             .path()
-            .join("claude/accounts")
+            .join("claude")
+            .join("accounts")
             .join(login.login_id.strip_prefix("claude:").unwrap())
             .exists()
     );
