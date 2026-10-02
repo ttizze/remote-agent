@@ -3,30 +3,16 @@ mod cdp;
 pub mod mcp;
 
 use agent_protocol::browser::{
-    BrowserAction, BrowserControl, BrowserFrame, BrowserRequest, BrowserTab, HEIGHT, WIDTH,
+    BrowserAction, BrowserFrame, BrowserRequest, BrowserTab, HEIGHT, WIDTH,
 };
 use base64::Engine;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
-use tokio::sync::{Mutex, watch};
-use uuid::Uuid;
+use tokio::sync::Mutex;
 
+#[derive(Default)]
 struct Page {
     tabs: Vec<String>,
     active: String,
-    owner: Option<String>,
-    waiting: bool,
-    token: String,
-}
-impl Default for Page {
-    fn default() -> Self {
-        Self {
-            tabs: Vec::new(),
-            active: String::new(),
-            owner: None,
-            waiting: false,
-            token: Uuid::new_v4().to_string(),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -40,7 +26,6 @@ pub struct Browser {
     profile: PathBuf,
     executable: PathBuf,
     state: Mutex<State>,
-    changed: watch::Sender<u64>,
     stop: tokio_util::sync::CancellationToken,
     bridge_directory: tempfile::TempDir,
 }
@@ -74,7 +59,6 @@ impl Browser {
             executable,
             bridge_directory,
             state: Mutex::new(State::default()),
-            changed: watch::channel(0).0,
             stop: Default::default(),
         });
         mcp::listen(&browser)?;
@@ -95,23 +79,6 @@ impl Browser {
     fn socket(&self) -> PathBuf {
         self.bridge_directory.path().join("bridge.sock")
     }
-    fn notify(&self) {
-        self.changed.send_modify(|n| *n = n.wrapping_add(1));
-    }
-    pub async fn revoke_device(&self, principal: &str) {
-        let mut state = self.state.lock().await;
-        for page in state
-            .pages
-            .values_mut()
-            .filter(|page| page.owner.as_deref() == Some(principal))
-        {
-            page.owner = None;
-            page.waiting = true;
-            page.token = Uuid::new_v4().to_string();
-        }
-        self.notify();
-    }
-
     pub async fn shutdown(&self) {
         self.stop.cancel();
         if let Some(chrome) = self.state.lock().await.chrome.take() {
@@ -130,7 +97,6 @@ impl Browser {
             for page in state.pages.values_mut() {
                 page.tabs.clear();
                 page.active.clear();
-                page.token = Uuid::new_v4().to_string();
             }
         }
         if state.chrome.is_none() {
@@ -174,38 +140,18 @@ impl Browser {
         Ok(())
     }
 
-    pub async fn request(
-        &self,
-        principal: &str,
-        request: &BrowserRequest,
-    ) -> Result<BrowserFrame, String> {
+    pub async fn request(&self, request: &BrowserRequest) -> Result<BrowserFrame, String> {
         request.validate()?;
         let thread = request.thread_id.to_string();
         let mut state = self.state.lock().await;
         self.ensure(&mut state, &thread).await?;
-        let page = state.pages.get_mut(&thread).unwrap();
-        authorize(
-            page,
-            principal,
-            &request.control_token,
+        validate_tab(
+            &state.pages[&thread].active,
             &request.tab_id,
             &request.action,
         )?;
-        match &request.action {
-            BrowserAction::TakeControl => {
-                page.owner = Some(principal.into());
-                page.token = Uuid::new_v4().to_string();
-                self.notify();
-            }
-            BrowserAction::ReleaseControl => {
-                page.owner = None;
-                page.waiting = false;
-                page.token = Uuid::new_v4().to_string();
-                self.notify();
-            }
-            _ => self.action(&mut state, &thread, &request.action).await?,
-        }
-        let mut frame = self.frame(&mut state, &thread, principal).await?;
+        Self::action(&mut state, &thread, &request.action).await?;
+        let mut frame = Self::frame(&mut state, &thread).await?;
         if frame.image_id == request.image_id {
             frame.image.clear();
         }
@@ -216,54 +162,20 @@ impl Browser {
         &self,
         thread: &str,
         action: BrowserAction,
-        wait_for_user: bool,
     ) -> Result<BrowserFrame, String> {
         action.validate()?;
-        let thread = self
-            .state
-            .lock()
-            .await
+        let mut state = self.state.lock().await;
+        let thread = state
             .aliases
             .get(thread)
             .cloned()
             .unwrap_or_else(|| thread.to_owned());
-        let thread = thread.as_str();
-        let mut changed = self.changed.subscribe();
-        let mut waited = false;
-        if wait_for_user {
-            let mut state = self.state.lock().await;
-            self.ensure(&mut state, thread).await?;
-            state.pages.get_mut(thread).unwrap().waiting = true;
-            self.notify();
-        }
-        loop {
-            let mut state = self.state.lock().await;
-            self.ensure(&mut state, thread).await?;
-            let page = &state.pages[thread];
-            if page.owner.is_none() && !page.waiting {
-                if waited && !matches!(action, BrowserAction::Read) {
-                    return Err("ユーザーの操作が完了しました。待機していた操作は実行していません。screenshot で現在の画面を確認してから続けてください。".into());
-                }
-                self.action(&mut state, thread, &action).await?;
-                return self.frame(&mut state, thread, "agent").await;
-            }
-            waited = true;
-            drop(state);
-            tokio::select! {
-                _ = self.stop.cancelled() => return Err("Hostを終了しました。".into()),
-                result = tokio::time::timeout(std::time::Duration::from_secs(1800), changed.changed()) => {
-                    if !matches!(result, Ok(Ok(()))) { return Err("ユーザーがブラウザを操作中です。「AIに戻す」を待ってください。".into()); }
-                }
-            }
-        }
+        self.ensure(&mut state, &thread).await?;
+        Self::action(&mut state, &thread, &action).await?;
+        Self::frame(&mut state, &thread).await
     }
 
-    async fn action(
-        &self,
-        state: &mut State,
-        thread: &str,
-        action: &BrowserAction,
-    ) -> Result<(), String> {
+    async fn action(state: &mut State, thread: &str, action: &BrowserAction) -> Result<(), String> {
         let page = state.pages.get_mut(thread).unwrap();
         if let BrowserAction::SelectTab { id } = action {
             if !page.tabs.contains(id) {
@@ -280,12 +192,7 @@ impl Browser {
         chrome.action(&session, action).await
     }
 
-    async fn frame(
-        &self,
-        state: &mut State,
-        thread: &str,
-        principal: &str,
-    ) -> Result<BrowserFrame, String> {
+    async fn frame(state: &mut State, thread: &str) -> Result<BrowserFrame, String> {
         let page = &state.pages[thread];
         let chrome = state.chrome.as_mut().unwrap();
         let session = chrome.attach(&page.active).await?;
@@ -304,13 +211,6 @@ impl Browser {
                 })
                 .collect(),
             tab_id: page.active.clone(),
-            control_token: page.token.clone(),
-            control: match page.owner.as_deref() {
-                Some(owner) if owner == principal => BrowserControl::Yours,
-                Some(_) => BrowserControl::Other,
-                None if page.waiting => BrowserControl::AwaitingHuman,
-                None => BrowserControl::Agent,
-            },
             width: WIDTH,
             height: HEIGHT,
             image,
@@ -320,32 +220,11 @@ impl Browser {
     }
 }
 
-fn authorize(
-    page: &Page,
-    principal: &str,
-    token: &str,
-    tab: &str,
-    action: &BrowserAction,
-) -> Result<(), String> {
-    if matches!(action, BrowserAction::Read) {
-        return Ok(());
-    }
-    if page.token != token {
-        return Err("操作権が変わりました。最新の画面で再試行してください。".into());
-    }
-    if matches!(action, BrowserAction::TakeControl) {
-        if page.owner.as_deref().is_none_or(|owner| owner == principal) {
-            return Ok(());
-        }
-        return Err("別の端末が操作中です。".into());
-    }
-    if page.owner.as_deref() != Some(principal) {
-        return Err("「自分で操作する」を押してから操作してください。".into());
-    }
+fn validate_tab(active: &str, displayed: &str, action: &BrowserAction) -> Result<(), String> {
     if !matches!(
         action,
-        BrowserAction::ReleaseControl | BrowserAction::SelectTab { .. }
-    ) && page.active != tab
+        BrowserAction::Read | BrowserAction::SelectTab { .. }
+    ) && active != displayed
     {
         return Err("表示中のタブが変わりました。最新の画面で再試行してください。".into());
     }

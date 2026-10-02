@@ -237,30 +237,15 @@ impl SessionChange {
             } else {
                 TurnStatus::Running
             };
-            if let Some(old) = old {
-                if turn.started_at.is_none() {
-                    merged.started_at = old.started_at;
-                }
-                if turn.completed_at.is_none() {
-                    merged.completed_at = old.completed_at;
-                }
-                if turn.duration_ms.is_none() {
-                    merged.duration_ms = old.duration_ms;
-                }
-            }
             if let Some(items) = &turn.items {
-                merged.items = Some(
-                    if items.is_empty()
-                        || matches!(turn.items_view.as_deref(), Some("summary" | "notLoaded"))
-                    {
-                        append_items(
-                            old.and_then(|old| old.items.as_deref()).unwrap_or_default(),
-                            items,
-                        )
-                    } else {
-                        items.clone()
-                    },
-                );
+                // Turn lifecycle and item notifications are independent. Even
+                // a native "full" turn can omit an item whose output is still
+                // arriving. Only RemoveItem removes a streamed item; a new
+                // history response replaces the conversation at its owner.
+                merged.items = Some(append_items(
+                    old.and_then(|old| old.items.as_deref()).unwrap_or_default(),
+                    items,
+                ));
             }
             if turn.error.is_none()
                 && (merged.status == TurnStatus::Completed
@@ -384,11 +369,8 @@ impl SessionChange {
     }
 }
 
-pub(crate) fn merge_fields(previous: &Turn, incoming: &Turn) -> Turn {
+fn merge_fields(previous: &Turn, incoming: &Turn) -> Turn {
     let mut merged = previous.clone();
-    if incoming.status != TurnStatus::Unknown {
-        merged.status = incoming.status;
-    }
     macro_rules! field { ($($field:ident),* $(,)?) => { $(if incoming.$field.is_some() { merged.$field = incoming.$field.clone(); })* }; }
     field!(
         items_view,
@@ -405,7 +387,7 @@ pub(crate) fn merge_fields(previous: &Turn, incoming: &Turn) -> Turn {
     merged
 }
 
-pub(crate) fn append_items(previous: &[Arc<Item>], incoming: &[Arc<Item>]) -> Vec<Arc<Item>> {
+fn append_items(previous: &[Arc<Item>], incoming: &[Arc<Item>]) -> Vec<Arc<Item>> {
     let mut merged = previous.to_vec();
     for item in incoming {
         if let Some(index) = merged.iter().position(|current| current.id == item.id) {

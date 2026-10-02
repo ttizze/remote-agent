@@ -29,10 +29,35 @@ impl std::ops::Deref for Request {
 }
 pub struct Reader {
     incoming: mpsc::Receiver<Request>,
+    scripted_composer_catalog: bool,
 }
 impl Reader {
+    pub fn script_composer_catalog(&mut self) {
+        self.scripted_composer_catalog = true;
+    }
     pub async fn read_request(&mut self) -> std::io::Result<Option<Request>> {
-        Ok(self.incoming.recv().await)
+        while let Some(request) = self.incoming.recv().await {
+            // Unrelated Store tests use an empty catalog. Catalog regressions
+            // opt into scripted replies to control the actual RPC boundary.
+            if !self.scripted_composer_catalog
+                && let Call::ComposerCatalog(params) = &request.call
+            {
+                let mut send = request.send.lock().await.take().unwrap();
+                agent_transport::framing::write(
+                    &mut send,
+                    protocol::Response::Success {
+                        result: agent_protocol::composer::ComposerCatalog {
+                            cwd: params.cwd.clone(),
+                            ..Default::default()
+                        },
+                    },
+                )
+                .await?;
+                continue;
+            }
+            return Ok(Some(request));
+        }
+        Ok(None)
     }
 }
 pub struct Session {
@@ -104,7 +129,10 @@ pub fn from_peer(
             inner: session,
             blobs: tokio::sync::Mutex::new(incoming_blobs),
         },
-        Reader { incoming },
+        Reader {
+            incoming,
+            scripted_composer_catalog: false,
+        },
         Writer {
             state: Mutex::new(State::default()),
             events: tokio::sync::Mutex::new(events),

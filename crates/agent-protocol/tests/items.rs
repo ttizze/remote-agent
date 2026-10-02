@@ -24,6 +24,73 @@ fn conversation(body: ItemBody) -> Thread {
 }
 
 #[test]
+fn turn_completion_keeps_independent_items_for_late_output() {
+    let original = conversation(ItemBody::CommandExecution {
+        command: "fixture command".into(),
+        output: "before".into(),
+        actions: Vec::new(),
+        source: CommandSource::Unknown,
+        process_id: None,
+        cwd: None,
+        exit_code: None,
+        duration_ms: None,
+    });
+    let final_answer = Arc::new(Item::new(
+        "answer".into(),
+        ItemStatus::Completed,
+        ItemBody::AssistantText {
+            text: "done".into(),
+            phase: AssistantPhase::Final,
+            citation: None,
+        },
+    ));
+    let completed = SessionChange::Turn {
+        turn: Turn {
+            id: "turn".into(),
+            status: TurnStatus::Completed,
+            items: Some(vec![final_answer.clone()]),
+            items_view: Some("full".into()),
+            ..Default::default()
+        },
+        completed: true,
+    }
+    .apply(&original)
+    .unwrap();
+    let changed = SessionChange::Text {
+        turn_id: "turn".into(),
+        item_id: "item".into(),
+        field: TextField::CommandOutput,
+        delta: " after".into(),
+    }
+    .apply(&completed)
+    .unwrap();
+    let turn = &changed.turns.as_ref().unwrap()[0];
+    assert_eq!(turn.status, TurnStatus::Completed);
+    assert_eq!(turn.items.as_ref().unwrap()[1], final_answer);
+    assert!(
+        matches!(turn.items.as_ref().unwrap()[0].body(), ItemBody::CommandExecution {output, ..} if output == "before after")
+    );
+    assert_eq!(
+        original.turns.as_ref().unwrap()[0]
+            .items
+            .as_ref()
+            .unwrap()
+            .len(),
+        1
+    );
+    let removed = SessionChange::RemoveItem {
+        turn_id: "turn".into(),
+        item_id: "item".into(),
+    }
+    .apply(&changed)
+    .unwrap();
+    assert_eq!(
+        removed.turns.as_ref().unwrap()[0].items.as_ref().unwrap(),
+        &[final_answer]
+    );
+}
+
+#[test]
 fn invalid_appends_report_the_boundary_and_preserve_the_input() {
     let original = conversation(ItemBody::AssistantText {
         text: "original".into(),
@@ -92,6 +159,37 @@ fn invalid_appends_report_the_boundary_and_preserve_the_input() {
 }
 
 proptest! {
+    #[test]
+    fn lifecycle_items_upsert_without_losing_streamed_items(
+        updates in prop::collection::vec((0u8..8, ".{0,20}"), 0..24),
+        completed in any::<bool>(),
+        view in prop::sample::select(vec![None, Some("full"), Some("summary"), Some("notLoaded")]),
+    ) {
+        let original = conversation(ItemBody::AssistantText {
+            text: "original".into(), phase: AssistantPhase::Unknown, citation: None,
+        });
+        let mut expected = std::collections::BTreeMap::from([("item".to_string(), "original".to_string())]);
+        let mut items = Vec::new();
+        for (index, text) in updates {
+            let id = if index == 0 { "item".into() } else { format!("item-{index}") };
+            expected.insert(id.clone(), text.clone());
+            items.push(Arc::new(Item::new(id.into(), ItemStatus::Completed, ItemBody::AssistantText {
+                text, phase: AssistantPhase::Final, citation: None,
+            })));
+        }
+        let changed = SessionChange::Turn {
+            turn: Turn { id: "turn".into(), items: Some(items), items_view: view.map(str::to_owned), ..Default::default() },
+            completed,
+        }.apply(&original).unwrap();
+        let items = changed.turns.as_ref().unwrap()[0].items.as_ref().unwrap();
+        prop_assert_eq!(items.len(), expected.len());
+        for item in items {
+            let ItemBody::AssistantText {text, ..} = item.body() else { unreachable!() };
+            prop_assert_eq!(text, &expected[item.id.as_str()]);
+        }
+        prop_assert_eq!(original.turns.as_ref().unwrap()[0].items.as_ref().unwrap().len(), 1);
+    }
+
     #[test]
     fn reasoning_parts_keep_sparse_indexes(operations in prop::collection::vec((any::<bool>(), 0u32..16, ".{0,20}"), 0..60)) {
         let mut thread = conversation(ItemBody::Reasoning {content:vec![], summary:vec![]});

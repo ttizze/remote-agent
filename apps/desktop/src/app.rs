@@ -30,7 +30,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use hosts::{HostEvent, Hosts};
+use hosts::{ConnectionLayout, HostEvent, Hosts};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
@@ -40,7 +40,6 @@ use std::{
 };
 
 enum OperationCompletion {
-    Refresh,
     Busy,
     Download,
     Composer(u64),
@@ -70,6 +69,7 @@ enum Update {
     },
     Recording(uuid::Uuid, platform::RecordingEvent),
     PersistenceError(String),
+    OnboardingCompleted(Result<(), String>),
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
@@ -78,7 +78,8 @@ enum Tab {
 }
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsPage {
-    Accounts,
+    Models,
+    Agents,
     Connections,
     Worktrees,
 }
@@ -186,6 +187,7 @@ pub(crate) struct Desktop {
     remote: Option<RemoteHost>,
     hosts: Option<Entity<Hosts>>,
     side_chat_mode: bool,
+    onboarding: bool,
     initial_cwd: Option<String>,
     busy: usize,
     error: String,
@@ -315,6 +317,11 @@ impl Desktop {
         });
         let editor_input = cx.new(|cx| EditorState::new(window, cx));
         let model_search = cx.new(|cx| InputState::new(window, cx).placeholder("モデルを検索"));
+        let account_code = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("認証コードを貼り付け")
+                .masked(true)
+        });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("会話を検索"));
         let path = cx.new(|cx| InputState::new(window, cx).placeholder("絶対パス"));
         let worktree_copy_paths = cx.new(|cx| {
@@ -401,6 +408,11 @@ impl Desktop {
                     cx.notify();
                 }
             }),
+            cx.subscribe(&account_code, |_, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&search, |view, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
                     let value = input.read(cx).value();
@@ -433,6 +445,7 @@ impl Desktop {
             }),
         ];
         if let Some(hosts) = &hosts {
+            subscriptions.push(cx.observe(hosts, |_, _, cx| cx.notify()));
             subscriptions.push(
                 cx.subscribe_in(hosts, window, |view, _, event, window, cx| {
                     match event {
@@ -475,6 +488,9 @@ impl Desktop {
             remote,
             hosts,
             side_chat_mode,
+            onboarding: !side_chat_mode
+                && !platform::state_dir()
+                    .is_ok_and(|directory| directory.join("onboarding.completed").is_file()),
             initial_cwd,
             busy: 0,
             error: String::new(),
@@ -507,18 +523,14 @@ impl Desktop {
             worktree_save_pending: false,
             worktree_removal: None,
             worktree_busy: false,
-            account_code: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("ブラウザに表示された認証コード")
-                    .masked(true)
-            }),
+            account_code,
             account_busy: false,
             account_polling: false,
             expanded_projects: HashSet::new(),
             expanded_items: HashSet::new(),
             expanded_work: HashMap::new(),
             tab: Tab::Chat,
-            settings_page: SettingsPage::Accounts,
+            settings_page: SettingsPage::Agents,
             sidebar: true,
             panel_open: false,
             panel: Panel::Home,
@@ -661,7 +673,9 @@ impl Desktop {
         );
     }
     fn dispatch(&self, intent: Intent) {
-        self.perform(intent, OperationCompletion::Refresh);
+        if let Some(session) = &self.session {
+            drop(session.store.dispatch(intent));
+        }
     }
     fn receive(
         &mut self,
@@ -700,6 +714,10 @@ impl Desktop {
             Update::Completed(kind, result) => self.operation_completed(kind, result, window, cx),
             Update::Recording(id, event) => self.recording_update(id, event, window, cx),
             Update::PersistenceError(error) => self.set_error(error),
+            Update::OnboardingCompleted(result) => match result {
+                Ok(()) => self.onboarding = false,
+                Err(error) => self.set_error(error),
+            },
             Update::Folder(result) => {
                 self.busy = self.busy.saturating_sub(1);
                 match result {
@@ -829,7 +847,6 @@ impl Desktop {
                 }
                 return;
             }
-            OperationCompletion::Refresh => {}
             OperationCompletion::RemoveWorktree => {
                 self.worktree_busy = false;
                 match result {
@@ -897,6 +914,17 @@ impl Desktop {
         let snapshot = store.snapshot();
         let changed = !Arc::ptr_eq(&snapshot, &self.snapshot);
         let previous = std::mem::replace(&mut self.snapshot, snapshot);
+        if previous.account.login.as_ref().map(|login| &login.login_id)
+            != self
+                .snapshot
+                .account
+                .login
+                .as_ref()
+                .map(|login| &login.login_id)
+        {
+            self.account_code
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
         if let Some(request) = self
             .snapshot
             .permission_control(self.draft_key())
@@ -1219,11 +1247,7 @@ impl Desktop {
     fn open_chat(&mut self, id: SessionRef, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = Tab::Chat;
         self.cancel_recording();
-        self.busy += 1;
-        self.perform(
-            Intent::ReadThread(op::ReadThread::open(id)),
-            OperationCompletion::Busy,
-        );
+        self.dispatch(Intent::ReadThread(op::ReadThread::open(id)));
         self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
     fn older(&mut self, _: &mut Window, cx: &mut Context<Self>) {

@@ -360,7 +360,7 @@ impl HostRuntime {
                 let mut next = record.clone();
                 next.trust.allowed.remove(&node_id);
                 *record = self.credentials.persist(next).await?;
-                self.service.revoke_device(&node_id.to_string()).await;
+                self.service.revoke_device(&node_id.to_string());
                 for connection in self.active.lock().unwrap().values() {
                     if connection.node_id() == node_id {
                         connection.close();

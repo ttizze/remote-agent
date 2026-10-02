@@ -108,7 +108,10 @@ extension BexLaunchUITests {
             XCTAssertEqual(message.value as? String, "Keep my original draft")
             XCTAssertFalse(app.staticTexts["notice"].exists)
             app.buttons["task.tools"].tap()
-            XCTAssertTrue(sideMessage.waitForExistence(timeout: 15))
+            let reopened = expectation(
+                for: NSPredicate(format: "value == %@", "> Needle\n\nKeep my side draft"), evaluatedWith: sideMessage
+            )
+            wait(for: [reopened], timeout: 15)
             XCTAssertEqual(sideMessage.value as? String, "> Needle\n\nKeep my side draft")
             closeWorkbench(app)
             return

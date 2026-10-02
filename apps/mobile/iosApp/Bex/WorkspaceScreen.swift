@@ -152,7 +152,7 @@ private struct WorkspaceBrowserScreen: View {
     @State private var dialogText = ""
 
     private var acceptsInput: Bool {
-        frame?.control == .yours && !sending && scenePhase == .active && connectionError == nil
+        frame != nil && !sending && scenePhase == .active && connectionError == nil
     }
 
     var body: some View {
@@ -180,7 +180,6 @@ private struct WorkspaceBrowserScreen: View {
                 } label: { Image(systemName: "square.on.square") }
                     .accessibilityLabel("タブ").disabled(!acceptsInput)
                 Spacer()
-                controlButton
             }.padding(12)
             if let title = frame?.tabs.first(where: { $0.id == frame?.tabId })?.title, !title.isEmpty {
                 Text(title).font(.caption).lineLimit(1).accessibilityIdentifier("browser.title")
@@ -208,25 +207,23 @@ private struct WorkspaceBrowserScreen: View {
                     ProgressView("Macのブラウザに接続中…")
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            if frame?.control == .yours {
+            HStack {
+                Button { showKeyboard.toggle() } label: { Label("文字入力", systemImage: "keyboard") }
+                Spacer()
+                Button("Tab") { send(.key(key: .tab)) }
+                Button { send(.key(key: .backspace)) } label: { Image(systemName: "delete.left") }
+                    .accessibilityLabel("1文字削除")
+                Button("Enter") { send(.key(key: .enter)) }
+            }.padding(12).disabled(!acceptsInput)
+            if showKeyboard {
                 HStack {
-                    Button { showKeyboard.toggle() } label: { Label("文字入力", systemImage: "keyboard") }
-                    Spacer()
-                    Button("Tab") { send(.key(key: .tab)) }
-                    Button { send(.key(key: .backspace)) } label: { Image(systemName: "delete.left") }
-                        .accessibilityLabel("1文字削除")
-                    Button("Enter") { send(.key(key: .enter)) }
-                }.padding(12).disabled(!acceptsInput)
-                if showKeyboard {
-                    HStack {
-                        SecureField("選択した欄に入力", text: $text)
-                            .textInputAutocapitalization(.never).disableAutocorrection(true)
-                            .textFieldStyle(.roundedBorder).onSubmit(insertText)
-                            .accessibilityIdentifier("browser.text")
-                        Button("入力", action: insertText).disabled(text.isEmpty || !acceptsInput)
-                            .accessibilityIdentifier("browser.type")
-                    }.padding(.horizontal).padding(.bottom, 8)
-                }
+                    SecureField("選択した欄に入力", text: $text)
+                        .textInputAutocapitalization(.never).disableAutocorrection(true)
+                        .textFieldStyle(.roundedBorder).onSubmit(insertText)
+                        .accessibilityIdentifier("browser.text")
+                    Button("入力", action: insertText).disabled(text.isEmpty || !acceptsInput)
+                        .accessibilityIdentifier("browser.type")
+                }.padding(.horizontal).padding(.bottom, 8)
             }
         }
         .task(id: scenePhase == .active) {
@@ -241,20 +238,6 @@ private struct WorkspaceBrowserScreen: View {
             }
         }
         .onDisappear { requestId = UUID(); text = "" }
-    }
-
-    @ViewBuilder private var controlButton: some View {
-        if frame?.control == .yours {
-            Button("AIに戻す") { send(.releaseControl) }
-                .buttonStyle(.borderedProminent).disabled(sending)
-                .accessibilityIdentifier("browser.release")
-        } else if frame?.control == .other {
-            Text("別の端末が操作中").font(.caption)
-        } else {
-            Button(frame?.control == .awaitingHuman ? "操作を引き継ぐ" : "自分で操作する") { send(.takeControl) }
-                .buttonStyle(.bordered).disabled(frame == nil || sending)
-                .accessibilityIdentifier("browser.take")
-        }
     }
 
     private func open() {
@@ -284,7 +267,7 @@ private struct WorkspaceBrowserScreen: View {
         requestId = id
         do {
             let result = try await model.browser(BrowserRequest(
-                threadId: thread, controlToken: frame?.controlToken ?? "",
+                threadId: thread,
                 tabId: frame?.tabId ?? "", imageId: frame?.imageId ?? "", action: action
             ))
             guard !Task.isCancelled, requestId == id, scenePhase == .active else { return }

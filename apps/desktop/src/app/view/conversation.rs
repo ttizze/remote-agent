@@ -14,7 +14,9 @@ impl Desktop {
                     return None;
                 };
                 turn.rows.iter().find_map(|row| match &row.content {
-                    ConversationRowContent::User { item } => Some((index, &item.data.body, turn)),
+                    ConversationRowContent::User { item } => {
+                        item.data.body.as_ref().map(|text| (index, text, turn))
+                    }
                     _ => None,
                 })
             })
@@ -48,9 +50,11 @@ impl Desktop {
             let marker_id = SharedString::from(format!("conversation-marker-{index}"));
             let preview = (distance == Some(0)).then(|| {
                 let answer = turn.rows.iter().find_map(|row| match &row.content {
-                    ConversationRowContent::Response { item, .. } => {
-                        Some(item.data.body.chars().take(240).collect::<String>())
-                    }
+                    ConversationRowContent::Response { item, .. } => item
+                        .data
+                        .body
+                        .as_ref()
+                        .map(|text| text.chars().take(240).collect::<String>()),
                     _ => None,
                 });
                 let preview_width =
@@ -160,6 +164,8 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = item.id.to_string();
+        let title = projected.data.title.as_deref();
+        let body_text = projected.data.body.as_deref();
         let expanded = self.expanded_items.contains(&id);
         let deferred = projected.data.deferred;
         if expanded && deferred {
@@ -176,7 +182,7 @@ impl Desktop {
                 Some(Some(error)) => format!("{error} · 再試行"),
                 None => "詳細を読み込む".to_owned(),
             };
-            let title = projected.data.title.clone();
+            let title = title.expect("activity has a title");
             let toggle = id.clone();
             return v_flex()
                 .gap_2()
@@ -200,33 +206,11 @@ impl Desktop {
         let turn_id = turn.map(|turn| turn.id.clone()).unwrap_or_default();
         match item.body() {
             agent_protocol::items::ItemBody::AssistantText { .. } => {
-                self.markdown(id, &projected.data.body, cx)
+                self.markdown(id, body_text.expect("assistant message has text"), cx)
             }
             agent_protocol::items::ItemBody::ImageGeneration { .. } => {
-                let path = projected
-                    .data
-                    .image_sources
-                    .first()
-                    .map(String::as_str)
-                    .unwrap_or_default();
-                let mut body = v_flex()
-                    .gap_2()
-                    .w_full()
-                    .when(!projected.data.title.is_empty(), |body| {
-                        body.child(div().text_sm().child(projected.data.title.clone()))
-                    });
-                if !path.is_empty() {
-                    body = body.child(self.image(path, false, 320., true, cx));
-                    let path = path.to_owned();
-                    body = body.child(self.button(
-                        format!("open-image-{id}"),
-                        "画像を開く",
-                        cx,
-                        move |s, _, cx| {
-                            s.open_image_gallery(std::sync::Arc::new(path.clone()), false, cx)
-                        },
-                    ));
-                } else if projected.data.image_placeholder {
+                let mut body = v_flex().gap_2().w_full();
+                if projected.data.image_placeholder {
                     body = body.child(
                         skeleton::Skeleton::new()
                             .w_full()
@@ -236,7 +220,13 @@ impl Desktop {
                             .bg(cx.theme().secondary),
                     );
                 }
-                body.into_any_element()
+                for source in &projected.data.image_sources {
+                    body = body.child(self.image(source, false, 320., true, cx));
+                }
+                body.when_some(body_text, |body, text| {
+                    body.child(div().text_sm().child(text.to_owned()))
+                })
+                .into_any_element()
             }
             agent_protocol::items::ItemBody::UserMessage { text, content } => {
                 let mut body = user_message_bubble();
@@ -292,18 +282,18 @@ impl Desktop {
                     projected.data.image_sources.iter().map(String::as_str),
                     cx,
                 );
-                let text = projected.data.body.clone();
+                let text = body_text.expect("user message has text");
+                let copied = text.to_owned();
                 let edit = self.button(format!("edit-{id}"), "", cx, move |s, window, cx| {
-                    selection::set_composer_text(&s.composer, text.clone().into(), window, cx);
+                    selection::set_composer_text(&s.composer, copied.clone().into(), window, cx);
                 });
                 let timestamp = turn.and_then(|turn| turn.started_at.map(|time| time as i64));
-                user_message_row(&id, &projected.data.body, body, timestamp, edit)
-                    .into_any_element()
+                user_message_row(&id, text, body, timestamp, edit).into_any_element()
             }
             agent_protocol::items::ItemBody::CommandExecution {
                 command, exit_code, ..
             } => {
-                let label = projected.data.title.clone();
+                let label = title.expect("command has a title");
                 let toggle = id.clone();
                 let mut body = v_flex().gap_2().child(
                     self.button(
@@ -420,7 +410,7 @@ impl Desktop {
                         format!(
                             "{} {}",
                             if expanded { "⌄" } else { "›" },
-                            projected.data.title.clone()
+                            title.expect("activity has a title")
                         ),
                         cx,
                         move |s, _, _| {
@@ -521,7 +511,7 @@ impl Desktop {
                 ConversationRowContent::Response { item, fork_turn_id } => {
                     body = body.child(self.projected_item(item, turn, cx));
                     if item.data.kind == "agent" {
-                        let text = item.data.body.clone();
+                        let text = item.data.body.clone().expect("assistant message has text");
                         body = body.child(
                             h_flex()
                                 .gap_2()

@@ -24,6 +24,14 @@ pub struct Draft {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_tier: Option<String>,
 }
+/// Device preferences applied only when creating a new conversation draft.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ModelDefaults {
+    pub model: Option<crate::models::ModelRef>,
+    pub effort: Option<String>,
+    pub service_tier: Option<String>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -181,6 +189,8 @@ pub struct TerminalView {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
+    #[serde(default)]
+    pub model_defaults: ModelDefaults,
     #[serde(skip)]
     pub permission_settings: Option<Arc<op::PermissionSettingsState>>,
     #[serde(skip)]
@@ -319,13 +329,15 @@ fn clear_workspace_location(workspace: &mut Workspace) {
 }
 
 pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
-    match event {
+    let (mut next, mut effects) = match event {
         Event::Intent(intent) => reduce_intent(previous, intent),
 
         Event::Notification(message) => notification(previous, message),
         Event::SessionUpdate(update) => notifications::session_update(previous, *update),
         event => reduce_event(previous, event),
-    }
+    };
+    effects.extend(op::prefetch_composer_catalog(&mut next));
+    (next, effects)
 }
 macro_rules! prepare_operations {
     ($intent:expr, $previous:expr, $next:ident, [$($variant:ident),* $(,)?], {$($local:tt)*}) => {
@@ -443,14 +455,20 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             next.epoch += 1;
             let key = DraftKey::Local { key: format!("new:{cwd}") };
             if !previous.drafts.contains_key(&key) {
-                let draft = Draft::default();
-                let (model, effort, tier) = supported_settings(&draft, &previous.models, &previous.model_errors);
-                let draft = Draft {
-                    model: model.cloned(),
-                    effort: effort.map(str::to_owned),
-                    service_tier: tier.map(str::to_owned),
-                    ..draft
+                let mut draft = Draft {
+                    model: previous.model_defaults.model.clone(),
+                    effort: previous.model_defaults.effort.clone(),
+                    service_tier: previous.model_defaults.service_tier.clone(),
+                    ..Default::default()
                 };
+                if !previous.models.is_empty() {
+                    let (model, effort, tier) = supported_settings(
+                        draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(),
+                        &previous.models, &previous.model_errors,
+                    );
+                    let settings = (model.cloned(), effort.map(str::to_owned), tier.map(str::to_owned));
+                    (draft.model, draft.effort, draft.service_tier) = settings;
+                }
                 Arc::make_mut(&mut next.drafts).insert(key.clone(), Arc::new(draft));
             }
             navigate(&mut next, Navigation {
@@ -488,14 +506,27 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             }
         }
 
+        Intent::SelectDefaultModel { model } => {
+            if next.model_defaults.model != model {
+                next.model_defaults = ModelDefaults { model, ..Default::default() };
+            }
+        }
+        Intent::SelectDefaultEffort { effort } => next.model_defaults.effort = effort,
+        Intent::SelectDefaultServiceTier { service_tier } => next.model_defaults.service_tier = service_tier,
         Intent::SetDraft { thread_id, draft } => {
             Arc::make_mut(&mut next.drafts).insert(thread_id, Arc::new(draft));
         }
         Intent::EditComposer { thread_id, text, cursor } => {
             let load_catalog = thread_id == previous.navigation.draft_key
+                && previous.connected
                 && previous.composer_query(&text, cursor as usize).is_some_and(|(_, _, filter)| {
-                    previous.composer_catalog.as_ref().is_none_or(|catalog| catalog.cwd != previous.navigation.cwd)
-                        || (filter.is_empty() && previous.drafts.get(&thread_id).is_none_or(|draft| draft.text != text))
+                    crate::composer::should_refresh_catalog(
+                        previous.composer_catalog.as_ref()
+                            .filter(|catalog| catalog.cwd == previous.navigation.cwd)
+                            .map(|catalog| catalog.loading),
+                        filter,
+                        previous.drafts.get(&thread_id).is_none_or(|draft| draft.text != text),
+                    )
                 });
             set_draft_text(&mut next, thread_id, text);
             if load_catalog {
@@ -548,7 +579,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 _ => unreachable!(),
             };
             if !previous.models.is_empty() {
-                let (model, effort, tier) = supported_settings(&draft, &previous.models, &previous.model_errors);
+                let (model, effort, tier) = supported_settings(draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(), &previous.models, &previous.model_errors);
                 let settings = (
                     model.cloned(),
                     effort.map(str::to_owned),
@@ -805,8 +836,10 @@ fn clear_session_status(thread: &mut Thread) {
     }
 }
 
-fn supported_settings<'a>(
-    draft: &'a Draft,
+pub(crate) fn supported_settings<'a>(
+    selected_model: Option<&'a crate::models::ModelRef>,
+    selected_effort: Option<&'a str>,
+    selected_tier: Option<&'a str>,
     models: &'a [Model],
     errors: &Map<String, Value>,
 ) -> (
@@ -816,20 +849,14 @@ fn supported_settings<'a>(
 ) {
     // Absence in an incomplete catalog is not evidence that a saved choice was removed.
     if !errors.is_empty()
-        && draft.model.is_some()
+        && selected_model.is_some()
         && !models
             .iter()
-            .any(|model| Some(&model.model) == draft.model.as_ref())
+            .any(|model| Some(&model.model) == selected_model)
     {
-        return (
-            draft.model.as_ref(),
-            draft.effort.as_deref(),
-            draft.service_tier.as_deref(),
-        );
+        return (selected_model, selected_effort, selected_tier);
     }
-    let provider = draft
-        .model
-        .as_ref()
+    let provider = selected_model
         .filter(|model| !model.id.is_empty())
         .map(|model| model.provider);
     let mut available = models
@@ -837,7 +864,7 @@ fn supported_settings<'a>(
         .filter(|model| provider.is_none_or(|provider| model.model.provider == provider));
     let model = available
         .clone()
-        .find(|model| Some(&model.model) == draft.model.as_ref())
+        .find(|model| Some(&model.model) == selected_model)
         .or_else(|| {
             available
                 .clone()
@@ -845,15 +872,13 @@ fn supported_settings<'a>(
         })
         .or_else(|| available.next());
     let Some(model) = model else {
-        return (draft.model.as_ref(), None, None);
+        return (selected_model, None, None);
     };
-    let changed = draft.model.as_ref() != Some(&model.model);
+    let changed = selected_model.is_some() && selected_model != Some(&model.model);
     let effort = model
         .supported_reasoning_efforts
         .iter()
-        .find(|effort| {
-            !changed && Some(effort.reasoning_effort.as_str()) == draft.effort.as_deref()
-        })
+        .find(|effort| !changed && Some(effort.reasoning_effort.as_str()) == selected_effort)
         .or_else(|| {
             model
                 .supported_reasoning_efforts
@@ -868,9 +893,7 @@ fn supported_settings<'a>(
                 .as_ref()
                 .is_some_and(|tiers| tiers.iter().any(|tier| tier.id == id))
     };
-    let tier = draft
-        .service_tier
-        .as_deref()
+    let tier = selected_tier
         .filter(|tier| !changed && supported_tier(tier))
         .or_else(|| {
             model

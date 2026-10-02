@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C0DE00000000000000000401 /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000402; };
         D60000000000000000000001 /* SkeletonUI in Frameworks */ = {isa = PBXBuildFile; productRef = D60000000000000000000002; };
         D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */; };
 		E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E50000000000000000000002 /* PrivacyInfo.xcprivacy */; };
@@ -56,6 +57,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		C0DE00000000000000000402 /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
         F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreen.swift; sourceTree = "<group>"; };
 		E50000000000000000000002 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
         C30000000000000000000004 /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
@@ -165,6 +167,7 @@
 				C0DE00000000000000000004 /* ConversationPresentation.swift */,
 				C0DE00000000000000000003 /* AppViewActions.swift */,
 				C0DE00000000000000000002 /* ModelSettingsSheet.swift */,
+				C0DE00000000000000000402 /* AgentSettings.swift */,
 				C0DE00000000000000000203 /* AccountViews.swift */,
 				C0DE00000000000000000001 /* CodexModelSettings.swift */,
 				04926FF582DA33DFFF64E6C5 /* TaskList.swift */,
@@ -316,6 +319,7 @@
 				C0DE00000000000000000104 /* ConversationPresentation.swift in Sources */,
 				C0DE00000000000000000103 /* AppViewActions.swift in Sources */,
 				C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */,
+				C0DE00000000000000000401 /* AgentSettings.swift in Sources */,
 				C0DE00000000000000000202 /* AccountViews.swift in Sources */,
 				C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */,
 				D08EEED058A8C4FE92AA21E2 /* TaskList.swift in Sources */,

@@ -40,6 +40,46 @@ pub(crate) fn state_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "application data directory unavailable".into())
 }
 
+pub(crate) async fn ssh_invitation(
+    destination: &str,
+) -> Result<agent_protocol::models::Invitation, String> {
+    use tokio::io::AsyncReadExt;
+    let destination = agent_core::presentation::connections::validate_ssh_destination(destination)?;
+    let mut child = tokio::process::Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "--",
+            destination,
+            "sh -lc 'exec host-daemon invite'",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| "SSHを起動できません。SSHがインストールされているか確認してください。")?;
+    let result = tokio::time::timeout(Duration::from_secs(20), async {
+        let mut contents = Vec::new();
+        child.stdout.take().expect("SSH stdout is piped").take(64 * 1024 + 1)
+            .read_to_end(&mut contents).await
+            .map_err(|_| "SSHの応答を読み取れません。")?;
+        if contents.len() > 64 * 1024 {
+            return Err("SSHの応答が長すぎます。".into());
+        }
+        let status = child.wait().await.map_err(|_| "SSHの終了を確認できません。")?;
+        if !status.success() {
+            return Err("接続できません。SSHの鍵と接続先を確認し、サーバーでBex Hostを起動してください。".into());
+        }
+        serde_json::from_slice(&contents).map_err(|_| "Bexの接続情報を取得できません。接続先で host-daemon invite を実行できるか確認してください。".into())
+    }).await;
+    result.map_err(|_| "SSH接続がタイムアウトしました。".to_owned())?
+}
+
 /// One identity with separate local and remote endpoints. Views own sessions.
 #[derive(Default)]
 pub(crate) struct Connections {

@@ -77,7 +77,7 @@ struct ThreadMessageRow: View {
         }
         let thumbnails = ForEach(sources.indices, id: \.self) { index in
             ConversationImage(source: SessionImage(reference: sources[index]),
-                              label: item.data.kind == "imageGeneration" ? "生成画像" : "添付画像",
+                              label: isUser ? "添付画像" : "生成画像",
                               identifier: "message.image.\(item.data.id).\(index)", media: media)
                 .frame(width: isUser ? 80 : nil, height: isUser ? 80 : nil)
                 .clipped()
@@ -96,9 +96,9 @@ struct ThreadMessageRow: View {
         VStack(alignment: isUser ? .trailing : .leading, spacing: 14) {
             VStack(alignment: isUser ? .trailing : .leading, spacing: 12) {
                 images
-                if !item.data.body.isEmpty {
+                if let text = item.data.body, !text.isEmpty {
                     if isUser {
-                        Text(item.data.body).font(.system(size: 18))
+                        Text(text).font(.system(size: 18))
                             .padding(14)
                             .background(Color(UIColor.secondarySystemBackground),
                                         in: RoundedRectangle(cornerRadius: 22))
@@ -112,9 +112,9 @@ struct ThreadMessageRow: View {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("item.\(item.data.id)")
             .contextMenu {
-                if isUser, !item.data.body.isEmpty {
+                if isUser, let text = item.data.body, !text.isEmpty {
                     Button {
-                        UIPasteboard.general.string = item.data.body
+                        UIPasteboard.general.string = text
                     } label: {
                         Label("コピー", systemImage: "doc.on.doc")
                     }
@@ -126,7 +126,9 @@ struct ThreadMessageRow: View {
                 }
             }
             if isUser, item.data.nativeId == nil {
-                Text(item.data.title).font(.caption).foregroundStyle(.secondary)
+                if let title = item.data.title {
+                    Text(title).font(.caption).foregroundStyle(.secondary)
+                }
                 if let id = item.source.unknownSubmissionId() {
                     HStack(spacing: 18) {
                         Button { restoreUnknown?(id) } label: {
@@ -143,9 +145,9 @@ struct ThreadMessageRow: View {
                     .buttonStyle(.plain)
                 }
             }
-            if item.data.kind == "agent" {
+            if item.data.kind == "agent", let text = item.data.body {
                 HStack(spacing: 20) {
-                    Button { UIPasteboard.general.string = item.data.body; copied = true } label: {
+                    Button { UIPasteboard.general.string = text; copied = true } label: {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                     }.accessibilityLabel(copied ? "コピーしました" : "回答をコピー")
                     if let fork {
@@ -170,14 +172,16 @@ struct ThreadMessageRow: View {
         .padding(.bottom, isUser ? 12 : 8)
         .sheet(isPresented: $selectingText) {
             NavigationStack {
-                MessageTextSelection(text: item.data.body)
-                    .navigationTitle("テキストを選択")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) {
-                            Button("完了") { selectingText = false }
+                if let text = item.data.body {
+                    MessageTextSelection(text: text)
+                        .navigationTitle("テキストを選択")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("完了") { selectingText = false }
+                            }
                         }
-                    }
+                }
             }
         }
     }
@@ -243,8 +247,9 @@ struct ThreadItemRow: View {
                     }
                 } label: {
                     Label {
-                        Text(item.data.title)
-                            .lineLimit(1)
+                        if let title = item.data.title {
+                            Text(title).lineLimit(1)
+                        }
                     } icon: { Image(systemName: icon) }
                         .font(.system(size: 17))
                         .foregroundColor(.secondary)

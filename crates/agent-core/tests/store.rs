@@ -36,6 +36,137 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 #[tokio::test]
+async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_navigation() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let first = store.dispatch(Intent::ListSessions(op::ListSessions::new(
+        Default::default(),
+    )));
+    let first_request = read(&mut reader).await;
+    assert_eq!(first_request["method"], "host/session/list");
+    let navigation_epoch = store.snapshot().epoch;
+    let mut receipts = Vec::new();
+    for index in 0..40 {
+        receipts.push(if index == 10 || index == 20 {
+            store.dispatch(Intent::ExpandThreadList {
+                project_id: None,
+                projects: true,
+            })
+        } else {
+            store.dispatch(Intent::ListSessions(op::ListSessions::new(
+                (*store.snapshot().list_query).clone(),
+            )))
+        });
+    }
+    assert_eq!(
+        store.snapshot().epoch,
+        navigation_epoch,
+        "list queries must not invalidate conversation reads"
+    );
+    let id = SessionRef::new(ProviderKind::Codex, "selected".to_owned()).unwrap();
+    let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())));
+    assert_eq!(store.snapshot().navigation.thread_id.as_ref(), Some(&id));
+    let open_request = read(&mut reader).await;
+    assert_eq!(
+        open_request["method"], "host/session/open",
+        "refreshes must not fan out while the first list is pending"
+    );
+    receipts.push(store.dispatch(Intent::ExpandThreadList {
+        project_id: None,
+        projects: true,
+    }));
+    writer
+        .reply(
+            &open_request,
+            json!({"result":{"thread":{"id":id,"status":"idle","turns":[]}}}),
+        )
+        .await
+        .unwrap();
+    opening.await.unwrap();
+    assert!(
+        store.snapshot().subscriptions.contains_key(&id),
+        "expanding projects must retain the in-flight conversation subscription"
+    );
+    writer.reply(&first_request, json!({"result":{"data":[],"projects":[{"id":"obsolete","name":"Old project","roots":[]}],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false}})).await.unwrap();
+    first.await.unwrap();
+    assert!(
+        store
+            .snapshot()
+            .threads
+            .as_ref()
+            .unwrap()
+            .projects
+            .is_empty(),
+        "an older query must not replace the expanded list"
+    );
+    let latest = read(&mut reader).await;
+    assert_eq!(latest["method"], "host/session/list");
+    assert_eq!(latest["params"]["projectLimit"], 35);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), reader.read_request())
+            .await
+            .is_err()
+    );
+    writer.reply(&latest, json!({"result":{"data":[],"projects":[{"id":"latest","name":"Expanded project","roots":[]}],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false}})).await.unwrap();
+    for receipt in receipts {
+        receipt.await.unwrap();
+    }
+    assert_eq!(
+        store.snapshot().threads.as_ref().unwrap().projects[0].id,
+        "latest"
+    );
+    assert_eq!(store.snapshot().navigation.thread_id.as_ref(), Some(&id));
+
+    // A list result remains useful after a navigation-only epoch change.
+    let refresh = store.dispatch(Intent::ListSessions(op::ListSessions::new(
+        (*store.snapshot().list_query).clone(),
+    )));
+    let request = read(&mut reader).await;
+    store.dispatch(Intent::ShowThreadList).await.unwrap();
+    writer.reply(&request, json!({"result":{"data":[],"projects":[{"id":"after-navigation","name":"Current project","roots":[]}],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false}})).await.unwrap();
+    refresh.await.unwrap();
+    assert_eq!(
+        store.snapshot().threads.as_ref().unwrap().projects[0].id,
+        "after-navigation"
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_list_refresh_releases_the_next_request_and_close_releases_its_waiters() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let refresh = || {
+        store.dispatch(Intent::ListSessions(op::ListSessions::new(
+            Default::default(),
+        )))
+    };
+    let first = refresh();
+    let request = read(&mut reader).await;
+    let second = refresh();
+    let joined = refresh();
+    // This independent RPC is also a barrier: the queued refreshes were admitted.
+    let models = store.dispatch(Intent::LoadModels(op::LoadModels {}));
+    let model_request = read(&mut reader).await;
+    assert_eq!(model_request["method"], "model/list");
+    writer
+        .reply(
+            &model_request,
+            json!({"result":{"data":[],"nextCursor":null}}),
+        )
+        .await
+        .unwrap();
+    models.await.unwrap();
+    writer.reply(&request, json!({"error":{"code":"provider_failed","message":"list failed","delivery":"notSent"}})).await.unwrap();
+    assert!(first.await.is_err());
+    let second_request = read(&mut reader).await;
+    assert_eq!(second_request["method"], "host/session/list");
+    let pending = refresh();
+    store.close().await.unwrap();
+    for receipt in [second, joined, pending] {
+        assert!(receipt.await.is_err());
+    }
+}
+
+#[tokio::test]
 async fn browser_frames_are_ephemeral_and_pending_reads_end_with_the_connection() {
     use agent_protocol::browser::{BrowserAction, BrowserFrame, BrowserRequest};
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
@@ -45,7 +176,6 @@ async fn browser_frames_are_ephemeral_and_pending_reads_end_with_the_connection(
             provider: ProviderKind::Codex,
             id: "browser-thread".into(),
         },
-        control_token: String::new(),
         tab_id: String::new(),
         image_id: String::new(),
         action: BrowserAction::Read,
@@ -597,8 +727,11 @@ async fn new_conversation_moves_draft_to_pending_before_creation_reply() {
     let rendered =
         agent_core::presentation::conversation::project_conversation(&pending, source, &None);
     assert_eq!(rendered.queued.len(), 1);
-    assert_eq!(rendered.queued[0].data.body, "first message");
-    assert_eq!(rendered.queued[0].data.title, "送信中…");
+    assert_eq!(
+        rendered.queued[0].data.body.as_deref(),
+        Some("first message")
+    );
+    assert_eq!(rendered.queued[0].data.title.as_deref(), Some("送信中…"));
     writer.reply(&request, json!({ "result": {"thread": {"id":{"provider":"codex","id":"created"}, "cwd":"/fixture", "status":"idle", "turns":[]}}})).await.unwrap();
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "host/session/submit");
@@ -1655,50 +1788,49 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
 #[tokio::test]
 async fn a_late_list_reply_cannot_replace_a_new_search() {
     use agent_protocol::models::ListQuery;
-    let (store, mut reader, writer) = setup(Snapshot::default()).await;
-    let old = tokio::spawn({
-        let store = store.clone();
-        async move {
-            store
-                .dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery {
-                    search_term: "old".into(),
-                    ..Default::default()
-                })))
-                .await
-        }
-    });
-    let old_request = read(&mut reader).await;
-    let new = tokio::spawn({
-        let store = store.clone();
-        async move {
-            store
-                .dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery {
-                    search_term: "new".into(),
-                    ..Default::default()
-                })))
-                .await
-        }
-    });
-    let new_request = read(&mut reader).await;
-    let result = |id| json!({"data":[{"id":{"provider":"codex","id":id}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false});
-    writer
-        .reply(&new_request, json!({"result":result("new")}))
+    for failure in [false, true] {
+        let (store, mut reader, writer) = setup(Snapshot::default()).await;
+        let old = store.dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery {
+            search_term: "old".into(),
+            ..Default::default()
+        })));
+        let old_request = read(&mut reader).await;
+        let new = store.dispatch(Intent::ListSessions(op::ListSessions::new(ListQuery {
+            search_term: "new".into(),
+            ..Default::default()
+        })));
+        let requested = store.snapshot();
+        let result = |id| json!({"data":[{"id":{"provider":"codex","id":id}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false});
+        writer
+        .reply(&old_request, if failure {
+            json!({"error":{"code":"provider_failed","message":"old search failed","delivery":"notSent"}})
+        } else {
+            json!({"result":result("old")})
+        })
         .await
         .unwrap();
-    new.await.unwrap().unwrap();
-    writer
-        .reply(&old_request, json!({"result":result("old")}))
-        .await
-        .unwrap();
-    old.await.unwrap().unwrap();
-    assert_eq!(
-        store.snapshot().threads.as_ref().unwrap().data[0]
-            .id
-            .as_ref()
-            .map(|session| session.id.as_str()),
-        Some("new")
-    );
-    assert_eq!(store.snapshot().list_query.search_term, "new");
+        assert_eq!(old.await.is_err(), failure);
+        assert_eq!(
+            store.snapshot(),
+            requested,
+            "the old query must not publish while the new search is pending"
+        );
+        let new_request = read(&mut reader).await;
+        writer
+            .reply(&new_request, json!({"result":result("new")}))
+            .await
+            .unwrap();
+        new.await.unwrap();
+        assert_eq!(
+            store.snapshot().threads.as_ref().unwrap().data[0]
+                .id
+                .as_ref()
+                .map(|session| session.id.as_str()),
+            Some("new")
+        );
+        assert_eq!(store.snapshot().list_query.search_term, "new");
+        store.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -2817,10 +2949,6 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
             Intent::ListAccounts(op::ListAccounts {}),
             json!({"accounts":[],"selectedId":null,"error":null}),
         ),
-        (
-            Intent::ListSessions(op::ListSessions::new(Default::default())),
-            json!({"data":[{"id":{"provider":"codex","id":"old"}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
-        ),
     ] {
         let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
         let loading = store.dispatch(intent);
@@ -3182,6 +3310,96 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
     }).await.unwrap();
 }
 
+#[rstest::rstest]
+#[case::restored(true)]
+#[case::read_failed(false)]
+#[tokio::test]
+async fn session_update_gap_preserves_history_and_only_reports_failed_recovery(
+    #[case] restored: bool,
+) {
+    use agent_protocol::session::{SessionChange, TextField};
+    let id = SessionRef::new(ProviderKind::Codex, "thread".into()).unwrap();
+    let mut conversation = thread("cached");
+    conversation.cwd = None;
+    conversation.history_limit = Some(24);
+    let mut initial = Snapshot::default();
+    Arc::make_mut(&mut initial.conversations).insert(id.clone(), Arc::new(conversation.clone()));
+    Arc::make_mut(&mut initial.drafts).insert(
+        id.clone().into(),
+        Arc::new(Draft {
+            text: "unsent draft".into(),
+            ..Default::default()
+        }),
+    );
+    let (store, mut reader, writer) = setup(initial).await;
+    let old_subscription = store.snapshot().subscriptions[&id];
+    writer
+        .notify(
+            json!({"method":"fixture/session/change", "session":id, "change":SessionChange::Text {
+                turn_id: "turn".into(), item_id: "missing".into(),
+                field: TextField::AssistantText, delta: "unapplied".into(),
+            }}),
+        )
+        .await
+        .unwrap();
+    let recovery = read(&mut reader).await;
+    assert_eq!(recovery["method"], "host/session/open");
+    assert_eq!(recovery["params"]["limit"], 24);
+    assert!(!store.snapshot().subscriptions.contains_key(&id));
+    assert!(store.snapshot().error.is_none());
+    assert_eq!(
+        store.snapshot().conversations[&id].turns,
+        conversation.turns
+    );
+    assert_eq!(store.snapshot().conversations[&id].history_limit, Some(24));
+
+    if restored {
+        let mut recovered = thread("authoritative");
+        recovered.cwd = None;
+        recovered.history_limit = Some(24);
+        writer
+            .reply(&recovery, json!({"result":{"thread":recovered}}))
+            .await
+            .unwrap();
+        wait_for(&store, |state| state.subscriptions.contains_key(&id)).await;
+        assert_ne!(store.snapshot().subscriptions[&id], old_subscription);
+        writer.notify(json!({"method":"fixture/session/change", "session":id, "change":SessionChange::Text {
+            turn_id: "turn".into(), item_id: "item".into(),
+            field: TextField::AssistantText, delta: " updated".into(),
+        }})).await.unwrap();
+        wait_for(&store, |state| matches!(state.conversations[&id].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "authoritative updated")).await;
+        assert!(store.snapshot().error.is_none());
+        assert_eq!(store.snapshot().conversations[&id].history_limit, Some(24));
+    } else {
+        writer
+            .reply(
+                &recovery,
+                json!({"error":{"code":"history_unavailable","message":"history read failed"}}),
+            )
+            .await
+            .unwrap();
+        wait_for(&store, |state| state.error.is_some()).await;
+        assert!(
+            store
+                .snapshot()
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("history read failed")
+        );
+        assert!(!store.snapshot().subscriptions.contains_key(&id));
+        assert_eq!(
+            store.snapshot().conversations[&id].turns,
+            conversation.turns
+        );
+    }
+    assert_eq!(
+        store.snapshot().drafts[&DraftKey::from(id)].text,
+        "unsent draft"
+    );
+    store.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn completed_login_selects_its_account_before_refreshing_without_client_logic() {
     for (provider, id) in [("codex", "added"), ("claude", "claude:added")] {
@@ -3260,6 +3478,238 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
             store.close().await.unwrap();
         }
     }
+}
+
+#[tokio::test]
+async fn composer_catalog_prefetch_and_refresh_keep_candidates_available() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    reader.script_composer_catalog();
+    let navigation = store.dispatch(Intent::NewChat {
+        cwd: "/project".into(),
+    });
+    let mut prefetch = None;
+    for _ in 0..2 {
+        let request = read(&mut reader).await;
+        match request["method"].as_str().unwrap() {
+            "host/composer/catalog" => {
+                assert_eq!(request["params"]["cwd"], "/project");
+                prefetch = Some(request);
+            }
+            "host/workspace/review" => writer
+                .reply(&request, json!({"result":review()}))
+                .await
+                .unwrap(),
+            method => panic!("unexpected prefetch request: {method}"),
+        }
+    }
+    navigation.await.unwrap();
+    let key = store.snapshot().navigation.draft_key.clone();
+    store
+        .dispatch(Intent::EditComposer {
+            thread_id: key.clone(),
+            text: "/".into(),
+            cursor: 1,
+        })
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), reader.read_request())
+            .await
+            .is_err(),
+        "opening the picker must share the pending prefetch"
+    );
+    let catalog = json!({"cwd":"/project","loading":false,"candidates":[{
+        "invocation":{"kind":"Skill","name":"review","path":"/project/review/SKILL.md"},
+        "description":"Review changes"
+    }],"errors":[]});
+    writer
+        .reply(&prefetch.unwrap(), json!({"result":catalog}))
+        .await
+        .unwrap();
+    wait_for(&store, |snapshot| {
+        snapshot
+            .composer_catalog
+            .as_ref()
+            .is_some_and(|c| !c.loading)
+    })
+    .await;
+    let suggestions = store
+        .snapshot()
+        .composer_suggestions("/".into(), 1)
+        .unwrap();
+    assert_eq!(suggestions.candidates[0].invocation.name, "review");
+    assert!(suggestions.status.is_none());
+
+    store
+        .dispatch(Intent::EditComposer {
+            thread_id: key.clone(),
+            text: String::new(),
+            cursor: 0,
+        })
+        .await
+        .unwrap();
+    let refresh = store.dispatch(Intent::EditComposer {
+        thread_id: key.clone(),
+        text: "/".into(),
+        cursor: 1,
+    });
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/composer/catalog");
+    tokio::time::timeout(Duration::from_secs(2), refresh)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(store.snapshot().composer_catalog.as_ref().unwrap().loading);
+    let suggestions = store
+        .snapshot()
+        .composer_suggestions("/".into(), 1)
+        .unwrap();
+    assert_eq!(suggestions.candidates[0].invocation.name, "review");
+    assert!(
+        suggestions.status.is_none(),
+        "cached candidates should display immediately during refresh"
+    );
+    store
+        .dispatch(Intent::EditComposer {
+            thread_id: key,
+            text: "/rev".into(),
+            cursor: 4,
+        })
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), reader.read_request())
+            .await
+            .is_err()
+    );
+    writer
+        .reply(
+            &request,
+            json!({"error":{"code":"unavailable","message":"offline"}}),
+        )
+        .await
+        .unwrap();
+    wait_for(&store, |snapshot| {
+        snapshot
+            .composer_catalog
+            .as_ref()
+            .is_some_and(|c| !c.loading)
+    })
+    .await;
+    let suggestions = store
+        .snapshot()
+        .composer_suggestions("/rev".into(), 4)
+        .unwrap();
+    assert_eq!(suggestions.candidates[0].invocation.name, "review");
+    assert!(
+        suggestions
+            .status
+            .unwrap()
+            .contains("候補を取得できませんでした")
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    reader.script_composer_catalog();
+    let mut pending = Vec::new();
+    for cwd in ["/first", "/second"] {
+        let navigation = store.dispatch(Intent::NewChat { cwd: cwd.into() });
+        for _ in 0..2 {
+            let request = read(&mut reader).await;
+            match request["method"].as_str().unwrap() {
+                "host/composer/catalog" => {
+                    assert_eq!(request["params"]["cwd"], cwd);
+                    pending.push(request);
+                }
+                "host/workspace/review" => writer
+                    .reply(&request, json!({"result":review()}))
+                    .await
+                    .unwrap(),
+                method => panic!("unexpected navigation request: {method}"),
+            }
+        }
+        navigation.await.unwrap();
+    }
+    writer
+        .reply(
+            &pending[0],
+            json!({"result":{"cwd":"/first","loading":false,"candidates":[],"errors":[]}}),
+        )
+        .await
+        .unwrap();
+    store
+        .dispatch(Intent::SetDraftText {
+            thread_id: store.snapshot().navigation.draft_key.clone(),
+            text: "draft".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.snapshot().composer_catalog.as_ref().unwrap().cwd,
+        "/second"
+    );
+    assert!(store.snapshot().composer_catalog.as_ref().unwrap().loading);
+
+    let selection = store.dispatch(Intent::SelectAccount(op::SelectAccount {
+        id: "new".into(),
+    }));
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/account/select");
+    writer
+        .reply(
+            &request,
+            json!({"result":{"provider":"codex","selectedId":"new","persistenceError":null}}),
+        )
+        .await
+        .unwrap();
+    selection.await.unwrap();
+    let mut refreshed = None;
+    for _ in 0..3 {
+        let request = read(&mut reader).await;
+        match request["method"].as_str().unwrap() {
+            "host/account/list" => writer
+                .reply(&request, json!({"result":{"accounts":[]}}))
+                .await
+                .unwrap(),
+            "model/list" => writer
+                .reply(&request, json!({"result":{"data":[]}}))
+                .await
+                .unwrap(),
+            "host/composer/catalog" => refreshed = Some(request),
+            method => panic!("unexpected account refresh: {method}"),
+        }
+    }
+    writer.reply(&pending[1], json!({"result":{"cwd":"/second","loading":false,"candidates":[{
+        "invocation":{"kind":"Skill","name":"old-account","path":"/old/SKILL.md"},"description":"Old"
+    }],"errors":[]}})).await.unwrap();
+    let catalog = json!({"cwd":"/second","loading":false,"candidates":[{
+        "invocation":{"kind":"Skill","name":"new-account","path":"/new/SKILL.md"},"description":"New"
+    }],"errors":[]});
+    writer
+        .reply(&refreshed.unwrap(), json!({"result":catalog}))
+        .await
+        .unwrap();
+    wait_for(&store, |snapshot| {
+        snapshot
+            .composer_catalog
+            .as_ref()
+            .is_some_and(|c| !c.loading)
+    })
+    .await;
+    assert_eq!(
+        store
+            .snapshot()
+            .composer_suggestions("/".into(), 1)
+            .unwrap()
+            .candidates[0]
+            .invocation
+            .name,
+        "new-account"
+    );
+    store.close().await.unwrap();
 }
 
 #[tokio::test]

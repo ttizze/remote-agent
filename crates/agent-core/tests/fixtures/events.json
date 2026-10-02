@@ -131,7 +131,7 @@
     }
   },
   {
-    "name": "full lifecycle replaces item occurrences",
+    "name": "full lifecycle upserts items while retaining live output",
     "previous": {
       "id": {
         "provider": "codex",
@@ -236,22 +236,15 @@
           "status": "completed",
           "items": [
             {
-              "id": "b",
+              "id": "a",
               "status": "unknown",
               "clientInputId": null,
               "body": {
                 "inline": {
                   "body": {
-                    "custom": {
-                      "provider": "codex",
-                      "kind": "futureTool",
-                      "value": {
-                        "id": "b",
-                        "type": "futureTool",
-                        "opaque": {
-                          "retained": true
-                        }
-                      }
+                    "assistantText": {
+                      "text": "live",
+                      "phase": "unknown"
                     }
                   }
                 }

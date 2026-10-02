@@ -115,7 +115,6 @@ struct SessionRef {
 #[uniffi::remote(Record)]
 struct BrowserRequest {
     pub thread_id: SessionRef,
-    pub control_token: String,
     pub tab_id: String,
     pub image_id: String,
     pub action: BrowserAction,
@@ -123,8 +122,6 @@ struct BrowserRequest {
 #[uniffi::remote(Enum)]
 enum BrowserAction {
     Read,
-    TakeControl,
-    ReleaseControl,
     Navigate {
         url: String,
     },
@@ -167,14 +164,6 @@ enum BrowserKey {
     ArrowRight,
     SelectAll,
 }
-#[uniffi::remote(Enum)]
-enum BrowserControl {
-    #[default]
-    Agent,
-    AwaitingHuman,
-    Yours,
-    Other,
-}
 #[uniffi::remote(Record)]
 struct BrowserTab {
     pub id: String,
@@ -190,8 +179,6 @@ struct BrowserDialog {
 struct BrowserFrame {
     pub tabs: Vec<BrowserTab>,
     pub tab_id: String,
-    pub control: BrowserControl,
-    pub control_token: String,
     pub width: u32,
     pub height: u32,
 

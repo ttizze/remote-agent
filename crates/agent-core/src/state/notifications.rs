@@ -116,12 +116,19 @@ pub(super) fn session_update(
     };
     let thread = match update.change.apply(current) {
         Ok(thread) => thread,
-        Err(error) => {
+        Err(_) => {
             Arc::make_mut(&mut next.subscriptions).remove(id);
-            next.error = Some(format!(
-                "会話の更新を適用できないため再取得しています: {error}"
-            ));
-            return (next, vec![Effect::execute(op::ReadThread::new(id.clone()))]);
+            // Recover through a fresh snapshot/subscription. The Store reports
+            // a failed read; a recoverable gap is not a persistent user error.
+            return (
+                next,
+                vec![Effect::execute(
+                    op::ReadThread::new(id.clone()).with_history(
+                        current.history_limit,
+                        current.turns.as_ref().map_or(0, Vec::len),
+                    ),
+                )],
+            );
         }
     };
     use crate::session::SessionChange;

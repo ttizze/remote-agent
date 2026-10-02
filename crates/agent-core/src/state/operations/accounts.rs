@@ -136,7 +136,13 @@ impl Operation for SelectAccountForDraft {
                         draft.effort = None;
                         draft.service_tier = None;
                     }
-                    let (model, effort, tier) = supported_settings(&draft, &models, &Map::new());
+                    let (model, effort, tier) = supported_settings(
+                        draft.model.as_ref(),
+                        draft.effort.as_deref(),
+                        draft.service_tier.as_deref(),
+                        &models,
+                        &Map::new(),
+                    );
                     let settings = (
                         model.cloned(),
                         effort.map(str::to_owned),

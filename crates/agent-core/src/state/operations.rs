@@ -95,6 +95,15 @@ pub enum Intent {
         thread_id: crate::session::SessionRef,
     },
     LoadModels(LoadModels),
+    SelectDefaultModel {
+        model: Option<crate::models::ModelRef>,
+    },
+    SelectDefaultEffort {
+        effort: Option<String>,
+    },
+    SelectDefaultServiceTier {
+        service_tier: Option<String>,
+    },
     SetDraft {
         thread_id: DraftKey,
         draft: Draft,
@@ -145,16 +154,21 @@ pub enum StalePolicy {
     Retry,
 }
 
-/// Typed state application after the Store has checked its single epoch.
+/// Typed state application after Store checks the navigation epoch or list query.
 pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     type Output: Send + std::fmt::Debug + 'static;
     const INVALIDATES: bool = false;
+    /// Metadata refreshes publish later without holding the initiating receipt.
+    const BACKGROUND: bool = false;
     const STALE_POLICY: StalePolicy = StalePolicy::Discard;
     /// Identifies a submission step whose completion and failure belong to the same dispatch.
     fn submission_id(&self) -> Option<&str> {
         None
     }
     fn item_read(&self) -> Option<&ReadItem> {
+        None
+    }
+    fn list_query(&self) -> Option<&crate::models::ListQuery> {
         None
     }
     fn terminal_handle(&self) -> Option<&str> {
