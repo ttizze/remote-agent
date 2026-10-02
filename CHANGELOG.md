@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Move Linux and Android CI and Rust toolchain lookup from Hetzner to GitHub-hosted Ubuntu 24.04 runners with the pinned Nix environments. Keep native Windows CI and fix filesystem and CRLF assumptions in its shared presentation fixtures.
+
 - Keep Host connections alive through bursts of small session updates. Bound outbound queues by a shared 16 MiB allocation budget instead of a 128-message cutoff, and record the reason when a queue or invalid update closes a connection.
 
 - Recover UDP transports after a failed network-change rebind using a pinned netwatch fix, preserving explicit close semantics. Retain bounded network-change, rebind, and QUIC failure diagnostics without saving dependency payloads or addresses.

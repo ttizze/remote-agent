@@ -6,7 +6,7 @@ The workspace pins netwatch 0.19.3 to a fork commit containing [UDP rebind recov
 
 ## Supported operating systems
 
-Except for Linux (existing CI baseline retained), BEX supports only the latest generally available OS major, including its stable minor/patch releases. Betas, release candidates, older majors and future majors are outside the support contract. Minimum deployment versions prevent installation on older Apple/Android systems; they do not impose a runtime upper-version kill switch.
+Except for Linux (Ubuntu 24.04 CI baseline), BEX supports only the latest generally available OS major, including its stable minor/patch releases. Betas, release candidates, older majors and future majors are outside the support contract. Minimum deployment versions prevent installation on older Apple/Android systems; they do not impose a runtime upper-version kill switch.
 
 Verified on **2026-09-13**:
 
