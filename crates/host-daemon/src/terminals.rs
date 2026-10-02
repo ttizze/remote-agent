@@ -1,52 +1,19 @@
 //! Device-owned PTYs, retained across transport disconnects. The private supervisor pipe carries terminal I/O;
 //! only this owner publishes events and grants access to a process handle.
+mod screen;
+mod session;
+
 use crate::host_rpc::routing::{SessionId, SessionRouter};
-use agent_protocol::{
-    operations::TerminalSize,
-    protocol::{Call, Notification},
-};
-use agent_transport::peer::JsonlReader;
-use alacritty_terminal::grid::Dimensions as _;
-use bex_process::{PtyCommand, PtyEvent};
+use agent_protocol::{operations::TerminalSize, protocol::Call};
+use session::Worker;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
-use tokio::{
-    io::AsyncWriteExt,
-    sync::{mpsc, oneshot, watch},
-};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Default)]
-struct Replies(Arc<Mutex<Vec<alacritty_terminal::event::Event>>>);
-impl alacritty_terminal::event::EventListener for Replies {
-    fn send_event(&self, event: alacritty_terminal::event::Event) {
-        use alacritty_terminal::event::Event;
-        if matches!(
-            event,
-            Event::PtyWrite(_)
-                | Event::ColorRequest(..)
-                | Event::TextAreaSizeRequest(_)
-                | Event::ClipboardLoad(..)
-        ) {
-            self.0.lock().unwrap().push(event);
-        }
-    }
-}
-struct Dimensions(TerminalSize);
-impl alacritty_terminal::grid::Dimensions for Dimensions {
-    fn total_lines(&self) -> usize {
-        self.screen_lines()
-    }
-    fn screen_lines(&self) -> usize {
-        self.0.rows as usize
-    }
-    fn columns(&self) -> usize {
-        self.0.cols as usize
-    }
-}
 type Receipt = oneshot::Sender<Result<(), String>>;
 struct Command {
     action: Action,
@@ -306,231 +273,10 @@ impl Terminals {
         }
     }
 }
-struct Worker {
-    router: SessionRouter,
-    attached: Arc<Mutex<Option<SessionId>>>,
-    started: Arc<std::sync::atomic::AtomicBool>,
-    handle: String,
-    stop: CancellationToken,
-    input: mpsc::Receiver<Command>,
-    ready: Option<Receipt>,
-}
-impl Worker {
-    fn publish(&self, event: Notification) {
-        let mut attached = self.attached.lock().unwrap();
-        if let Some(owner) = *attached
-            && self.router.send(owner, event).is_err()
-        {
-            *attached = None;
-        }
-    }
-    async fn run(mut self, cwd: PathBuf, size: TerminalSize) -> Result<(), String> {
-        let mut pending: Option<(u64, Receipt)> = None;
-        let replies = Replies::default();
-        let mut screen = alacritty_terminal::Term::new(
-            alacritty_terminal::term::Config::default(),
-            &Dimensions(size),
-            replies.clone(),
-        );
-        let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
-        let mut cleanup = Ok(());
-        let result = async {
-            if self.stop.is_cancelled() { return Err("terminal startup cancelled".into()); }
-            let mut child = bex_process::terminal_command().and_then(|mut command| command.spawn()).map_err(|error| error.to_string())?;
-            cleanup = Err("terminal cleanup incomplete".into());
-            let mut stdin = child.stdin().take().ok_or("terminal input pipe unavailable")?;
-            let mut output = JsonlReader::new(child.stdout().take().ok_or("terminal output pipe unavailable")?);
-            let initialize = PtyCommand::Start { command:crate::platform::terminal_command().iter().map(|value| (*value).into()).collect(), cwd:cwd.to_string_lossy().into_owned(), rows:size.rows, cols:size.cols };
-            let mut next_id = 0u64;
-            let interaction: Result<(), String> = async {
-                write(&mut stdin, &initialize).await?;
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = self.stop.cancelled() => return Ok(()),
-                        line = output.read_line() => {
-                            let line = line.map_err(|error| error.to_string())?.ok_or("terminal supervisor exited without a result")?;
-                            match serde_json::from_str::<PtyEvent>(&line).map_err(|error| error.to_string())? {
-                                PtyEvent::Started => { self.publish(Notification::TerminalRestored { handle: self.handle.clone(), data: screen.ansi_checkpoint(None), cols: size.cols, rows: size.rows }); self.started.store(true, std::sync::atomic::Ordering::Release); if let Some(ready) = self.ready.take() { let _ = ready.send(Ok(())); } }
-                                PtyEvent::Output { data } => {
-                                    parser.advance(&mut screen, &data);
-                                    // The Host is the sole terminal-query responder, even during disconnects.
-                                    let output_replies=std::mem::take(&mut *replies.0.lock().unwrap());
-                                    for reply in output_replies {
-                                        use alacritty_terminal::event::{Event, WindowSize};
-                                        use alacritty_terminal::vte::ansi::Rgb;
-                                        let data = match reply {
-                                            Event::PtyWrite(data)=>data,
-                                            Event::ColorRequest(index,format)=> {
-                                                let value=agent_protocol::operations::terminal_color(index as u16);
-                                                let color=screen.colors()[index].unwrap_or(Rgb {r:(value>>16) as u8,g:(value>>8) as u8,b:value as u8});
-                                                format(color)
-                                            }
-                                            Event::TextAreaSizeRequest(format)=>format(WindowSize {num_cols:screen.columns() as u16,num_lines:screen.screen_lines() as u16,cell_width:0,cell_height:0}),
-                                            Event::ClipboardLoad(_,format)=>format(""),
-                                            _=>unreachable!(),
-                                        };
-                                        write(&mut stdin,&PtyCommand::Write{id:0,data:data.into_bytes()}).await?;
-                                    }
-                                    self.publish(Notification::Output { handle: self.handle.clone(), data });
-                                },
-                                PtyEvent::Ack { id, error } => {
-                                    if id == 0 { if let Some(error)=error {return Err(error);} continue; }
-                                    let (expected, complete) = pending.take().ok_or("unexpected terminal acknowledgement")?;
-                                    if expected != id { let _ = complete.send(Err("terminal acknowledgement ID changed".into())); return Err("terminal acknowledgement ID changed".into()); }
-                                    let _ = complete.send(error.map_or(Ok(()), Err));
-                                }
-                                PtyEvent::Exited { code } => { self.publish(Notification::Exited { handle: self.handle.clone(), code: i32::try_from(code).unwrap_or(1) }); return Ok(()); }
-                                PtyEvent::Failed { message } => return Err(message),
-                            }
-                        }
-                        command = self.input.recv(), if self.ready.is_none() && pending.is_none() => {
-                            let Some(command) = command else { return Ok(()) };
-                            if let Action::Attach(owner, size) = command.action {
-                                if let Err(error) = self.router.ensure_session(owner) { let _=command.complete.send(Err(error)); continue; }
-                                let previous=self.attached.lock().unwrap().replace(owner);
-                                if let Some(previous)=previous.filter(|previous|*previous!=owner) {
-                                    let _=self.router.send(previous, Notification::TerminalDetached { handle: self.handle.clone() });
-                                }
-                                if screen.columns()!=usize::from(size.cols) || screen.screen_lines()!=usize::from(size.rows) {
-                                    screen.resize(Dimensions(size));
-                                    write(&mut stdin,&PtyCommand::Resize{id:0,rows:size.rows,cols:size.cols}).await?;
-                                }
-                                let mut data=screen.ansi_checkpoint(parser.preceding_char());
-                                data.extend(parser.checkpoint_tail());
-                                let result=self.router.send(owner, Notification::TerminalRestored { handle: self.handle.clone(), data, cols: screen.columns() as u16, rows: screen.screen_lines() as u16 });
-                                if result.is_err() { *self.attached.lock().unwrap()=None; }
-                                let _=command.complete.send(result);
-                                continue;
-                            }
-                            next_id = next_id.checked_add(1).ok_or("terminal operation ID exhausted")?;
-                            let action = match command.action {
-                                Action::Write(data) => PtyCommand::Write {id:next_id,data},
-                                Action::Resize(size) => {screen.resize(Dimensions(size)); PtyCommand::Resize {id:next_id,rows:size.rows,cols:size.cols}},
-                                Action::Attach(_, _) => unreachable!(),
-                            };
-                            pending = Some((next_id, command.complete));
-                            tokio::select! {
-                                _ = self.stop.cancelled() => return Ok(()),
-                                result = write(&mut stdin, &action) => result?,
-                            }
-                        }
-                    }
-                }
-            }.await;
-            // EOF is the supervisor's lifetime signal. Keep the owner record
-            // until its entire PTY session/Job Object has finished cleanup.
-            // Killing the supervisor on a deadline would strand its jobs.
-            drop(output);
-            drop(stdin);
-            cleanup = child.wait().await.map_err(|error| error.to_string()).and_then(|status| {
-                if status.success() { Ok(()) } else { Err(format!("terminal cleanup failed: {status}")) }
-            });
-            cleanup.clone()?;
-            if self.stop.is_cancelled() { self.publish(Notification::Exited { handle: self.handle.clone(), code: 0 }); }
-            interaction
-        }.await;
-        if let Some(ready) = self.ready.take() {
-            let _ = ready.send(Err(result
-                .clone()
-                .err()
-                .unwrap_or_else(|| "terminal startup cancelled".into())));
-        }
-        if let Some((_, complete)) = pending {
-            let _ = complete.send(Err("terminal has exited".into()));
-        }
-        if let Err(message) = result {
-            self.publish(Notification::TerminalFailed {
-                handle: self.handle.clone(),
-                reason: message,
-            });
-        }
-        cleanup
-    }
-}
-async fn write(
-    output: &mut tokio::process::ChildStdin,
-    command: &PtyCommand,
-) -> Result<(), String> {
-    let mut data = serde_json::to_vec(command).map_err(|error| error.to_string())?;
-    data.push(b'\n');
-    output
-        .write_all(&data)
-        .await
-        .map_err(|error| error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn checkpoint_restores_screen_modes_and_split_sequences() {
-        use alacritty_terminal::{Term, term::Config, vte::ansi::Processor};
-        let size = TerminalSize { rows: 5, cols: 12 };
-        let basic = [
-            (
-                b"hello\r\nworld\x1b[31m!\x1b[3;8H".as_slice(),
-                b"again".as_slice(),
-            ),
-            (
-                b"original\x1b[?1049h\x1b[2;4r\x1b[?6hALT\x1b[?2004h",
-                b"\r\nmore\x1b[?1049l!",
-            ),
-            (b"012345678901", b"next"),
-            (b"hi\x1b[38;2;12;", b"34;56mcolor"),
-            (b"\xe6\x97", b"\xa5\xe6\x9c\xac"),
-            (b"abc\x1b[2J", b"\x1b[3b"),
-            (b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix", b"\r\nseven"),
-        ];
-        let sequences = [
-            "日本語\r\n12345678901日\r\ne\u{301}\x1b[31;44;1mred\x1b[0m",
-            "abc\x1b7\r\nother\x1b8!",
-            "123456789012\x1b7\r\nnext\x1b8X",
-            "screen\x1b[?1049h\x1b[2;4r\x1b[?6hALT\x1b[?1049l!",
-            "abc\x1b]0;title\x1b\\hello\x1b[38;2;12;34;56mRGB",
-            "before\x1b[?2026hupdate\r\nmore\x1b[?2026lafter",
-        ];
-        let cases =
-            basic.into_iter().chain(sequences.iter().flat_map(|text| {
-                (0..=text.len()).map(move |index| text.as_bytes().split_at(index))
-            }));
-        for (before, after) in cases {
-            let mut original = Term::new(Config::default(), &Dimensions(size), Replies::default());
-            let mut parser: Processor = Default::default();
-            parser.advance(&mut original, before);
-            let mut restored = Term::new(Config::default(), &Dimensions(size), Replies::default());
-            let mut reader: Processor = Default::default();
-            let mut checkpoint = original.ansi_checkpoint(parser.preceding_char());
-            checkpoint.extend(parser.checkpoint_tail());
-            reader.advance(&mut restored, &checkpoint);
-            parser.advance(&mut original, after);
-            reader.advance(&mut restored, after);
-            assert_eq!(original.mode(), restored.mode(), "{before:?}");
-            assert_eq!(
-                original.grid().cursor.point,
-                restored.grid().cursor.point,
-                "{before:?}"
-            );
-            assert_eq!(
-                original.grid().history_size(),
-                restored.grid().history_size(),
-                "{before:?}"
-            );
-            for row in -(original.grid().history_size() as i32)..5 {
-                for col in 0..12 {
-                    use alacritty_terminal::index::{Column, Line};
-                    let a = &original.grid()[Line(row)][Column(col)];
-                    let b = &restored.grid()[Line(row)][Column(col)];
-                    assert_eq!(
-                        (a.c, a.fg, a.bg, a.flags, a.zerowidth()),
-                        (b.c, b.fg, b.bg, b.flags, b.zerowidth()),
-                        "{before:?}, {row}:{col}"
-                    );
-                }
-            }
-        }
-    }
-
+    use agent_protocol::protocol::Notification;
     #[cfg(unix)]
     #[tokio::test]
     async fn reattach_retains_shell_and_detach_only_releases_one_terminal() {
