@@ -6,7 +6,6 @@ use agent_protocol::{
     protocol::{Call, Notification},
 };
 use agent_transport::peer::JsonlReader;
-use alacritty_terminal::grid::Dimensions as _;
 use bex_process::{PtyCommand, PtyEvent};
 use std::{
     collections::HashMap,
@@ -19,34 +18,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Default)]
-struct Replies(Arc<Mutex<Vec<alacritty_terminal::event::Event>>>);
-impl alacritty_terminal::event::EventListener for Replies {
-    fn send_event(&self, event: alacritty_terminal::event::Event) {
-        use alacritty_terminal::event::Event;
-        if matches!(
-            event,
-            Event::PtyWrite(_)
-                | Event::ColorRequest(..)
-                | Event::TextAreaSizeRequest(_)
-                | Event::ClipboardLoad(..)
-        ) {
-            self.0.lock().unwrap().push(event);
-        }
-    }
-}
-struct Dimensions(TerminalSize);
-impl alacritty_terminal::grid::Dimensions for Dimensions {
-    fn total_lines(&self) -> usize {
-        self.screen_lines()
-    }
-    fn screen_lines(&self) -> usize {
-        self.0.rows as usize
-    }
-    fn columns(&self) -> usize {
-        self.0.cols as usize
-    }
-}
 type Receipt = oneshot::Sender<Result<(), String>>;
 struct Command {
     action: Action,
@@ -306,6 +277,50 @@ impl Terminals {
         }
     }
 }
+struct Pending {
+    id: u64,
+    kind: PendingKind,
+    complete: Receipt,
+}
+#[derive(Clone, Copy)]
+enum PendingKind {
+    Ack,
+    Checkpoint {
+        owner: SessionId,
+        size: TerminalSize,
+        initial: bool,
+    },
+}
+impl Pending {
+    fn take(pending: &mut Option<Self>, id: u64) -> Result<Self, String> {
+        let operation = pending
+            .take()
+            .ok_or("unexpected terminal acknowledgement")?;
+        if operation.id != id {
+            return operation.fail("terminal acknowledgement ID changed");
+        }
+        Ok(operation)
+    }
+
+    fn fail<T>(self, message: &str) -> Result<T, String> {
+        let error = message.to_owned();
+        let _ = self.complete.send(Err(error.clone()));
+        Err(error)
+    }
+
+    fn acknowledge(self, error: Option<String>) -> Result<(), String> {
+        if matches!(self.kind, PendingKind::Checkpoint { .. }) && error.is_none() {
+            return self.fail("terminal checkpoint acknowledged without a snapshot");
+        }
+        let result = error.map_or(Ok(()), Err);
+        let _ = self.complete.send(result.clone());
+        if matches!(self.kind, PendingKind::Checkpoint { initial: true, .. }) {
+            result
+        } else {
+            Ok(())
+        }
+    }
+}
 struct Worker {
     router: SessionRouter,
     attached: Arc<Mutex<Option<SessionId>>>,
@@ -324,15 +339,65 @@ impl Worker {
             *attached = None;
         }
     }
-    async fn run(mut self, cwd: PathBuf, size: TerminalSize) -> Result<(), String> {
-        let mut pending: Option<(u64, Receipt)> = None;
-        let replies = Replies::default();
-        let mut screen = alacritty_terminal::Term::new(
-            alacritty_terminal::term::Config::default(),
-            &Dimensions(size),
-            replies.clone(),
+    fn restore(&self, owner: SessionId, data: Vec<u8>, size: TerminalSize) -> Result<(), String> {
+        let mut attached = self.attached.lock().unwrap();
+        // An attach may have waited behind output or another operation. Do not
+        // evict its current owner for a session which closed in the meantime.
+        self.router.ensure_session(owner)?;
+        let previous = attached.replace(owner);
+        if let Some(previous) = previous.filter(|previous| *previous != owner) {
+            let _ = self.router.send(
+                previous,
+                Notification::TerminalDetached {
+                    handle: self.handle.clone(),
+                },
+            );
+        }
+        let result = self.router.send(
+            owner,
+            Notification::TerminalRestored {
+                handle: self.handle.clone(),
+                data,
+                cols: size.cols,
+                rows: size.rows,
+            },
         );
-        let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+        if result.is_err() {
+            *attached = None;
+        }
+        result
+    }
+
+    fn checkpoint(
+        &self,
+        pending: Pending,
+        data: Vec<u8>,
+        size: TerminalSize,
+    ) -> Result<(), String> {
+        let PendingKind::Checkpoint {
+            owner,
+            size: expected,
+            initial,
+        } = pending.kind
+        else {
+            return pending.fail("unexpected terminal checkpoint");
+        };
+        if size.rows != expected.rows || size.cols != expected.cols {
+            return pending.fail("terminal checkpoint size changed");
+        }
+        let result = self.restore(owner, data, size);
+        if initial && result.is_ok() {
+            self.started
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        let _ = pending.complete.send(result.clone());
+        // A failed reconnect leaves the shell with its existing attachment.
+        // A failed initial snapshot must release the startup reservation.
+        if initial { result } else { Ok(()) }
+    }
+
+    async fn run(mut self, cwd: PathBuf, size: TerminalSize) -> Result<(), String> {
+        let mut pending: Option<Pending> = None;
         let mut cleanup = Ok(());
         let result = async {
             if self.stop.is_cancelled() { return Err("terminal startup cancelled".into()); }
@@ -351,34 +416,30 @@ impl Worker {
                         line = output.read_line() => {
                             let line = line.map_err(|error| error.to_string())?.ok_or("terminal supervisor exited without a result")?;
                             match serde_json::from_str::<PtyEvent>(&line).map_err(|error| error.to_string())? {
-                                PtyEvent::Started => { self.publish(Notification::TerminalRestored { handle: self.handle.clone(), data: screen.ansi_checkpoint(None), cols: size.cols, rows: size.rows }); self.started.store(true, std::sync::atomic::Ordering::Release); if let Some(ready) = self.ready.take() { let _ = ready.send(Ok(())); } }
+                                PtyEvent::Started => {
+                                    let owner = self.attached.lock().unwrap().ok_or("terminal startup cancelled")?;
+                                    self.router.ensure_session(owner)?;
+                                    next_id = next_id.checked_add(1).ok_or("terminal operation ID exhausted")?;
+                                    let complete = self.ready.take().ok_or("terminal supervisor started twice")?;
+                                    pending = Some(Pending {
+                                        id: next_id,
+                                        kind: PendingKind::Checkpoint { owner, size, initial: true },
+                                        complete,
+                                    });
+                                    write(&mut stdin, &PtyCommand::Checkpoint { id: next_id, rows: size.rows, cols: size.cols }).await?;
+                                }
                                 PtyEvent::Output { data } => {
-                                    parser.advance(&mut screen, &data);
-                                    // The Host is the sole terminal-query responder, even during disconnects.
-                                    let output_replies=std::mem::take(&mut *replies.0.lock().unwrap());
-                                    for reply in output_replies {
-                                        use alacritty_terminal::event::{Event, WindowSize};
-                                        use alacritty_terminal::vte::ansi::Rgb;
-                                        let data = match reply {
-                                            Event::PtyWrite(data)=>data,
-                                            Event::ColorRequest(index,format)=> {
-                                                let value=agent_protocol::operations::terminal_color(index as u16);
-                                                let color=screen.colors()[index].unwrap_or(Rgb {r:(value>>16) as u8,g:(value>>8) as u8,b:value as u8});
-                                                format(color)
-                                            }
-                                            Event::TextAreaSizeRequest(format)=>format(WindowSize {num_cols:screen.columns() as u16,num_lines:screen.screen_lines() as u16,cell_width:0,cell_height:0}),
-                                            Event::ClipboardLoad(_,format)=>format(""),
-                                            _=>unreachable!(),
-                                        };
-                                        write(&mut stdin,&PtyCommand::Write{id:0,data:data.into_bytes()}).await?;
+                                    // The supervisor has already parsed these bytes and answered
+                                    // terminal queries. Startup output is part of its first snapshot.
+                                    if self.started.load(std::sync::atomic::Ordering::Acquire) {
+                                        self.publish(Notification::Output { handle: self.handle.clone(), data });
                                     }
-                                    self.publish(Notification::Output { handle: self.handle.clone(), data });
-                                },
+                                }
                                 PtyEvent::Ack { id, error } => {
-                                    if id == 0 { if let Some(error)=error {return Err(error);} continue; }
-                                    let (expected, complete) = pending.take().ok_or("unexpected terminal acknowledgement")?;
-                                    if expected != id { let _ = complete.send(Err("terminal acknowledgement ID changed".into())); return Err("terminal acknowledgement ID changed".into()); }
-                                    let _ = complete.send(error.map_or(Ok(()), Err));
+                                    Pending::take(&mut pending, id)?.acknowledge(error)?;
+                                }
+                                PtyEvent::Checkpoint { id, data, rows, cols } => {
+                                    self.checkpoint(Pending::take(&mut pending, id)?, data, TerminalSize { rows, cols })?;
                                 }
                                 PtyEvent::Exited { code } => { self.publish(Notification::Exited { handle: self.handle.clone(), code: i32::try_from(code).unwrap_or(1) }); return Ok(()); }
                                 PtyEvent::Failed { message } => return Err(message),
@@ -386,30 +447,25 @@ impl Worker {
                         }
                         command = self.input.recv(), if self.ready.is_none() && pending.is_none() => {
                             let Some(command) = command else { return Ok(()) };
-                            if let Action::Attach(owner, size) = command.action {
-                                if let Err(error) = self.router.ensure_session(owner) { let _=command.complete.send(Err(error)); continue; }
-                                let previous=self.attached.lock().unwrap().replace(owner);
-                                if let Some(previous)=previous.filter(|previous|*previous!=owner) {
-                                    let _=self.router.send(previous, Notification::TerminalDetached { handle: self.handle.clone() });
-                                }
-                                if screen.columns()!=usize::from(size.cols) || screen.screen_lines()!=usize::from(size.rows) {
-                                    screen.resize(Dimensions(size));
-                                    write(&mut stdin,&PtyCommand::Resize{id:0,rows:size.rows,cols:size.cols}).await?;
-                                }
-                                let mut data=screen.ansi_checkpoint(parser.preceding_char());
-                                data.extend(parser.checkpoint_tail());
-                                let result=self.router.send(owner, Notification::TerminalRestored { handle: self.handle.clone(), data, cols: screen.columns() as u16, rows: screen.screen_lines() as u16 });
-                                if result.is_err() { *self.attached.lock().unwrap()=None; }
-                                let _=command.complete.send(result);
+                            if let Action::Attach(owner, _) = command.action
+                                && let Err(error) = self.router.ensure_session(owner)
+                            {
+                                let _ = command.complete.send(Err(error));
                                 continue;
                             }
                             next_id = next_id.checked_add(1).ok_or("terminal operation ID exhausted")?;
-                            let action = match command.action {
-                                Action::Write(data) => PtyCommand::Write {id:next_id,data},
-                                Action::Resize(size) => {screen.resize(Dimensions(size)); PtyCommand::Resize {id:next_id,rows:size.rows,cols:size.cols}},
-                                Action::Attach(_, _) => unreachable!(),
+                            let (action, kind) = match command.action {
+                                Action::Write(data) => (PtyCommand::Write { id: next_id, data }, PendingKind::Ack),
+                                Action::Resize(size) => (PtyCommand::Resize { id: next_id, rows: size.rows, cols: size.cols }, PendingKind::Ack),
+                                Action::Attach(owner, size) => (
+                                    PtyCommand::Checkpoint { id: next_id, rows: size.rows, cols: size.cols },
+                                    PendingKind::Checkpoint { owner, size, initial: false },
+                                ),
                             };
-                            pending = Some((next_id, command.complete));
+                            // Keep publishing to the previous owner until the supervisor's
+                            // ordered checkpoint arrives. Switching earlier would deliver
+                            // bytes to the new owner both before and inside its snapshot.
+                            pending = Some(Pending { id: next_id, kind, complete: command.complete });
                             tokio::select! {
                                 _ = self.stop.cancelled() => return Ok(()),
                                 result = write(&mut stdin, &action) => result?,
@@ -436,8 +492,8 @@ impl Worker {
                 .err()
                 .unwrap_or_else(|| "terminal startup cancelled".into())));
         }
-        if let Some((_, complete)) = pending {
-            let _ = complete.send(Err("terminal has exited".into()));
+        if let Some(pending) = pending {
+            let _ = pending.complete.send(Err("terminal has exited".into()));
         }
         if let Err(message) = result {
             self.publish(Notification::TerminalFailed {
@@ -463,6 +519,233 @@ async fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alacritty_terminal::grid::Dimensions as _;
+
+    // These helpers belong only to the byte-boundary checkpoint contract test.
+    // The supervisor owns the production terminal and parser.
+    struct Dimensions(TerminalSize);
+    impl alacritty_terminal::grid::Dimensions for Dimensions {
+        fn total_lines(&self) -> usize {
+            self.screen_lines()
+        }
+        fn screen_lines(&self) -> usize {
+            self.0.rows as usize
+        }
+        fn columns(&self) -> usize {
+            self.0.cols as usize
+        }
+    }
+    #[derive(Default)]
+    struct Replies {}
+    impl alacritty_terminal::event::EventListener for Replies {
+        fn send_event(&self, _: alacritty_terminal::event::Event) {}
+    }
+
+    fn worker(router: SessionRouter, owner: SessionId) -> Worker {
+        let (_, input) = mpsc::channel(1);
+        Worker {
+            router,
+            attached: Arc::new(Mutex::new(Some(owner))),
+            started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            handle: "checkpoint".into(),
+            stop: CancellationToken::new(),
+            input,
+            ready: None,
+        }
+    }
+
+    fn pending(kind: PendingKind) -> (Pending, oneshot::Receiver<Result<(), String>>) {
+        let (complete, completed) = oneshot::channel();
+        (
+            Pending {
+                id: 1,
+                kind,
+                complete,
+            },
+            completed,
+        )
+    }
+
+    #[tokio::test]
+    async fn checkpoint_delivery_switches_owner_after_preceding_output() {
+        let router = SessionRouter::new();
+        let mut previous = router.open_authenticated_session(Some("phone".into()));
+        let mut next = router.open_authenticated_session(Some("phone".into()));
+        let worker = worker(router, previous.id());
+        let size = TerminalSize { rows: 31, cols: 93 };
+        let (operation, completed) = pending(PendingKind::Checkpoint {
+            owner: next.id(),
+            size,
+            initial: false,
+        });
+        // Output before the checkpoint still belongs to the previous owner.
+        let before = b"raw\x1b[38;2;12;\xe6\x97".to_vec();
+        worker.publish(Notification::Output {
+            handle: worker.handle.clone(),
+            data: before.clone(),
+        });
+        assert!(matches!(
+            agent_protocol::protocol::decode::<Notification>(&previous.recv().await.unwrap()).unwrap(),
+            Notification::Output { data, .. } if data == before
+        ));
+        assert!(futures_util::poll!(Box::pin(next.recv())).is_pending());
+        assert_eq!(*worker.attached.lock().unwrap(), Some(previous.id()));
+
+        let snapshot = b"snapshot\x1b[38;2;12;\xe6\x97".to_vec();
+        worker
+            .checkpoint(operation, snapshot.clone(), size)
+            .unwrap();
+        completed.await.unwrap().unwrap();
+        assert_eq!(*worker.attached.lock().unwrap(), Some(next.id()));
+        assert!(matches!(
+            agent_protocol::protocol::decode::<Notification>(&previous.recv().await.unwrap()).unwrap(),
+            Notification::TerminalDetached { handle } if handle == worker.handle
+        ));
+        assert!(matches!(
+            agent_protocol::protocol::decode::<Notification>(&next.recv().await.unwrap()).unwrap(),
+            Notification::TerminalRestored { data, rows, cols, .. }
+                if data == snapshot && rows == size.rows && cols == size.cols
+        ));
+        let after = b"\xa5after".to_vec();
+        worker.publish(Notification::Output {
+            handle: worker.handle.clone(),
+            data: after.clone(),
+        });
+        assert!(matches!(
+            agent_protocol::protocol::decode::<Notification>(&next.recv().await.unwrap()).unwrap(),
+            Notification::Output { data, .. } if data == after
+        ));
+        assert!(futures_util::poll!(Box::pin(previous.recv())).is_pending());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_for_closed_session_keeps_previous_owner() {
+        let router = SessionRouter::new();
+        let mut previous = router.open_authenticated_session(Some("phone".into()));
+        let next = router.open_authenticated_session(Some("phone".into()));
+        let worker = worker(router.clone(), previous.id());
+        let size = TerminalSize { rows: 24, cols: 80 };
+        let (operation, completed) = pending(PendingKind::Checkpoint {
+            owner: next.id(),
+            size,
+            initial: false,
+        });
+        router.ensure_session(next.id()).unwrap();
+        router.close_session(next.id());
+        worker
+            .checkpoint(operation, b"snapshot".to_vec(), size)
+            .unwrap();
+        assert!(completed.await.unwrap().is_err());
+        assert_eq!(*worker.attached.lock().unwrap(), Some(previous.id()));
+        worker.publish(Notification::Output {
+            handle: worker.handle.clone(),
+            data: b"still attached".to_vec(),
+        });
+        assert!(matches!(
+            agent_protocol::protocol::decode::<Notification>(&previous.recv().await.unwrap()).unwrap(),
+            Notification::Output { data, .. } if data == b"still attached"
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_checkpoint_requires_matching_reply_kind_id_and_dimensions() {
+        let router = SessionRouter::new();
+        let previous = router.open_session();
+        let next = router.open_session();
+        let worker = worker(router, previous.id());
+        let size = TerminalSize { rows: 24, cols: 80 };
+        let checkpoint = PendingKind::Checkpoint {
+            owner: next.id(),
+            size,
+            initial: false,
+        };
+
+        let (operation, completed) = pending(checkpoint);
+        let mut operation = Some(operation);
+        assert!(Pending::take(&mut operation, 0).is_err());
+        assert!(completed.await.unwrap().unwrap_err().contains("ID changed"));
+        assert!(operation.is_none());
+
+        let (operation, completed) = pending(checkpoint);
+        assert!(operation.acknowledge(None).is_err());
+        assert!(
+            completed
+                .await
+                .unwrap()
+                .unwrap_err()
+                .contains("without a snapshot")
+        );
+
+        let (operation, completed) = pending(PendingKind::Ack);
+        assert!(worker.checkpoint(operation, Vec::new(), size).is_err());
+        assert!(
+            completed
+                .await
+                .unwrap()
+                .unwrap_err()
+                .contains("unexpected terminal checkpoint")
+        );
+
+        for wrong in [
+            TerminalSize { rows: 25, ..size },
+            TerminalSize { cols: 81, ..size },
+        ] {
+            let (operation, completed) = pending(checkpoint);
+            assert!(worker.checkpoint(operation, Vec::new(), wrong).is_err());
+            assert!(
+                completed
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .contains("size changed")
+            );
+        }
+        let (operation, completed) = pending(checkpoint);
+        operation.acknowledge(Some("resize failed".into())).unwrap();
+        assert_eq!(completed.await.unwrap(), Err("resize failed".into()));
+        assert_eq!(*worker.attached.lock().unwrap(), Some(previous.id()));
+    }
+
+    #[tokio::test]
+    async fn startup_is_complete_only_after_a_valid_checkpoint() {
+        for closes in [false, true] {
+            let router = SessionRouter::new();
+            let owner = router.open_session();
+            let worker = worker(router.clone(), owner.id());
+            worker
+                .started
+                .store(false, std::sync::atomic::Ordering::Release);
+            let size = TerminalSize { rows: 24, cols: 80 };
+            let (operation, completed) = pending(PendingKind::Checkpoint {
+                owner: owner.id(),
+                size,
+                initial: true,
+            });
+            if closes {
+                router.close_session(owner.id());
+            }
+            let result = worker.checkpoint(operation, Vec::new(), size);
+            assert_eq!(result.is_ok(), !closes);
+            assert_eq!(completed.await.unwrap().is_ok(), !closes);
+            assert_eq!(
+                worker.started.load(std::sync::atomic::Ordering::Acquire),
+                !closes
+            );
+        }
+        let size = TerminalSize { rows: 24, cols: 80 };
+        let (operation, completed) = pending(PendingKind::Checkpoint {
+            owner: 1,
+            size,
+            initial: true,
+        });
+        assert!(
+            operation
+                .acknowledge(Some("checkpoint failed".into()))
+                .is_err()
+        );
+        assert_eq!(completed.await.unwrap(), Err("checkpoint failed".into()));
+    }
+
     #[test]
     fn checkpoint_restores_screen_modes_and_split_sequences() {
         use alacritty_terminal::{Term, term::Config, vte::ansi::Processor};

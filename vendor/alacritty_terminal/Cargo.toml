@@ -104,7 +104,7 @@ version = "0.4.3"
 version = "0.6.0"
 
 [target."cfg(windows)".dependencies.piper]
-version = "0.2.1"
+version = "0.2.5"
 
 [target."cfg(windows)".dependencies.windows-sys]
 version = "0.59.0"

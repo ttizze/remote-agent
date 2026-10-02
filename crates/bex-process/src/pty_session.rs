@@ -5,26 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) fn wait_without_reaping(pid: u32) -> io::Result<portable_pty::ExitStatus> {
-    loop {
-        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
-        let result =
-            unsafe { libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT) };
-        if result == 0 {
-            let code = if info.si_code == libc::CLD_EXITED {
-                unsafe { info.si_status() as u32 }
-            } else {
-                1
-            };
-            return Ok(portable_pty::ExitStatus::with_exit_code(code));
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
-}
-
 pub(super) fn terminate(session: libc::pid_t) -> io::Result<()> {
     let started = Instant::now();
     loop {
@@ -143,4 +123,31 @@ fn process_ids() -> io::Result<Vec<libc::pid_t>> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn is_live(_: libc::pid_t) -> io::Result<bool> {
     Ok(true)
+}
+
+/// Keep the native child unreaped until all of its job-control groups are gone.
+pub(super) struct Session {
+    child: std::process::Child,
+    finished: bool,
+}
+impl Session {
+    pub(super) fn new(child: std::process::Child) -> Self {
+        Self {
+            child,
+            finished: false,
+        }
+    }
+    pub(super) fn finish(&mut self) -> io::Result<()> {
+        if !self.finished {
+            terminate(self.child.id() as libc::pid_t)?;
+            self.child.wait()?;
+            self.finished = true;
+        }
+        Ok(())
+    }
+}
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
 }

@@ -10,7 +10,8 @@ tokio = { workspace = true, features = ["io-std"] }
 serde.workspace = true
 serde_json.workspace = true
 process-wrap = { version = "10", features = ["tokio1"] }
-portable-pty = "=0.9.0"
+alacritty_terminal = "=0.26.0"
+agent-protocol = { path = "../agent-protocol" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

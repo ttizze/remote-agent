@@ -23,9 +23,15 @@ struct Interest {
     event: Event,
 }
 
+#[derive(Default)]
+struct Registration {
+    interest: Option<Interest>,
+    exited: bool,
+}
+
 struct ChildExitSender {
     sender: mpsc::Sender<ChildEvent>,
-    interest: Arc<Mutex<Option<Interest>>>,
+    registration: Arc<Mutex<Registration>>,
     child_handle: AtomicPtr<c_void>,
 }
 
@@ -43,8 +49,9 @@ extern "system" fn child_exit_callback(ctx: *mut c_void, timed_out: BOOLEAN) {
     let exit_status = if status == FALSE { None } else { Some(ExitStatus::from_raw(exit_code)) };
     event_tx.sender.send(ChildEvent::Exited(exit_status)).ok();
 
-    let interest = event_tx.interest.lock().unwrap();
-    if let Some(interest) = interest.as_ref() {
+    let mut registration = event_tx.registration.lock().unwrap();
+    registration.exited = true;
+    if let Some(interest) = registration.interest.as_ref() {
         interest.poller.post(CompletionPacket::new(interest.event)).ok();
     }
 }
@@ -52,7 +59,7 @@ extern "system" fn child_exit_callback(ctx: *mut c_void, timed_out: BOOLEAN) {
 pub struct ChildExitWatcher {
     wait_handle: AtomicPtr<c_void>,
     event_rx: mpsc::Receiver<ChildEvent>,
-    interest: Arc<Mutex<Option<Interest>>>,
+    registration: Arc<Mutex<Registration>>,
     child_handle: AtomicPtr<c_void>,
     pid: Option<NonZeroU32>,
 }
@@ -62,10 +69,10 @@ impl ChildExitWatcher {
         let (event_tx, event_rx) = mpsc::channel();
 
         let mut wait_handle: HANDLE = ptr::null_mut();
-        let interest = Arc::new(Mutex::new(None));
+        let registration = Arc::new(Mutex::new(Registration::default()));
         let sender_ref = Box::new(ChildExitSender {
             sender: event_tx,
-            interest: interest.clone(),
+            registration: registration.clone(),
             child_handle: AtomicPtr::from(child_handle),
         });
 
@@ -86,7 +93,7 @@ impl ChildExitWatcher {
             let pid = unsafe { NonZeroU32::new(GetProcessId(child_handle)) };
             Ok(ChildExitWatcher {
                 event_rx,
-                interest,
+                registration,
                 pid,
                 child_handle: AtomicPtr::from(child_handle),
                 wait_handle: AtomicPtr::from(wait_handle),
@@ -94,16 +101,31 @@ impl ChildExitWatcher {
         }
     }
 
-    pub fn event_rx(&self) -> &mpsc::Receiver<ChildEvent> {
-        &self.event_rx
+    pub fn next_event(&self) -> Option<ChildEvent> {
+        let mut registration = self.registration.lock().unwrap();
+        if !registration.exited {
+            return None;
+        }
+        // The callback queues the exit before latching readiness. Consume it
+        // once, so re-registration during the final output drain cannot report
+        // another exit merely because the callback's sender was dropped.
+        let event = self.event_rx.try_recv().ok();
+        registration.exited = false;
+        event
     }
 
     pub fn register(&self, poller: &Arc<Poller>, event: Event) {
-        *self.interest.lock().unwrap() = Some(Interest { poller: poller.clone(), event });
+        let mut registration = self.registration.lock().unwrap();
+        registration.interest = Some(Interest { poller: poller.clone(), event });
+        // A short-lived process can exit before its first registration. Latch
+        // readiness under the same lock as the callback to avoid a lost wakeup.
+        if registration.exited {
+            poller.post(CompletionPacket::new(event)).ok();
+        }
     }
 
     pub fn deregister(&self) {
-        *self.interest.lock().unwrap() = None;
+        self.registration.lock().unwrap().interest = None;
     }
 
     /// Retrieve the process handle of the underlying child process.
@@ -143,6 +165,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn registration_replays_an_exit_that_was_already_queued() {
+        let mut child = Command::new("cmd.exe").args(["/C", "exit", "7"]).spawn().unwrap();
+        let watcher = ChildExitWatcher::new(child.as_raw_handle() as HANDLE).unwrap();
+        child.wait().unwrap();
+
+        // Wait for the callback to queue its event without consuming that event.
+        let timeout = Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + timeout;
+        while !watcher.registration.lock().unwrap().exited {
+            assert!(std::time::Instant::now() < deadline, "exit callback did not run");
+            std::thread::yield_now();
+        }
+        let poller = Arc::new(Poller::new().unwrap());
+        watcher.register(&poller, Event::readable(PTY_CHILD_EVENT_TOKEN));
+        let mut events = polling::Events::new();
+        poller.wait(&mut events, Some(timeout)).unwrap();
+        assert!(events.iter().any(|event| event.key == PTY_CHILD_EVENT_TOKEN));
+        assert_eq!(
+            watcher.next_event(),
+            Some(ChildEvent::Exited(Some(ExitStatus::from_raw(7)))),
+        );
+        assert_eq!(watcher.next_event(), None);
+        watcher.register(&poller, Event::readable(PTY_CHILD_EVENT_TOKEN));
+        events.clear();
+        poller.wait(&mut events, Some(Duration::from_millis(20))).unwrap();
+        assert!(events.is_empty(), "consumed exit was reported again");
+    }
+
+    #[test]
     pub fn event_is_emitted_when_child_exits() {
         const WAIT_TIMEOUT: Duration = Duration::from_millis(200);
 
@@ -161,8 +212,8 @@ mod tests {
         // Verify that at least one `ChildEvent::Exited` was received.
         let expected_status = ExitStatus::from_raw(1);
         assert_eq!(
-            child_exit_watcher.event_rx().try_recv(),
-            Ok(ChildEvent::Exited(Some(expected_status)))
+            child_exit_watcher.next_event(),
+            Some(ChildEvent::Exited(Some(expected_status)))
         );
     }
 }

@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{Error, Result};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::IntoRawHandle;
+use std::os::windows::io::AsRawHandle;
 use std::{mem, ptr};
 
-use windows_sys::Win32::Foundation::{HANDLE, S_OK};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
@@ -122,14 +122,14 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
     let result = unsafe {
         (api.create)(
             window_size.into(),
-            conin_pty_handle.into_raw_handle() as HANDLE,
-            conout_pty_handle.into_raw_handle() as HANDLE,
+            conin_pty_handle.as_raw_handle() as HANDLE,
+            conout_pty_handle.as_raw_handle() as HANDLE,
             0,
             &mut pty_handle as *mut _,
         )
     };
 
-    assert_eq!(result, S_OK);
+    check_hresult(result, "CreatePseudoConsole")?;
 
     let mut success;
 
@@ -234,9 +234,20 @@ pub fn new(config: &Options, window_size: WindowSize) -> Result<Pty> {
         }
     }
 
+    // ConPTY has its own references after the hosted process is created.
+    // Keeping our child-side output writer open would prevent observing EOF.
+    // https://learn.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session
+    drop(conin_pty_handle);
+    drop(conout_pty_handle);
+    // No later operation needs the primary thread handle.
+    unsafe { CloseHandle(proc_info.hThread) };
+
     let conin = UnblockedWriter::new(conin, PIPE_CAPACITY);
     let conout = UnblockedReader::new(conout, PIPE_CAPACITY);
 
+    // The watcher and its callback borrow hProcess. Its upstream ownership
+    // remains process-scoped: Windows reclaims it when this per-terminal
+    // supervisor exits. Do not close it while a callback may still be running.
     let child_watcher = ChildExitWatcher::new(proc_info.hProcess)?;
     let conpty = Conpty { handle: pty_handle as HPCON, api };
 
@@ -301,9 +312,9 @@ fn add_windows_env_key_value_to_block(block: &mut Vec<u16>, key: &OsStr, value: 
 }
 
 impl OnResize for Conpty {
-    fn on_resize(&mut self, window_size: WindowSize) {
+    fn on_resize(&mut self, window_size: WindowSize) -> Result<()> {
         let result = unsafe { (self.api.resize)(self.handle, window_size.into()) };
-        assert_eq!(result, S_OK);
+        check_hresult(result, "ResizePseudoConsole")
     }
 }
 
@@ -312,5 +323,55 @@ impl From<WindowSize> for COORD {
         let lines = window_size.num_lines;
         let columns = window_size.num_cols;
         COORD { X: columns as i16, Y: lines as i16 }
+    }
+}
+
+/// ConPTY returns HRESULTs, not GetLastError values.
+fn check_hresult(result: HRESULT, operation: &str) -> Result<()> {
+    if result >= 0 {
+        Ok(())
+    } else if result as u32 & 0x1fff_0000 == 0x0007_0000 {
+        // HRESULT_FROM_WIN32 stores the native error in its low 16 bits.
+        Err(Error::from_raw_os_error(result & 0xffff))
+    } else {
+        Err(Error::other(format!(
+            "{operation} failed with HRESULT {result:#010x}"
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hresult_failure_preserves_native_error_or_hresult() {
+        check_hresult(0, "ConPTY").unwrap();
+        check_hresult(1, "ConPTY").unwrap();
+        let error = check_hresult(0x8007_0057_u32 as HRESULT, "ConPTY").unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(87));
+        let error = check_hresult(0x8000_4005_u32 as HRESULT, "ConPTY").unwrap_err();
+        assert!(error.to_string().contains("0x80004005"));
+    }
+
+    #[test]
+    fn resize_returns_native_failure() {
+        unsafe extern "system" fn fail_resize(_: HPCON, _: COORD) -> HRESULT {
+            0x8007_0057_u32 as HRESULT
+        }
+        unsafe extern "system" fn close(_: HPCON) {}
+        let api = ConptyApi {
+            create: CreatePseudoConsole,
+            resize: fail_resize,
+            close,
+        };
+        let mut conpty = Conpty { handle: 0, api };
+        let size = WindowSize {
+            num_lines: 24,
+            num_cols: 80,
+            cell_width: 1,
+            cell_height: 1,
+        };
+        assert_eq!(conpty.on_resize(size).unwrap_err().raw_os_error(), Some(87));
     }
 }

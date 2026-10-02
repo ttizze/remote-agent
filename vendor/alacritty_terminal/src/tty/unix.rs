@@ -1,17 +1,16 @@
 //! TTY related functionality.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Read, Result};
 use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 #[cfg(target_os = "macos")]
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::Arc;
 use std::{env, ptr};
 
@@ -33,13 +32,6 @@ pub(crate) const PTY_READ_WRITE_TOKEN: usize = 0;
 
 // Interest in new child events.
 pub(crate) const PTY_CHILD_EVENT_TOKEN: usize = 1;
-
-macro_rules! die {
-    ($($arg:tt)*) => {{
-        error!($($arg)*);
-        std::process::exit(1);
-    }};
-}
 
 /// Really only needed on BSD, but should be fine elsewhere.
 fn set_controlling_terminal(fd: c_int) -> Result<()> {
@@ -63,30 +55,39 @@ struct Passwd<'a> {
 }
 
 /// Return a Passwd struct with pointers into the provided buf.
-///
-/// # Unsafety
-///
-/// If `buf` is changed while `Passwd` is alive, bad thing will almost certainly happen.
 fn get_pw_entry(buf: &mut [i8; 1024]) -> Result<Passwd<'_>> {
-    // Create zeroed passwd struct.
-    let mut entry: MaybeUninit<libc::passwd> = MaybeUninit::uninit();
+    let uid = unsafe { libc::getuid() };
+    // SAFETY: getpwuid_r initializes the entry and buffer on a successful lookup.
+    unsafe {
+        get_pw_entry_with(buf, uid, |entry, buf, result| {
+            libc::getpwuid_r(uid, entry, buf.as_mut_ptr().cast(), buf.len(), result)
+        })
+    }
+}
 
+/// # Safety
+///
+/// On success with a non-null result, `lookup` must initialize the passwd entry
+/// and its NUL-terminated string fields, backed by `buf` or longer-lived memory.
+unsafe fn get_pw_entry_with(
+    buf: &mut [i8; 1024],
+    uid: libc::uid_t,
+    lookup: impl FnOnce(*mut libc::passwd, &mut [i8; 1024], &mut *mut libc::passwd) -> c_int,
+) -> Result<Passwd<'_>> {
+    let mut entry: MaybeUninit<libc::passwd> = MaybeUninit::uninit();
     let mut res: *mut libc::passwd = ptr::null_mut();
 
-    // Try and read the pw file.
-    let uid = unsafe { libc::getuid() };
-    let status = unsafe {
-        libc::getpwuid_r(uid, entry.as_mut_ptr(), buf.as_mut_ptr() as *mut _, buf.len(), &mut res)
-    };
-    let entry = unsafe { entry.assume_init() };
-
-    if status < 0 {
-        return Err(Error::other("getpwuid_r failed"));
+    let status = lookup(entry.as_mut_ptr(), buf, &mut res);
+    if status != 0 {
+        // POSIX returns the positive error number directly, including ERANGE
+        // when this bounded buffer is too small. No passwd fields are valid yet.
+        return Err(Error::from_raw_os_error(status));
     }
 
     if res.is_null() {
         return Err(Error::other("pw not found"));
     }
+    let entry = unsafe { entry.assume_init() };
 
     // Sanity check.
     assert_eq!(entry.pw_uid, uid);
@@ -100,15 +101,26 @@ fn get_pw_entry(buf: &mut [i8; 1024]) -> Result<Passwd<'_>> {
 }
 
 pub struct Pty {
-    child: Child,
+    child: Option<Child>,
+    child_id: u32,
     file: File,
     signals: UnixStream,
     sig_id: SigId,
+    child_exit_reported: bool,
 }
 
 impl Pty {
-    pub fn child(&self) -> &Child {
-        &self.child
+    pub fn child(&self) -> Option<&Child> {
+        self.child.as_ref()
+    }
+
+    /// Transfer child cleanup and reaping to the caller.
+    ///
+    /// The PTY continues to report exit events without reaping. The caller must
+    /// keep the child waitable until the complete session has been cleaned up,
+    /// including when PTY setup or its event loop fails.
+    pub fn take_child(&mut self) -> Option<Child> {
+        self.child.take()
     }
 
     pub fn file(&self) -> &File {
@@ -240,10 +252,9 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
     builder.env_remove("XDG_ACTIVATION_TOKEN");
     builder.env_remove("DESKTOP_STARTUP_ID");
 
-    let working_directory = config
-        .working_directory
-        .as_ref()
-        .and_then(|path| CString::new(path.as_os_str().as_bytes()).ok());
+    if let Some(working_directory) = config.working_directory.as_ref() {
+        builder.current_dir(working_directory);
+    }
 
     unsafe {
         builder.pre_exec(move || {
@@ -251,11 +262,6 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
             let err = libc::setsid();
             if err == -1 {
                 return Err(Error::last_os_error());
-            }
-
-            // Set working directory, ignoring invalid paths.
-            if let Some(working_directory) = working_directory.as_ref() {
-                libc::chdir(working_directory.as_ptr());
             }
 
             set_controlling_terminal(slave_fd)?;
@@ -279,9 +285,9 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
     let (signals, sig_id) = {
         let (sender, recv) = UnixStream::pair()?;
 
+        recv.set_nonblocking(true)?;
         // Register the recv end of the pipe for SIGCHLD.
         let sig_id = signal_pipe::register(sigconsts::SIGCHLD, sender)?;
-        recv.set_nonblocking(true)?;
         (recv, sig_id)
     };
 
@@ -293,30 +299,42 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
                 set_nonblocking(master_fd);
             }
 
-            Ok(Pty { child, file: File::from(master), signals, sig_id })
+            Ok(Pty {
+                child_id: child.id(),
+                child: Some(child),
+                file: File::from(master),
+                signals,
+                sig_id,
+                child_exit_reported: false,
+            })
         },
-        Err(err) => Err(Error::new(
-            err.kind(),
-            format!(
-                "Failed to spawn command '{}': {}",
-                builder.get_program().to_string_lossy(),
-                err
-            ),
-        )),
+        Err(err) => {
+            unregister_signal(sig_id);
+            Err(Error::new(
+                err.kind(),
+                format!(
+                    "Failed to spawn command '{}': {}",
+                    builder.get_program().to_string_lossy(),
+                    err
+                ),
+            ))
+        },
     }
 }
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        // Make sure the PTY is terminated properly.
-        unsafe {
-            libc::kill(self.child.id() as i32, libc::SIGHUP);
-        }
-
         // Clear signal-hook handler.
         unregister_signal(self.sig_id);
 
-        let _ = self.child.wait();
+        if let Some(child) = self.child.as_mut() {
+            // Callers owning session-wide cleanup take the child first, so
+            // dropping the PTY cannot reap its leader before cleanup completes.
+            unsafe {
+                libc::kill(child.id() as libc::pid_t, libc::SIGHUP);
+            }
+            let _ = child.wait();
+        }
     }
 }
 
@@ -382,25 +400,70 @@ impl EventedReadWrite for Pty {
 impl EventedPty for Pty {
     #[inline]
     fn next_child_event(&mut self) -> Option<ChildEvent> {
-        // See if there has been a SIGCHLD.
-        let mut buf = [0u8; 1];
-        if let Err(err) = self.signals.read(&mut buf) {
-            if err.kind() != ErrorKind::WouldBlock {
-                error!("Error reading from signal pipe: {err}");
+        // Drain all pending notifications, including signals from unrelated
+        // children. Leaving data unread would spin the level-triggered poller.
+        let mut signaled = false;
+        let mut buf = [0u8; 128];
+        loop {
+            match self.signals.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => signaled = true,
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Err(err) => {
+                    error!("Error reading from signal pipe: {err}");
+                    break;
+                },
             }
+        }
+        if !signaled || self.child_exit_reported {
             return None;
         }
 
-        // Match on the child process.
-        match self.child.try_wait() {
+        match child_exit_status(self.child_id) {
             Err(err) => {
                 error!("Error checking child process termination: {err}");
                 None
             },
             Ok(None) => None,
-            Ok(exit_status) => Some(ChildEvent::Exited(exit_status)),
+            Ok(Some(exit_status)) => {
+                self.child_exit_reported = true;
+                Some(ChildEvent::Exited(Some(exit_status)))
+            },
         }
     }
+}
+
+/// Observe termination without reaping the session leader.
+fn child_exit_status(pid: u32) -> Result<Option<ExitStatus>> {
+    loop {
+        let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        let result = unsafe {
+            libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT)
+        };
+        if result == 0 {
+            if unsafe { info.si_pid() } == 0 {
+                return Ok(None);
+            }
+            return exit_status_from_info(info.si_code, unsafe { info.si_status() }).map(Some);
+        }
+        let err = Error::last_os_error();
+        if err.kind() != ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+fn exit_status_from_info(code: c_int, status: c_int) -> Result<ExitStatus> {
+    let raw = match code {
+        libc::CLD_EXITED => status << 8,
+        libc::CLD_KILLED => status,
+        libc::CLD_DUMPED => status | 0x80,
+        _ => {
+            return Err(Error::new(ErrorKind::InvalidData, "unexpected child wait status"));
+        },
+    };
+    Ok(ExitStatus::from_raw(raw))
 }
 
 impl OnResize for Pty {
@@ -408,14 +471,12 @@ impl OnResize for Pty {
     ///
     /// Tells the kernel that the window size changed with the new pixel
     /// dimensions and line/column counts.
-    fn on_resize(&mut self, window_size: WindowSize) {
+    fn on_resize(&mut self, window_size: WindowSize) -> Result<()> {
         let win = window_size.to_winsize();
 
         let res = unsafe { libc::ioctl(self.file.as_raw_fd(), libc::TIOCSWINSZ, &win as *const _) };
 
-        if res < 0 {
-            die!("ioctl TIOCSWINSZ failed: {}", Error::last_os_error());
-        }
+        if res < 0 { Err(Error::last_os_error()) } else { Ok(()) }
     }
 }
 
@@ -445,4 +506,195 @@ unsafe fn set_nonblocking(fd: c_int) {
 fn test_get_pw_entry() {
     let mut buf: [i8; 1024] = [0; 1024];
     let _pw = get_pw_entry(&mut buf).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::ffi::OsStringExt;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::tty::Shell;
+
+    // SIGCHLD notifications are process-wide, so keep the real-child tests from
+    // sending notifications while another test asserts the pipe has been drained.
+    static PTY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn passwd_lookup_failure_does_not_read_uninitialized_entry() {
+        for error_code in [libc::EIO, libc::ERANGE] {
+            let mut buf = [0; 1024];
+            // A failed lookup need not initialize passwd, even if the result
+            // pointer is left non-null. Its positive errno must take precedence.
+            let error = unsafe {
+                get_pw_entry_with(&mut buf, 0, |entry, _, result| {
+                    *result = entry;
+                    error_code
+                })
+            }
+            .unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(error_code));
+        }
+
+        let mut buf = [0; 1024];
+        // A successful lookup with a null result means no matching account;
+        // POSIX does not initialize passwd in this case either.
+        let error = unsafe { get_pw_entry_with(&mut buf, 0, |_, _, _| 0) }.unwrap_err();
+        assert_eq!(error.to_string(), "pw not found");
+    }
+
+    fn window_size() -> WindowSize {
+        WindowSize { num_lines: 24, num_cols: 80, cell_width: 8, cell_height: 16 }
+    }
+
+    fn options(script: &str) -> Options {
+        Options {
+            shell: Some(Shell::new("/bin/sh".into(), vec!["-c".into(), script.into()])),
+            ..Options::default()
+        }
+    }
+
+    fn await_exit(pty: &mut Pty) -> ExitStatus {
+        let poller = Poller::new().unwrap();
+        let mut events = polling::Events::new();
+        unsafe {
+            poller
+                .add_with_mode(
+                    &pty.signals,
+                    Event::readable(PTY_CHILD_EVENT_TOKEN),
+                    PollMode::Level,
+                )
+                .unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            events.clear();
+            poller
+                .wait(&mut events, Some(deadline.saturating_duration_since(Instant::now())))
+                .unwrap();
+            assert!(!events.is_empty(), "PTY child did not notify its exit");
+            if let Some(ChildEvent::Exited(Some(status))) = pty.next_child_event() {
+                poller.delete(&pty.signals).unwrap();
+                return status;
+            }
+            assert!(Instant::now() < deadline, "PTY child did not report its exit");
+        }
+    }
+
+    #[test]
+    fn child_exit_preserves_native_status_and_waitable_session_until_drop() {
+        let _guard = PTY_TEST_LOCK.lock().unwrap();
+        for (script, code, signal) in
+            [("exit 37", Some(37), None), ("kill -TERM $$", None, Some(libc::SIGTERM))]
+        {
+            let mut pty = new(&options(script), window_size(), 0).unwrap();
+            let pid = pty.child().unwrap().id();
+            let status = await_exit(&mut pty);
+            assert_eq!(status.code(), code);
+            assert_eq!(status.signal(), signal);
+            // A second non-reaping observation must still see the original child.
+            assert_eq!(child_exit_status(pid).unwrap(), Some(status));
+            assert_eq!(unsafe { libc::getsid(pid as libc::pid_t) }, pid as libc::pid_t);
+
+            // Further SIGCHLDs must be drained without reporting the zombie again.
+            for _ in 0..256 {
+                assert_eq!(unsafe { libc::raise(libc::SIGCHLD) }, 0);
+            }
+            assert_eq!(pty.next_child_event(), None);
+            assert_eq!(pty.next_child_event(), None);
+            assert_eq!(pty.signals.read(&mut [0]).unwrap_err().kind(), ErrorKind::WouldBlock);
+            drop(pty);
+            assert_eq!(child_exit_status(pid).unwrap_err().raw_os_error(), Some(libc::ECHILD));
+        }
+    }
+
+    #[test]
+    fn live_child_has_no_exit_event_and_resize_reports_kernel_result() {
+        let _guard = PTY_TEST_LOCK.lock().unwrap();
+        let mut pty = new(&options("read value"), window_size(), 0).unwrap();
+        assert_eq!(child_exit_status(pty.child().unwrap().id()).unwrap(), None);
+        assert_eq!(pty.next_child_event(), None);
+
+        let resized = WindowSize { num_lines: 31, num_cols: 97, cell_width: 9, cell_height: 18 };
+        pty.on_resize(resized).unwrap();
+        let mut actual = unsafe { std::mem::zeroed::<libc::winsize>() };
+        assert_eq!(unsafe { libc::ioctl(pty.file.as_raw_fd(), libc::TIOCGWINSZ, &mut actual) }, 0);
+        assert_eq!((actual.ws_row, actual.ws_col), (31, 97));
+        assert_eq!((actual.ws_xpixel, actual.ws_ypixel), (873, 558));
+
+        // Retain the real master so replacing the test descriptor does not end
+        // the child session before exercising the ioctl error path.
+        let _master = std::mem::replace(&mut pty.file, File::open("/dev/null").unwrap());
+        assert_eq!(pty.on_resize(resized).unwrap_err().raw_os_error(), Some(libc::ENOTTY));
+    }
+
+    #[test]
+    fn transferred_child_remains_waitable_after_pty_drop() {
+        let _guard = PTY_TEST_LOCK.lock().unwrap();
+        let mut pty = new(&options("exit 41"), window_size(), 0).unwrap();
+        let mut child = pty.take_child().unwrap();
+        let pid = child.id();
+        assert!(pty.child().is_none());
+        assert!(pty.take_child().is_none());
+
+        let status = await_exit(&mut pty);
+        assert_eq!(status.code(), Some(41));
+        drop(pty);
+        assert_eq!(child_exit_status(pid).unwrap(), Some(status));
+        assert_eq!(unsafe { libc::getsid(pid as libc::pid_t) }, pid as libc::pid_t);
+        assert_eq!(child.wait().unwrap(), status);
+        assert_eq!(child_exit_status(pid).unwrap_err().raw_os_error(), Some(libc::ECHILD));
+
+        // An early event-loop/setup failure drops the PTY before receiving an
+        // exit notification. The caller must retain its session leader then too.
+        let mut pty = new(&options("read value"), window_size(), 0).unwrap();
+        let mut child = pty.take_child().unwrap();
+        let pid = child.id();
+        drop(pty);
+        assert_eq!(unsafe { libc::getsid(pid as libc::pid_t) }, pid as libc::pid_t);
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGHUP));
+        assert_eq!(child_exit_status(pid).unwrap_err().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn configured_working_directory_is_used_or_spawn_fails() {
+        let _guard = PTY_TEST_LOCK.lock().unwrap();
+        let mut config = options("test \"$PWD\" = /");
+        config.working_directory = Some("/".into());
+        let mut pty = new(&config, window_size(), 0).unwrap();
+        assert!(await_exit(&mut pty).success());
+        drop(pty);
+
+        config.working_directory = Some("/dev/null/invalid-directory".into());
+        let error = new(&config, window_size(), 0).err().expect("invalid cwd must fail spawn");
+        assert_eq!(error.kind(), ErrorKind::NotADirectory);
+
+        config.working_directory =
+            Some(std::ffi::OsString::from_vec(b"/tmp/invalid\0cwd".to_vec()).into());
+        let error = new(&config, window_size(), 0).err().expect("NUL cwd must fail spawn");
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn waitid_status_conversion_preserves_exit_codes_signals_and_core_flag() {
+        for code in 0..=255 {
+            let status = exit_status_from_info(libc::CLD_EXITED, code).unwrap();
+            assert_eq!(status.code(), Some(code));
+            assert_eq!(status.signal(), None);
+            assert!(!status.core_dumped());
+        }
+        for signal in [libc::SIGHUP, libc::SIGTERM, libc::SIGKILL, libc::SIGABRT] {
+            for (reason, core_dumped) in [(libc::CLD_KILLED, false), (libc::CLD_DUMPED, true)] {
+                let status = exit_status_from_info(reason, signal).unwrap();
+                assert_eq!(status.code(), None);
+                assert_eq!(status.signal(), Some(signal));
+                assert_eq!(status.core_dumped(), core_dumped);
+            }
+        }
+        assert_eq!(
+            exit_status_from_info(libc::CLD_STOPPED, libc::SIGSTOP).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
+    }
 }
