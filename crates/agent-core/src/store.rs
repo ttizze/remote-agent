@@ -591,6 +591,7 @@ fn publish_locked(
 ) -> (Vec<Effect>, bool) {
     // No `..`: adding a Snapshot field must update the publication contract.
     let Snapshot {
+        model_defaults,
         permission_settings,
         composer_catalog,
         host_name,
@@ -620,7 +621,8 @@ fn publish_locked(
         (None, None) => true,
         _ => false,
     };
-    if current.host_name == *host_name
+    if current.model_defaults == *model_defaults
+        && current.host_name == *host_name
         && current.permission_settings == *permission_settings
         && current.composer_catalog == *composer_catalog
         && current.storage_scope == *storage_scope

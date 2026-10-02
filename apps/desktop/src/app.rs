@@ -78,6 +78,7 @@ enum Tab {
 }
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsPage {
+    Models,
     Agents,
     Connections,
     Worktrees,

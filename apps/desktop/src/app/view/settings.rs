@@ -18,6 +18,7 @@ impl Desktop {
     pub(super) fn settings_sidebar(&self, cx: &Context<Self>) -> Sidebar<SidebarSection> {
         let mut navigation = SidebarMenu::new().gap_1();
         for (label, icon, page) in [
+            ("モデル", IconName::Settings, SettingsPage::Models),
             ("エージェント", IconName::User, SettingsPage::Agents),
             ("端末と接続", IconName::Network, SettingsPage::Connections),
             ("ワークツリー", IconName::Folder, SettingsPage::Worktrees),
@@ -50,15 +51,17 @@ impl Desktop {
     }
 
     pub(super) fn settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let environment = if self.settings_page == SettingsPage::Connections {
-            "このPCと登録済みの環境".to_owned()
-        } else {
-            self.remote
+        let environment = match self.settings_page {
+            SettingsPage::Models => "すべての環境（このPC）".to_owned(),
+            SettingsPage::Connections => "このPCと登録済みの環境".to_owned(),
+            SettingsPage::Agents | SettingsPage::Worktrees => self
+                .remote
                 .as_ref()
                 .map_or("このPC", |host| host.name.as_str())
-                .to_owned()
+                .to_owned(),
         };
         let (title, subtitle) = match self.settings_page {
+            SettingsPage::Models => ("モデル", "新しい会話で使うモデルの初期値を設定します。"),
             SettingsPage::Agents => (
                 "エージェント",
                 "選択した環境のAIアカウントと使用量を管理します。",
@@ -103,6 +106,7 @@ impl Desktop {
         }
         body =
             match self.settings_page {
+                SettingsPage::Models => body.child(self.default_model_settings(cx)),
                 SettingsPage::Agents => body.child(self.account_controls(true, cx)),
                 SettingsPage::Connections => {
                     let setup = self.snapshot.connection_setup();
@@ -162,6 +166,7 @@ impl Desktop {
             .child(
                 div()
                     .id(match self.settings_page {
+                        SettingsPage::Models => "settings-models-scroll",
                         SettingsPage::Agents => "settings-agents-scroll",
                         SettingsPage::Connections => "settings-connections-scroll",
                         SettingsPage::Worktrees => "settings-worktrees-scroll",

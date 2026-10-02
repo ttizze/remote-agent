@@ -120,7 +120,9 @@ Back stays at the bottom and returns to the selected conversation and draft.
 Settings pages show a common applicability bar above their contents. It shows
 the current storage scope rather than implying that settings are written to
 every environment. Environment settings apply to every project on that Host;
-iPhone connection registrations belong to that iPhone.
+iPhone connection registrations belong to that iPhone. New-conversation model
+defaults are device preferences across environments, so their desktop
+applicability bar names all environments and this PC as the storage owner.
 
 Acceptance: desktop
 `model_picker_keeps_quick_controls_and_routes_quota_to_account_management`, core

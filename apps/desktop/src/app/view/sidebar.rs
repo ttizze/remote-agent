@@ -392,6 +392,7 @@ mod tests {
             original
         );
         for page in [
+            SettingsPage::Models,
             SettingsPage::Agents,
             SettingsPage::Connections,
             SettingsPage::Worktrees,

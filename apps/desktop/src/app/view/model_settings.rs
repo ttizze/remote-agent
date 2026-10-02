@@ -19,6 +19,175 @@ fn account_identity(provider: Option<ProviderKind>, identity: &str) -> Div {
 }
 
 impl Desktop {
+    pub(super) fn default_model_settings(&self, cx: &Context<Self>) -> AnyElement {
+        let defaults = self.snapshot.model_defaults();
+        let model = self.snapshot.default_model();
+        let label = defaults
+            .model
+            .as_ref()
+            .and(model.as_ref())
+            .map(|model| model.display_name.clone())
+            .or_else(|| defaults.model.as_ref().map(|model| model.id.clone()))
+            .unwrap_or_else(|| "自動".into());
+        let selected = defaults.model.clone();
+        let models = self.snapshot.models.clone();
+        let entity = cx.entity().downgrade();
+        let model_picker = Button::new("default-model")
+            .disabled(self.session.is_none())
+            .label(label)
+            .accessibility_label("新しい会話のモデル")
+            .debug_selector(|| "default-model".into())
+            .ghost()
+            .when_some(model.as_ref(), |button, model| {
+                button.icon(provider_icon(model.model.provider))
+            })
+            .child(Icon::new(IconName::ChevronDown).size(px(14.)))
+            .dropdown_menu(move |mut menu, _, _| {
+                let automatic = entity.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("自動")
+                        .checked(selected.is_none())
+                        .on_click(move |_, _, cx| {
+                            let _ = automatic.update(cx, |s, cx| {
+                                s.dispatch(Intent::SelectDefaultModel { model: None });
+                                cx.notify();
+                            });
+                        }),
+                );
+                for model in models.iter() {
+                    let value = model.model.clone();
+                    let entity = entity.clone();
+                    let provider = match model.model.provider {
+                        ProviderKind::Codex => "Codex",
+                        ProviderKind::Claude => "Claude",
+                    };
+                    menu = menu.item(
+                        PopupMenuItem::new(format!("{provider} · {}", model.display_name))
+                            .checked(selected.as_ref() == Some(&model.model))
+                            .on_click(move |_, _, cx| {
+                                let _ = entity.update(cx, |s, cx| {
+                                    s.dispatch(Intent::SelectDefaultModel {
+                                        model: Some(value.clone()),
+                                    });
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
+        let mut controls = h_flex().gap_2().child(model_picker);
+        let quick = self.snapshot.default_model_controls();
+        if !quick.efforts.is_empty() {
+            let efforts = quick.efforts.clone();
+            let entity = cx.entity().downgrade();
+            let effort = defaults.effort.clone();
+            controls = controls.child(
+                Button::new("default-model-effort")
+                    .disabled(self.session.is_none())
+                    .label(effort.clone().unwrap_or_else(|| "自動".into()))
+                    .accessibility_label("新しい会話の推論強度")
+                    .debug_selector(|| "default-model-effort".into())
+                    .ghost()
+                    .child(Icon::new(IconName::ChevronDown).size(px(14.)))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for value in std::iter::once(None).chain(efforts.iter().cloned().map(Some))
+                        {
+                            let entity = entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(value.clone().unwrap_or_else(|| "自動".into()))
+                                    .checked(value == effort)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = entity.update(cx, |s, cx| {
+                                            s.dispatch(Intent::SelectDefaultEffort {
+                                                effort: value.clone(),
+                                            });
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            );
+        }
+        if let Some(fast_tier) = quick.fast_service_tier {
+            let entity = cx.entity().downgrade();
+            let selected = defaults.service_tier.clone();
+            controls = controls.child(
+                Button::new("default-model-speed")
+                    .disabled(self.session.is_none())
+                    .label(if quick.fast { "高速" } else { "通常" })
+                    .icon(Icon::default().path("bex/bolt.svg"))
+                    .accessibility_label("新しい会話の速度")
+                    .debug_selector(|| "default-model-speed".into())
+                    .ghost()
+                    .child(Icon::new(IconName::ChevronDown).size(px(14.)))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for (label, value) in [
+                            ("自動", None),
+                            ("通常", Some("default".to_owned())),
+                            ("高速", Some(fast_tier.clone())),
+                        ] {
+                            let entity = entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(label)
+                                    .checked(value == selected)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = entity.update(cx, |s, cx| {
+                                            s.dispatch(Intent::SelectDefaultServiceTier {
+                                                service_tier: value.clone(),
+                                            });
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            );
+        }
+        v_flex()
+            .gap_4()
+            .child(div().text_lg().font_semibold().child("新しい会話"))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_5()
+                    .p_4()
+                    .rounded(px(14.))
+                    .border_1()
+                    .border_color(rgb(0x2b2f35))
+                    .child(
+                        v_flex().flex_1().min_w_0().gap_1().child("モデル").child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x949ca8))
+                                .child("新しい会話で使うモデル・推論強度・速度の初期値です。"),
+                        ),
+                    )
+                    .child(controls),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x949ca8))
+                    .child("変更はこの端末に自動保存されます。会話ごとに変更できます。"),
+            )
+            .children(
+                self.snapshot
+                    .model_error_messages()
+                    .into_iter()
+                    .map(|error| {
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xff8e86))
+                            .child(error_message(&error))
+                    }),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn refresh_accounts_and_models(&self) {
         self.dispatch(Intent::ListAccounts(op::ListAccounts {}));
         self.dispatch(Intent::LoadModels(op::LoadModels {}));
@@ -1080,5 +1249,74 @@ mod tests {
         let claude = window.debug_bounds("model-provider-Claude").unwrap();
         window.simulate_click(claude.center(), Modifiers::default());
         window.update(|_, cx| assert!(view.read(cx).0.read(cx).model_provider.is_none()));
+    }
+    struct DefaultsView(Entity<Desktop>);
+    impl Render for DefaultsView {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.update(cx, |view, cx| {
+                h_flex()
+                    .size_full()
+                    .child(view.settings_sidebar(cx))
+                    .child(view.settings(cx))
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn default_model_settings_keep_speed_beside_effort_and_worktrees_separate(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(crate::Runtime {
+                handle: runtime.handle().clone(),
+                connections: Arc::new(crate::platform::Connections::default()),
+                closing: tokio_util::task::TaskTracker::new(),
+                logging_error: None,
+            });
+        });
+        let (view, window) = cx.add_window_view(|window, cx| {
+            let desktop = cx.new(|cx| Desktop::new(Mode::SideChat {
+                remote: Some(RemoteHost { id: "fixture".into(), name: "fixture".into(), ticket: "invalid-fixture-ticket".into() }),
+                cwd: "/fixture".into(),
+            }, window, cx));
+            desktop.update(cx, |view, _| {
+                view.tab = super::Tab::Settings;
+                view.settings_page = super::SettingsPage::Models;
+                let snapshot = Arc::make_mut(&mut view.snapshot);
+                snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
+                    {"id":"gpt","model":{"provider":"codex","id":"gpt"},"displayName":"GPT-6-Astra",
+                     "isDefault":true,"defaultReasoningEffort":"medium",
+                     "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
+                     "serviceTiers":[{"id":"priority"}]}
+                ])).unwrap());
+            });
+            cx.observe(&desktop, |_, _, cx| cx.notify()).detach();
+            DefaultsView(desktop)
+        });
+        for width in [1000., 1280.] {
+            window.simulate_resize(gpui_kit::size(px(width), px(720.)));
+            window.run_until_parked();
+            let model = window.debug_bounds("default-model").unwrap();
+            let effort = window.debug_bounds("default-model-effort").unwrap();
+            let speed = window.debug_bounds("default-model-speed").unwrap();
+            assert!(model.right() <= effort.left());
+            assert!(effort.right() <= speed.left());
+            assert_eq!(model.top(), speed.top());
+            assert!(speed.right() < px(width));
+            assert!(window.debug_bounds("worktree-create").is_none());
+        }
+        window.update(|_, cx| {
+            view.read(cx).0.clone().update(cx, |view, cx| {
+                view.settings_page = super::SettingsPage::Worktrees;
+                cx.notify();
+            });
+        });
+        window.run_until_parked();
+        assert!(window.debug_bounds("default-model").is_none());
     }
 }

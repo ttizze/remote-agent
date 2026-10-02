@@ -26,10 +26,46 @@ pub struct ModelQuickControls {
     pub effort_level: u32,
     pub fast: bool,
     pub toggle_fast_to: Option<String>,
+    pub fast_service_tier: Option<String>,
 }
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    pub fn model_defaults(&self) -> crate::state::ModelDefaults {
+        self.model_defaults.clone()
+    }
+
+    pub fn default_model(&self) -> Option<Model> {
+        let (model, _, _) = crate::state::supported_settings(
+            self.model_defaults.model.as_ref(),
+            self.model_defaults.effort.as_deref(),
+            self.model_defaults.service_tier.as_deref(),
+            &self.models,
+            &self.model_errors,
+        );
+        self.models
+            .iter()
+            .find(|choice| Some(&choice.model) == model)
+            .cloned()
+    }
+
+    pub fn default_model_controls(&self) -> ModelQuickControls {
+        let (model, effort, tier) = crate::state::supported_settings(
+            self.model_defaults.model.as_ref(),
+            self.model_defaults.effort.as_deref(),
+            self.model_defaults.service_tier.as_deref(),
+            &self.models,
+            &self.model_errors,
+        );
+        quick_controls(
+            self.models
+                .iter()
+                .find(|choice| Some(&choice.model) == model),
+            effort,
+            tier,
+        )
+    }
+
     pub fn model_provider_for_draft(&self, thread_id: crate::state::DraftKey) -> ProviderKind {
         draft_provider(
             &thread_id,
@@ -92,54 +128,61 @@ impl Snapshot {
         let Some(draft) = self.drafts.get(&thread_id) else {
             return ModelQuickControls::default();
         };
-        let Some(model) = self
-            .models
-            .iter()
-            .find(|model| Some(&model.model) == draft.model.as_ref())
-        else {
-            return ModelQuickControls::default();
-        };
-        let efforts: Vec<_> = model
-            .supported_reasoning_efforts
-            .iter()
-            .map(|choice| choice.reasoning_effort.clone())
-            .collect();
-        let effort = draft
-            .effort
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .unwrap_or(&model.default_reasoning_effort)
-            .to_owned();
-        let effort_level = efforts
-            .iter()
-            .position(|value| *value == effort)
-            .map_or(0, |index| index as u32 + 1);
-        let tier = draft
-            .service_tier
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .or(model.default_service_tier.as_deref())
-            .unwrap_or("default");
-        let fast_tier = model
-            .service_tiers
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .find(|tier| matches!(tier.id.as_str(), "priority" | "fast"));
-        let fast = fast_tier.is_some_and(|fast| fast.id == tier);
-        ModelQuickControls {
-            efforts,
-            effort,
-            effort_level,
-            fast,
-            toggle_fast_to: fast_tier.map(|tier| {
-                if fast {
-                    "default".into()
-                } else {
-                    tier.id.clone()
-                }
-            }),
-        }
+        quick_controls(
+            self.models
+                .iter()
+                .find(|model| Some(&model.model) == draft.model.as_ref()),
+            draft.effort.as_deref(),
+            draft.service_tier.as_deref(),
+        )
+    }
+}
+
+fn quick_controls(
+    model: Option<&Model>,
+    effort: Option<&str>,
+    service_tier: Option<&str>,
+) -> ModelQuickControls {
+    let Some(model) = model else {
+        return ModelQuickControls::default();
+    };
+    let efforts: Vec<_> = model
+        .supported_reasoning_efforts
+        .iter()
+        .map(|choice| choice.reasoning_effort.clone())
+        .collect();
+    let effort = effort
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&model.default_reasoning_effort)
+        .to_owned();
+    let effort_level = efforts
+        .iter()
+        .position(|value| *value == effort)
+        .map_or(0, |index| index as u32 + 1);
+    let tier = service_tier
+        .filter(|value| !value.is_empty())
+        .or(model.default_service_tier.as_deref())
+        .unwrap_or("default");
+    let fast_tier = model
+        .service_tiers
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .find(|tier| matches!(tier.id.as_str(), "priority" | "fast"));
+    let fast = fast_tier.is_some_and(|fast| fast.id == tier);
+    ModelQuickControls {
+        efforts,
+        effort,
+        effort_level,
+        fast,
+        fast_service_tier: fast_tier.map(|tier| tier.id.clone()),
+        toggle_fast_to: fast_tier.map(|tier| {
+            if fast {
+                "default".into()
+            } else {
+                tier.id.clone()
+            }
+        }),
     }
 }
 
