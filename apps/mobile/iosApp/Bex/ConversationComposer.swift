@@ -132,10 +132,10 @@ extension ThreadScreen {
                         .disabled(!model.isConnected || model.sending)
                     }
                     Button { composerFocused = false; showingModelSettings = true } label: {
-                        Text(model.currentModel?
-                            .displayName ?? (model.selectedModel?.id ?? "モデル"))
+                        Text(model.currentModel?.displayName ?? "モデル")
                             .font(.subheadline).lineLimit(1).truncationMode(.middle)
                             .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
                     .layoutPriority(1)
                     .accessibilityLabel("モデル設定")

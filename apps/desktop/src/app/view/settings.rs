@@ -1,9 +1,10 @@
+use super::sidebar::SidebarSection;
 use super::*;
 
 impl Desktop {
     pub(super) fn open_settings(&mut self) {
         self.tab = Tab::Settings;
-        self.settings_page = SettingsPage::Accounts;
+        self.settings_page = SettingsPage::Agents;
         if self.snapshot.account.login.is_none() {
             self.model_provider = None;
         }
@@ -14,75 +15,52 @@ impl Desktop {
         self.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
     }
 
-    pub(super) fn settings_sidebar(&self, cx: &Context<Self>) -> AnyElement {
-        let mut navigation = v_flex().gap_1();
-        for (id, label, icon, page) in [
-            (
-                "settings-accounts",
-                "アカウント",
-                IconName::User,
-                SettingsPage::Accounts,
-            ),
-            (
-                "settings-connections",
-                "端末と接続",
-                IconName::Network,
-                SettingsPage::Connections,
-            ),
-            (
-                "settings-worktrees",
-                "ワークツリー",
-                IconName::Folder,
-                SettingsPage::Worktrees,
-            ),
+    pub(super) fn settings_sidebar(&self, cx: &Context<Self>) -> Sidebar<SidebarSection> {
+        let mut navigation = SidebarMenu::new().gap_1();
+        for (label, icon, page) in [
+            ("エージェント", IconName::User, SettingsPage::Agents),
+            ("端末と接続", IconName::Network, SettingsPage::Connections),
+            ("ワークツリー", IconName::Folder, SettingsPage::Worktrees),
         ] {
             navigation = navigation.child(
-                self.button(id, label, cx, move |s, _, _| s.settings_page = page)
+                SidebarMenuItem::new(label)
                     .icon(icon)
-                    .w_full()
-                    .h(px(40.))
-                    .px_3()
-                    .selected(self.settings_page == page)
-                    .when(self.settings_page == page, |button| {
-                        button.text_color(rgb(0x8bb7f9))
-                    }),
+                    .active(self.settings_page == page)
+                    .on_click(cx.listener(move |s, _, _, cx| {
+                        s.settings_page = page;
+                        cx.notify();
+                    })),
             );
         }
-        v_flex()
-            .w(px(220.))
-            .flex_shrink_0()
-            .h_full()
-            .bg(rgb(0x101214))
-            .border_r_1()
-            .border_color(rgb(0x2b2f35))
-            .child(
-                h_flex()
-                    .h(px(crate::WINDOW_HEADER_HEIGHT))
-                    .flex_shrink_0()
-                    .pl(px(88.))
-                    .child(div().text_sm().font_semibold().child("Bex")),
+        Sidebar::new("settings-sidebar")
+            .child(SidebarSection {
+                label: "設定",
+                menu: navigation,
+                add_project: None,
+            })
+            .footer(
+                self.button("settings-back", "会話に戻る", cx, |s, _, _| {
+                    s.tab = Tab::Chat
+                })
+                .icon(IconName::ArrowLeft)
+                .debug_selector(|| "settings-back".into())
+                .w_full()
+                .h(px(40.)),
             )
-            .child(
-                v_flex()
-                    .gap_5()
-                    .px_3()
-                    .pt_3()
-                    .child(
-                        self.button("settings-back", "会話に戻る", cx, |s, _, _| {
-                            s.tab = Tab::Chat
-                        })
-                        .icon(IconName::ArrowLeft)
-                        .h(px(36.)),
-                    )
-                    .child(navigation),
-            )
-            .into_any_element()
     }
 
     pub(super) fn settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let environment = if self.settings_page == SettingsPage::Connections {
+            "このPCと登録済みの環境".to_owned()
+        } else {
+            self.remote
+                .as_ref()
+                .map_or("このPC", |host| host.name.as_str())
+                .to_owned()
+        };
         let (title, subtitle) = match self.settings_page {
-            SettingsPage::Accounts => (
-                "アカウント",
+            SettingsPage::Agents => (
+                "エージェント",
                 "選択した環境のAIアカウントと使用量を管理します。",
             ),
             SettingsPage::Connections => (
@@ -94,20 +72,11 @@ impl Desktop {
                 "新しい会話の作業場所と、作成済みのワークツリーを管理します。",
             ),
         };
-        let mut heading = v_flex()
+        let heading = v_flex()
+            .debug_selector(|| "settings-page-heading".into())
             .gap_2()
             .child(div().text_size(px(26.)).font_semibold().child(title))
             .child(div().text_sm().text_color(rgb(0x949ca8)).child(subtitle));
-        if self.settings_page != SettingsPage::Connections {
-            heading = heading.child(div().pt_2().text_xs().text_color(rgb(0x949ca8)).child(
-                format!(
-                        "設定する環境 · {}",
-                        self.remote
-                            .as_ref()
-                            .map_or("このPC", |host| host.name.as_str())
-                    ),
-            ));
-        }
         let mut body = v_flex()
             .w_full()
             .max_w(px(960.))
@@ -134,7 +103,7 @@ impl Desktop {
         }
         body =
             match self.settings_page {
-                SettingsPage::Accounts => body.child(self.account_controls(true, cx)),
+                SettingsPage::Agents => body.child(self.account_controls(true, cx)),
                 SettingsPage::Connections => {
                     let setup = self.snapshot.connection_setup();
                     let agent_controls = self.connection_agent_controls(&setup.agents, cx);
@@ -173,15 +142,27 @@ impl Desktop {
             .h_full()
             .child(
                 h_flex()
+                    .id("settings-scope")
+                    .debug_selector(|| "settings-scope".into())
                     .h(px(crate::WINDOW_HEADER_HEIGHT))
                     .flex_shrink_0()
-                    .px_8()
-                    .child(div().text_xs().text_color(rgb(0x949ca8)).child("設定")),
+                    .gap_2()
+                    .when(self.sidebar, |header| header.px_8())
+                    .when(!self.sidebar, |header| {
+                        header.child(sidebar_header(false, cx)).pr_8()
+                    })
+                    .text_xs()
+                    .child(div().text_color(rgb(0x949ca8)).child("設定の適用先"))
+                    .child("すべてのプロジェクト")
+                    .child(div().text_color(rgb(0x949ca8)).child("／"))
+                    .child(environment)
+                    .border_b_1()
+                    .border_color(rgb(0x2b2f35)),
             )
             .child(
                 div()
                     .id(match self.settings_page {
-                        SettingsPage::Accounts => "settings-accounts-scroll",
+                        SettingsPage::Agents => "settings-agents-scroll",
                         SettingsPage::Connections => "settings-connections-scroll",
                         SettingsPage::Worktrees => "settings-worktrees-scroll",
                     })

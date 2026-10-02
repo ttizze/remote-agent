@@ -212,7 +212,7 @@ extension BexLaunchUITests {
     }
 
     func openModelChoices(_ app: XCUIApplication) {
-        for _ in 0 ..< 2 where app.buttons["model.back"].exists {
+        if app.buttons["model.back"].exists {
             app.buttons["model.back"].tap()
         }
         XCTAssertTrue(app.textFields["model.search"].waitForExistence(timeout: 15))

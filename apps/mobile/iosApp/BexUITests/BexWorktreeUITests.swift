@@ -111,11 +111,15 @@ extension BexLaunchUITests {
     }
 
     private func openWorktreeSettings(_ app: XCUIApplication) {
-        let menu = app.buttons["tasks.menu"]
-        let visible = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: menu)
-        wait(for: [visible], timeout: 10)
-        menu.tap()
-        app.buttons["tasks.worktree-settings"].tap()
+        let worktrees = app.buttons["settings.worktrees"]
+        if !worktrees.exists {
+            let menu = app.buttons["tasks.menu"]
+            let visible = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: menu)
+            wait(for: [visible], timeout: 10)
+            menu.tap()
+            app.buttons["tasks.settings"].tap()
+        }
+        XCTAssertTrue(worktrees.waitForExistence(timeout: 10)); worktrees.tap()
         let save = app.buttons["worktree.save"]
         XCTAssertTrue(save.waitForExistence(timeout: 10))
         let loaded = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: save)

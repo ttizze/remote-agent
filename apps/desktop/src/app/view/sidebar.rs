@@ -1,10 +1,10 @@
 use super::*;
 
 #[derive(Clone)]
-struct SidebarSection {
-    label: &'static str,
-    menu: SidebarMenu,
-    add_project: Option<(WeakEntity<Desktop>, bool)>,
+pub(super) struct SidebarSection {
+    pub(super) label: &'static str,
+    pub(super) menu: SidebarMenu,
+    pub(super) add_project: Option<(WeakEntity<Desktop>, bool)>,
 }
 
 impl Collapsible for SidebarSection {
@@ -60,6 +60,30 @@ impl SidebarItem for SidebarSection {
 
 impl Desktop {
     pub(super) fn sidebar(&self, cx: &Context<Self>) -> AnyElement {
+        let sidebar = match self.tab {
+            Tab::Chat => self.conversation_sidebar(cx),
+            Tab::Settings => self.settings_sidebar(cx),
+        }
+        .w_full()
+        .h_auto()
+        .flex_1()
+        .min_h_0()
+        .border_r_0()
+        .bg(rgb(0x242424));
+        v_flex()
+            .debug_selector(|| "desktop-sidebar-shell".into())
+            .w(px(272.))
+            .h_full()
+            .flex_shrink_0()
+            .bg(rgb(0x242424))
+            .border_r_1()
+            .border_color(cx.theme().sidebar_border)
+            .child(sidebar_header(true, cx))
+            .child(sidebar)
+            .into_any_element()
+    }
+
+    fn conversation_sidebar(&self, cx: &Context<Self>) -> Sidebar<SidebarSection> {
         let list = self.snapshot.thread_list();
         let mut projects = SidebarMenu::new().gap_1();
         for project in list
@@ -169,13 +193,7 @@ impl Desktop {
                 },
             )));
         }
-        let sidebar = Sidebar::new("desktop-sidebar")
-            .w_full()
-            .h_auto()
-            .flex_1()
-            .min_h_0()
-            .border_r_0()
-            .bg(rgb(0x242424))
+        Sidebar::new("desktop-sidebar")
             .header(
                 v_flex()
                     .w_full()
@@ -228,18 +246,21 @@ impl Desktop {
                     .gap_2()
                     .justify_between()
                     .py_2()
-                    .child(self.icon_button(
-                        "sidebar-settings",
-                        IconName::Settings,
-                        "設定を開く",
-                        cx,
-                        |s, _, cx| {
-                            s.open_settings();
-                            if let Some(hosts) = &s.hosts {
-                                hosts.update(cx, |hosts, _| hosts.refresh());
-                            }
-                        },
-                    ))
+                    .child(
+                        self.icon_button(
+                            "sidebar-settings",
+                            IconName::Settings,
+                            "設定を開く",
+                            cx,
+                            |s, _, cx| {
+                                s.open_settings();
+                                if let Some(hosts) = &s.hosts {
+                                    hosts.update(cx, |hosts, _| hosts.refresh());
+                                }
+                            },
+                        )
+                        .debug_selector(|| "sidebar-settings".into()),
+                    )
                     .child(self.icon_button(
                         "refresh-threads",
                         IconName::RotateCw,
@@ -247,17 +268,7 @@ impl Desktop {
                         cx,
                         |s, _, _| s.refresh_threads(),
                     )),
-            );
-        v_flex()
-            .w(px(272.))
-            .h_full()
-            .flex_shrink_0()
-            .bg(rgb(0x242424))
-            .border_r_1()
-            .border_color(cx.theme().sidebar_border)
-            .child(sidebar_header(true, cx))
-            .child(sidebar)
-            .into_any_element()
+            )
     }
     pub(super) fn thread_button(
         &self,
@@ -303,14 +314,16 @@ impl Desktop {
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, Desktop, Mode, RemoteHost, Runtime, Snapshot, StoreSession};
+    use super::{
+        Arc, Desktop, Draft, Mode, RemoteHost, Runtime, SettingsPage, Snapshot, StoreSession, Tab,
+    };
     use agent_core::store::Store;
     use gpui_kit as gpui;
     use gpui_kit::{
         AppContext, Context, Entity, InteractiveElement, IntoElement, Modifiers, ParentElement,
         Render, Styled, TestAppContext, Window,
         component::{sidebar::SidebarItem, v_flex},
-        div, px,
+        div, px, size,
     };
 
     struct TaskNavigation(Entity<Desktop>);
@@ -331,6 +344,86 @@ mod tests {
                     }))
             })
         }
+    }
+
+    #[gpui::test]
+    fn settings_share_sidebar_and_return_to_the_same_conversation(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(Runtime {
+                handle: runtime.handle().clone(),
+                connections: Arc::default(),
+                closing: tokio_util::task::TaskTracker::new(),
+                logging_error: None,
+            });
+        });
+        let (view, window) = cx.add_window_view(|window, cx| {
+            let mut desktop = Desktop::new(Mode::Main, window, cx);
+            desktop.onboarding = false;
+            desktop.panel_open = false;
+            let session = agent_protocol::session::SessionRef {
+                provider: agent_protocol::session::ProviderKind::Codex,
+                id: "fixture".into(),
+            };
+            let snapshot = Arc::make_mut(&mut desktop.snapshot);
+            Arc::make_mut(&mut snapshot.navigation).thread_id = Some(session.clone());
+            Arc::make_mut(&mut snapshot.navigation).draft_key = session.clone().into();
+            Arc::make_mut(&mut snapshot.drafts).insert(
+                session.into(),
+                Arc::new(Draft {
+                    text: "Keep my draft".into(),
+                    ..Default::default()
+                }),
+            );
+            desktop
+        });
+        window.simulate_resize(size(px(1000.), px(700.)));
+        window.run_until_parked();
+        let original = window.debug_bounds("desktop-sidebar-shell").unwrap();
+        let settings = window.debug_bounds("sidebar-settings").unwrap().center();
+        window.simulate_click(settings, Modifiers::default());
+        window.run_until_parked();
+        assert_eq!(
+            window.debug_bounds("desktop-sidebar-shell").unwrap(),
+            original
+        );
+        for page in [
+            SettingsPage::Agents,
+            SettingsPage::Connections,
+            SettingsPage::Worktrees,
+        ] {
+            view.update(window, |view, cx| {
+                view.settings_page = page;
+                cx.notify();
+            });
+            window.run_until_parked();
+            let scope = window.debug_bounds("settings-scope").unwrap();
+            assert!(scope.bottom() <= window.debug_bounds("settings-page-heading").unwrap().top());
+            assert!(window.debug_bounds("settings-back").unwrap().bottom() >= px(640.));
+        }
+        let collapse = window.debug_bounds("collapse-sidebar").unwrap().center();
+        window.simulate_click(collapse, Modifiers::default());
+        window.run_until_parked();
+        assert!(window.debug_bounds("desktop-sidebar-shell").is_none());
+        let expand = window.debug_bounds("expand-sidebar").unwrap().center();
+        window.simulate_click(expand, Modifiers::default());
+        window.run_until_parked();
+        let back = window.debug_bounds("settings-back").unwrap().center();
+        window.simulate_click(back, Modifiers::default());
+        window.run_until_parked();
+        assert_eq!(
+            window.debug_bounds("desktop-sidebar-shell").unwrap(),
+            original
+        );
+        view.update(window, |view, _| {
+            assert!(view.tab == Tab::Chat);
+            assert_eq!(view.selected().unwrap().id, "fixture");
+            assert_eq!(view.draft().text, "Keep my draft");
+        });
     }
 
     #[gpui::test]

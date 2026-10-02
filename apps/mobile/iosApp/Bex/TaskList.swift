@@ -5,7 +5,6 @@ struct ThreadsScreen: View {
     @ObservedObject var model: BexAppViewModel
     @State private var search = ""
     @State private var expandedProjectIds = Set<String>()
-    @State private var worktreeHost: WorktreeSettingsHost?
     @State private var showingSettings = false
 
     var body: some View {
@@ -205,31 +204,16 @@ struct ThreadsScreen: View {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
                     Button { showingSettings = true } label: { Label("設定", systemImage: "gearshape") }
-                        .disabled(!model.isConnected)
                         .accessibilityIdentifier("tasks.settings")
                     Button { model.refreshTaskList() } label: { Label("更新", systemImage: "arrow.clockwise") }
                         .disabled(model.threadLoadState == .loading)
                         .accessibilityIdentifier("tasks.refresh")
-                    Button {
-                        if let id = model.selectedProfileId {
-                            worktreeHost = WorktreeSettingsHost(id: id, name: model.selectedProfileName ?? "PC Host")
-                        }
-                    } label: { Label("ワークツリー設定", systemImage: "arrow.triangle.branch") }
-                        .disabled(!model.isConnected)
-                        .accessibilityIdentifier("tasks.worktree-settings")
-                    Button { model.showProfiles() } label: { Label("PC一覧", systemImage: "laptopcomputer") }
                 } label: { Image(systemName: "ellipsis") }
                     .accessibilityLabel("その他")
                     .accessibilityIdentifier("tasks.menu")
             }
         }
-        .sheet(isPresented: $showingSettings) { ModelSettingsSheet(model: model, managementOnly: true) }
-        .sheet(item: $worktreeHost) { host in WorktreeSettingsSheet(
-            connected: model.isConnected && model.selectedProfileId == host.id,
-            request: model.requestSnapshot,
-            settings: model.snapshot.worktreeSettings(),
-            host: host
-        ) }
+        .sheet(isPresented: $showingSettings) { SettingsSheet(model: model) }
     }
 }
 

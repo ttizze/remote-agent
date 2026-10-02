@@ -99,16 +99,28 @@ Controls have no persistent border or model chevron. Fast toggles directly;
 effort opens the model's supported choices and its icon indicates the current
 level. Hide unsupported controls, and retain accessible labels and values.
 
-The model name opens a searchable catalog with separate agent and
-connection/account rows. The account row includes the Host-reported weekly
-quota windows; clicking it opens account switching, then account management
-(add/login/confirmed sign-out). Settings opens that same management view.
+The model name opens a searchable catalog. Desktop's account row includes the
+Host-reported weekly quota windows; clicking it opens account switching, then
+account management (add/login/confirmed sign-out). On iPhone, new conversations
+choose Codex or Claude Code with a segmented control; existing conversations
+keep their agent fixed. The account is read-only in the model picker, and
+Manage opens the same agent/account screen used by Settings. Browsing agent
+settings must not change the conversation's model. The selected account shows
+weekly quotas and reset times, with full usage details collapsed by default.
 Never invent quota values, account nicknames, unavailable agents or unsupported
 agent/connection combinations. Current Host adapters remain Codex and Claude;
 Pi and third-party connection adapters are not implied by the picker UI.
 Refresh must not change the selected provider. Account changes retain supported
 model/effort/speed choices, and normalize only settings the new catalog lacks.
 Account/model changes continue through the shared Store.
+
+Desktop's conversation and settings pages share the sidebar shell, width,
+header and collapse state. Only navigation contents and footer actions change;
+Back stays at the bottom and returns to the selected conversation and draft.
+Settings pages show a common applicability bar above their contents. It shows
+the current storage scope rather than implying that settings are written to
+every environment. Environment settings apply to every project on that Host;
+iPhone connection registrations belong to that iPhone.
 
 Acceptance: desktop
 `model_picker_keeps_quick_controls_and_routes_quota_to_account_management`, core

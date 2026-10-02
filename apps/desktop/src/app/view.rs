@@ -63,6 +63,7 @@ fn sidebar_header(expanded: bool, cx: &Context<Desktop>) -> Div {
         })
         .child(
             Button::new(id)
+                .debug_selector(move || id.into())
                 .icon(icon)
                 .small()
                 .ghost()
@@ -156,21 +157,30 @@ impl Render for Desktop {
                 .text_size(px(14.))
                 .child(gallery);
         }
-        if self.tab == Tab::Settings {
-            return h_flex()
-                .size_full()
-                .items_stretch()
-                .bg(rgb(0x111315))
-                .text_color(rgb(0xececec))
-                .text_size(px(14.))
-                .font_weight(FontWeight::NORMAL)
-                .child(self.settings_sidebar(cx))
-                .child(self.settings(cx));
-        }
-        if self.onboarding {
+        if self.onboarding && self.tab == Tab::Chat {
             return self.onboarding_view(window, cx);
         }
-        let wide = window.viewport_size().width >= px(1080.);
+        let main = match self.tab {
+            Tab::Chat => self.conversation_content(window.viewport_size().width, cx),
+            Tab::Settings => self.settings(cx),
+        };
+        h_flex()
+            .size_full()
+            .items_stretch()
+            .bg(rgb(0x181818))
+            .text_color(rgb(0xececec))
+            .text_size(px(14.))
+            .font_weight(FontWeight::NORMAL)
+            .when(self.sidebar && !self.side_chat_mode, |body| {
+                body.child(self.sidebar(cx))
+            })
+            .child(main)
+    }
+}
+
+impl Desktop {
+    fn conversation_content(&mut self, width: Pixels, cx: &mut Context<Self>) -> AnyElement {
+        let wide = width >= px(1080.);
         let title = self
             .thread()
             .and_then(|thread| thread.name.as_deref())
@@ -247,7 +257,7 @@ impl Render for Desktop {
                 .size_full()
                 .items_stretch()
                 .child(self.chat(cx))
-                .when(window.viewport_size().width >= px(1280.), |v| {
+                .when(width >= px(1280.), |v| {
                     v.child(
                         div()
                             .w(px(300.))
@@ -257,7 +267,7 @@ impl Render for Desktop {
                 })
                 .into_any_element()
         };
-        let main = v_flex()
+        v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
@@ -292,18 +302,8 @@ impl Render for Desktop {
                     .flex()
                     .items_stretch()
                     .child(content),
-            );
-        h_flex()
-            .size_full()
-            .items_stretch()
-            .bg(rgb(0x181818))
-            .text_color(rgb(0xececec))
-            .text_size(px(14.))
-            .font_weight(FontWeight::NORMAL)
-            .when(self.sidebar && !self.side_chat_mode, |body| {
-                body.child(self.sidebar(cx))
-            })
-            .child(main)
+            )
+            .into_any_element()
     }
 }
 

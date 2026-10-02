@@ -306,6 +306,9 @@ private struct ProfilesScreen: View {
             }
         }
         .background(Color(UIColor.systemGroupedBackground).ignoresSafeArea())
+        .safeAreaInset(edge: .top, spacing: 0) {
+            SettingsScopeBar(projects: "すべてのプロジェクト", environment: "このiPhone")
+        }
         .navigationTitle("Bex")
         .alert("このPCとの接続を解除しますか？", isPresented: Binding(
             get: { removing != nil }, set: {
