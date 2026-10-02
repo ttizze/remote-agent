@@ -525,7 +525,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     thread.borrow_mut().metadata.insert("status".into(), json!({"type":"active","activeFlags":[]}));
                     context.respond(id, &json!({"turn":{"id":turn_id}}))?;
                     let delayed = prompt.contains("[delayed-input]") || prompt.contains("[deferred-steer]");
-                    if delayed || prompt.contains("[workspace-edit]") { remove_if_present(&context.home.join("release-inputs"))?; }
+                    if delayed || prompt.contains("[workspace-edit]") || prompt.contains("[groups]") { remove_if_present(&context.home.join("release-inputs"))?; }
                     let stop = CancellationToken::new();
                     context.controls.borrow_mut().insert(turn_id, Control { stop: stop.clone(), delayed });
                     let context = context.clone();

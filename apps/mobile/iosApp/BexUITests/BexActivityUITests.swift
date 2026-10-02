@@ -60,6 +60,7 @@ extension BexLaunchUITests {
         app.buttons.matching(NSPredicate(format: "label == %@", "pwd")).firstMatch.tap()
         XCTAssertTrue(app.staticTexts["GROUP_DETAIL_OUTPUT"].waitForExistence(timeout: 5))
         captureScreen(app, named: "Selected command group and command details expanded")
+        try simulatorFixture("release-inputs")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 20))
         let completed = prefixedButton(app, prefix: "turn.activity.fixture-turn-")
         let completion = expectation(
