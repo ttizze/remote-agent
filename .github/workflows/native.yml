@@ -104,7 +104,7 @@ jobs:
       - name: Build unsigned iOS simulator app and UI tests
         run: |
           target=$(cargo metadata --no-deps --format-version 1 | jq -er .target_directory)
-          xcodebuild -project apps/mobile/iosApp/Bex.xcodeproj \
+          xcodebuild -skipPackagePluginValidation -project apps/mobile/iosApp/Bex.xcodeproj \
             -scheme Bex -destination 'generic/platform=iOS Simulator' \
             -configuration Debug -derivedDataPath "$RUNNER_TEMP/ios-derived-data" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
