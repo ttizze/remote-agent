@@ -86,7 +86,7 @@ impl LocalHostRegistry {
             );
         }
         crate::platform::create_state_directory(directory)?;
-        let directory = dunce::canonicalize(&directory)?;
+        let directory = dunce::canonicalize(directory)?;
         let lock = open_lock(&directory.join("host.lock"))?;
         lock.try_lock()
             .context("Host is already running or its lock is unavailable")?;

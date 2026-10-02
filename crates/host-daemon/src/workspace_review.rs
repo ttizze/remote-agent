@@ -28,7 +28,7 @@ fn collect_workspace_review(cwd: PathBuf) -> Result<WorkspaceReview> {
 }
 
 fn review_existing_workspace(cwd: &Path) -> Result<WorkspaceReview> {
-    let cwd = dunce::canonicalize(&cwd).context("working directory is unavailable")?;
+    let cwd = dunce::canonicalize(cwd).context("working directory is unavailable")?;
     if !cwd.is_dir() {
         return Err(anyhow!("working directory is not a directory"));
     }

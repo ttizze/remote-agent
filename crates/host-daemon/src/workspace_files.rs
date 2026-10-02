@@ -223,7 +223,7 @@ impl WorkspaceFiles {
                 } else {
                     absolute_path(&params.directory)?
                 };
-                let directory = dunce::canonicalize(&directory)?;
+                let directory = dunce::canonicalize(directory)?;
                 if !directory.is_dir() {
                     return Err(anyhow!("upload directory is unavailable"));
                 }
