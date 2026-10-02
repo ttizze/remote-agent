@@ -25,41 +25,6 @@ struct ConversationPresentationInput {
     let host: String?
 }
 
-extension JsonValue {
-    var string: String? {
-        switch self {
-        case let .string(value), let .number(value): value
-        default: nil
-        }
-    }
-
-    var fields: [String: JsonValue] {
-        if case let .object(fields) = self {
-            return fields
-        }; return [:]
-    }
-
-    var array: [JsonValue] {
-        if case let .array(values) = self {
-            return values
-        }; return []
-    }
-
-    var bool: Bool {
-        if case let .boolean(value) = self {
-            return value
-        }; return false
-    }
-
-    var formatted: String {
-        (try? formatJsonValue(value: self)) ?? ""
-    }
-
-    subscript(_ key: String) -> JsonValue? {
-        fields[key]
-    }
-}
-
 final class ConversationItem: Sendable {
     let source: RenderedItem
     let data: ItemPresentation
