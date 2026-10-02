@@ -16,19 +16,17 @@ The first version renders compressed still frames while the screen is visible;
 unchanged images are omitted from subsequent replies. It is intended for web
 interaction, not video or audio streaming.
 
-The phone starts in viewing mode. “自分で操作する” takes control of that
-conversation's browser. The Host serializes all browser operations, rejects
-stale control tokens and input from other devices, and suspends agent browser
-calls until “AIに戻す”. Disconnection never silently gives control back to the
-agent. Other non-browser agent work is not suspended. Returning control resumes
-a waiting screenshot call. A suspended input command returns a request to
-observe the updated page before retrying, so old coordinates cannot execute
-after human navigation. Returning control does not start a new conversation turn.
+The phone and agent can operate the conversation's browser concurrently, without
+claiming or returning control. Opening the browser makes input available as soon
+as the first frame arrives. The Host serializes individual operations and rejects
+phone input if the displayed tab has changed. Agent calls remain available while
+the phone is connected or interacting. Both should observe the current page
+before continuing after another participant changes it.
 
 Codex and Claude receive a BEX browser MCP tool scoped by the Host to their
 conversation. It offers screenshots, navigation, tabs, click, scroll, text,
-keyboard keys, dialogs and an explicit wait for human input. Both providers use
-the same Host owner and control checks as the phone.
+keyboard keys and dialogs. Human steps such as login use the same shared page
+without a browser control mode or a handoff button.
 
 The Host uses an installed Chrome/Chromium executable (optionally selected with
 `BEX_BROWSER_EXECUTABLE`). Remote debugging binds only to loopback with a
@@ -38,6 +36,6 @@ client persisted conversation state. Browser screenshots returned to an agent
 are tool results and therefore may be retained in that provider's conversation.
 
 Verification must cover the live browser, persistent site storage, popup
-ownership, human takeover, stale input rejection, suspended agent calls, and
+ownership, concurrent phone and agent input, stale tab input rejection, and
 the iPhone UI. A local connection test does not establish external-network
 latency; that requires the physical iPhone on another network.

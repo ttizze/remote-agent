@@ -274,11 +274,8 @@ impl HostRpcService {
         }
     }
 
-    pub(crate) async fn revoke_device(&self, principal: &str) {
+    pub(crate) fn revoke_device(&self, principal: &str) {
         self.inner.terminals.revoke_device(principal);
-        if let Some(browser) = self.inner.browser.get() {
-            browser.revoke_device(principal).await;
-        }
     }
     pub fn open_session(&self) -> HostSession {
         self.start_codex_event_pump();
@@ -754,13 +751,8 @@ impl HostRpcService {
                     "このHostではBEXブラウザが有効になっていません。",
                 )
             })?;
-            let principal = self
-                .inner
-                .router
-                .principal(session)
-                .map_err(|e| Failure::new("invalid_session", e))?;
             return browser
-                .request(&principal, params)
+                .request(params)
                 .await
                 .map(Into::into)
                 .map_err(|e| Failure::new("browser_failed", e));
