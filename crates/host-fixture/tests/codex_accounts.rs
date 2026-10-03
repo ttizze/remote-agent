@@ -19,8 +19,11 @@ async fn call(
     service: &HostRpcService,
     session: &mut HostSession,
     method: &str,
-    params: Value,
+    mut params: Value,
 ) -> Value {
+    if method.starts_with("host/account/") && method != "host/account/list" {
+        params["provider"] = json!("codex");
+    }
     let reply = service
         .dispatch(
             session.id(),
@@ -102,7 +105,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let mut session = service.open_session();
         let list = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(list["result"]["accounts"][0]["email"], "desktop@example.invalid");
-        assert_eq!(list["result"]["selectedId"], "desktop");
+        assert_eq!(list["result"]["selected"]["codex"], "desktop");
         assert!(list["result"]["accounts"][0]["usage"].is_null());
         std::fs::write(home.join("usage-paused"), "").unwrap();
         let usage_service = service.clone();
@@ -195,7 +198,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         service.enable_accounts(accounts_dir, config).await.unwrap();
         let mut session = service.open_session();
         let accounts = call(&service, &mut session, "host/account/list", json!({})).await;
-        assert!(accounts["result"]["selectedId"].is_null());
+        assert!(accounts["result"]["selected"]["codex"].is_null());
         assert!(accounts["result"]["error"].is_string());
         assert!(call(&service, &mut session, "host/session/list", json!({})).await.get("error").is_none());
         assert_eq!(call(&service, &mut session, "host/session/submit", json!({"threadId":{"provider":"codex","id":"any"},"clientUserMessageId":"unavailable-account","input":[{"text":{"text":"must not use a different account"}}]})).await["error"]["code"], "account_unavailable");
@@ -207,7 +210,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let remaining = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(remaining["result"]["accounts"].as_array().unwrap().len(), 1);
         assert_eq!(remaining["result"]["accounts"][0]["id"], "desktop");
-        assert!(remaining["result"]["selectedId"].is_null(), "logout must not select another saved account");
+        assert!(remaining["result"]["selected"]["codex"].is_null(), "logout must not select another saved account");
 
         drop(session); drop(service);
         server.shutdown().await.unwrap();
@@ -311,7 +314,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
         let mut session = service.open_session();
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
-        assert_eq!(listed["result"]["selectedId"], "desktop");
+        assert_eq!(listed["result"]["selected"]["codex"], "desktop");
         if account["type"] == "apiKey" {
             assert_eq!(listed["result"]["accounts"][0]["planType"], "API key");
             assert!(listed["result"]["accounts"][0]["email"].is_null());
@@ -328,7 +331,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
         let mut session = service.open_session();
-        assert_eq!(call(&service, &mut session, "host/account/list", json!({})).await["result"]["selectedId"], "desktop");
+        assert_eq!(call(&service, &mut session, "host/account/list", json!({})).await["result"]["selected"]["codex"], "desktop");
         let invalid = call(&service, &mut session, "host/account/logout", json!({"accountId":"missing"})).await;
         assert!(invalid.get("error").is_some());
         assert_eq!(rpc(&server, "account/read", json!({})).await["account"], account);
@@ -339,7 +342,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         let failed = call(&service, &mut session, "host/account/logout", json!({"accountId":"desktop"})).await;
         assert!(failed.get("error").is_some());
         assert_eq!(rpc(&server, "account/read", json!({})).await["account"], account);
-        assert_eq!(call(&service, &mut session, "host/account/list", json!({})).await["result"]["selectedId"], "desktop");
+        assert_eq!(call(&service, &mut session, "host/account/list", json!({})).await["result"]["selected"]["codex"], "desktop");
         std::fs::remove_dir(accounts_dir.join("accounts.json")).unwrap();
         std::fs::write(accounts_dir.join("accounts.json"), registry).unwrap();
         let logged_out = call(&service, &mut session, "host/account/logout", json!({"accountId":"desktop"})).await;
@@ -348,7 +351,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         assert!(!home.join("account-fixture.json").exists());
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(listed["result"]["accounts"], json!([]));
-        assert!(listed["result"]["selectedId"].is_null());
+        assert!(listed["result"]["selected"]["codex"].is_null());
         drop(session); drop(service);
         server.shutdown().await.unwrap();
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
@@ -357,7 +360,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         let mut session = service.open_session();
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(listed["result"]["accounts"], json!([]));
-        assert!(listed["result"]["selectedId"].is_null());
+        assert!(listed["result"]["selected"]["codex"].is_null());
         let login = call(&service, &mut session, "host/account/login/start", json!({"provider":"codex"})).await;
         let status = loop {
             let status = call(&service, &mut session, "host/account/login/status", json!({"loginId":login["result"]["loginId"]})).await;

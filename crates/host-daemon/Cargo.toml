@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait = "0.1.89"
 url.workspace = true
 tracing.workspace = true
 bex-process = { path = "../bex-process" }
@@ -25,7 +26,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "net"] }
-async-tungstenite = { version = "0.35", default-features = false, features = ["handshake", "futures-03-sink", "tokio-rustls-native-certs"] }
+async-tungstenite = { version = "0.35", default-features = false, features = ["handshake", "futures-03-sink", "tokio-rustls-platform-verifier"] }
 futures-io = "0.3"
 tokio-util.workspace = true
 zeroize.workspace = true
@@ -37,6 +38,7 @@ dunce.workspace = true
 alacritty_terminal = "=0.26.0"
 
 [dev-dependencies]
+proptest = "1.11"
 # Exercise the real client Store and rendering against Host behavior.
 agent-core = { path = "../agent-core" }
 # Match desktop builds even when CI tests only the headless packages. With both

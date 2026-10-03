@@ -308,3 +308,86 @@ focused cargo-mutants の対象と結果、最終ビルド・結合テストの�
 [`BEX_PROTOCOL_NATIVE_CONTRACTS.md`](BEX_PROTOCOL_NATIVE_CONTRACTS.md) の検証欄に記録する。
 実際の認証済み Codex/Claude に推論を送る live テストは、この作業では実行していない。
 native schema、保存済み native transcript、所有する fixture を通した検証の範囲で判断する。
+
+## 11. Host と adapter の実装境界（2026-10-03）
+
+Host は `HashMap<ProviderKind, Arc<dyn Agent>>` で二つの実装を引く。
+`Agent` は会話の list/open/create/submit/interrupt/answer、models、capabilities、
+catalog、worktree 内の稼働確認と event stream を提供する。汎用プラグイン機構は追加しない。
+`Identity` はアカウント一覧、ログイン状態機械と usage を提供する。操作とログイン結果は
+provider を明示し、選択中アカウントは `Accounts.selected[provider]` に保持する。
+アカウント ID の prefix は Host/core の routing に使わない。
+会話作成の事前検証も adapter が担当する。Claude は CLI の起動を入力送信まで遅延でき、
+Codex が利用不能なら Host が worktree を作る前に拒否する。
+会話一覧のページ走査は `session_pages` に集約し、タイトル一覧・worktree 一覧・Codex の稼働確認で
+同じ終了条件とカーソル反復の拒否を使う。途中まで取得したページの利用可否は呼び出し元が決める。
+アカウント一覧は `Identity::list` から直接取得し、ログイン操作の Call/Body を経由しない。
+再初期化が成功した provider の過去の起動エラーは破棄する。
+
+adapter は native の通知を中立の `AgentChange` に変換する。Host が自分の Router に適用してから
+adapter に処理済みを返す。Claude の worker は native の断片を組み立てる実行中の値だけを持ち、
+完了後はその本文を解放する。item 更新は共通の純粋な更新処理に一度だけ適用し、
+別の作業用配列への二重適用はしない。adapter へ Router を渡す経路は廃止した。
+回答は未送信の準備と送信 future を分け、キャンセル時の Awaiting/Unknown/Sent の証拠を保つ。
+Claude の追加入力も、キュー受理後に書き込み確認を失った場合は Unknown を返す。
+キューへ渡す前の拒否だけを NotSent として扱う。
+
+Host は adapter の `SessionState` と cwd から start/steer/queue を決める。
+送信前の読み取りは `SubmissionState` に会話と中立の `needs_reload` を返す。
+Host は自身の実行台帳を重ねて route を決め、workspace 再作成も合わせて reload を指示する。
+Codex は同じ読み取りの証拠を resume に使い、送信時の重複読み取りや新たな状態キャッシュを持たない。
+start/steer/queue の native 送信と入力変換も一か所に置き、専用メソッドを経由する転送層は持たない。
+Codex の `inProgress`/`notLoaded` 等は adapter 内で解釈する。Claude の追加入力は native の
+queue に対応する。未知の native エラー分類は `ErrorCategory::Provider(Value)` として保持し、
+core はその中身を再解釈しない。既存の中立な quota/context/policy 等の分類と表示も保持する。
+モデル・端末の wire も `host/model/list` と `host/terminal/...` に統一した。
+`historyMode` と `itemsView` は公開モデルから除去した。native のページング方式と
+読み込み済みかの判定は Codex adapter 内だけで使い、Host/core は中立な履歴・項目状態を受け取る。
+
+プロジェクト登録は Host の state directory にある `bex-projects.json` が正本である。
+登録は ProjectStore が排他的・原子的に保存する。native project catalog や Codex の projectId を
+使わず、adapter の作成操作へは cwd とモデル設定を渡す。worktree の稼働は Host の実行台帳と
+各 adapter の確認を合わせる。確認に失敗した場合は削除しない。Claude の transcript だけでは
+外部プロセスの終了を証明できないため、所有する稼働・idle process を観測できない会話がある
+worktree は確認不能として扱う。
+
+composer catalog は adapter ごとの候補を Host が合成する。Invocation は provider を持ち、
+core が現在の会話・draft の provider の候補だけを使用する。取得エラーも provider ごとに保持する。
+Claude は native initialize の
+commands を読み、選択されたスキルを `/name` として送る。入力テキストにすでにある invocation を
+二重に追加しない。native の dispatch は [Claude の公式 SDK 契約](https://code.claude.com/docs/en/agent-sdk/slash-commands#dispatch-commands-by-name)
+に合わせる。
+
+音声入力のクライアントネイティブ化は取りやめた。`host/dictation/transcribe`、音声転送、
+Codex の認証を使う既存の文字起こしは維持する。
+
+`host-fixture/tests/adapter_conformance.rs` は同じ会話シナリオを Codex/Claude の両 fixture に走らせる。
+作成・送信・追加入力・中断・承認・質問・履歴・再接続/resume・異常終了と他 provider の継続を検査する。
+Codex の turn ID が見えない場合の queue と、一方の adapter 初期化失敗も実際の Host 経由で検査する。
+
+検証結果（2026-10-03）:
+
+- 最終コードの共通 adapter 適合テストは 5 件すべて通過した。
+  ページをまたぐ一覧・カーソル異常時の他 provider 継続と、resume 時の状態読み取りの再利用も確認した。
+- Host 単体 102 件、iroh Host 結合 35 件、Claude 結合 17 件、Codex アカウント結合 3 件は
+  通過した。Host/fixture の通常回帰一式も通過し、整理後の共通シナリオ・Claude 結合を再確認した。
+  実アカウント・長時間 soak の明示実行用テストは通常どおり除外する。
+- `submission.rs` の focused cargo-mutants は 2 caught、2 unviable、missed/timeout は 0。
+- 共通化した `session_pages` の focused cargo-mutants は 2 caught、1 unviable、missed/timeout は 0。
+  unviable は Rust が許可しない let-chain の `||` 置換であり、テストでの検出とは別に扱う。
+- Claude の追加入力・current turn 読み取り・更新処理の focused cargo-mutants は 5 caught。
+  missed/unviable/timeout は 0。書き込み確認喪失と、最終 block・retry 時の更新を検査した。
+- UniFFI を含む core 122 件、store 結合 54 件、CLI の iroh 結合 4 件は通過した。
+  protocol・transport・Codex App Server の回帰テストも通過した。
+- Rust/Swift の整形、変更した Swift の strict lint、workspace 全対象の Clippy は通過した。
+  今回の整理後も Host/fixture の全対象 Clippy を警告なしで再確認した。
+- desktop の 43 件と Host・desktop の本番ビルドは通過した。
+- iOS Simulator のアカウント分離・要求表示の UI テストは 2 件とも通過し、skip は 0。
+  今回の整理後もログイン取消・再開始と Claude アカウント追加の 2 件が通過し、skip は 0。
+  ログイン操作には ID と provider を組で渡し、待機後も同じログインか確認する。
+- Android APK と ktfmtCheck は指定変更前に通過した。以後の Android 検証はユーザー指定により
+  CI だけで行う。CI の Android ジョブは維持した。
+- Windows の拡張子なし CLI 指定は共通 adapter シナリオで検査する。Windows 実行は CI の対象で、
+  この macOS 上のローカル検証には含めない。
+
+稼働中の Host は再起動していない。fixture を通した検証であり、実アカウントへの推論は行っていない。

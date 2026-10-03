@@ -61,8 +61,13 @@ fn native(mut value: Value) {
     writeln!(file, "{value}").unwrap();
 }
 
+fn session_state(session: &str, state: &str) -> Value {
+    json!({"type":"system","subtype":"session_state_changed","state":state,"session_id":session,"sdk_host_only":true})
+}
+
 fn emit(value: Value) {
-    let idle = (value["type"] == "result").then(|| json!({"type":"system","subtype":"session_state_changed","state":"idle","session_id":value["session_id"],"sdk_host_only":true}));
+    let idle = (value["type"] == "result")
+        .then(|| session_state(value["session_id"].as_str().unwrap(), "idle"));
     native(value.clone());
     output(value);
     if let Some(idle) = idle {
@@ -105,9 +110,7 @@ fn reply(session: &str, count: usize, text: &str, idle_before_result: bool) {
     block(session, &message, 1, "text", text);
     let result = json!({"type":"result","subtype":"success","session_id":session,"is_error":false,"result":text});
     if idle_before_result {
-        output(
-            json!({"type":"system","subtype":"session_state_changed","state":"idle","session_id":session,"sdk_host_only":true}),
-        );
+        output(session_state(session, "idle"));
         output(result);
     } else {
         emit(result);
@@ -205,6 +208,7 @@ fn main() {
                                 {"value":"haiku","displayName":"Haiku","description":"Haiku 4.5 · Fastest for quick answers"},
                                 {"value":"custom","displayName":"Custom model"}
                             ])),
+                            "commands":[{"name":"fixture-skill","description":"Fixture skill"}],
                             "account":if config["unauthenticated"] == true {json!({})} else {json!({"subscriptionType":"Claude Max"})}
                         }}}),
                     );
@@ -257,9 +261,7 @@ fn main() {
                 fs::write(&history, &bytes).unwrap();
                 fs::write(&path, bytes).unwrap();
                 emit(json!({"type":"system","subtype":"init","session_id":session}));
-                output(
-                    json!({"type":"system","subtype":"session_state_changed","state":"running","session_id":session,"sdk_host_only":true}),
-                );
+                output(session_state(&session, "running"));
                 let text = content
                     .as_array()
                     .unwrap()
@@ -267,7 +269,9 @@ fn main() {
                     .filter_map(|block| block["text"].as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                if config["resultError"] == true {
+                if text == "crash" {
+                    std::process::exit(17);
+                } else if config["resultError"] == true {
                     emit(
                         json!({"type":"result","session_id":session,"is_error":true,"errors":["fixture inference failed"]}),
                     );
@@ -333,14 +337,11 @@ fn main() {
                     emit(
                         json!({"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":tool,"tool_use_id":"tool-1","input":input}}),
                     );
-                    waiting = Some(if text == "background-settled" {
-                        "background-settled"
-                    } else if text == "background" {
-                        "background"
-                    } else if text == "question" {
-                        "question"
-                    } else {
-                        "permission"
+                    waiting = Some(match text.as_str() {
+                        "background-settled" => "background-settled",
+                        "background" => "background",
+                        "question" => "question",
+                        _ => "permission",
                     });
                 } else {
                     reply(

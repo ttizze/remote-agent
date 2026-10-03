@@ -289,9 +289,11 @@ impl Desktop {
                             && let Some(login) = &view.snapshot.account.login
                         {
                             let id = login.login_id.clone();
+                            let provider = login.provider;
                             view.account_busy = true;
                             view.perform(
                                 Intent::ReadAccountLogin(op::ReadAccountLogin {
+                                    provider,
                                     id,
                                     thread_id: view.account_login_draft.clone(),
                                 }),
@@ -712,7 +714,7 @@ impl Desktop {
             }
             Update::Snapshot => self.accept_snapshot(window, cx),
             Update::Completed(kind, result) => self.operation_completed(kind, result, window, cx),
-            Update::Recording(id, event) => self.recording_update(id, event, window, cx),
+            Update::Recording(id, event) => self.recording_update(id, event),
             Update::PersistenceError(error) => self.set_error(error),
             Update::OnboardingCompleted(result) => match result {
                 Ok(()) => self.onboarding = false,
@@ -1344,20 +1346,13 @@ impl Desktop {
         self.connect();
     }
     fn send(&mut self, cx: &Context<Self>) {
-        if !self.snapshot.connected
-            || self.busy > 0
-            || self.dictation.as_ref().is_some_and(|dictation| {
-                matches!(dictation.phase, Phase::Permission | Phase::Transcribing)
-            })
-        {
+        if !self.snapshot.connected || self.busy > 0 {
             return;
         }
-        if self
-            .dictation
-            .as_ref()
-            .is_some_and(|dictation| dictation.phase == Phase::Recording)
-        {
-            self.finish_dictation(true, cx);
+        if let Some(dictation) = &self.dictation {
+            if dictation.phase == Phase::Recording {
+                self.finish_dictation(true);
+            }
             return;
         }
         if self.composer.read(cx).value().trim().is_empty() && self.draft().attachments.is_empty() {

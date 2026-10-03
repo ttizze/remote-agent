@@ -5,7 +5,6 @@
       "cwd": "/fixture/workspace",
       "historyHasMore": false,
       "historyLimit": 5,
-      "historyMode": "paginated",
       "historyReadState": {
         "type": "complete"
       },
@@ -24,7 +23,6 @@
           "completedAt": 4,
           "durationMs": 3000,
           "id": "fixture-turn-1-1",
-          "itemsView": "full",
           "itemsHasMore": false,
           "items": [
             {

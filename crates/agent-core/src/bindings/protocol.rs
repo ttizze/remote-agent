@@ -193,6 +193,7 @@ enum InvocationKind {
 }
 #[uniffi::remote(Record)]
 struct Invocation {
+    pub provider: ProviderKind,
     pub kind: InvocationKind,
     pub name: String,
     pub path: String,
@@ -299,8 +300,7 @@ struct UsageWindow {
 #[uniffi::remote(Record)]
 struct Accounts {
     pub accounts: Vec<Account>,
-    pub selected_id: Option<String>,
-    pub selected_claude_id: Option<String>,
+    pub selected: std::collections::HashMap<ProviderKind, String>,
     pub error: Option<String>,
 }
 #[uniffi::remote(Record)]
@@ -309,11 +309,13 @@ struct StartAccountLogin {
 }
 #[uniffi::remote(Record)]
 struct SubmitAccountLogin {
+    pub provider: ProviderKind,
     pub id: String,
     pub code: String,
 }
 #[uniffi::remote(Record)]
 struct AccountLogin {
+    pub provider: ProviderKind,
     pub login_id: String,
     pub requires_code_submission: bool,
     pub user_code: String,
@@ -532,14 +534,17 @@ struct RemoveWorktree {
 }
 #[uniffi::remote(Record)]
 struct SelectAccount {
+    pub provider: ProviderKind,
     pub id: String,
 }
 #[uniffi::remote(Record)]
 struct LogoutAccount {
+    pub provider: ProviderKind,
     pub id: String,
 }
 #[uniffi::remote(Record)]
 struct CancelAccountLogin {
+    pub provider: ProviderKind,
     pub id: String,
 }
 #[uniffi::remote(Record)]

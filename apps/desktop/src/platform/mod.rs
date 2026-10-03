@@ -21,14 +21,10 @@ use macos as os;
 #[cfg(target_os = "windows")]
 use windows as os;
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod microphone;
-pub(crate) use os::{Recording, start_recording};
-pub(crate) enum RecordingEvent {
-    Started,
-    Level(f32),
-    Finished(Result<Vec<u8>, String>),
-}
+#[cfg(target_os = "macos")]
+pub(crate) use microphone::prepare_microphone;
+pub(crate) use microphone::{Recording, RecordingEvent, start_recording};
 
 pub(crate) fn state_dir() -> Result<PathBuf, String> {
     std::env::var_os("BEX_STATE_DIR")

@@ -79,14 +79,16 @@ impl HostFixture {
             .enable_browser(directory.join("browser"))
             .await
             .map_err(anyhow::Error::msg)?;
-        if let Some(program) = claude {
-            service
+        if let Some(program) = claude
+            && let Err(error) = service
                 .enable_claude(
                     program.to_owned(),
                     directory.join("claude"),
                     Some(directory.join("claude-native")),
                 )
-                .await?;
+                .await
+        {
+            eprintln!("Claude fixture adapter unavailable: {error:#}");
         }
         if accounts && server.is_ok() {
             service

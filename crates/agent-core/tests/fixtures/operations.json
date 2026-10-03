@@ -1375,7 +1375,7 @@
     },
     "exchanges": [
       {
-        "method": "model/list",
+        "method": "host/model/list",
         "params": {
           "limit": 100
         },
@@ -1406,7 +1406,7 @@
         }
       },
       {
-        "method": "model/list",
+        "method": "host/model/list",
         "params": {
           "limit": 100,
           "cursor": "page-2"
@@ -1501,7 +1501,7 @@
     },
     "exchanges": [
       {
-        "method": "model/list",
+        "method": "host/model/list",
         "params": {
           "limit": 100
         },
@@ -1532,7 +1532,7 @@
         }
       },
       {
-        "method": "model/list",
+        "method": "host/model/list",
         "params": {
           "limit": 100,
           "cursor": "loop"

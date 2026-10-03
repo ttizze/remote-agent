@@ -21,6 +21,12 @@ pub(crate) enum RequestDestination {
 }
 
 impl RequestOrigin {
+    pub(crate) fn provider(&self) -> agent_protocol::session::ProviderKind {
+        match self.destination {
+            RequestDestination::Codex { .. } => agent_protocol::session::ProviderKind::Codex,
+            RequestDestination::Claude { .. } => agent_protocol::session::ProviderKind::Claude,
+        }
+    }
     pub fn is_alive(&self) -> bool {
         match &self.destination {
             RequestDestination::Codex { stopped } => !stopped.is_cancelled(),

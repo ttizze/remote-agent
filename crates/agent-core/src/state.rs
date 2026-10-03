@@ -269,9 +269,17 @@ impl Snapshot {
         })
     }
 
-    pub fn model_error_messages(&self) -> Vec<String> {
+    pub fn model_error_messages(
+        &self,
+        provider: Option<crate::session::ProviderKind>,
+    ) -> Vec<String> {
+        let provider = provider.map(|provider| match provider {
+            crate::session::ProviderKind::Codex => "codex",
+            crate::session::ProviderKind::Claude => "claude",
+        });
         self.model_errors
             .iter()
+            .filter(|(key, _)| provider.is_none_or(|provider| provider == key.as_str()))
             .map(|(provider, error)| {
                 let message = error
                     .get("message")
@@ -464,7 +472,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 if !previous.models.is_empty() {
                     let (model, effort, tier) = supported_settings(
                         draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(),
-                        &previous.models, &previous.model_errors,
+                        None, &previous.models, !previous.model_errors.is_empty(),
                     );
                     let settings = (model.cloned(), effort.map(str::to_owned), tier.map(str::to_owned));
                     (draft.model, draft.effort, draft.service_tier) = settings;
@@ -519,7 +527,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         Intent::EditComposer { thread_id, text, cursor } => {
             let load_catalog = thread_id == previous.navigation.draft_key
                 && previous.connected
-                && previous.composer_query(&text, cursor as usize).is_some_and(|(_, _, filter)| {
+                && crate::composer::query(&text, cursor as usize).is_some_and(|(_, _, filter)| {
                     crate::composer::should_refresh_catalog(
                         previous.composer_catalog.as_ref()
                             .filter(|catalog| catalog.cwd == previous.navigation.cwd)
@@ -579,7 +587,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 _ => unreachable!(),
             };
             if !previous.models.is_empty() {
-                let (model, effort, tier) = supported_settings(draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(), &previous.models, &previous.model_errors);
+                let (model, effort, tier) = supported_settings(draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(), None, &previous.models, !previous.model_errors.is_empty());
                 let settings = (
                     model.cloned(),
                     effort.map(str::to_owned),
@@ -840,15 +848,16 @@ pub(crate) fn supported_settings<'a>(
     selected_model: Option<&'a crate::models::ModelRef>,
     selected_effort: Option<&'a str>,
     selected_tier: Option<&'a str>,
+    default_provider: Option<crate::session::ProviderKind>,
     models: &'a [Model],
-    errors: &Map<String, Value>,
+    catalog_incomplete: bool,
 ) -> (
     Option<&'a crate::models::ModelRef>,
     Option<&'a str>,
     Option<&'a str>,
 ) {
     // Absence in an incomplete catalog is not evidence that a saved choice was removed.
-    if !errors.is_empty()
+    if catalog_incomplete
         && selected_model.is_some()
         && !models
             .iter()
@@ -858,7 +867,8 @@ pub(crate) fn supported_settings<'a>(
     }
     let provider = selected_model
         .filter(|model| !model.id.is_empty())
-        .map(|model| model.provider);
+        .map(|model| model.provider)
+        .or(default_provider);
     let mut available = models
         .iter()
         .filter(|model| provider.is_none_or(|provider| model.model.provider == provider));
@@ -872,7 +882,12 @@ pub(crate) fn supported_settings<'a>(
         })
         .or_else(|| available.next());
     let Some(model) = model else {
-        return (selected_model, None, None);
+        return if models.is_empty() {
+            (selected_model, None, None)
+        } else {
+            // The other provider's catalog cannot validate this draft's options.
+            (selected_model, selected_effort, selected_tier)
+        };
     };
     let changed = selected_model.is_some() && selected_model != Some(&model.model);
     let effort = model

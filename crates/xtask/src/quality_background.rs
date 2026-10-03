@@ -169,7 +169,14 @@ async fn check(state: &Path, commit: &str, log: &Path) -> Result<()> {
             command
                 .arg("develop")
                 .arg(&checkout)
-                .args(["--command", "just", "quality"])
+                .args([
+                    "--command",
+                    "bash",
+                    "-euo",
+                    "pipefail",
+                    "-c",
+                    "just quality rust && just quality swift",
+                ])
                 .current_dir(&checkout)
                 .env_remove("CARGO")
                 .env_remove("RUSTC")

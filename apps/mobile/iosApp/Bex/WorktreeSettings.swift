@@ -10,6 +10,10 @@ struct SettingsSheet: View {
             List {
                 Section {
                     NavigationLink {
+                        ModelSettingsScreen(model: model, defaults: true, close: { dismiss() })
+                    } label: { Label("モデル", systemImage: "slider.horizontal.3") }
+                        .accessibilityIdentifier("settings.models")
+                    NavigationLink {
                         AgentSettingsScreen(model: model, close: { dismiss() })
                     } label: { Label("エージェント", systemImage: "bubble.left.and.bubble.right") }
                         .accessibilityIdentifier("settings.agents")
