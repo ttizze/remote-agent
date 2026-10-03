@@ -1153,6 +1153,7 @@ impl Worker {
                 message["tool_use_id"].as_str(),
                 message["status"].as_str(),
                 message["summary"].as_str(),
+                message["output_file"].as_str(),
             )
         } else if kind == "attachment" && message["attachment"]["type"] == "queued_command" {
             native::queued_task_outcome(

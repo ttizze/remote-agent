@@ -1662,6 +1662,22 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
         assert!(!projected.turns[0].rows.iter().any(|row| matches!(
             &row.content, ConversationRowContent::ActivityHeader { activity } if activity.is_in_progress
         )));
+        if prompt == "background" {
+            store
+                .dispatch(Intent::ReadItem(op::ReadItem {
+                    thread_id: id.clone(),
+                    turn_id: thread.turns.as_ref().unwrap()[0].id.clone(),
+                    item_id: "tool-1".into(),
+                }))
+                .await
+                .unwrap();
+            let snapshot = store.snapshot();
+            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+            assert!(snapshot.conversations[&id].turns.as_ref().unwrap()[0].items.as_ref().unwrap().iter().any(|item|
+                item.status == agent_protocol::execution::ItemStatus::Completed
+                && matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution {output, exit_code:None, ..} if output == "background stdout\n")
+            ), "expanded background work must retain its native output");
+        }
         send(&store, "next turn", "after-background").await;
         completed(&store, &id, 2, "completed").await;
         send(&store, prompt, "stop-background").await;

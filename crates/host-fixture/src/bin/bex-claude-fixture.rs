@@ -13,8 +13,9 @@ fn native(mut value: Value) {
             return;
         };
         let prompt = format!(
-            "<task-notification><task-id>{}</task-id><tool-use-id>{tool}</tool-use-id><status>{}</status><summary>{}</summary></task-notification>",
+            "<task-notification><task-id>{}</task-id><tool-use-id>{tool}</tool-use-id><output-file>{}</output-file><status>{}</status><summary>{}</summary></task-notification>",
             value["task_id"].as_str().unwrap(),
+            value["output_file"].as_str().unwrap_or_default(),
             value["status"].as_str().unwrap(),
             value["summary"].as_str().unwrap()
         );
@@ -411,8 +412,10 @@ fn main() {
                             else if allowed && waiting != Some("question") { json!({"exitCode":0}) } else { json!({}) }}),
                 );
                 if waiting == Some("background") {
+                    let output_file = std::env::current_dir().unwrap().join("background.output");
+                    fs::write(&output_file, "background stdout\n").unwrap();
                     emit(
-                        json!({"type":"system","subtype":"task_notification","task_id":"background-1","tool_use_id":"tool-1","status":"completed","summary":"background done","session_id":session}),
+                        json!({"type":"system","subtype":"task_notification","task_id":"background-1","tool_use_id":"tool-1","output_file":output_file,"status":"completed","summary":"background done","session_id":session}),
                     );
                 }
                 reply(

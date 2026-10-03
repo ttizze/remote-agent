@@ -148,6 +148,7 @@ pub(super) fn tool_result_item(
 
 pub(super) struct TaskOutcome<'a> {
     pub tool_id: &'a str,
+    pub output_path: Option<&'a str>,
     status: ItemStatus,
     summary: &'a str,
 }
@@ -174,6 +175,7 @@ pub(super) fn task_outcome<'a>(
     tool_id: Option<&'a str>,
     status: Option<&str>,
     summary: Option<&'a str>,
+    output_path: Option<&'a str>,
 ) -> Option<TaskOutcome<'a>> {
     let tool_id = tool_id.filter(|id| !id.is_empty())?;
     let status = match status? {
@@ -186,6 +188,7 @@ pub(super) fn task_outcome<'a>(
         tool_id,
         status,
         summary: summary?,
+        output_path: output_path.filter(|path| !path.is_empty()),
     })
 }
 
@@ -219,7 +222,12 @@ pub(super) fn queued_task_outcome<'a>(
         }
         Some(value.trim())
     };
-    task_outcome(field("tool-use-id"), field("status"), Some(summary.trim()))
+    task_outcome(
+        field("tool-use-id"),
+        field("status"),
+        Some(summary.trim()),
+        field("output-file"),
+    )
 }
 
 pub(super) fn content_item(
@@ -443,6 +451,7 @@ mod tests {
             background in any::<bool>(),
             failed_launch in any::<bool>(),
             subagent in any::<bool>(),
+            output_available in any::<bool>(),
         ) {
             let summary = summary.trim();
             let session = SessionRef::new(ProviderKind::Claude, "session".into()).unwrap();
@@ -456,10 +465,13 @@ mod tests {
             };
             let launched = tool_result_item(call.id.clone(), call.body(), &json!("launched"), &metadata, failed_launch);
             prop_assert_eq!(launched.status, if failed_launch {ItemStatus::Failed} else if background {ItemStatus::Running} else {ItemStatus::Completed});
-            let prompt = json!(format!("<task-notification>\n<task-id>task</task-id><tool-use-id>work</tool-use-id>\n<status>{status}</status><summary>{summary}</summary>\n</task-notification>"));
-            let live = task_outcome(Some("work"), Some(status), Some(summary)).unwrap();
+            let output = if output_available {"/work/result.output"} else {""};
+            let prompt = json!(format!("<task-notification>\n<task-id>task</task-id><tool-use-id>work</tool-use-id><output-file>{output}</output-file>\n<status>{status}</status><summary>{summary}</summary>\n</task-notification>"));
+            let live = task_outcome(Some("work"), Some(status), Some(summary), Some(output)).unwrap();
             let saved = queued_task_outcome(Some("task-notification"), &prompt).unwrap();
             prop_assert_eq!(saved.tool_id, "work");
+            prop_assert_eq!(saved.output_path, live.output_path);
+            prop_assert_eq!(live.output_path, output_available.then_some("/work/result.output"));
             let expected = match status {"completed"=>ItemStatus::Completed, "failed"=>ItemStatus::Failed, _=>ItemStatus::Interrupted};
             let result = live.item(launched.id.clone(), launched.body()).unwrap();
             prop_assert_eq!(result.status, expected);
@@ -546,9 +558,9 @@ mod tests {
             (Some("work"), None, Some("result")),
             (Some("work"), Some("failed"), None),
         ] {
-            assert!(task_outcome(tool, status, summary).is_none());
+            assert!(task_outcome(tool, status, summary, None).is_none());
         }
-        let outcome = task_outcome(Some("work"), Some("failed"), Some("result")).unwrap();
+        let outcome = task_outcome(Some("work"), Some("failed"), Some("result"), None).unwrap();
         assert!(
             outcome
                 .item(

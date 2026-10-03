@@ -341,6 +341,14 @@ fn convert(
                             })
                     })
         {
+            if let Some(path) = outcome.output_path {
+                details.insert(
+                    item.id.clone(),
+                    NativeItemDetails {
+                        output_path: Some(path.into()),
+                    },
+                );
+            }
             Arc::make_mut(&mut turns[turn_index])
                 .items
                 .as_mut()
@@ -623,7 +631,7 @@ mod tests {
             json!({"type":"assistant","uuid":"call","parentUuid":"first","message":{"id":"message","content":[{"type":"tool_use","id":"work","name":"Bash","input":{"command":"work"}}]}}),
             json!({"type":"user","uuid":"launch","parentUuid":"call","message":{"content":[{"type":"tool_result","tool_use_id":"work","content":"launched"}]},"toolUseResult":{"backgroundTaskId":"task"}}),
             json!({"type":"user","uuid":"second","parentUuid":"launch","message":{"content":"second input"}}),
-            json!({"type":"attachment","uuid":"notice","parentUuid":"second","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification><tool-use-id>work</tool-use-id><status>failed</status><summary>work failed</summary></task-notification>"}}),
+            json!({"type":"attachment","uuid":"notice","parentUuid":"second","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification><tool-use-id>work</tool-use-id><output-file>/work/result.output</output-file><status>failed</status><summary>work failed</summary></task-notification>"}}),
         ];
         let history = convert(
             Thread {
@@ -636,6 +644,12 @@ mod tests {
         )
         .unwrap();
         let turns = history.response.thread.turns.unwrap();
+        assert_eq!(
+            history.details[&ItemId::from("work")]
+                .output_path
+                .as_deref(),
+            Some("/work/result.output")
+        );
         assert_eq!(turns.len(), 2);
         let items = turns[0].items.as_ref().unwrap();
         assert_eq!(items.len(), 2);
