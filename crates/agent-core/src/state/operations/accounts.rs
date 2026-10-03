@@ -129,8 +129,11 @@ impl Operation for SelectAccountForDraft {
         match catalog {
             Ok(catalog) => {
                 LoadModels {}.apply(snapshot, catalog);
-                let models = crate::models::provider_models(&snapshot.models, provider);
-                if !models.is_empty() {
+                if snapshot
+                    .models
+                    .iter()
+                    .any(|model| model.model.provider == provider)
+                {
                     if previous_provider != provider {
                         draft.model = None;
                         draft.effort = None;
@@ -140,8 +143,9 @@ impl Operation for SelectAccountForDraft {
                         draft.model.as_ref(),
                         draft.effort.as_deref(),
                         draft.service_tier.as_deref(),
-                        &models,
-                        &Map::new(),
+                        Some(provider),
+                        &snapshot.models,
+                        false,
                     );
                     let settings = (
                         model.cloned(),

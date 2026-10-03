@@ -216,6 +216,36 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Existing conversation fixes the agent")
     }
 
+    func testSimulatorAutomaticallyShowsModelControlsInExistingAndRunningConversations() throws {
+        let app = try connectedSimulatorApp()
+        try useSimulatorListFixture("external-conversation")
+        app.buttons["tasks.menu"].tap()
+        app.buttons["tasks.refresh"].tap()
+        let row = app.buttons["tasks.row.codex:fixture-external-thread"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["item.answer-fixture-external-thread"]
+            .waitForExistence(timeout: 15))
+        captureScreen(app, named: "Model controls on an externally created conversation")
+        let model = app.buttons["model.settings"]
+        XCTAssertEqual(model.value as? String, "Fixture Model",
+                       "Opening an existing conversation must select from the automatically loaded model catalog")
+        XCTAssertTrue(app.buttons["model.effort"].isHittable)
+        let prompt = app.textFields["task.message"]
+        prompt.tap(); prompt.typeText("[delayed-input] Keep model settings available while working")
+        app.buttons["task.send"].tap()
+        XCTAssertTrue(prefixedButton(app, prefix: "turn.interrupt.").waitForExistence(timeout: 10))
+        XCTAssertTrue(model.isHittable)
+        XCTAssertEqual(model.value as? String, "Fixture Model")
+        captureScreen(app, named: "Model selection remains visible during a running turn")
+        model.tap()
+        let selected = app.buttons["model.choice.fixture-model"]
+        XCTAssertTrue(selected.waitForExistence(timeout: 10))
+        XCTAssertEqual(selected.value as? String, "選択中")
+        app.buttons["model.close"].tap()
+        try simulatorFixture("release-inputs")
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
+    }
+
     func testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone() throws {
         let app = try connectedSimulatorApp()
         app.buttons["tasks.new.project.simulator-project"].tap()
