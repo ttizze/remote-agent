@@ -35,7 +35,10 @@ case $(uname -m) in arm64|aarch64) abi=arm64-v8a ;; *) abi=x86_64 ;; esac
 avd="bex-os-$$"
 avdmanager create avd --name "$avd" --package "system-images;android-37.0;google_apis;$abi" --device pixel_7 <<< no
 log="$target/qa/android-$(date +%s)-$$"
-emulator -avd "$avd" -report-console "unix:$fixture/console.sock,server,max=30" -no-window -no-audio -no-snapshot -no-boot-anim >"$log.emulator.log" 2>&1 &
+# Headless automatic graphics use CPU rendering on macOS and compete with builds.
+gpu=auto
+if [[ $(uname) == Darwin ]]; then gpu=host; fi
+emulator -avd "$avd" -gpu "$gpu" -report-console "unix:$fixture/console.sock,server,max=30" -no-window -no-audio -no-snapshot -no-boot-anim >"$log.emulator.log" 2>&1 &
 emulator_pid=$!
 port=$(python3 - "$fixture/console.sock" <<'PY'
 import socket, sys, time
@@ -64,6 +67,8 @@ done
 adb -P "$server_port" -s "$serial" shell input keyevent 82
 adb -P "$server_port" -s "$serial" install apps/mobile/build/outputs/apk/debug/mobile-debug.apk
 adb -P "$server_port" -s "$serial" install apps/mobile/build/outputs/apk/androidTest/debug/mobile-debug-androidTest.apk
+adb -P "$server_port" -s "$serial" shell am start -W -a android.intent.action.MAIN -c android.intent.category.HOME | tee "$log.home.log"
+grep -qx 'Status: ok' "$log.home.log"
 if [[ $mode == terminal ]]; then
     adb -P "$server_port" -s "$serial" shell pm grant dev.remoteagent.mobile android.permission.ACCESS_LOCAL_NETWORK
 else
@@ -89,12 +94,12 @@ pathlib.Path(sys.argv[2]).write_text(result.stdout)
 print(result.stdout)
 assert result.returncode == 0 and re.search(r'^OK \(1 test\)', result.stdout, re.M), "Android tests did not all pass"
 PYTHON
+adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission.png "$log.permission.png" || true
 if [[ $test_status != 0 ]]; then
     adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.startup-failure.png" || true
     adb -P "$server_port" -s "$serial" logcat -d -t 150 -s AndroidRuntime ActivityManager >"$log.startup-failure.log" || true
     exit "$test_status"
 fi
-adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission.png "$log.permission.png"
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission-granted.png "$log.granted.png"
 fi
 # The permission test starts denied and leaves LAN access granted for the real Host checks.
