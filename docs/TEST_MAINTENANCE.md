@@ -205,7 +205,7 @@ transfer server just to delete that check would reverse A14.
   The runner retains Xcode derived data under the Cargo target's
   `qa/ios-derived-data`, always builds the current revision, and holds a
   repository-wide lock through cleanup. Manual runs and quality workers in
-  different worktrees or Cargo targets cannot overlap native UI automation.
+  different worktrees or Cargo targets cannot overlap iOS acceptance batches.
   Unchanged bindings preserve their timestamps; the compiled Swift bindings
   are reused only with matching sources, SDK, compiler and Rust runner.
   Per-worker logs, result bundles and a timing summary remain under `qa/Bex-*`.
