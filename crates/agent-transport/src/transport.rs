@@ -26,7 +26,9 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tracing::Instrument;
 use uuid::Uuid;
 
-const ALPN: &[u8] = b"remote-agent/streams/2";
+// Bump when shared Postcard types change incompatibly; enum indices and field
+// positions are part of the wire format, even when decoding still succeeds.
+const ALPN: &[u8] = b"remote-agent/streams/3";
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     #[error("iroh transport failed: {0}")]
