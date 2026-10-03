@@ -858,11 +858,13 @@ impl Worker {
         });
         let mut interrupted = false;
         let mut pending_inputs = HashSet::new();
+        let mut result_received = false;
+        let mut idle = false;
         let outcome = async {
             let turn=self.current_turn().cloned().ok_or("Claude execution state is unavailable")?;
             self.change(SessionChange::Turn {turn,completed:false}).await?;
             loop {
-                tokio::select! {
+                let message = tokio::select! {
                     _ = self.stop.cancelled() => {
                         interrupted = true;
                         process.write(&json!({"type":"control_request","request_id":"shutdown","request":{"subtype":"interrupt"}})).await?;
@@ -872,6 +874,8 @@ impl Worker {
                         let command = command.ok_or("Claude input queue is closed")?;
                         let result = process.write(&command.value).await;
                         if result.is_ok() && let Some(user) = command.user {
+                            result_received = false;
+                            idle = false;
                             pending_inputs.insert(user.id.clone());
                             self.change(SessionChange::Item {
                                 turn_id: self.turn_id.clone(), item: Arc::new(user),
@@ -879,49 +883,69 @@ impl Worker {
                         }
                         if let Some(delivered) = command.delivered { let _ = delivered.send(result.clone()); }
                         result?;
+                        continue;
                     }
-                    message = process.read() => {
-                        let message = message?.ok_or("Claude Code exited without a result")?;
-                        if message["type"] == "result" {
-                            if message["is_error"] == true {
-                                let mut error = execution_error(&message, false);
-                                if matches!(error.category,ErrorCategory::Other|ErrorCategory::Provider(_)) && let Some(previous) = self.current_turn().and_then(|turn| turn.error.as_ref()) {
-                                    error.category = previous.category.clone();
-                                    error.provider_code = previous.provider_code.clone();
-                                }
-                                let text = error.message.clone();
-                                self.change(SessionChange::Error {turn_id: self.turn_id.clone(), error}).await?;
-                                return Err(text);
+                    message = process.read() => message?.ok_or("Claude Code exited before the turn completed")?,
+                };
+                let kind = message["type"].as_str().unwrap_or_default();
+                match kind {
+                    "system" if message["subtype"] == "session_state_changed" => {
+                        idle = message["state"] == "idle";
+                    }
+                    "result" => {
+                        if message["is_error"] == true {
+                            let mut error = execution_error(&message, false);
+                            if matches!(error.category, ErrorCategory::Other | ErrorCategory::Provider(_))
+                                && let Some(previous) = self.current_turn().and_then(|turn| turn.error.as_ref())
+                            {
+                                error.category = previous.category.clone();
+                                error.provider_code = previous.provider_code.clone();
                             }
-                            // A result can belong to the input before a queued message.
-                            // Keep reading until Claude has consumed every submitted input.
-                            if interrupted || pending_inputs.is_empty() {
-                                return Ok(());
-                            }
-                            continue;
+                            let text = error.message.clone();
+                            self.change(SessionChange::Error {turn_id: self.turn_id.clone(), error}).await?;
+                            return Err(text);
                         }
-                        if message["type"] == "user" && let Some(id) = message["uuid"].as_str() {
-                            pending_inputs.remove(id);
-                        }
-                        if message["type"] == "control_request" {
-                            if let Err(error) = self.permission(&message).await {
-                                tracing::warn!(target: "bex", operation = "host.claude.request_rejected", message = %error);
-                                let response = if message["request"]["subtype"] == "request_user_dialog" {
-                                    json!({"subtype":"success","request_id":message["request_id"],"response":{"behavior":"cancelled"}})
-                                } else { json!({"subtype":"error","request_id":message["request_id"],"error":error}) };
-                                process.write(&json!({"type":"control_response","response":response})).await?;
-                            }
-                        } else if message["type"] == "control_cancel_request" {
-                            let request_id = message["request_id"].as_str().ok_or("Claude canceled request ID is missing")?;
-                            emit(&self.events,AgentChange::Resolved {instance:self.instance,native_id:request_id.into()}).await?;
-                        } else if message["type"] == "control_response" && message["response"]["request_id"] == "interrupt" {
-                            let result = if message["response"]["subtype"] == "success" { interrupted = true; Ok(()) }
-                                else { Err(format!("Claude Codeの停止に失敗しました: {}", message["response"]["error"])) };
-                            self.interrupt.send_replace(Some(result));
-                        } else {
-                            self.message(message).await?;
+                        result_received = true;
+                        if interrupted {
+                            return Ok(());
                         }
                     }
+                    "control_request" => {
+                        if let Err(error) = self.permission(&message).await {
+                            tracing::warn!(target: "bex", operation = "host.claude.request_rejected", message = %error);
+                            let response = if message["request"]["subtype"] == "request_user_dialog" {
+                                json!({"subtype":"success","request_id":message["request_id"],"response":{"behavior":"cancelled"}})
+                            } else { json!({"subtype":"error","request_id":message["request_id"],"error":error}) };
+                            process.write(&json!({"type":"control_response","response":response})).await?;
+                        }
+                    }
+                    "control_cancel_request" => {
+                        let request_id = message["request_id"].as_str().ok_or("Claude canceled request ID is missing")?;
+                        emit(&self.events, AgentChange::Resolved {instance:self.instance,native_id:request_id.into()}).await?;
+                    }
+                    "control_response" if message["response"]["request_id"] == "interrupt" => {
+                        let result = if message["response"]["subtype"] == "success" { interrupted = true; Ok(()) }
+                            else { Err(format!("Claude Codeの停止に失敗しました: {}", message["response"]["error"])) };
+                        self.interrupt.send_replace(Some(result));
+                    }
+                    _ => {
+                        let input_consumed = kind == "user"
+                            && message["uuid"].as_str().is_some_and(|id| pending_inputs.remove(id));
+                        let response_started = message["parent_tool_use_id"].is_null()
+                            && (kind == "assistant"
+                                || (kind == "stream_event" && message["event"]["type"] == "message_start"));
+                        if input_consumed || response_started {
+                            result_received = false;
+                            idle = false;
+                        }
+                        self.message(message).await?;
+                    }
+                }
+                // A result ends one response, not necessarily the background
+                // work and its follow-up. Idle is Claude's run-end signal.
+                // It can precede the result; queued input must still be consumed.
+                if result_received && idle && pending_inputs.is_empty() {
+                    return Ok(());
                 }
             }
         }.await;

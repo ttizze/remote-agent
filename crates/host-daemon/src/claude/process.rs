@@ -30,6 +30,7 @@ impl Process {
         command
             .env("CLAUDE_CONFIG_DIR", config_home)
             .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", credentials_home)
+            .env("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1")
             .env_remove("ANTHROPIC_API_KEY")
             .env_remove("ANTHROPIC_AUTH_TOKEN")
             .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
