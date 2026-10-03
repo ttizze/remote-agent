@@ -186,7 +186,7 @@ transfer server just to delete that check would reverse A14.
   -p host-daemon -p host-fixture` covers the integration tests omitted by the
   selected quality targets.
 - `nix develop . --command just conversation-ui` runs the maintained native
-  conversation contracts on four fresh isolated Simulator/Host pairs, sharing
+  conversation contracts on two fresh isolated Simulator/Host pairs, sharing
   one build. Each pair owns its history, failure controls and app storage.
   Set `BEX_IOS_TEST_WORKERS=1` for a serial audit, or 2–10 for parallel runs.
   An initialized, app-free Simulator template is kept shut down for this Cargo

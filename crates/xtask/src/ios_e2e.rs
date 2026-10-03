@@ -360,7 +360,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
         return Err("Select unique isolated Simulator tests".into());
     }
     let workers = std::env::var("BEX_IOS_TEST_WORKERS")
-        .unwrap_or_else(|_| "4".to_owned())
+        .unwrap_or_else(|_| "2".to_owned())
         .parse::<usize>()?;
     if !(1..=10).contains(&workers) {
         return Err("BEX_IOS_TEST_WORKERS must be between 1 and 10".into());
