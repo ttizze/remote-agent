@@ -103,7 +103,7 @@ impl Child {
             self.process.start_kill()
         };
         if let Err(error) = signal
-            && !missing(&error)
+            && !self.missing(&error).await?
         {
             return Err(error.into());
         }
@@ -113,17 +113,48 @@ impl Child {
         while tokio::time::Instant::now() < deadline {
             match nix::sys::signal::killpg(self.group, None) {
                 Ok(()) => tokio::time::sleep(Duration::from_millis(10)).await,
-                Err(Errno::ESRCH) => break,
+                Err(error) if self.missing(&io::Error::from(error)).await? => break,
                 Err(error) => return Err(error.into()),
             }
         }
         if let Err(error) = self.process.start_kill()
-            && !missing(&error)
+            && !self.missing(&error).await?
         {
             return Err(error.into());
         }
         self.process.wait().await?;
         Ok(())
+    }
+
+    async fn missing(&self, error: &io::Error) -> Result<bool> {
+        #[cfg(unix)]
+        {
+            if error.raw_os_error() == Some(Errno::ESRCH as i32) {
+                return Ok(true);
+            }
+            #[cfg(target_os = "macos")]
+            if error.raw_os_error() == Some(Errno::EPERM as i32) {
+                // An orphaned zombie group can reject signals on macOS before
+                // launchd reaps it. Ignore EPERM only after verifying that no
+                // live group member remains; genuine permission errors fail.
+                let mut command = Command::new("ps");
+                command.args(["-A", "-o", "pgid=,stat="]).kill_on_drop(true);
+                let output =
+                    tokio::time::timeout(Duration::from_secs(5), command.output()).await??;
+                if !output.status.success() {
+                    return Err("Could not inspect stopped process group".into());
+                }
+                return Ok(!live_group(
+                    std::str::from_utf8(&output.stdout)?,
+                    self.group.as_raw(),
+                )?);
+            }
+            Ok(false)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(error.kind() == io::ErrorKind::NotFound)
+        }
     }
 
     pub async fn output(
@@ -153,15 +184,17 @@ impl Child {
     }
 }
 
-fn missing(error: &io::Error) -> bool {
-    #[cfg(unix)]
-    {
-        error.raw_os_error() == Some(Errno::ESRCH as i32)
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn live_group(processes: &str, group: i32) -> Result<bool> {
+    for line in processes.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_whitespace();
+        let id: i32 = fields.next().ok_or("missing process group")?.parse()?;
+        let state = fields.next().ok_or("missing process state")?;
+        if id == group && !state.starts_with('Z') {
+            return Ok(true);
+        }
     }
-    #[cfg(not(unix))]
-    {
-        error.kind() == io::ErrorKind::NotFound
-    }
+    Ok(false)
 }
 
 impl Drop for Child {
@@ -221,6 +254,52 @@ mod tests {
     use super::*;
     use crate::test_support::Fixture;
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    #[test]
+    fn orphaned_zombies_are_not_live_group_members() {
+        assert!(!live_group("42 Z+\n42 Z\n7 S\n", 42).unwrap());
+        assert!(live_group("42 Z\n42 S+\n", 42).unwrap());
+        assert!(!live_group("7 R\n", 42).unwrap());
+        assert!(live_group("42\n", 42).is_err());
+        assert!(live_group("unknown S\n", 42).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn permission_errors_require_confirmation_of_group_exit() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "echo ready; read hold"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut child = Child::spawn(command).unwrap();
+        let mut stdout = BufReader::new(child.process.stdout().take().unwrap());
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), stdout.read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(line.trim(), "ready");
+        assert!(
+            !child
+                .missing(&io::Error::from_raw_os_error(Errno::EPERM as i32))
+                .await
+                .unwrap()
+        );
+        child.stop(false, Duration::from_secs(10)).await.unwrap();
+        assert!(
+            child
+                .missing(&io::Error::from_raw_os_error(Errno::EPERM as i32))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !child
+                .missing(&io::Error::from_raw_os_error(Errno::EACCES as i32))
+                .await
+                .unwrap()
+        );
+    }
 
     #[tokio::test]
     async fn timeout_stops_descendants_and_closes_their_pipes() {
