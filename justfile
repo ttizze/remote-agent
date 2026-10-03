@@ -11,11 +11,13 @@ unit-tests:
     set -uo pipefail
     failed=0
     cargo build --locked -p bex-process --bin bex-provider-supervisor || failed=1
-    cargo test --locked --no-fail-fast --workspace --lib --bins --features agent-core/bindings,agent-ffi/bindgen || failed=1
+    cargo nextest run --locked --no-fail-fast --workspace --lib --bins --features agent-core/bindings,agent-ffi/bindgen &
+    rust_pid=$!
     nix build .#agent-peer --no-link || failed=1
     if [[ $(uname -s) == Darwin ]]; then
         cargo xtask ios-markdown || failed=1
     fi
+    wait "$rust_pid" || failed=1
     exit "$failed"
 
 # Prune inactive Cargo outputs older than 3 days or over the 32 GiB idle budget.

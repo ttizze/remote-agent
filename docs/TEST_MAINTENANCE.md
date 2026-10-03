@@ -185,7 +185,10 @@ transfer server just to delete that check would reverse A14.
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.
 - `nix develop . --command just unit-tests` runs every Rust workspace library
   and binary test with native bindings, verifies the standalone agent-peer
-  package, and runs headless Swift Markdown tests on macOS. It starts no client,
+  package, and runs headless Swift Markdown tests on macOS. Nix-pinned
+  cargo-nextest runs Rust tests across crates in parallel while the headless
+  Swift tests run concurrently; both results are awaited and failures retained.
+  It starts no client,
   Simulator or emulator and reuses build caches. Android currently has no JVM
   unit tests; instrumentation acceptance remains in CI.
 - `nix develop . --command just quality rust` checks formatting, workspace

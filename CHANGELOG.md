@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Run all local Rust unit tests across crates in parallel with Nix-pinned cargo-nextest, concurrently with headless Swift Markdown tests, while collecting failures from both suites.
+
 - Run all unit tests locally with `just unit-tests` before integrating into main, then run full Native clients CI after pushes to main without requiring a PR. Run native Mac Browser E2E concurrently with iPhone conversation acceptance on two isolated Simulator/Host pairs within one Apple Silicon Mac. Remove Lefthook, the local background QA worker, its queue/status commands and its shared Cargo cache integration; retain manual debugging commands and workflow dispatch.
 
 - Batch completed dictation audio uploads instead of flushing every 100ms frame. Preserve sample-aligned chunks and transport backpressure, and cover lossless delivery of recordings longer than 30 seconds.
