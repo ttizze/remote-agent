@@ -67,10 +67,12 @@ private struct UsageWindowView: View {
     var compact = false
 
     var body: some View {
+        let tint: Color = window.remainingPercent <= 20 ? .orange
+            : compact ? Color(red: 0.54, green: 0.81, blue: 0.67) : .green
         if compact {
             HStack(spacing: 12) {
                 ProgressView(value: Double(window.remainingPercent), total: 100)
-                    .tint(window.remainingPercent <= 20 ? .orange : Color(red: 0.54, green: 0.81, blue: 0.67))
+                    .tint(tint)
                 Text("\(window.remainingPercent)%").monospacedDigit()
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -82,7 +84,7 @@ private struct UsageWindowView: View {
                     Text("残り \(window.remainingPercent)%").monospacedDigit()
                 }.font(.caption)
                 ProgressView(value: Double(window.remainingPercent), total: 100)
-                    .tint(window.remainingPercent <= 20 ? .orange : .green)
+                    .tint(tint)
                 if let reset = window.resetsAt {
                     let date = Date(timeIntervalSince1970: Double(reset))
                     Text("リセット: \(date.formatted(date: .abbreviated, time: .shortened))")
