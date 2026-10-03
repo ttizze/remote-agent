@@ -2702,8 +2702,9 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             }
             store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
             let snapshot = store.snapshot();
+            let list = snapshot.thread_list().unwrap();
             for (index, id) in ids.iter().enumerate() {
-                let row = snapshot.thread_list().unwrap().threads.iter().find(|row| &row.id == id).unwrap();
+                let row = list.threads.iter().find(|row| &row.id == id).unwrap();
                 assert_eq!(row.worktree_status, if index < 2 && !(index == 1 && step == "missing-metadata") { expected } else { None }, "{step}: {index}");
             }
             assert_eq!(snapshot.error, None);
