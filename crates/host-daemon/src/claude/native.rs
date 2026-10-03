@@ -136,7 +136,7 @@ pub(super) fn tool_result_item(
         } else if metadata["backgroundTaskId"]
             .as_str()
             .is_some_and(|id| !id.is_empty())
-            || metadata["isAsync"] == true
+            || metadata["status"] == "async_launched"
         {
             ItemStatus::Running
         } else {
@@ -450,16 +450,16 @@ mod tests {
             summary in "[a-z &<>]{0,80}",
             background in any::<bool>(),
             failed_launch in any::<bool>(),
-            subagent in any::<bool>(),
+            tool_kind in 0..3usize,
             output_available in any::<bool>(),
         ) {
             let summary = summary.trim();
             let session = SessionRef::new(ProviderKind::Claude, "session".into()).unwrap();
             let call = content_item(&session, "block".into(),
-                &json!({"type":"tool_use","id":"work","name":if subagent {"Agent"} else {"Bash"},"input":{"command":"work","prompt":"work"}}),
+                &json!({"type":"tool_use","id":"work","name":match tool_kind {0=>"Bash", 1=>"Agent", _=>"mcp__workflow__run"},"input":{"command":"work","prompt":"work"}}),
                 None, ItemStatus::Running).unwrap();
-            let metadata = if subagent {
-                json!({"isAsync":background,"agentId":"agent"})
+            let metadata = if tool_kind != 0 {
+                json!({"status":if background {"async_launched"} else {"completed"},"agentId":"agent"})
             } else {
                 json!({"backgroundTaskId":if background {"task"} else {""}})
             };

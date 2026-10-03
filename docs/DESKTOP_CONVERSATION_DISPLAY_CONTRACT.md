@@ -14,7 +14,7 @@ submission retains the draft; retry clears the previous submission notice.
 Claude live events and native history use one content translation boundary.
 Only human-origin, non-meta prompt-mode queued commands become user messages. Task notifications update
 the originating tool's outcome and retain its native output for detail reads;
-unmatched notifications remain inspectable
+unmatched native notifications remain inspectable
 activity in the same turn. Text and image input echoes do not add
 activity items. Native tool results preserve exit codes, applied diffs and
 subagent handles, MCP calls use the shared MCP presentation, and child-agent
