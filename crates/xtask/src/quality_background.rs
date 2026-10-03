@@ -203,7 +203,9 @@ async fn check(
         .stdout(file.try_clone()?)
         .stderr(file);
     let status = supervision::Child::spawn(command)?
-        .output(cancel, Duration::from_secs(3600))
+        // Native runners may finish several bounded Simulator cleanup commands
+        // after cancellation. Keep their owner alive until that cleanup ends.
+        .output(cancel, Duration::from_secs(3600), Duration::from_secs(300))
         .await?
         .status;
     if !status.success() {

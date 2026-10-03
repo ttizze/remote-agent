@@ -163,7 +163,7 @@ async fn running_binary_and_active_worktree_stay_protected_until_exit() {
         let (_sender, cancel) = watch::channel(false);
         assert!(
             process
-                .output(&cancel, Duration::from_secs(5))
+                .output(&cancel, Duration::from_secs(5), Duration::from_secs(10))
                 .await
                 .unwrap()
                 .status
@@ -184,7 +184,7 @@ async fn real_cargo_waits_for_the_same_cleanup_lock_inode() {
     drop(locks);
     let (_sender, cancel) = watch::channel(false);
     let output = process
-        .output(&cancel, Duration::from_secs(30))
+        .output(&cancel, Duration::from_secs(30), Duration::from_secs(10))
         .await
         .unwrap();
     assert!(output.status.success());
@@ -216,7 +216,7 @@ async fn active_cargo_in_shared_target_is_not_cleaned() {
     let (_sender, cancel) = watch::channel(false);
     assert!(
         process
-            .output(&cancel, Duration::from_secs(30))
+            .output(&cancel, Duration::from_secs(30), Duration::from_secs(10))
             .await
             .unwrap()
             .status
@@ -280,7 +280,7 @@ async fn nested_worktree_activity_does_not_pin_parent_builds() {
     command.arg("30").current_dir(&nested);
     let mut process = Child::spawn(command).unwrap();
     await_cleaned(&[root.clone(), nested], &fixture.common).await;
-    process.stop(false).await.unwrap();
+    process.stop(false, Duration::from_secs(10)).await.unwrap();
 }
 
 #[tokio::test]

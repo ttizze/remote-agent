@@ -88,9 +88,9 @@ pub async fn network_permission(
         .stderr(std::process::Stdio::piped());
     let mut child = Child::spawn(command)?;
     let output = tokio::select! {
-        result = child.output(&cancel, Duration::from_secs(180)) => result?,
+        result = child.output(&cancel, Duration::from_secs(180), Duration::from_secs(10)) => result?,
         result = serve(listener) => {
-            child.stop(false).await?;
+            child.stop(false, Duration::from_secs(10)).await?;
             result?;
             return Err("Android network fixture stopped".into());
         }

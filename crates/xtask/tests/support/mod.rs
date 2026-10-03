@@ -58,7 +58,7 @@ impl Fixture {
 use std::{io::{Read, Write}, process::{Command, Stdio}, sync::atomic::{AtomicU32, Ordering}, time::Duration};
 static SIGNAL: AtomicU32 = AtomicU32::new(0);
 extern "C" fn record(signal: i32) { SIGNAL.store(signal as u32, Ordering::SeqCst); }
-unsafe extern "C" { fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize; }
+unsafe extern "C" { fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize; fn kill(pid: i32, signal: i32) -> i32; }
 fn main() {
  let args: Vec<_> = std::env::args().collect();
  match args.get(1).map(String::as_str) {
@@ -72,11 +72,22 @@ fn main() {
   Some("hold") => { let mut line=String::new(); std::io::stdin().read_line(&mut line).unwrap(); }
   Some("panic") => fail(),
   Some("provider") => {
-   unsafe { signal(15, record); } let root=std::path::Path::new(&args[2]); std::fs::write(root.join("ready"), "").unwrap();
+   unsafe { signal(15, record); } let root=std::path::Path::new(&args[2]);
+   if args.get(3).map(String::as_str)==Some("--lifetime") { std::thread::spawn(|| { std::io::stdin().read_to_end(&mut Vec::new()).unwrap(); SIGNAL.store(15, Ordering::SeqCst); }); }
+   std::fs::write(root.join("ready"), "").unwrap();
    while SIGNAL.load(Ordering::SeqCst)==0 { std::thread::sleep(Duration::from_millis(10)); }
    std::fs::write(root.join("stopped"), "").unwrap();
   }
   Some("parent") => { Command::new(&args[0]).args(["provider", &args[2]]).status().unwrap(); }
+  Some("slow") | Some("controller") => {
+   use std::os::unix::process::CommandExt;
+   unsafe { signal(15, record); } let root=std::path::Path::new(&args[2]);
+   let mut provider=if args[1]=="controller" { Some(Command::new(&args[0]).args(["provider", &args[2], "--lifetime"]).stdin(Stdio::piped()).process_group(0).spawn().unwrap()) } else { std::fs::write(root.join("ready"), "").unwrap(); None };
+   while SIGNAL.load(Ordering::SeqCst)==0 { std::thread::sleep(Duration::from_millis(10)); }
+   std::thread::sleep(Duration::from_millis(350));
+   if let Some(provider)=provider.as_mut() { unsafe { kill(provider.id() as i32, 15); } assert!(provider.wait().unwrap().success()); }
+   std::fs::write(root.join("cleaned"), "").unwrap();
+  }
   Some("supervisor") => {
    unsafe { signal(2, record); } let root=std::path::Path::new(&args[2]); std::fs::write(root.join("ready"), "").unwrap();
    std::io::stdin().read_to_end(&mut Vec::new()).unwrap();
@@ -113,7 +124,7 @@ fn main() {
         let (_sender, cancel) = watch::channel(false);
         let output = Child::spawn(self.cargo(root, target))
             .unwrap()
-            .output(&cancel, Duration::from_secs(60))
+            .output(&cancel, Duration::from_secs(60), Duration::from_secs(10))
             .await
             .unwrap();
         assert!(

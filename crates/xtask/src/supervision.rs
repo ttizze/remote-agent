@@ -85,7 +85,7 @@ impl Child {
         self.process.stdin().take()
     }
 
-    pub async fn stop(&mut self, host: bool) -> Result<()> {
+    pub async fn stop(&mut self, host: bool, grace: Duration) -> Result<()> {
         // Only the Host receives SIGINT. Its supervisors must remain alive to
         // observe lifetime-pipe closure and stop their separate provider groups.
         #[cfg(unix)]
@@ -107,7 +107,7 @@ impl Child {
         {
             return Err(error.into());
         }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + grace;
         let _ = tokio::time::timeout_at(deadline, self.process.wait()).await;
         #[cfg(unix)]
         while tokio::time::Instant::now() < deadline {
@@ -130,6 +130,7 @@ impl Child {
         &mut self,
         cancel: &watch::Receiver<bool>,
         timeout: Duration,
+        shutdown_grace: Duration,
     ) -> Result<Output> {
         async fn read(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> io::Result<Vec<u8>> {
             let mut bytes = Vec::new();
@@ -147,7 +148,7 @@ impl Child {
             }) => result.map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>).and_then(|result| result.map_err(Into::into)),
             _ = cancelled(cancel.clone()) => Err(interrupted()),
         };
-        self.stop(false).await?;
+        self.stop(false, shutdown_grace).await?;
         result
     }
 }
@@ -196,7 +197,9 @@ pub async fn run(
         }
         Io::Inherit => {}
     }
-    let output = Child::spawn(command)?.output(cancel, timeout).await?;
+    let output = Child::spawn(command)?
+        .output(cancel, timeout, Duration::from_secs(10))
+        .await?;
     if !output.status.success() {
         return Err(format!(
             "{} failed: {}{}",
@@ -236,7 +239,7 @@ mod tests {
         let (_sender, cancel) = watch::channel(false);
         assert!(
             child
-                .output(&cancel, Duration::from_millis(20))
+                .output(&cancel, Duration::from_millis(20), Duration::from_secs(10))
                 .await
                 .is_err()
         );
@@ -267,7 +270,7 @@ mod tests {
         let (sender, cancel) = watch::channel(false);
         sender.send(true).unwrap();
         let error = child
-            .output(&cancel, Duration::from_secs(5))
+            .output(&cancel, Duration::from_secs(5), Duration::from_secs(10))
             .await
             .unwrap_err();
         assert_eq!(
@@ -286,9 +289,41 @@ mod tests {
         command.arg("host").arg(&root);
         let mut child = Child::spawn(command).unwrap();
         ready(&mut child, &root).await;
-        child.stop(true).await.unwrap();
+        child.stop(true, Duration::from_secs(10)).await.unwrap();
         assert!(child.try_wait().unwrap().unwrap().success());
         assert!(root.join("closed").exists());
         assert!(!root.join("interrupted").exists());
+    }
+
+    #[tokio::test]
+    async fn cancellation_honors_the_controller_cleanup_deadline() {
+        let fixture = Fixture::new().await;
+        let root = fixture.project("controller").await;
+        for (mode, grace, cleaned) in [
+            ("slow", Duration::from_millis(20), false),
+            ("controller", Duration::from_secs(2), true),
+        ] {
+            let records = root.join(mode);
+            std::fs::create_dir(&records).unwrap();
+            let mut command = Command::new(Fixture::executable(&root));
+            command.arg(mode).arg(&records);
+            let mut child = Child::spawn(command).unwrap();
+            ready(&mut child, &records).await;
+            let (sender, cancel) = watch::channel(false);
+            sender.send(true).unwrap();
+            let error = child
+                .output(&cancel, Duration::from_secs(5), grace)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<io::Error>().unwrap().kind(),
+                io::ErrorKind::Interrupted
+            );
+            assert_eq!(records.join("cleaned").exists(), cleaned);
+            if cleaned {
+                assert!(records.join("stopped").exists());
+                assert!(child.try_wait().unwrap().unwrap().success());
+            }
+        }
     }
 }

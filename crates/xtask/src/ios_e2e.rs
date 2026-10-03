@@ -199,6 +199,8 @@ async fn worker(
             println!("{label}: {} passed; records: {}", tests.len(), bundle.display());
             Ok(WorkerResult { tests, seconds: started.elapsed().as_secs_f64(), bundle })
         }.await;
+    // Stop the Host before potentially slow Simulator cleanup.
+    let shutdown = host.stop(true, Duration::from_secs(10)).await;
     // Cleanup ignores cancellation, and recovers devices by this run's
     // unique name even if simctl create was cancelled before returning an ID.
     let cleanup: Result<()> = async {
@@ -248,7 +250,6 @@ async fn worker(
         Ok(())
     }
     .await;
-    let shutdown = host.stop(true).await;
     let result = result?;
     cleanup?;
     shutdown?;
