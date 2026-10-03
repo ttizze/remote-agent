@@ -34,6 +34,10 @@ dev: build-desktop-macos
 ios-e2e *tests:
     scripts/ios-e2e.sh "$@"
 
+# Archive iOS with the pinned package plugins trusted from the first build.
+ios-archive archive-path derived-data-path *args:
+    scripts/archive-ios.sh "$@"
+
 # Headless tests of the production iOS Markdown parser.
 ios-markdown:
     cargo xtask ios-markdown
