@@ -38,7 +38,7 @@ async fn exercise(command: &[&str], expected: Value) {
             if handled
                 && matches!(
                     request["method"].as_str(),
-                    Some("model/list" | "host/account/list")
+                    Some("host/model/list" | "host/account/list")
                 )
             {
                 continue;
@@ -58,8 +58,8 @@ async fn exercise(command: &[&str], expected: Value) {
                     handled = true;
                     json!({})
                 }
-                Some("model/list") => json!({"data":[],"nextCursor":null}),
-                Some("host/account/list") => json!({"accounts":[]}),
+                Some("host/model/list") => json!({"data":[],"nextCursor":null}),
+                Some("host/account/list") => json!({"accounts":[], "selected":{}}),
                 Some("host/session/list") => {
                     lists += 1;
                     let (projects, chats, search) = if mode == "list" {

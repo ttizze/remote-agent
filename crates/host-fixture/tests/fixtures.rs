@@ -85,7 +85,7 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
         let fixture = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(fixture.path()).unwrap();
         let original = b"[]\n";
-        fs::write(root.join("projects.json"), original).unwrap();
+        fs::write(root.join("bex-projects.json"), original).unwrap();
         let host = HostFixture::start(
             &root,
             codex_fixture::config(&root),
@@ -140,7 +140,7 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
                 .status(),
             204
         );
-        assert_eq!(fs::read(root.join("projects.json")).unwrap(), original);
+        assert_eq!(fs::read(root.join("bex-projects.json")).unwrap(), original);
         assert!(!root.join("list-fixture.json").exists());
         assert!(!root.join("projects-before-list-fixture.json").exists());
         assert_eq!(

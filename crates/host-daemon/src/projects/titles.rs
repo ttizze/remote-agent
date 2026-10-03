@@ -94,7 +94,6 @@ impl<'a> TitleList<'a> {
         thread.turns = None;
         thread.path = None;
         thread.preview = None;
-        thread.history_mode = None;
         thread.history_has_more = None;
         thread.history_limit = None;
         thread.agent_id = None;

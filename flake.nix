@@ -31,6 +31,7 @@
             targets = [
               "aarch64-apple-ios"
               "aarch64-apple-ios-sim"
+            ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               "aarch64-linux-android"
               "x86_64-linux-android"
             ];
@@ -75,30 +76,26 @@
             ANDROID_HOME = "${androidTestSdk}/libexec/android-sdk";
             ANDROID_SDK_ROOT = "${androidTestSdk}/libexec/android-sdk";
           };
-          default = pkgs.mkShell {
+          default = pkgs.mkShell ({
             packages = with pkgs; [
               just
               jq
               python3
               lsof
               shellcheck
-              gradle
-              jdk21
               rustToolchain
               cargo-mutants
-              cargo-ndk
               lefthook
+            ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              gradle
+              jdk21
+              cargo-ndk
               kotlin-language-server
               androidSdk
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
               pkgs.swiftlint
               pkgs.swiftformat
             ];
-
-            JAVA_HOME = pkgs.jdk21.home;
-            ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
-            ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
-            ANDROID_NDK_HOME = "${androidSdk}/libexec/android-sdk/ndk-bundle";
 
             shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
               export MOBILE_CARGO="${rustToolchain}/bin/cargo"
@@ -111,7 +108,12 @@
                 unset LD
               fi
             '';
-          };
+          } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            JAVA_HOME = pkgs.jdk21.home;
+            ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
+            ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
+            ANDROID_NDK_HOME = "${androidSdk}/libexec/android-sdk/ndk-bundle";
+          });
         });
     };
 }

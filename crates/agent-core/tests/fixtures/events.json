@@ -43,7 +43,6 @@
             "turn": {
               "id": "t",
               "status": "completed",
-              "itemsView": "summary",
               "items": [
                 {
                   "id": "b",
@@ -123,7 +122,6 @@
               }
             }
           ],
-          "itemsView": "summary",
           "future": "new"
         }
       ],
@@ -511,7 +509,6 @@
             "turn": {
               "id": "t",
               "status": "completed",
-              "itemsView": "summary",
               "items": [
                 {
                   "id": "b",
@@ -574,8 +571,7 @@
                 }
               }
             }
-          ],
-          "itemsView": "summary"
+          ]
         }
       ],
       "status": "idle"

@@ -49,11 +49,10 @@ struct PluginInterface {
 impl Codex {
     pub(super) async fn composer_catalog(&self, cwd: &str) -> ComposerCatalog {
         let cwds: Vec<&str> = if cwd.is_empty() { vec![] } else { vec![cwd] };
-        let skills_params = json!({"cwds":cwds});
-        let plugin_params = json!({"cwds":cwds});
+        let params = json!({"cwds":cwds});
         let (skills, plugins) = tokio::join!(
-            self.request::<_, Skills>("skills/list", &skills_params),
-            self.request::<_, Plugins>("plugin/list", &plugin_params)
+            self.request::<_, Skills>("skills/list", &params),
+            self.request::<_, Plugins>("plugin/list", &params)
         );
         let mut catalog = ComposerCatalog {
             cwd: cwd.into(),
@@ -65,6 +64,8 @@ impl Codex {
                     if !group.errors.is_empty() {
                         catalog
                             .errors
+                            .entry(agent_protocol::session::ProviderKind::Codex)
+                            .or_default()
                             .push("一部のスキルを読み込めませんでした".into());
                     }
                     catalog
@@ -72,6 +73,7 @@ impl Codex {
                         .extend(group.skills.into_iter().filter(|s| s.enabled).map(|s| {
                             ComposerCandidate {
                                 invocation: Invocation {
+                                    provider: agent_protocol::session::ProviderKind::Codex,
                                     kind: InvocationKind::Skill,
                                     name: s.name,
                                     path: s.path,
@@ -81,13 +83,19 @@ impl Codex {
                         }));
                 }
             }
-            Err(_) => catalog.errors.push("スキルを取得できませんでした".into()),
+            Err(_) => catalog
+                .errors
+                .entry(agent_protocol::session::ProviderKind::Codex)
+                .or_default()
+                .push("スキルを取得できませんでした".into()),
         }
         match plugins {
             Ok(plugins) => {
                 if !plugins.marketplace_load_errors.is_empty() {
                     catalog
                         .errors
+                        .entry(agent_protocol::session::ProviderKind::Codex)
+                        .or_default()
                         .push("一部のプラグインを読み込めませんでした".into());
                 }
                 catalog.candidates.extend(
@@ -106,6 +114,7 @@ impl Codex {
                                 });
                             ComposerCandidate {
                                 invocation: Invocation {
+                                    provider: agent_protocol::session::ProviderKind::Codex,
                                     kind: InvocationKind::Plugin,
                                     name,
                                     path: format!("plugin://{}", p.id),
@@ -117,18 +126,10 @@ impl Codex {
             }
             Err(_) => catalog
                 .errors
+                .entry(agent_protocol::session::ProviderKind::Codex)
+                .or_default()
                 .push("プラグインを取得できませんでした".into()),
         }
-        catalog.candidates.sort_by(|a, b| {
-            a.invocation
-                .name
-                .to_lowercase()
-                .cmp(&b.invocation.name.to_lowercase())
-                .then(a.invocation.path.cmp(&b.invocation.path))
-        });
-        catalog
-            .candidates
-            .dedup_by(|a, b| a.invocation == b.invocation);
         catalog
     }
 }

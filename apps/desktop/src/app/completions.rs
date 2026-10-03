@@ -211,7 +211,7 @@ mod tests {
                             ("Review", "Investigate whether structured datasets and query results are trustworthy enough to use, including freshness, duplicates and missing values"),
                             ("Analyze Data Quality With A Very Long Skill Name", "First line\nSecond line"),
                         ].into_iter().map(|(name, description)| ComposerCandidate {
-                            invocation: Invocation { kind: InvocationKind::Skill, name: name.into(), path: format!("/fixture/{name}/SKILL.md") },
+                            invocation: Invocation { provider: agent_protocol::session::ProviderKind::Codex, kind: InvocationKind::Skill, name: name.into(), path: format!("/fixture/{name}/SKILL.md") },
                             description: description.into(),
                         }).collect(), ..Default::default()
                     }));
@@ -371,6 +371,7 @@ mod tests {
                 cwd: snapshot.navigation.cwd.clone(),
                 candidates: vec![ComposerCandidate {
                     invocation: Invocation {
+                        provider: agent_protocol::session::ProviderKind::Codex,
                         kind: InvocationKind::Skill,
                         name: "review".into(),
                         path: "/fixture/review/SKILL.md".into(),

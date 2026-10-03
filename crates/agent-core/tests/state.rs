@@ -837,7 +837,7 @@ fn disconnected_catalog_reads_do_not_apply_or_retry_stale_responses() {
             .stale(
                 &mut state,
                 serde_json::from_value(json!({
-                    "accounts":[{"provider":"codex","id":"old"}],"selectedId":"old"
+                    "accounts":[{"provider":"codex","id":"old"}],"selected":{"codex":"old"}
                 }))
                 .unwrap()
             )
@@ -849,7 +849,7 @@ fn disconnected_catalog_reads_do_not_apply_or_retry_stale_responses() {
 #[test]
 fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_drafts() {
     use agent_core::state::{Draft, Intent};
-    for restored in [false, true] {
+    for (restored, failed) in [(false, false), (true, false), (false, true), (true, true)] {
         let draft = Draft {
             model: Some(agent_protocol::models::ModelRef {
                 provider: agent_protocol::session::ProviderKind::Codex,
@@ -867,16 +867,28 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         if restored {
             state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
         }
+        let errors = if failed {
+            json!({"codex":{"message":"offline"}})
+        } else {
+            json!({})
+        };
         op::LoadModels {}.apply(
             &mut state,
             serde_json::from_value(json!({"data":[{
             "id":"claude:default","model":{"provider": "claude", "id": "default"},"displayName":"Claude",
             "defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"}]
-        }],"providerErrors":{"codex":{"message":"offline"}}}))
+        }],"providerErrors":errors}))
             .unwrap(),
         );
         assert_eq!(*state.drafts[&DraftKey::from("saved")], draft);
-        assert_eq!(state.model_error_messages(), ["codex: offline"]);
+        assert_eq!(
+            state.model_error_messages(None),
+            if failed {
+                vec!["codex: offline"]
+            } else {
+                vec![]
+            }
+        );
         state = reduce(
             &state,
             Event::Intent(Intent::NewChat {

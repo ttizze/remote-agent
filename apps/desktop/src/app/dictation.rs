@@ -3,6 +3,8 @@ use agent_core::state::operations as op;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Phase {
+    Preparing,
+    #[cfg(target_os = "macos")]
     Permission,
     Recording,
     Transcribing,
@@ -60,10 +62,11 @@ impl Desktop {
                     .flex_1()
                     .gap_2()
                     .child(spinner::Spinner::new().small())
-                    .child(if state.phase == Phase::Permission {
-                        "マイクの許可を確認中…"
-                    } else {
-                        "文字起こし中…"
+                    .child(match state.phase {
+                        Phase::Preparing => "録音を準備中…",
+                        #[cfg(target_os = "macos")]
+                        Phase::Permission => "マイクの許可を確認中…",
+                        _ => "文字起こし中…",
                     })
                     .into_any_element()
             })
@@ -73,7 +76,7 @@ impl Desktop {
                     IconName::Pause,
                     "録音を終了して文字起こし",
                     cx,
-                    |s, _, cx| s.finish_dictation(false, cx),
+                    |s, _, _| s.finish_dictation(false),
                 )
                 .icon(Icon::default().path("bex/stop.svg"))
                 .disabled(!recording),
@@ -120,17 +123,17 @@ impl Desktop {
                     id,
                     key: self.draft_key().clone(),
                     generation: self.snapshot.epoch,
-                    phase: Phase::Permission,
+                    phase: Phase::Preparing,
                     send: false,
                     control: Some(control),
-                    levels: std::collections::VecDeque::from(vec![0.; 40]),
+                    levels: std::collections::VecDeque::from([0.; 40]),
                 });
                 self.error.clear();
             }
             Err(error) => self.set_error(error),
         }
     }
-    pub(super) fn finish_dictation(&mut self, send: bool, _: &Context<Self>) {
+    pub(super) fn finish_dictation(&mut self, send: bool) {
         let Some(state) = self
             .dictation
             .as_mut()
@@ -138,7 +141,7 @@ impl Desktop {
         else {
             return;
         };
-        if let Err(error) = state.control.as_mut().expect("recording control").finish() {
+        if let Err(error) = state.control.as_ref().expect("recording control").finish() {
             self.set_error(error);
             self.dictation = None;
             return;
@@ -148,23 +151,22 @@ impl Desktop {
     }
     pub(super) fn cancel_recording(&mut self) {
         if let Some(state) = self.dictation.as_mut() {
-            state.send = false;
-            if state.phase != Phase::Transcribing {
+            if state.phase == Phase::Transcribing {
+                state.send = false;
+            } else {
                 self.dictation = None;
             }
         }
     }
-    pub(super) fn recording_update(
-        &mut self,
-        id: uuid::Uuid,
-        event: platform::RecordingEvent,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) {
+    pub(super) fn recording_update(&mut self, id: uuid::Uuid, event: platform::RecordingEvent) {
         let Some(state) = self.dictation.as_mut().filter(|state| state.id == id) else {
             return;
         };
         match event {
+            #[cfg(target_os = "macos")]
+            platform::RecordingEvent::RequestingPermission => state.phase = Phase::Permission,
+            #[cfg(target_os = "macos")]
+            platform::RecordingEvent::Preparing => state.phase = Phase::Preparing,
             platform::RecordingEvent::Started => state.phase = Phase::Recording,
             platform::RecordingEvent::Level(level) => {
                 if state.phase == Phase::Recording && level.is_finite() {

@@ -12,14 +12,6 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-fn projects(home: &std::path::Path) -> crate::Result<Vec<Value>> {
-    match fs::read(home.join("projects.json")) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error.into()),
-    }
-}
-
 pub(super) type SharedThread = Rc<RefCell<Thread>>;
 pub(super) type Turn = Rc<RefCell<Value>>;
 
@@ -267,9 +259,6 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
         let mut saved_threads = None;
         let mut list_contents = None;
         let mut next_thread = 0;
-        // Only the provider's process lifecycle protocol is modeled here. No
-        // shell commands are executed by this deterministic Codex double.
-        let mut processes = std::collections::HashSet::<String>::new();
         loop {
             let line = tokio::select! {
                 result = &mut writer => { result??; break; }
@@ -287,25 +276,6 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
             let method = message["method"].as_str().unwrap_or("");
             let params = &mut owned_params;
             match method {
-                "process/spawn" => {
-                    let handle = params["processHandle"].as_str().unwrap_or("");
-                    if handle.is_empty() || !params["cwd"].as_str().is_some_and(|cwd| std::path::Path::new(cwd).is_dir())
-                        || !params["command"].as_array().is_some_and(|command| !command.is_empty())
-                        || processes.contains(handle)
-                    {
-                        context.error(id, -32602, "invalid process start")?;
-                    } else {
-                        processes.insert(handle.to_owned());
-                        context.respond(id, &json!({}))?;
-                    }
-                }
-                "process/kill" => {
-                    let handle = params["processHandle"].as_str().unwrap_or("");
-                    if processes.remove(handle) {
-                        context.notify("process/exited", &json!({"processHandle":handle,"exitCode":0}))?;
-                        context.respond(id, &json!({}))?;
-                    } else { context.error(id, -32602, "process not found")?; }
-                }
                 "initialize" => {
                     if params["capabilities"]["experimentalApi"] != true {
                         context.error(id, -32602, "experimentalApi capability required")?;
@@ -411,35 +381,10 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     context.trace(method, json!({"useStateDbOnly":params["useStateDbOnly"] == true,"count":page.len()}))?;
                     #[derive(Serialize)] #[serde(rename_all = "camelCase")]
                     struct Page<'a> { data: &'a [ThreadView<'a>], next_cursor: Option<String> }
-                    context.respond(id, &Page { data: &page, next_cursor: (end < ordered.len()).then(|| end.to_string()) })?;
-                }
-                "project/list" => {
-                    let mut projects = projects(&context.home)?;
-                    for (index, project) in projects.iter_mut().enumerate() {
-                        let fields = project.as_object_mut().ok_or("fixture project must be an object")?;
-                        fields.entry("createdAt").or_insert(json!(0));
-                        fields.entry("updatedAt").or_insert(json!(0));
-                        fields.entry("position").or_insert(json!(index));
-                        fields.entry("metadata").or_insert(json!({}));
-                    }
-                    let offset = offset(params);
-                    let end = offset.saturating_add(limit(params, 100));
-                    context.respond(id, &json!({"data":projects.iter().skip(offset).take(end-offset).collect::<Vec<_>>(),
-                        "nextCursor":(end < projects.len()).then(|| end.to_string())}))?;
-                }
-                "project/create" => {
-                    let mut projects = projects(&context.home)?;
-                    let project = if let Some(project) = projects.iter().find(|project| project["metadata"]["fixtureIdempotencyKey"] == params["idempotencyKey"]) {
-                        project.clone()
-                    } else {
-                        let project = json!({"id":format!("fixture-project-{}", projects.len()+1),"name":params["name"],
-                            "roots":params["roots"],"metadata":{"fixtureIdempotencyKey":params["idempotencyKey"]},
-                            "position":projects.len(),"createdAt":1,"updatedAt":1});
-                        projects.push(project.clone());
-                        fs::write(context.home.join("projects.json"), serde_json::to_vec(&projects)?)?;
-                        project
-                    };
-                    context.respond(id, &json!({"project":project}))?;
+                    let next_cursor = if context.home.join("repeat-list-cursor").exists() {
+                        Some(offset.to_string())
+                    } else { (end < ordered.len()).then(|| end.to_string()) };
+                    context.respond(id, &Page { data: &page, next_cursor })?;
                 }
                 "thread/start" => {
                     let failure = context.home.join("fail-next-thread-start");
@@ -456,16 +401,16 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     };
                     let matches = context.config.expected_cwd.as_ref().is_none_or(|expected| cwd.as_str().is_some_and(|cwd| std::path::Path::new(cwd) == expected));
                     context.trace(method, json!({"hasProjectId":params.get("projectId").is_some(),"cwdMatchesFixture":matches}))?;
-                    if let Some(project_id) = params.get("projectId").filter(|id| !id.is_null())
-                        && !projects(&context.home)?.iter().any(|project| &project["id"] == project_id)
-                    { context.error(id, -32600, "project not found")?; continue; }
+                    assert!(params.get("projectId").is_none(), "Bex owns project registration");
                     if !matches || !cwd.as_str().is_some_and(|cwd| !cwd.is_empty()) {
                         context.error(id, -32602, "invalid cwd")?; continue;
                     }
-                    next_thread += 1;
-                    let thread_id = format!("fixture-thread-{next_thread}");
+                    let thread_id = loop {
+                        next_thread += 1;
+                        let id = format!("fixture-thread-{next_thread}");
+                        if !threads.contains_key(&id) { break id; }
+                    };
                     let mut thread = Thread::new(thread_id.clone(), cwd);
-                    if let Some(project_id) = params.get("projectId") { thread.metadata.insert("projectId".into(), project_id.clone()); }
                     if context.config.deferred_thread_metadata { thread.metadata.insert("name".into(), Value::Null); }
                     thread.metadata.insert("path".into(), context.home.join(format!("{thread_id}.jsonl")).into_os_string().into_string().unwrap().into());
                     thread.metadata.insert("historyMode".into(), "paginated".into());
@@ -524,6 +469,13 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     thread.borrow_mut().turns.push(turn.clone());
                     thread.borrow_mut().metadata.insert("status".into(), json!({"type":"active","activeFlags":[]}));
                     context.respond(id, &json!({"turn":{"id":turn_id}}))?;
+                    if prompt == "[crash]" {
+                        context.turn_event("turn/started",thread_id,&turn.borrow())?;
+                        let (flushed,ready)=oneshot::channel();
+                        context.output.send(Output::Barrier(flushed))?;
+                        ready.await?;
+                        std::process::exit(17);
+                    }
                     let delayed = prompt.contains("[delayed-input]") || prompt.contains("[deferred-steer]");
                     if delayed || prompt.contains("[workspace-edit]") || prompt.contains("[groups]") { remove_if_present(&context.home.join("release-inputs"))?; }
                     let stop = CancellationToken::new();
@@ -538,6 +490,15 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                             let _ = context.finish(&thread, &turn, "failed", Some(json!({"message":"fixture scenario failed"})));
                         }
                     });
+                }
+                "thread/queue/add" => {
+                    let thread_id=params["threadId"].as_str().unwrap_or("");
+                    let active=threads.get(thread_id).and_then(|thread|thread.borrow().turns.iter().find(|turn|turn.borrow()["status"]=="inProgress").cloned());
+                    let Some(turn)=active else {context.error(id,-32602,"no active turn")?;continue;};
+                    context.trace(method,json!({"hasExpectedTurnId":params.get("expectedTurnId").is_some()}))?;
+                    context.respond(id,&json!({"queuedSubmission":{"id":"fixture-queued-input"}}))?;
+                    context.turn_event("turn/started",thread_id,&turn.borrow())?;
+                    context.stream_item(thread_id,&turn,json!({"id":params["clientUserMessageId"],"clientId":params["clientUserMessageId"],"type":"userMessage","content":params["input"]}))?;
                 }
                 "turn/interrupt" | "turn/steer" => {
                     let thread_id = params["threadId"].as_str().unwrap_or("");
@@ -577,6 +538,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     history::page(&context, id, &thread.borrow(), method, params)?;
                 }
                 "thread/read" | "thread/resume" => {
+                    context.trace(method, json!({"threadId":params["threadId"]}))?;
                     let failure = context.home.join("fail-next-history-read");
                     if method == "thread/read" && failure.exists() {
                         fs::remove_file(failure)?;

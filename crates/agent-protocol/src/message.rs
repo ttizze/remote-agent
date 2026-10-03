@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-/// The only message distinction the Host needs for routing Codex traffic.
+/// Envelope distinctions for JSON RPC transport and native adapter traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpcMessageKind {
     Request,
@@ -11,11 +11,11 @@ pub enum RpcMessageKind {
     Notification,
 }
 
-/// A classified Codex JSONL line.
+/// A classified JSON RPC envelope.
 ///
 /// Envelope values borrow the original line without materializing payloads.
 /// IDs and payloads retain their raw JSON representation. Unknown envelope
-/// fields are discarded; only the provider protocol fields are retained.
+/// fields are discarded; only JSON RPC envelope fields are retained.
 #[derive(Debug)]
 pub struct RpcMessage<'a> {
     kind: RpcMessageKind,
