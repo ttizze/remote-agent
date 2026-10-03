@@ -2,7 +2,13 @@
 #![cfg(unix)]
 
 use serde_json::Value;
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    process::Command,
+    time::{Duration, Instant},
+};
 
 fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -26,6 +32,7 @@ fn checks_committed_snapshot_and_exposes_failures_without_touching_source() {
     git(root, &["config", "user.name", "Quality test"]);
     git(root, &["config", "user.email", "quality@example.invalid"]);
     fs::write(root.join("subject"), "committed").unwrap();
+    fs::write(root.join("tracked"), "original").unwrap();
     git(root, &["add", "."]);
     git(
         root,
@@ -40,12 +47,12 @@ fn checks_committed_snapshot_and_exposes_failures_without_touching_source() {
     let nix = bin.join("nix");
     fs::write(
         &nix,
-        "#!/bin/sh\n[ \"$(cat \"$2/subject\")\" = committed ] || exit 7\necho checked-snapshot\n",
+        "#!/bin/sh\nset -eu\n[ \"$(cat \"$2/subject\")\" = committed ]\n[ \"$(cat \"$2/tracked\")\" = original ]\n[ ! -e \"$2/stale\" ]\necho modified > \"$2/tracked\"\ntouch \"$2/stale\"\necho checked-snapshot\n",
     )
     .unwrap();
     fs::set_permissions(&nix, fs::Permissions::from_mode(0o700)).unwrap();
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    let enqueue = || {
+    let enqueue = |commit: &str| {
         fs::write(
             state.join(format!("queue/{commit}.request")),
             format!("{commit}\n{}", root.display()),
@@ -61,7 +68,7 @@ fn checks_committed_snapshot_and_exposes_failures_without_touching_source() {
             .unwrap()
     };
     fs::write(root.join("subject"), "uncommitted").unwrap();
-    enqueue();
+    enqueue(&commit);
     let output = run("quality-worker");
     assert!(
         output.status.success(),
@@ -80,8 +87,48 @@ fn checks_committed_snapshot_and_exposes_failures_without_touching_source() {
     );
     fs::write(root.join("subject"), "committed").unwrap();
     assert!(run("quality-status").status.success());
-    fs::write(nix, "#!/bin/sh\necho deliberate-failure >&2\nexit 9\n").unwrap();
-    enqueue();
+    let checkout = state.join("worktrees/checkout");
+    let unchanged_modified = fs::metadata(checkout.join("subject"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    fs::create_dir(checkout.join("target")).unwrap();
+    fs::write(checkout.join("target/generated"), "cached").unwrap();
+    // Only changed tracked files should receive new timestamps. A prior check's
+    // source changes must disappear, while generated build outputs survive.
+    fs::write(root.join("new-source"), "next commit").unwrap();
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "next fixture",
+        ],
+    );
+    let commit = git(root, &["rev-parse", "HEAD"]);
+    enqueue(&commit);
+    assert!(run("quality-worker").status.success());
+    assert!(run("quality-status").status.success());
+    assert_eq!(
+        fs::metadata(checkout.join("subject"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+        unchanged_modified
+    );
+    assert_eq!(
+        fs::read_to_string(checkout.join("new-source")).unwrap(),
+        "next commit"
+    );
+    assert_eq!(
+        fs::read_to_string(checkout.join("target/generated")).unwrap(),
+        "cached"
+    );
+    fs::write(&nix, "#!/bin/sh\necho deliberate-failure >&2\nexit 9\n").unwrap();
+    enqueue(&commit);
     assert!(run("quality-worker").status.success());
     let output = run("quality-status");
     assert!(!output.status.success());
@@ -92,11 +139,60 @@ fn checks_committed_snapshot_and_exposes_failures_without_touching_source() {
             .unwrap()
             .contains("deliberate-failure")
     );
+    // An interrupt must stop the check's descendants before releasing the
+    // checkout lock, otherwise the next commit could replace their sources.
+    fs::write(
+        &nix,
+        "#!/bin/sh\nsleep 30 &\necho $! > \"$2/descendant\"\nwait\n",
+    )
+    .unwrap();
+    enqueue(&commit);
+    let mut worker = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("quality-worker")
+        .current_dir(root)
+        .env("PATH", &path)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let descendant = loop {
+        if let Ok(pid) = fs::read_to_string(checkout.join("descendant")) {
+            break pid.trim().to_owned();
+        }
+        if Instant::now() >= deadline {
+            worker.kill().unwrap();
+            worker.wait().unwrap();
+            panic!("quality descendant did not start");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    Command::new("kill")
+        .args(["-INT", &worker.id().to_string()])
+        .status()
+        .unwrap();
+    let status = worker.wait().unwrap();
+    let alive = Command::new("kill")
+        .args(["-0", &descendant])
+        .output()
+        .unwrap()
+        .status
+        .success();
+    // Clean up even when testing a broken implementation.
+    let _ = Command::new("kill").args(["-KILL", &descendant]).output();
+    assert!(!status.success());
+    assert!(
+        !alive,
+        "interrupted quality check left a descendant running"
+    );
+    let result: Value =
+        serde_json::from_slice(&fs::read(state.join(format!("results/{commit}.json"))).unwrap())
+            .unwrap();
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["error"], "interrupted");
     assert_eq!(
         git(root, &["worktree", "list", "--porcelain"])
             .matches("worktree ")
             .count(),
-        1
+        2
     );
 }
 

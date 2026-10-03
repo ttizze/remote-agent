@@ -1,4 +1,3 @@
-use process_wrap::tokio::{CommandWrap, KillOnDrop};
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
@@ -7,7 +6,7 @@ use std::{
     time::Duration,
 };
 use tokio::process::Command;
-use xtask::Result;
+use xtask::{Result, supervision};
 
 async fn git(arguments: &[&str]) -> Result<String> {
     let output = Command::new("git")
@@ -101,6 +100,7 @@ fn has_requests(state: &Path) -> Result<bool> {
 }
 
 pub async fn worker() -> Result<()> {
+    let cancel = supervision::cancellation();
     let state = state_directory().await?;
     for directory in ["queue", "results", "logs", "worktrees"] {
         fs::create_dir_all(state.join(directory))?;
@@ -130,14 +130,21 @@ pub async fn worker() -> Result<()> {
                 "status": "running", "log": log}),
             )?;
             fs::remove_file(request.path)?;
-            let result = check(&state, &request.commit, &log).await;
+            let result = check(&state, &request.commit, &log, &cancel).await;
             save(
                 &state,
                 &request.commit,
                 json!({"commit": request.commit,
                 "status": if result.is_ok() { "passed" } else { "failed" },
-                "log": log, "error": result.err().map(|error| error.to_string())}),
+                "log": log, "error": result.as_ref().err().map(|error| error.to_string())}),
             )?;
+            if let Err(error) = &result
+                && error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::Interrupted)
+            {
+                return result;
+            }
         }
         // Release before checking again: an enqueuer may have observed our lock
         // immediately before we found the queue empty.
@@ -148,126 +155,63 @@ pub async fn worker() -> Result<()> {
     }
 }
 
-async fn check(state: &Path, commit: &str, log: &Path) -> Result<()> {
-    let directory = tempfile::tempdir_in(state.join("worktrees"))?;
-    let checkout = directory.path().join("checkout");
+async fn check(
+    state: &Path,
+    commit: &str,
+    log: &Path,
+    cancel: &tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    // The worker lock owns this checkout through builds and tests. Keep its
+    // path and unchanged source timestamps stable so Cargo and Xcode can reuse
+    // outputs across commits, while discarding changes made by a prior check.
+    let checkout = state.join("worktrees/checkout");
     let checkout_str = checkout.to_str().ok_or("non-UTF-8 checkout path")?;
     // NamedTempFile supplies private creation permissions on Unix and Windows.
     let file = tempfile::NamedTempFile::new_in(state.join("logs"))?.persist(log)?;
-    let added = Command::new("git")
-        .args(["worktree", "add", "--detach", checkout_str, commit])
-        .stdout(file.try_clone()?)
-        .stderr(file.try_clone()?)
-        .kill_on_drop(true)
-        .status()
+    let commands = if checkout.exists() {
+        vec![
+            vec!["-C", checkout_str, "reset", "--hard", commit],
+            vec!["-C", checkout_str, "clean", "-ffdqx", "-e", "target/"],
+        ]
+    } else {
+        vec![vec!["worktree", "add", "--detach", checkout_str, commit]]
+    };
+    let cwd = std::env::current_dir()?;
+    for arguments in commands {
+        let mut args = vec![std::ffi::OsString::from("git")];
+        args.extend(arguments.into_iter().map(std::ffi::OsString::from));
+        supervision::run(
+            &args,
+            &cwd,
+            supervision::Io::Log(&file),
+            cancel,
+            Duration::from_secs(60),
+        )
         .await?;
-    if !added.success() {
-        return Err(format!("quality checkout failed: {added}").into());
     }
-    let result: Result<_> = async {
-        let mut command = CommandWrap::with_new("nix", |command| {
-            command
-                .arg("develop")
-                .arg(&checkout)
-                .args([
-                    "--command",
-                    "bash",
-                    "-euo",
-                    "pipefail",
-                    "-c",
-                    "just quality rust && just quality swift",
-                ])
-                .current_dir(&checkout)
-                .env_remove("CARGO")
-                .env_remove("RUSTC")
-                .env_remove("RUSTDOC")
-                .env("CARGO_TARGET_DIR", state.join("cargo-target"))
-                .stdin(std::process::Stdio::null());
-        });
-        command
-            .command_mut()
-            .stdout(file.try_clone()?)
-            .stderr(file.try_clone()?);
-        #[cfg(unix)]
-        command.wrap(process_wrap::tokio::ProcessGroup::leader());
-        #[cfg(windows)]
-        command.wrap(process_wrap::tokio::JobObject);
-        let mut child = command.wrap(KillOnDrop).spawn()?;
-        wait_for_quality(child.as_mut(), Duration::from_secs(3600)).await
-    }
-    .await;
-    let cleanup = Command::new("git")
-        .args(["worktree", "remove", "--force", checkout_str])
+    let mut command = Command::new("nix");
+    command
+        .arg("develop")
+        .arg(&checkout)
+        .args(["--command", "just", "quality"])
+        .current_dir(&checkout)
+        .env_remove("CARGO")
+        .env_remove("RUSTC")
+        .env_remove("RUSTDOC")
+        .env("CARGO_TARGET_DIR", state.join("cargo-target"))
+        .stdin(std::process::Stdio::null())
         .stdout(file.try_clone()?)
-        .stderr(file)
-        .kill_on_drop(true)
-        .status()
-        .await?;
-    let status = result?;
+        .stderr(file);
+    let status = supervision::Child::spawn(command)?
+        // Native runners may finish several bounded Simulator cleanup commands
+        // after cancellation. Keep their owner alive until that cleanup ends.
+        .output(cancel, Duration::from_secs(3600), Duration::from_secs(300))
+        .await?
+        .status;
     if !status.success() {
         return Err(format!("quality checks failed: {status}").into());
     }
-    if !cleanup.success() {
-        return Err(format!("quality checkout cleanup failed: {cleanup}").into());
-    }
     Ok(())
-}
-
-async fn wait_for_quality(
-    child: &mut dyn process_wrap::tokio::ChildWrapper,
-    duration: Duration,
-) -> Result<std::process::ExitStatus> {
-    match tokio::time::timeout(duration, child.wait()).await {
-        Ok(status) => Ok(status?),
-        Err(timeout) => {
-            // KillOnDrop only kills the direct child on Unix. Explicitly kill
-            // the group/job and reap it before removing its working directory.
-            child.start_kill()?;
-            child.wait().await?;
-            Err(timeout.into())
-        }
-    }
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-
-    #[tokio::test]
-    async fn timeout_terminates_descendants_before_checkout_cleanup() {
-        let mut command = CommandWrap::with_new("sh", |command| {
-            command
-                .args(["-c", "sleep 30 & echo ready; wait"])
-                .stdout(std::process::Stdio::piped());
-        });
-        command
-            .wrap(process_wrap::tokio::ProcessGroup::leader())
-            .wrap(KillOnDrop);
-        let mut child = command.spawn().unwrap();
-        let mut output = BufReader::new(child.stdout().take().unwrap());
-        let mut ready = String::new();
-        tokio::time::timeout(Duration::from_secs(5), output.read_line(&mut ready))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(ready.trim(), "ready");
-        let result = wait_for_quality(child.as_mut(), Duration::from_millis(20)).await;
-        assert!(result.is_err());
-        let mut remainder = Vec::new();
-        let closed = tokio::time::timeout(
-            Duration::from_millis(300),
-            output.read_to_end(&mut remainder),
-        )
-        .await;
-        // Always remove our process group, including on the regression's red run.
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-        assert!(
-            closed.is_ok(),
-            "a descendant retained the output pipe after timeout"
-        );
-    }
 }
 
 pub async fn status(wait: bool) -> Result<()> {
