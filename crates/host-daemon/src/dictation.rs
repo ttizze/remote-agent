@@ -177,17 +177,10 @@ async fn transcribe_request(
     // an account switch or refreshed token. Credentials stay exclusively on Host.
     let text = match crate::codex_accounts::auth_token(app_server, false).await? {
         AuthToken::ApiKey(key) => {
+            drop(prepared);
             transcribe_recording(&key, RecordingService::OpenAi, pcm, API_TRANSCRIBE_URL).await?
         }
         AuthToken::ChatGpt(token) => {
-            let socket = match prepared {
-                Some(prepared) => prepared
-                    .take()
-                    .await
-                    .filter(|connection| connection.token == token)
-                    .map(|connection| connection.socket),
-                None => None,
-            };
             let audio = Zeroizing::new(STANDARD.encode(pcm));
             transcribe_authenticated(
                 &token,
@@ -196,7 +189,7 @@ async fn transcribe_request(
                 pcm,
                 DICTATION_URL,
                 TRANSCRIBE_URL,
-                socket,
+                prepared,
             )
             .await?
         }
@@ -219,11 +212,21 @@ async fn transcribe_authenticated(
     pcm: &[u8],
     stream_url: &str,
     recording_url: &str,
-    prepared: Option<DictationSocket>,
+    prepared: Option<Prepared>,
 ) -> Result<String, String> {
     // Keep complete PCM for file transcription if the WebSocket attempts fail.
     let stream_result = tokio::time::timeout(Duration::from_secs(18), async {
-        if let Some(socket) = prepared
+        // Preparation shares the stream budget so file fallback still has
+        // time to finish within the overall transcription timeout.
+        let socket = match prepared {
+            Some(prepared) => prepared
+                .take()
+                .await
+                .filter(|connection| connection.token.as_str() == token)
+                .map(|connection| connection.socket),
+            None => None,
+        };
+        if let Some(socket) = socket
             && let Ok(text) = transcribe_socket(socket, audio).await
         {
             return Ok(text);
@@ -547,9 +550,8 @@ mod tests {
                     Ok(PreparedConnection { token, socket })
                 });
                 warmed.await.unwrap();
-                let connection = prepared.take().await.unwrap();
-                transcribe_authenticated(&connection.token, "isolated-codex/1.0", "AQD/fw==",
-                    &[1, 0, 255, 127], &url, "http://127.0.0.1:1/unused", Some(connection.socket)).await.unwrap()
+                transcribe_authenticated("isolated-token", "isolated-codex/1.0", "AQD/fw==",
+                    &[1, 0, 255, 127], &url, "http://127.0.0.1:1/unused", Some(prepared)).await.unwrap()
             };
             let (text, ()) = tokio::join!(operation, provider);
             assert_eq!(text, "全文");
@@ -585,9 +587,8 @@ mod tests {
                     Ok(PreparedConnection { token, socket })
                 });
                 // Stop can precede completion of the initial handshake.
-                let connection = prepared.take().await.unwrap();
-                transcribe_authenticated(&connection.token, "isolated-codex/1.0", "AQD/fw==",
-                    &[1, 0, 255, 127], &url, "http://127.0.0.1:1/unused", Some(connection.socket)).await.unwrap()
+                transcribe_authenticated("isolated-token", "isolated-codex/1.0", "AQD/fw==",
+                    &[1, 0, 255, 127], &url, "http://127.0.0.1:1/unused", Some(prepared)).await.unwrap()
             };
             let (text, ()) = tokio::join!(operation, provider);
             assert_eq!(text, "再接続後の全文");
@@ -900,14 +901,14 @@ mod tests {
             );
         }
         assert_eq!(
-            recording_fallback("200 OK", r#"{"text":"  "}"#, false, false)
+            recording_fallback("200 OK", r#"{"text":"  "}"#, false, false, false)
                 .await
                 .unwrap()
                 .trim(),
             ""
         );
         assert!(
-            recording_fallback("200 OK", r#"{"text":42}"#, false, false)
+            recording_fallback("200 OK", r#"{"text":42}"#, false, false, false)
                 .await
                 .is_err()
         );
@@ -941,8 +942,9 @@ mod tests {
         response_body: &str,
         secure_stream: bool,
         api_key: bool,
+        pending_preparation: bool,
     ) -> Result<String, String> {
-        tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::time::timeout(Duration::from_secs(if pending_preparation { 25 } else { 3 }), async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let token = format!("local.{}.signature", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
@@ -971,7 +973,13 @@ mod tests {
                     if streaming {
                         assert!(headers.starts_with("get /stream "));
                         assert!(headers.contains("upgrade: websocket"));
-                        socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                        if pending_preparation {
+                            // Leave the fresh handshake pending until the
+                            // stream budget expires and the client closes it.
+                            let _ = socket.read_to_end(&mut Vec::new()).await;
+                        } else {
+                            socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                        }
                         continue;
                     }
                     assert!(headers.starts_with("post /transcribe "));
@@ -1006,7 +1014,8 @@ mod tests {
                 if api_key {
                     transcribe_recording(&token, RecordingService::OpenAi, &[1, 0, 255, 127], &recording_url).await
                 } else {
-                    transcribe_authenticated(&token, "isolated-codex/1.0", "AQD/fw==", &[1, 0, 255, 127], &stream_url, &recording_url, None).await
+                    let prepared = pending_preparation.then(|| Prepared::new("delayed".into(), std::future::pending()));
+                    transcribe_authenticated(&token, "isolated-codex/1.0", "AQD/fw==", &[1, 0, 255, 127], &stream_url, &recording_url, prepared).await
                 }
             };
             let (result, ()) = tokio::join!(operation, provider);
@@ -1017,9 +1026,15 @@ mod tests {
     #[tokio::test]
     async fn api_key_recording_sends_model_without_chatgpt_headers_or_streaming() {
         assert_eq!(
-            recording_fallback("200 OK", r#"{"text":"API transcription"}"#, false, true)
-                .await
-                .unwrap(),
+            recording_fallback(
+                "200 OK",
+                r#"{"text":"API transcription"}"#,
+                false,
+                true,
+                false
+            )
+            .await
+            .unwrap(),
             "API transcription"
         );
         let error = recording_fallback(
@@ -1027,6 +1042,7 @@ mod tests {
             r#"{"error":"private provider payload"}"#,
             false,
             true,
+            false,
         )
         .await
         .unwrap_err();
@@ -1037,10 +1053,35 @@ mod tests {
     #[tokio::test]
     async fn submits_the_original_recording_when_streaming_is_rejected() {
         assert_eq!(
-            recording_fallback("200 OK", r#"{"text":"文字起こし成功"}"#, false, false)
-                .await
-                .unwrap(),
+            recording_fallback(
+                "200 OK",
+                r#"{"text":"文字起こし成功"}"#,
+                false,
+                false,
+                false
+            )
+            .await
+            .unwrap(),
             "文字起こし成功"
+        );
+    }
+
+    #[tokio::test]
+    async fn slow_preparation_preserves_the_complete_recording_fallback_budget() {
+        // Preparation takes ten seconds and the fresh handshake never replies.
+        // Both must share the eighteen-second stream budget so the original
+        // PCM can still reach file transcription within the overall 25 seconds.
+        assert_eq!(
+            recording_fallback(
+                "200 OK",
+                r#"{"text":"遅い接続でも全文"}"#,
+                false,
+                false,
+                true
+            )
+            .await
+            .unwrap(),
+            "遅い接続でも全文"
         );
     }
 
@@ -1049,6 +1090,7 @@ mod tests {
         let error = recording_fallback(
             "500 Internal Server Error",
             r#"{"error":"private provider payload"}"#,
+            false,
             false,
             false,
         )
@@ -1097,7 +1139,8 @@ mod tests {
                 "200 OK",
                 r#"{"text":"TLS後も文字起こし成功"}"#,
                 !api_key,
-                api_key
+                api_key,
+                false
             )
             .await
             .unwrap(),
