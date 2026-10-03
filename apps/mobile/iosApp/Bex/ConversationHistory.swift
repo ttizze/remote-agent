@@ -12,7 +12,6 @@ extension ThreadScreen {
     func conversationRow(_ row: ThreadConversationRow) -> some View {
         switch row.content {
         case let .historyNotice(message): Text(message).font(.caption).foregroundStyle(.secondary)
-        case .olderTurns: historyBoundary()
         case let .native(content, item): nativeConversationRow(content, item: item)
         case let .queued(item):
             userMessageRow(item)
@@ -97,35 +96,15 @@ extension ThreadScreen {
     }
 
     func loadVisibleHistory() {
-        guard scrollingToOlder, !historyRequestPending, !model.loadingHistory else { return }
-        if let position = historyBoundaries["older-turns"], position >= 0, position < scrollViewportHeight * 0.6 {
-            requestHistory()
-        }
-    }
-
-    func requestHistory() {
-        guard !model.loadingHistory else { return }
-        isFollowingLatest = false
-        scrollingToOlder = false
-        historyRequestPending = true
+        guard isVisible, conversation?.id == model.selectedThreadId,
+              model.notice == nil, AgentCore.shouldLoadHistory(
+                  hasMore: conversation?.source.hasMoreHistory() == true,
+                  loading: model.loadingHistory,
+                  oldestVisible: historyViewport.oldestVisible,
+                  latestVisible: historyViewport.latestVisible,
+                  followingLatest: isFollowingLatest
+              ) else { return }
         model.loadOlderHistory()
-    }
-
-    func historyBoundary() -> some View {
-        Button { requestHistory() } label: {
-            HStack {
-                if model.loadingHistory {
-                    ProgressView()
-                }
-                Text("以前の会話を読み込む")
-            }.frame(maxWidth: .infinity)
-        }
-        .disabled(model.loadingHistory)
-        .accessibilityIdentifier("history.older-turns")
-        .background(GeometryReader { geometry in
-            Color.clear.preference(key: HistoryBoundaryPreferenceKey.self,
-                                   value: ["older-turns": geometry.frame(in: .named("thread-scroll")).minY])
-        })
     }
 
     func threadAccessibilityValue(_ thread: ConversationPresentation) -> String {
@@ -153,13 +132,6 @@ func conversationRows(_ thread: ConversationPresentation,
         case .inProgress: return false
         default: return true
         }
-    }
-}
-
-struct HistoryBoundaryPreferenceKey: PreferenceKey {
-    static var defaultValue: [String: CGFloat] = [:]
-    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, next in next })
     }
 }
 

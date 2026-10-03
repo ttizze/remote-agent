@@ -108,6 +108,19 @@ pub fn activity_is_expanded(
         })
 }
 
+/// Fill the viewport on opening and continue at the oldest visible boundary.
+/// Wait for latest-message positioning before paging a scrollable initial page.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn should_load_history(
+    has_more: bool,
+    loading: bool,
+    oldest_visible: bool,
+    latest_visible: bool,
+    following_latest: bool,
+) -> bool {
+    has_more && !loading && oldest_visible && (!following_latest || latest_visible)
+}
+
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl RenderedTurn {
     pub fn conversation_rows(&self) -> Vec<ConversationRow> {
@@ -725,6 +738,34 @@ mod tests {
     use crate::state::{Draft, Snapshot};
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[rstest::rstest]
+    #[case::initial_viewport_needs_more(true, false, true, true, true, true)]
+    #[case::wait_for_initial_latest_position(true, false, true, false, true, false)]
+    #[case::older_boundary_is_visible(true, false, true, false, false, true)]
+    #[case::viewport_is_filled(true, false, false, true, true, false)]
+    #[case::reading_the_middle(true, false, false, false, false, false)]
+    #[case::request_in_flight(true, true, true, true, true, false)]
+    #[case::all_history_loaded(false, false, true, true, true, false)]
+    fn history_pages_follow_the_viewport(
+        #[case] has_more: bool,
+        #[case] loading: bool,
+        #[case] oldest_visible: bool,
+        #[case] latest_visible: bool,
+        #[case] following_latest: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            should_load_history(
+                has_more,
+                loading,
+                oldest_visible,
+                latest_visible,
+                following_latest
+            ),
+            expected
+        );
+    }
 
     fn fixture() -> Snapshot {
         let thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"turns":[{"id":"done","status":"completed","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"earlier","phase":"unknown"}}}}}]},{"id":"live","status":"running","items":[{"id":"user","status":"unknown","clientInputId":"accepted","body":{"inline":{"body":{"userMessage":{"text":"question","content":[]}}}}},{"id":"command","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":"/fixture","exitCode":null,"durationMs":null}}}}},{"id":"stream","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"hello","phase":"unknown"}}}}}]}]})).unwrap();

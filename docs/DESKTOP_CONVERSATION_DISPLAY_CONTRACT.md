@@ -55,9 +55,15 @@ hydration must not change this default.
 - Load the latest bounded page first; request older pages using the server's
   opaque cursor. A refresh must not fetch the entire conversation.
 - Codex timeline pages define one continuous history window. Show only turns
-  represented in that window and one older-history boundary above it. Do not
+  represented in that window. Do not
   create empty turn placeholders or fetch detached opening questions. Continue
   from the native timeline cursor without rereading the latest page.
+- Do not show history-loading buttons or placeholder conversation rows. Load
+  the next bounded page automatically while the oldest loaded boundary is in
+  the viewport, including on initial display when the page does not fill the
+  screen. Latest-message positioning must settle before paging a scrollable
+  initial page. Preserve latest following and the reader's position when
+  prepending older pages; never request duplicate pages while a read is pending.
 - Retain cached history only when its suffix matches the refreshed page's
   prefix in order. Apply the same rule to turns and to items within a turn,
   preserving repeated occurrences from the server page. A shared ID elsewhere
@@ -396,7 +402,7 @@ final-message identity, terminal state, or collapse eligibility.
 
 `RenderedTurn` stores one flat layout, shared by Desktop and the mobile
 `conversation_rows` getter, with core-owned row order and identities,
-including partial-history boundaries, activity membership, pending requests,
+including activity membership, pending requests,
 errors, and the last response eligible for a fork. Activity rows follow their
 header consecutively; clients filter them using that header's expansion state.
 Native clients cache rows while the rendered turn is unchanged. `activity_is_expanded` applies a

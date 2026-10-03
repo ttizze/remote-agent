@@ -166,10 +166,11 @@ fn route(
                 {"id":"fixture-final-persisted","type":"agentMessage","phase":"final_answer","text":"Persisted history complete."}
             ]}]}]),
         )?,
-        "/long-conversation" => write_json(
+        "/long-conversation" | "/viewport-conversation" => write_json(
             root.join("list-fixture.json"),
             &json!([{
-            "id":"fixture-long-history","cwd":root.join("project"),"name":"Long interrupted conversation",
+            "id":if path == "/viewport-conversation" { "fixture-viewport-history" } else { "fixture-long-history" },
+            "cwd":root.join("project"),"name":"Long conversation",
             "createdAt":10000,"updatedAt":10000,"status":{"type":"notLoaded"},"historyMode":"paginated"}]),
         )?,
         "/release-inputs" => {
