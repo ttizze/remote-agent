@@ -4,14 +4,38 @@ import SwiftUI
 struct ModelSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: BexAppViewModel
+
+    var body: some View {
+        NavigationStack {
+            ModelSettingsScreen(model: model, close: { dismiss() })
+        }
+    }
+}
+
+struct ModelSettingsScreen: View {
+    @ObservedObject var model: BexAppViewModel
+    var defaults = false
+    let close: () -> Void
     @State private var search = ""
     @State private var providerOverride: ProviderKind?
     @State private var loadingModels = false
     private var provider: ProviderKind {
+        if defaults {
+            return model.snapshot.defaultModel()?.model.provider
+                ?? model.snapshot.modelDefaults().model?.provider ?? .codex
+        }
         if model.isNewThread, let providerOverride {
             return providerOverride
         }
         return model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey)
+    }
+
+    private var selectedModel: ModelRef? {
+        defaults ? model.snapshot.modelDefaults().model : model.selectedModel
+    }
+
+    private var disabled: Bool {
+        defaults ? model.store == nil : !model.isConnected || model.sending
     }
 
     private var selectedAccount: Account? {
@@ -22,63 +46,86 @@ struct ModelSettingsSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
-            List {
-                if model.isNewThread {
-                    Section {
-                        Picker("エージェント", selection: Binding(get: { provider }, set: selectProvider)) {
-                            Text("Codex").tag(ProviderKind.codex)
-                            Text("Claude Code").tag(ProviderKind.claude)
-                        }
-                        .pickerStyle(.segmented)
-                        .accessibilityIdentifier("model.provider")
-                        .disabled(!model.isConnected || model.sending)
-                    }
-                }
-                modelSection
-                let controls = model.snapshot.modelQuickControls(threadId: model.coreDraftKey)
-                if !controls.efforts.isEmpty || controls.toggleFastTo != nil {
-                    Section {
-                        if !controls.efforts.isEmpty {
-                            Picker("思考の深さ", selection: Binding(get: { controls.effort }, set: model.chooseEffort)) {
-                                ForEach(controls.efforts, id: \.self) { Text($0).tag($0) }
-                            }
-                            .accessibilityIdentifier("model.sheet.effort")
-                        }
-                        if let next = controls.toggleFastTo {
-                            Toggle(
-                                "Fast",
-                                isOn: Binding(get: { controls.fast }, set: { _ in model.chooseServiceTier(next) })
-                            )
-                            .accessibilityIdentifier("model.sheet.fast")
-                        }
-                    }.disabled(!model.isConnected || model.sending)
-                }
+        List {
+            if !defaults, model.isNewThread {
                 Section {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("使用中のアカウント").font(.caption).foregroundStyle(.secondary)
-                            AccountIdentityView(account: selectedAccount)
-                        }
-                        Spacer(minLength: 8)
-                        NavigationLink {
-                            AgentSettingsScreen(model: model, provider: provider, close: { dismiss() })
-                        } label: { Text("管理") }
-                            .fixedSize()
-                            .accessibilityIdentifier("model.accounts.manage")
+                    Picker("エージェント", selection: Binding(get: { provider }, set: selectProvider)) {
+                        Text("Codex").tag(ProviderKind.codex)
+                        Text("Claude Code").tag(ProviderKind.claude)
                     }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("model.provider")
+                    .disabled(!model.isConnected || model.sending)
                 }
             }
-            .contentMargins(.top, 12, for: .scrollContent)
-            .safeAreaInset(edge: .top, spacing: 0) {
-                SettingsScopeBar(projects: "この会話", environment: model.selectedProfileName ?? "未選択")
+            modelSection
+            let controls = defaults ? model.snapshot.defaultModelControls()
+                : model.snapshot.modelQuickControls(threadId: model.coreDraftKey)
+            if !controls.efforts.isEmpty || controls.toggleFastTo != nil {
+                Section {
+                    if !controls.efforts.isEmpty {
+                        Picker("思考の深さ", selection: Binding<String?>(get: {
+                            defaults ? model.snapshot.modelDefaults().effort : controls.effort
+                        }, set: { value in
+                            if defaults {
+                                model.perform(.selectDefaultEffort(effort: value))
+                            } else if let value {
+                                model.chooseEffort(value)
+                            }
+                        })) {
+                            if defaults {
+                                Text("自動").tag(String?.none)
+                            }
+                            ForEach(controls.efforts, id: \.self) { Text($0).tag(Optional($0)) }
+                        }
+                        .accessibilityIdentifier("model.sheet.effort")
+                        .accessibilityValue(defaults ? model.snapshot.modelDefaults().effort ?? "自動" : controls.effort)
+                    }
+                    if defaults, let tier = controls.fastServiceTier {
+                        Picker("速度", selection: Binding<String?>(get: {
+                            model.snapshot.modelDefaults().serviceTier
+                        }, set: { model.perform(.selectDefaultServiceTier(serviceTier: $0)) })) {
+                            Text("自動").tag(String?.none)
+                            Text("通常").tag(Optional("default"))
+                            Text("高速").tag(Optional(tier))
+                        }
+                        .accessibilityIdentifier("model.defaults.speed")
+                        .accessibilityValue(model.snapshot.modelDefaults().serviceTier == nil ? "自動"
+                            : controls.fast ? "高速" : "通常")
+                    } else if let next = controls.toggleFastTo {
+                        Toggle(
+                            "Fast",
+                            isOn: Binding(get: { controls.fast }, set: { _ in model.chooseServiceTier(next) })
+                        )
+                        .accessibilityIdentifier("model.sheet.fast")
+                    }
+                }.disabled(disabled)
             }
-            .navigationTitle(model.isNewThread ? "モデル" : provider == .codex ? "Codex" : "Claude Code")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完了") { dismiss() }.accessibilityIdentifier("model.close")
+            Section {
+                HStack {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("使用中のアカウント").font(.caption).foregroundStyle(.secondary)
+                        AccountIdentityView(account: selectedAccount)
+                    }
+                    Spacer(minLength: 8)
+                    NavigationLink {
+                        AgentSettingsScreen(model: model, provider: provider, close: close)
+                    } label: { Text("管理") }
+                        .fixedSize()
+                        .accessibilityIdentifier("model.accounts.manage")
                 }
+            }
+        }
+        .contentMargins(.top, 12, for: .scrollContent)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            SettingsScopeBar(projects: defaults ? "すべてのプロジェクト" : "この会話",
+                             environment: defaults ? "すべての環境（このiPhone）" : model.selectedProfileName ?? "未選択")
+        }
+        .navigationTitle(defaults || model.isNewThread ? "モデル" : provider == .codex ? "Codex" : "Claude Code")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("完了", action: close).accessibilityIdentifier("model.close")
             }
         }
         .onAppear {
@@ -93,27 +140,59 @@ struct ModelSettingsSheet: View {
             TextField("モデルを検索", text: $search)
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .accessibilityIdentifier("model.search")
-            let choices = model.snapshot.providerModelsMatching(provider: provider, query: search)
+            if defaults {
+                Button { model.perform(.selectDefaultModel(model: nil)) } label: {
+                    HStack {
+                        Text("自動").foregroundStyle(.primary)
+                        Spacer()
+                        if selectedModel == nil {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+                .accessibilityIdentifier("model.choice.automatic")
+                .accessibilityValue(selectedModel == nil ? "選択中" : "")
+                .disabled(disabled)
+            }
+            let choices = model.snapshot.modelsMatching(provider: defaults ? nil : provider, query: search)
             if choices.isEmpty {
                 Text(loadingModels ? "モデルを読み込み中…" : "利用可能なモデルがありません")
                     .foregroundStyle(.secondary)
             }
-            ForEach(choices, id: \.id) { choice in
-                Button { model.chooseModel(choice.model) } label: {
+            ForEach(choices, id: \.model) { choice in
+                Button {
+                    if defaults {
+                        model.perform(.selectDefaultModel(model: choice.model))
+                    } else {
+                        model.chooseModel(choice.model)
+                    }
+                } label: {
                     HStack {
                         Text(choice.displayName).foregroundStyle(.primary)
                         Spacer()
-                        if model.selectedModel == choice.model {
+                        if selectedModel == choice.model {
                             Image(systemName: "checkmark")
                         }
                     }
                 }
                 .accessibilityIdentifier("model.choice." + choice.id)
-                .accessibilityValue(model.selectedModel == choice.model ? "選択中" : "")
-                .disabled(!model.isConnected || model.sending)
+                .accessibilityValue(selectedModel == choice.model ? "選択中" : "")
+                .disabled(disabled)
             }
-            ForEach(model.snapshot.modelErrorMessages(), id: \.self) { error in
+            ForEach(
+                model.snapshot.modelErrorMessages(provider: defaults ? selectedModel?.provider : provider),
+                id: \.self
+            ) { error in
                 Text(accountErrorMessage(message: error)).font(.caption).foregroundStyle(.red)
+                    .accessibilityIdentifier("model.error")
+            }
+        } header: {
+            if defaults {
+                Text("新しい会話")
+            }
+        } footer: {
+            if defaults {
+                Text("モデル・思考の深さ・速度の初期値をこのiPhoneに保存します。既存の会話には影響しません。")
             }
         }
     }

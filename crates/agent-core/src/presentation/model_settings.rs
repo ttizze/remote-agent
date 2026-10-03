@@ -40,8 +40,9 @@ impl Snapshot {
             self.model_defaults.model.as_ref(),
             self.model_defaults.effort.as_deref(),
             self.model_defaults.service_tier.as_deref(),
+            None,
             &self.models,
-            &self.model_errors,
+            !self.model_errors.is_empty(),
         );
         self.models
             .iter()
@@ -54,8 +55,9 @@ impl Snapshot {
             self.model_defaults.model.as_ref(),
             self.model_defaults.effort.as_deref(),
             self.model_defaults.service_tier.as_deref(),
+            None,
             &self.models,
-            &self.model_errors,
+            !self.model_errors.is_empty(),
         );
         quick_controls(
             self.models
@@ -75,14 +77,16 @@ impl Snapshot {
         )
     }
 
-    pub fn provider_models_matching(&self, provider: ProviderKind, query: String) -> Vec<Model> {
+    pub fn models_matching(&self, provider: Option<ProviderKind>, query: String) -> Vec<Model> {
         let query = query.trim().to_lowercase();
-        provider_models(&self.models, provider)
-            .into_iter()
+        self.models
+            .iter()
+            .filter(|model| provider.is_none_or(|provider| model.model.provider == provider))
             .filter(|model| {
                 model.display_name.to_lowercase().contains(&query)
                     || model.model.id.to_lowercase().contains(&query)
             })
+            .cloned()
             .collect()
     }
 
@@ -218,11 +222,35 @@ mod tests {
                     proptest::prop_assert_eq!(snapshot.model_for_provider(key.clone(), provider), Some(selected.clone()));
                     proptest::prop_assert_eq!(snapshot.model_quick_controls(key).effort, effort);
                 }
-                let choices = snapshot.provider_models_matching(provider, id.clone());
+                let choices = snapshot.models_matching(Some(provider), id.clone());
                 proptest::prop_assert_eq!(choices.len(), 1);
                 proptest::prop_assert_eq!(&choices[0].model, &selected);
             }
+            proptest::prop_assert_eq!(snapshot.models_matching(None, id).len(), 2);
         }
+    }
+
+    #[test]
+    fn model_failures_are_shown_only_for_the_requested_provider() {
+        let snapshot = Snapshot {
+            model_errors: Arc::new(
+                serde_json::from_value(serde_json::json!({
+                    "codex": {"message": "Codex catalog failed"},
+                    "claude": {"message": "Claude catalog failed"}
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            snapshot.model_error_messages(Some(ProviderKind::Codex)),
+            ["codex: Codex catalog failed"]
+        );
+        assert_eq!(
+            snapshot.model_error_messages(Some(ProviderKind::Claude)),
+            ["claude: Claude catalog failed"]
+        );
+        assert_eq!(snapshot.model_error_messages(None).len(), 2);
     }
 
     #[test]
@@ -273,7 +301,7 @@ mod tests {
         assert!(controls.toggle_fast_to.is_none());
         assert!(
             snapshot
-                .provider_models_matching(ProviderKind::Codex, "haiku".into())
+                .models_matching(Some(ProviderKind::Codex), "haiku".into())
                 .is_empty()
         );
         Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(

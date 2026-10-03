@@ -176,7 +176,7 @@ impl Desktop {
             )
             .children(
                 self.snapshot
-                    .model_error_messages()
+                    .model_error_messages(defaults.model.as_ref().map(|model| model.provider))
                     .into_iter()
                     .map(|error| {
                         div()
@@ -477,7 +477,7 @@ impl Desktop {
             )
             .children(
                 self.snapshot
-                    .model_error_messages()
+                    .model_error_messages(Some(provider))
                     .into_iter()
                     .map(|error| {
                         div()
@@ -897,9 +897,10 @@ impl Desktop {
                     .large()
                     .aria_label("モデルを検索"),
             );
-        let models = self
-            .snapshot
-            .provider_models_matching(provider, self.model_search.read(cx).value().to_string());
+        let models = self.snapshot.models_matching(
+            Some(provider),
+            self.model_search.read(cx).value().to_string(),
+        );
         let mut list = v_flex()
             .id("model-catalog")
             .max_h(px(240.))
@@ -956,7 +957,7 @@ impl Desktop {
         body.child(list)
             .children(
                 self.snapshot
-                    .model_error_messages()
+                    .model_error_messages(Some(provider))
                     .into_iter()
                     .map(|error| {
                         div()

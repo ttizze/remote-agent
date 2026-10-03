@@ -166,7 +166,12 @@ impl Claude {
     }
 
     async fn models(&self) -> Result<Vec<Model>, String> {
-        let auth_home = self.accounts.lock().await.home()?;
+        if self.availability().is_err() {
+            return Ok(Vec::new());
+        }
+        let Some(auth_home) = self.accounts.lock().await.selected_home()? else {
+            return Ok(Vec::new());
+        };
         let cwd = tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
         let (process, initialized) = Process::start(
             &self.program,
@@ -681,7 +686,12 @@ impl Claude {
         let cwd = state.cwd.clone();
         let (auth_home, auth_revision) = {
             let accounts = self.accounts.lock().await;
-            (accounts.home()?, accounts.revision())
+            (
+                accounts
+                    .selected_home()?
+                    .ok_or("Claude アカウントを選択してください。")?,
+                accounts.revision(),
+            )
         };
         let idle = state.idle.take();
         let mut process = if idle.as_ref().is_some_and(|idle| {
@@ -1860,7 +1870,6 @@ impl Agent for Claude {
         }.boxed())
     }
     async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
-        self.availability()?;
         Ok(op::ModelPage {
             data: if params.cursor.is_none() {
                 Claude::models(self)
@@ -1879,8 +1888,13 @@ impl Agent for Claude {
             cwd: cwd.into(),
             ..Default::default()
         };
+        if self.availability().is_err() {
+            return catalog;
+        }
         let candidates = async {
-            let auth_home = self.accounts.lock().await.home()?;
+            let Some(auth_home) = self.accounts.lock().await.selected_home()? else {
+                return Ok(Vec::new());
+            };
             let directory = if cwd.is_empty() {
                 self.directory.as_path()
             } else {
