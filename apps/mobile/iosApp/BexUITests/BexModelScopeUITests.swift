@@ -36,7 +36,7 @@ extension BexLaunchUITests {
         XCTAssertLessThan(weekly.frame.maxY, app.textFields["model.search"].frame.minY)
         XCTAssertLessThan(app.buttons["model.choice.fixture-model"].frame.maxY,
                           app.buttons["model.sheet.effort"].frame.minY)
-        XCTAssertLessThan(app.buttons["model.sheet.effort"].frame.maxY, app.switches["model.sheet.fast"].frame.minY)
+        XCTAssertLessThan(app.buttons["model.sheet.effort"].frame.maxY, app.buttons["model.sheet.fast"].frame.minY)
         captureScreen(app, named: "Harness account weekly quota models then effort and speed")
         app.buttons["settings.scope.projects"].tap()
         app.buttons["settings.scope.projects.simulator-project"].tap()

@@ -112,27 +112,25 @@ struct ModelSettingsScreen: View {
                         .accessibilityIdentifier("model.sheet.effort")
                         .accessibilityValue(defaults ? preferences.effort ?? "自動" : controls.effort)
                     }
-                    if defaults, let tier = controls.fastServiceTier {
+                    if let tier = controls.fastServiceTier {
                         Picker("速度", selection: Binding<String?>(get: {
-                            preferences.serviceTier
+                            defaults ? preferences.serviceTier : controls.fast ? tier : "default"
                         }, set: { value in
                             if let scope {
                                 model.perform(.selectDefaultServiceTier(scope: scope, serviceTier: value))
+                            } else if let value {
+                                model.chooseServiceTier(value)
                             }
                         })) {
-                            Text("自動").tag(String?.none)
+                            if defaults {
+                                Text("自動").tag(String?.none)
+                            }
                             Text("通常").tag(Optional("default"))
                             Text("高速").tag(Optional(tier))
                         }
-                        .accessibilityIdentifier("model.defaults.speed")
-                        .accessibilityValue(preferences.serviceTier == nil ? "自動"
+                        .accessibilityIdentifier(defaults ? "model.defaults.speed" : "model.sheet.fast")
+                        .accessibilityValue(defaults && preferences.serviceTier == nil ? "自動"
                             : controls.fast ? "高速" : "通常")
-                    } else if let next = controls.toggleFastTo {
-                        Toggle(
-                            "Fast",
-                            isOn: Binding(get: { controls.fast }, set: { _ in model.chooseServiceTier(next) })
-                        )
-                        .accessibilityIdentifier("model.sheet.fast")
                     }
                 }.disabled(disabled)
             }
