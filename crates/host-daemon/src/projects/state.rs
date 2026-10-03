@@ -12,26 +12,9 @@ pub(crate) struct Snapshot {
     pub(super) chat_directory: Option<PathBuf>,
 }
 impl Snapshot {
-    pub(crate) fn has_root(&self, path: &Path) -> bool {
-        self.projects.iter().any(|project| {
-            project.roots.iter().any(|root| {
-                self.resolved_roots
-                    .get(&root.path)
-                    .map_or_else(|| Path::new(&root.path), PathBuf::as_path)
-                    == path
-            })
-        })
-    }
-    pub(crate) fn project_membership(
-        &self,
-        cwd: Option<&str>,
-        assigned: &ProjectMembership,
-    ) -> ProjectMembership {
-        if matches!(assigned, ProjectMembership::Assigned(_)) {
-            return assigned.clone();
-        }
+    pub(crate) fn project_membership(&self, cwd: Option<&str>) -> ProjectMembership {
         let Some(cwd) = cwd else {
-            return assigned.clone();
+            return ProjectMembership::Unknown {};
         };
         if self
             .chat_directory
@@ -42,7 +25,7 @@ impl Snapshot {
         } else {
             self.project_for_workspace(cwd)
                 .map(|id| ProjectMembership::Assigned(id.to_owned()))
-                .unwrap_or_else(|| assigned.clone())
+                .unwrap_or(ProjectMembership::Unassigned {})
         }
     }
     pub(crate) fn project_for_workspace(&self, workspace: &str) -> Option<&str> {
@@ -145,38 +128,29 @@ mod tests {
         );
     }
     #[test]
-    fn null_membership_uses_workspace_without_overriding_native_assignments() {
+    fn membership_uses_host_roots_and_keeps_standalone_chats_unassigned() {
         let mut snapshot = snapshot();
         snapshot
             .worktree_roots
             .insert(fixture_path("/checkout"), fixture_path("/work/a"));
         snapshot.chat_directory = Some(fixture_path("/work/a/chats").into());
-        for assigned in [
-            ProjectMembership::Unknown {},
-            ProjectMembership::Unassigned {},
+        for (cwd, expected) in [
+            ("/work/a/src", ProjectMembership::Assigned("a".into())),
+            (
+                "/checkout/packages/app",
+                ProjectMembership::Assigned("nested".into()),
+            ),
+            ("/work/a/chats", ProjectMembership::Unassigned {}),
+            ("/outside", ProjectMembership::Unassigned {}),
         ] {
-            for (cwd, expected) in [("/work/a/src", "a"), ("/checkout/packages/app", "nested")] {
-                assert_eq!(
-                    snapshot.project_membership(Some(&fixture_path(cwd)), &assigned),
-                    ProjectMembership::Assigned(expected.into())
-                );
-            }
             assert_eq!(
-                snapshot.project_membership(Some(&fixture_path("/work/a/chats")), &assigned),
-                ProjectMembership::Unassigned {}
+                snapshot.project_membership(Some(&fixture_path(cwd))),
+                expected
             );
-            assert_eq!(
-                snapshot.project_membership(Some(&fixture_path("/outside")), &assigned),
-                assigned
-            );
-            assert_eq!(snapshot.project_membership(None, &assigned), assigned);
         }
         assert_eq!(
-            snapshot.project_membership(
-                Some(&fixture_path("/work/a")),
-                &ProjectMembership::Assigned("b".into())
-            ),
-            ProjectMembership::Assigned("b".into())
+            snapshot.project_membership(None),
+            ProjectMembership::Unknown {}
         );
     }
 

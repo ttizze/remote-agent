@@ -15,7 +15,10 @@ struct ModelSettingsSheet: View {
     }
 
     private var selectedAccount: Account? {
-        model.accounts.first { $0.provider == provider && model.snapshot.accountIsSelected(id: $0.id) }
+        model.accounts.first { $0.provider == provider && model.snapshot.accountIsSelected(
+            provider: $0.provider,
+            id: $0.id
+        ) }
     }
 
     var body: some View {

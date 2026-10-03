@@ -24,6 +24,22 @@ fn conversation(body: ItemBody) -> Thread {
 }
 
 #[test]
+fn provider_error_payload_survives_the_bex_binary_contract() {
+    use agent_protocol::protocol::{decode, encode};
+    let error = ExecutionError {
+        category: ErrorCategory::Provider(serde_json::json!({
+            "kind":"futureFailure", "details":[true, null, {"code":42}],
+        })),
+        message: "provider failure".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        decode::<ExecutionError>(&encode(&error).unwrap()).unwrap(),
+        error
+    );
+}
+
+#[test]
 fn turn_completion_keeps_independent_items_for_late_output() {
     let original = conversation(ItemBody::CommandExecution {
         command: "fixture command".into(),
@@ -49,7 +65,6 @@ fn turn_completion_keeps_independent_items_for_late_output() {
             id: "turn".into(),
             status: TurnStatus::Completed,
             items: Some(vec![final_answer.clone()]),
-            items_view: Some("full".into()),
             ..Default::default()
         },
         completed: true,
@@ -163,7 +178,6 @@ proptest! {
     fn lifecycle_items_upsert_without_losing_streamed_items(
         updates in prop::collection::vec((0u8..8, ".{0,20}"), 0..24),
         completed in any::<bool>(),
-        view in prop::sample::select(vec![None, Some("full"), Some("summary"), Some("notLoaded")]),
     ) {
         let original = conversation(ItemBody::AssistantText {
             text: "original".into(), phase: AssistantPhase::Unknown, citation: None,
@@ -178,7 +192,7 @@ proptest! {
             })));
         }
         let changed = SessionChange::Turn {
-            turn: Turn { id: "turn".into(), items: Some(items), items_view: view.map(str::to_owned), ..Default::default() },
+            turn: Turn { id: "turn".into(), items: Some(items), ..Default::default() },
             completed,
         }.apply(&original).unwrap();
         let items = changed.turns.as_ref().unwrap()[0].items.as_ref().unwrap();

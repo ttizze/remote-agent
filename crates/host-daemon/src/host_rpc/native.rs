@@ -77,6 +77,7 @@ pub(crate) fn codex_error(value: &Value, retrying: bool) -> ExecutionError {
             | "responseStreamDisconnected"
             | "responseTooManyFailedAttempts",
         ) => ErrorCategory::Network,
+        _ if !info.is_null() => ErrorCategory::Provider(info.clone()),
         _ => ErrorCategory::Other,
     };
     let status = code
@@ -477,7 +478,6 @@ pub(crate) fn codex_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
                     .collect()
             })
             .transpose()?,
-        items_view: field(&value, "itemsView")?,
         items_has_more: field(&value, "itemsHasMore")?,
         opening_user_message: value
             .get_mut("openingUserMessage")
@@ -524,18 +524,10 @@ pub(crate) fn codex_thread(mut value: Value) -> Result<Thread, serde_json::Error
                     .collect()
             })
             .transpose()?,
-        project_id: match &value["projectId"] {
-            Value::String(id) => agent_protocol::models::ProjectMembership::Assigned(id.clone()),
-            Value::Null if value.get("projectId").is_some() => {
-                agent_protocol::models::ProjectMembership::Unassigned {}
-            }
-            _ => agent_protocol::models::ProjectMembership::Unknown {},
-        },
         path: field(&value, "path")?,
         preview: field(&value, "preview")?,
         created_at: field(&value, "createdAt")?,
         updated_at: field(&value, "updatedAt")?,
-        history_mode: field(&value, "historyMode")?,
         history_has_more: field(&value, "historyHasMore")?,
         history_limit: field(&value, "historyLimit")?,
         ..Default::default()
@@ -561,11 +553,19 @@ pub(super) fn deserialize_item<'de, D: Deserializer<'de>>(
         .map_err(serde::de::Error::custom)
 }
 #[derive(Debug)]
-pub(super) struct NativeTurn(pub Arc<Turn>);
+pub(super) struct NativeTurn {
+    pub turn: Arc<Turn>,
+    pub items_loaded: bool,
+}
 impl<'de> Deserialize<'de> for NativeTurn {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        codex_turn(Value::deserialize(d)?)
-            .map(|turn| Self(Arc::new(turn)))
+        let value = Value::deserialize(d)?;
+        let items_loaded = value["items"].is_array() && value["itemsView"] != "notLoaded";
+        codex_turn(value)
+            .map(|turn| Self {
+                turn: Arc::new(turn),
+                items_loaded,
+            })
             .map_err(serde::de::Error::custom)
     }
 }
@@ -642,5 +642,14 @@ mod tests {
         assert_eq!(error.category, ErrorCategory::RateLimited);
         assert_eq!(error.http_status, Some(429));
         assert_eq!(error.retry.unwrap().attempt, None);
+        let future = json!({"futureFailure":{"detail":[1,{"unknown":true}]}});
+        assert_eq!(
+            codex_error(
+                &json!({"message":"future failure","codexErrorInfo":future}),
+                false
+            )
+            .category,
+            ErrorCategory::Provider(future)
+        );
     }
 }

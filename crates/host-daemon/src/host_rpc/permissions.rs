@@ -129,12 +129,12 @@ fn claude_settings(config: &Value, version: String) -> PermissionSettings {
     }
 }
 
-pub(super) fn read_claude_permissions(home: &Path) -> Result<PermissionSettings, Failure> {
+pub(crate) fn read_claude_permissions(home: &Path) -> Result<PermissionSettings, Failure> {
     let (config, version) = read_claude_file(&home.join("settings.json"))?;
     Ok(claude_settings(&config, version))
 }
 
-pub(super) fn update_claude_permissions(
+pub(crate) fn update_claude_permissions(
     home: &Path,
     mode: PermissionMode,
     version: &str,

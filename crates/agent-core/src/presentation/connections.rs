@@ -136,8 +136,7 @@ mod tests {
             } else { Vec::new() };
             let accounts: Accounts = serde_json::from_value(serde_json::json!({
                 "accounts": if authenticated { vec![serde_json::json!({"id":"selected","provider":key})] } else { Vec::new() },
-                "selectedId": if provider == ProviderKind::Codex { Some("selected") } else { None },
-                "selectedClaudeId": if provider == ProviderKind::Claude { Some("selected") } else { None },
+                "selected":{(key):"selected"},
                 "error":null
             })).unwrap();
             let errors = if failed { Map::from_iter([(key.into(), Value::Null)]) } else { Map::new() };
@@ -168,7 +167,7 @@ mod tests {
         std::sync::Arc::make_mut(&mut snapshot.account).accounts = Some(std::sync::Arc::new(
             serde_json::from_value(serde_json::json!({
                 "accounts":[{"id":"native", "provider":"codex"}, {"id":"native", "provider":"claude"}],
-                "selectedId":"native", "selectedClaudeId":null
+                "selected":{"codex":"native"}
             })).unwrap()
         ));
         let setup = snapshot.connection_setup();
@@ -200,8 +199,7 @@ mod tests {
         .unwrap();
         let accounts = Accounts {
             accounts: Vec::new(),
-            selected_id: None,
-            selected_claude_id: None,
+            selected: Default::default(),
             error: None,
         };
         assert_eq!(
@@ -229,7 +227,7 @@ mod tests {
             AgentAvailability::Unavailable
         );
         let authenticated = serde_json::from_value(serde_json::json!({
-            "accounts":[{"id":"native", "provider":"codex"}], "selectedId":"native"
+            "accounts":[{"id":"native", "provider":"codex"}], "selected":{"codex":"native"}
         }))
         .unwrap();
         assert_eq!(

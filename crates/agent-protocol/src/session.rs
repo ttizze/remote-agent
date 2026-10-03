@@ -373,7 +373,6 @@ fn merge_fields(previous: &Turn, incoming: &Turn) -> Turn {
     let mut merged = previous.clone();
     macro_rules! field { ($($field:ident),* $(,)?) => { $(if incoming.$field.is_some() { merged.$field = incoming.$field.clone(); })* }; }
     field!(
-        items_view,
         items_has_more,
         opening_user_message,
         started_at,

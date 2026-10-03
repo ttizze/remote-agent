@@ -215,17 +215,13 @@ impl UsageWindow {
 #[serde(rename_all = "camelCase")]
 pub struct Accounts {
     pub accounts: Vec<Account>,
-    pub selected_id: Option<String>,
-    pub selected_claude_id: Option<String>,
+    pub selected: std::collections::HashMap<crate::session::ProviderKind, String>,
     pub error: Option<String>,
 }
 
 impl Accounts {
     pub fn is_selected(&self, account: &Account) -> bool {
-        (match account.provider {
-            crate::session::ProviderKind::Codex => self.selected_id.as_ref(),
-            crate::session::ProviderKind::Claude => self.selected_claude_id.as_ref(),
-        }) == Some(&account.id)
+        self.selected.get(&account.provider) == Some(&account.id)
     }
 }
 
@@ -236,6 +232,7 @@ pub struct StartAccountLogin {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SubmitAccountLogin {
+    pub provider: crate::session::ProviderKind,
     pub id: String,
     pub code: String,
 }
@@ -258,6 +255,7 @@ pub struct AccountSelection {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountLogin {
+    pub provider: crate::session::ProviderKind,
     pub login_id: String,
     pub requires_code_submission: bool,
     pub user_code: String,
@@ -325,24 +323,28 @@ pub struct RemoveWorktree {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelectAccount {
+    pub provider: crate::session::ProviderKind,
     #[serde(rename = "accountId")]
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogoutAccount {
+    pub provider: crate::session::ProviderKind,
     #[serde(rename = "accountId")]
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadAccountLogin {
+    pub provider: crate::session::ProviderKind,
     #[serde(rename = "loginId")]
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelAccountLogin {
+    pub provider: crate::session::ProviderKind,
     #[serde(rename = "loginId")]
     pub id: String,
 }
@@ -499,6 +501,7 @@ pub struct LoadComposerCatalog {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadAccountUsage {
+    pub provider: crate::session::ProviderKind,
     #[serde(rename = "accountId")]
     pub id: String,
 }

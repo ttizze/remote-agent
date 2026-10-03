@@ -837,7 +837,7 @@ fn disconnected_catalog_reads_do_not_apply_or_retry_stale_responses() {
             .stale(
                 &mut state,
                 serde_json::from_value(json!({
-                    "accounts":[{"provider":"codex","id":"old"}],"selectedId":"old"
+                    "accounts":[{"provider":"codex","id":"old"}],"selected":{"codex":"old"}
                 }))
                 .unwrap()
             )

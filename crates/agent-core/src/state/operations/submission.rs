@@ -225,7 +225,9 @@ impl Operation for SendSubmission {
             self.draft
                 .invocations
                 .iter()
-                .filter(|item| item.is_in(&self.draft.text))
+                .filter(|item| {
+                    item.provider == self.thread_id.provider && item.is_in(&self.draft.text)
+                })
                 .map(agent_protocol::composer::Invocation::input),
         );
         for attachment in &self.draft.attachments {

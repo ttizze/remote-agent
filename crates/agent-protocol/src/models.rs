@@ -102,7 +102,6 @@ pub struct Thread {
     pub preview: Option<String>,
     pub created_at: Option<f64>,
     pub updated_at: Option<f64>,
-    pub history_mode: Option<String>,
     pub history_has_more: Option<bool>,
     pub history_limit: Option<u64>,
     pub list_stale: Option<bool>,
@@ -115,7 +114,6 @@ pub struct Turn {
     #[serde(default)]
     pub status: TurnStatus,
     pub items: Option<Vec<Arc<Item>>>,
-    pub items_view: Option<String>,
     pub items_has_more: Option<bool>,
     pub opening_user_message: Option<Arc<Item>>,
     pub started_at: Option<f64>,

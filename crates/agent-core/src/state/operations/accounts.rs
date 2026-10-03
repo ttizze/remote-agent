@@ -19,13 +19,15 @@ impl Operation for ListAccounts {
                     .accounts
                     .as_ref()
                     .and_then(|previous| {
-                        previous
-                            .accounts
-                            .iter()
-                            .find(|old| old.id == account.id && old.email == account.email)
+                        previous.accounts.iter().find(|old| {
+                            old.provider == account.provider
+                                && old.id == account.id
+                                && old.email == account.email
+                        })
                     })
                     .and_then(|old| old.usage.clone());
                 Effect::execute(ReadAccountUsage {
+                    provider: account.provider,
                     id: account.id.clone(),
                     email: account.email.clone(),
                 })
@@ -38,6 +40,7 @@ impl Operation for ListAccounts {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadAccountUsage {
+    pub provider: crate::session::ProviderKind,
     #[serde(rename = "accountId")]
     pub id: String,
     // The native profile can change identity while a usage read is in flight.
@@ -47,6 +50,7 @@ pub struct ReadAccountUsage {
 
 rpc::rpc_method!(ReadAccountUsage, ReadAccountUsage, |self| {
     agent_protocol::operations::ReadAccountUsage {
+        provider: self.provider,
         id: self.id.clone(),
     }
 });
@@ -55,10 +59,11 @@ impl Operation for ReadAccountUsage {
     rpc_operation!();
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         if let Some(accounts) = &mut Arc::make_mut(&mut snapshot.account).accounts
-            && let Some(account) = Arc::make_mut(accounts)
-                .accounts
-                .iter_mut()
-                .find(|account| account.id == self.id && account.email == self.email)
+            && let Some(account) = Arc::make_mut(accounts).accounts.iter_mut().find(|account| {
+                account.provider == self.provider
+                    && account.id == self.id
+                    && account.email == self.email
+            })
         {
             account.usage = Some(output);
         }
@@ -89,10 +94,7 @@ fn apply_selection(snapshot: &mut Snapshot, output: rpc::AccountSelection) {
     } = output;
     if let Some(accounts) = &mut Arc::make_mut(&mut snapshot.account).accounts {
         let accounts = Arc::make_mut(accounts);
-        match provider {
-            crate::session::ProviderKind::Codex => accounts.selected_id = Some(selected_id),
-            crate::session::ProviderKind::Claude => accounts.selected_claude_id = Some(selected_id),
-        }
+        accounts.selected.insert(provider, selected_id);
     }
     snapshot.error = persistence_error;
 }
@@ -100,6 +102,7 @@ fn apply_selection(snapshot: &mut Snapshot, output: rpc::AccountSelection) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SelectAccountForDraft {
+    pub provider: crate::session::ProviderKind,
     pub id: String,
     pub thread_id: DraftKey,
 }
@@ -111,6 +114,7 @@ impl Operation for SelectAccountForDraft {
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         let selection = context
             .call(&SelectAccount {
+                provider: self.provider,
                 id: self.id.clone(),
             })
             .await?;
@@ -173,11 +177,13 @@ impl Operation for StartAccountLogin {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ReadAccountLogin {
+    pub provider: crate::session::ProviderKind,
     pub id: String,
     pub thread_id: Option<DraftKey>,
 }
 rpc::rpc_method!(ReadAccountLogin, ReadAccountLogin, |self| {
     agent_protocol::operations::ReadAccountLogin {
+        provider: self.provider,
         id: self.id.clone(),
     }
 });
@@ -189,10 +195,15 @@ impl Operation for ReadAccountLogin {
             Arc::make_mut(&mut snapshot.account).login = None;
             if let Some(id) = status.account_id {
                 let intent = match self.thread_id {
-                    Some(thread_id) => {
-                        Intent::SelectAccountForDraft(SelectAccountForDraft { id, thread_id })
-                    }
-                    None => Intent::SelectAccount(SelectAccount { id }),
+                    Some(thread_id) => Intent::SelectAccountForDraft(SelectAccountForDraft {
+                        provider: self.provider,
+                        id,
+                        thread_id,
+                    }),
+                    None => Intent::SelectAccount(SelectAccount {
+                        provider: self.provider,
+                        id,
+                    }),
                 };
                 let (updated, effects) = reduce(snapshot, Event::Intent(intent));
                 *snapshot = updated;
@@ -246,30 +257,42 @@ mod account_model_tests {
     fn usage_updates_only_its_account_and_survives_list_refresh() {
         let mut snapshot = Snapshot::default();
         let accounts: rpc::Accounts = serde_json::from_value(json!({
-            "accounts": [{"id":"a","provider":"codex","email":"a@example.invalid"}, {"id":"b","provider":"codex"}],
-            "selectedId":"b"
+            "accounts": [{"id":"a","provider":"codex","email":"a@example.invalid"}, {"id":"b","provider":"codex"}, {"id":"a","provider":"claude","email":"a@example.invalid"}],
+            "selected":{"codex":"b","claude":"a"}
         })).unwrap();
         let effects = ListAccounts {}.apply(&mut snapshot, accounts.clone());
-        assert_eq!(effects.len(), 2);
+        assert_eq!(effects.len(), 3);
         let usage = rpc::AccountUsage {
             windows: vec![],
             fetched_at: 1,
             error: Some("unavailable".into()),
         };
         ReadAccountUsage {
+            provider: crate::session::ProviderKind::Codex,
             id: "a".into(),
             email: Some("a@example.invalid".into()),
         }
         .apply(&mut snapshot, usage.clone());
         ListAccounts {}.apply(&mut snapshot, accounts);
         let listed = snapshot.account.accounts.as_ref().unwrap();
-        assert_eq!(listed.selected_id.as_deref(), Some("b"));
+        assert_eq!(
+            listed
+                .selected
+                .get(&crate::session::ProviderKind::Codex)
+                .map(String::as_str),
+            Some("b")
+        );
         assert_eq!(listed.accounts[0].usage.as_ref(), Some(&usage));
         assert!(listed.accounts[1].usage.is_none());
+        assert!(listed.accounts[2].usage.is_none());
+        assert!(!listed.is_selected(&listed.accounts[0]));
+        assert!(listed.is_selected(&listed.accounts[1]));
+        assert!(listed.is_selected(&listed.accounts[2]));
         let mut changed = (**listed).clone();
         changed.accounts[0].email = Some("different@example.invalid".into());
         ListAccounts {}.apply(&mut snapshot, changed);
         ReadAccountUsage {
+            provider: crate::session::ProviderKind::Codex,
             id: "a".into(),
             email: Some("a@example.invalid".into()),
         }
@@ -281,9 +304,10 @@ mod account_model_tests {
         );
         ListAccounts {}.apply(
             &mut snapshot,
-            serde_json::from_value(json!({"accounts":[]})).unwrap(),
+            serde_json::from_value(json!({"accounts":[],"selected":{}})).unwrap(),
         );
         ReadAccountUsage {
+            provider: crate::session::ProviderKind::Codex,
             id: "a".into(),
             email: Some("a@example.invalid".into()),
         }
@@ -304,7 +328,7 @@ mod account_model_tests {
         let mut snapshot = Snapshot::default();
         Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(json!({
             "accounts":[{"id":"a","provider":"codex"},{"id":"b","provider":"codex"},{"id":"claude:c","provider":"claude"}],
-            "selectedId":"a","selectedClaudeId":"claude:c"
+            "selected":{"codex":"a","claude":"claude:c"}
         })).unwrap()));
         let codex: Model = serde_json::from_value(json!({"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"fast"}]})).unwrap();
         let claude: Model = serde_json::from_value(json!({"id":"claude:sonnet","model":{"provider": "claude", "id": "sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]})).unwrap();
@@ -323,6 +347,7 @@ mod account_model_tests {
         );
         let select = |snapshot: &mut Snapshot, id: &str, provider, data| {
             SelectAccountForDraft {
+                provider,
                 id: id.into(),
                 thread_id: "draft".into(),
             }
@@ -391,8 +416,9 @@ mod account_model_tests {
                 .accounts
                 .as_ref()
                 .unwrap()
-                .selected_claude_id
-                .as_deref(),
+                .selected
+                .get(&crate::session::ProviderKind::Claude)
+                .map(String::as_str),
             Some("claude:c")
         );
         LoadModels {}.apply(
@@ -427,8 +453,9 @@ mod account_model_tests {
                 .accounts
                 .as_ref()
                 .unwrap()
-                .selected_id
-                .as_deref(),
+                .selected
+                .get(&crate::session::ProviderKind::Codex)
+                .map(String::as_str),
             Some("b")
         );
         assert_eq!(
