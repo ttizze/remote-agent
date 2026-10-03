@@ -90,6 +90,7 @@ struct ModelSettingsScreen: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                    .buttonStyle(.plain)
                     .accessibilityIdentifier("model.accounts.manage")
                     if let account = selectedAccount {
                         WeeklyUsageView(windows: model.snapshot.accountWeeklyUsage(
@@ -154,6 +155,7 @@ struct ModelSettingsScreen: View {
                 if let scope, model.snapshot.hasModelDefaultsOverride(scope: scope) {
                     Divider()
                     Button("共通設定を使う") { model.perform(.inheritModelDefaults(scope: scope)) }
+                        .buttonStyle(.plain)
                         .frame(minHeight: 44)
                         .accessibilityIdentifier("model.defaults.inherit")
                         .disabled(disabled)
@@ -162,17 +164,18 @@ struct ModelSettingsScreen: View {
             .padding(.horizontal, 20)
             .padding(.bottom, 16)
         }
-        .font(.system(size: 15)).tint(.primary)
-        .buttonStyle(.plain)
+        .font(.system(size: 15))
         .background(modelSettingsBackground)
         .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 0) {
                 HStack {
                     Text("モデル").fontWeight(.medium)
                     Spacer()
-                    Button(action: close) { Image(systemName: "xmark") }
-                        .frame(width: 44, height: 44)
-                        .accessibilityLabel("閉じる").accessibilityIdentifier("model.close")
+                    Button(action: close) {
+                        Image(systemName: "xmark").frame(width: 44, height: 44).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                    .accessibilityLabel("閉じる").accessibilityIdentifier("model.close")
                 }
                 .font(.system(size: 15)).padding(.leading, 20).padding(.trailing, 8)
                 if let scope {
@@ -190,6 +193,7 @@ struct ModelSettingsScreen: View {
             }
             .background(modelSettingsBackground)
         }
+        .tint(.primary)
         .toolbar(.hidden, for: .navigationBar)
         .onAppear {
             model.perform(.listAccounts(ListAccounts()))
@@ -250,15 +254,12 @@ struct ModelSettingsScreen: View {
                     .disabled(disabled)
                 }
             }
-            .foregroundStyle(.primary)
+            .buttonStyle(.plain).foregroundStyle(.primary)
         }
         .scrollClipDisabled()
         .frame(height: min(CGFloat(max(choices.count + (defaults ? 1 : 0), 1)) * 44, 264))
         .padding(.bottom, 8)
-        ForEach(
-            model.snapshot.modelErrorMessages(provider: provider),
-            id: \.self
-        ) { error in
+        ForEach(model.snapshot.modelErrorMessages(provider: provider), id: \.self) { error in
             Text(accountErrorMessage(message: error)).font(.caption).foregroundStyle(.red)
                 .accessibilityIdentifier("model.error")
         }
@@ -292,6 +293,7 @@ private struct ModelChoiceRow: View {
             }
         }
         .frame(minHeight: 44)
+        .contentShape(Rectangle())
         .background {
             RoundedRectangle(cornerRadius: 6)
                 .fill(selected ? Color(red: 0.15, green: 0.17, blue: 0.2) : .clear)
@@ -309,7 +311,7 @@ private struct ModelSettingRow<Content: View>: View {
             Text(title).fixedSize()
             Spacer(minLength: 8)
             content()
-        }.frame(minHeight: 44)
+        }.frame(minHeight: 44).contentShape(Rectangle())
     }
 }
 
