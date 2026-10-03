@@ -2502,10 +2502,11 @@ async fn visualization_reaches_store_and_reopens_after_source_removal() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
+async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_store() {
     use agent_core::state::Intent;
     use agent_core::state::Snapshot;
     use agent_core::store::Store;
+    use agent_protocol::models::WorktreeStatus::{Merged, Unmerged};
     fn git(cwd: &Path, args: &[&str]) -> String {
         let result = std::process::Command::new("git")
             .current_dir(cwd)
@@ -2568,12 +2569,24 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
         }
         let store = Store::new((local.peer, local.events), Snapshot::default());
         for (step, expected) in [
-            ("fresh", false),
-            ("commit", false),
-            ("merge", true),
-            ("new-work", false),
+            ("fresh", None),
+            ("untracked", Some(Unmerged)),
+            ("staged", Some(Unmerged)),
+            ("commit", Some(Unmerged)),
+            ("merge", Some(Merged)),
+            ("edited", Some(Unmerged)),
+            ("reverted", Some(Merged)),
+            ("new-work", Some(Unmerged)),
         ] {
             match step {
+                "untracked" => std::fs::write(checkout.join("work.txt"), "work\n").unwrap(),
+                "staged" => {
+                    git(&checkout, &["add", "work.txt"]);
+                }
+                "edited" => std::fs::write(checkout.join("work.txt"), "changed\n").unwrap(),
+                "reverted" => {
+                    git(&checkout, &["restore", "work.txt"]);
+                }
                 "commit" | "new-work" => {
                     git(&checkout, &["commit", "--allow-empty", "-m", step]);
                 }
@@ -2593,8 +2606,8 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
             for (index, id) in ids.iter().enumerate() {
                 let row = list.threads.iter().find(|row| &row.id == id).unwrap();
                 assert_eq!(
-                    row.worktree_merged,
-                    index < 2 && expected,
+                    row.worktree_status,
+                    if index < 2 { expected } else { None },
                     "{step}: {index}"
                 );
             }
@@ -2607,7 +2620,7 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
             )))
             .await
             .unwrap();
-        assert!(
+        assert_eq!(
             store
                 .snapshot()
                 .thread_list()
@@ -2616,7 +2629,8 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
                 .iter()
                 .find(|row| row.id == ids[0])
                 .unwrap()
-                .worktree_merged
+                .worktree_status,
+            Some(Merged)
         );
         git(&checkout, &["checkout", "--detach"]);
         store
@@ -2625,8 +2639,8 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
             )))
             .await
             .unwrap();
-        assert!(
-            !store
+        assert_eq!(
+            store
                 .snapshot()
                 .thread_list()
                 .unwrap()
@@ -2634,7 +2648,8 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
                 .iter()
                 .find(|row| row.id == ids[0])
                 .unwrap()
-                .worktree_merged
+                .worktree_status,
+            None
         );
         store.close().await.unwrap();
         local.endpoint.close().await;

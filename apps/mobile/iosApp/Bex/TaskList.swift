@@ -247,13 +247,16 @@ private struct ThreadListRow: View {
                         .accessibilityLabel("完了・未確認")
                         .accessibilityIdentifier("tasks.completed.\(accessibilityID)")
                 }
-                if thread.worktreeMerged {
-                    Image("GitMerge")
+                if let status = thread.worktreeStatus {
+                    let unmerged = status == .unmerged
+                    Image(unmerged ? "GitDiff" : "GitMerge")
                         .resizable()
                         .frame(width: 18, height: 18)
-                        .foregroundStyle(.purple)
-                        .accessibilityLabel("main にマージ済み")
-                        .accessibilityIdentifier("tasks.merged.\(accessibilityID)")
+                        .foregroundStyle(unmerged ? .orange : .purple)
+                        .accessibilityLabel(unmerged ? "main に未反映の変更あり" : "main にマージ済み")
+                        .accessibilityIdentifier(
+                            "tasks.\(unmerged ? "unmerged" : "merged").\(accessibilityID)"
+                        )
                 }
             }
             .padding(.leading, indented ? 40 : 0)

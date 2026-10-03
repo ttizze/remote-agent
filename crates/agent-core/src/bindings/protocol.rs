@@ -5,6 +5,11 @@ use agent_protocol::permissions::*;
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
 use std::collections::BTreeMap;
+#[uniffi::remote(Enum)]
+enum WorktreeStatus {
+    Unmerged,
+    Merged,
+}
 #[uniffi::remote(Record)]
 struct Invitation {
     pub endpoint: String,

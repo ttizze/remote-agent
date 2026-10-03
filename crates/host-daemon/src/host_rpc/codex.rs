@@ -1072,7 +1072,7 @@ impl Agent for Codex {
         let process = self.process.clone();
         let (output, receiver) = tokio::sync::mpsc::channel(256);
         tokio::spawn(async move {
-            loop {
+            let (cause, reason) = loop {
                 match events.recv().await {
                     Ok(PeerEvent::Message(message)) => {
                         let sequence = message.sequence;
@@ -1144,18 +1144,39 @@ impl Agent for Codex {
                                 Err(error) => Err(error),
                             };
                             if let Err(error) = result {
-                                tracing::error!(target:"bex",operation="host.codex.event",message=%error);
-                                break;
+                                break (
+                                    "event_processing_failed",
+                                    format!(
+                                        "sequence={sequence} method={} error={error}",
+                                        request.method().unwrap_or_default(),
+                                    ),
+                                );
                             }
                         }
                     }
                     Ok(PeerEvent::Response { sequence, .. }) => {
                         processed.send_replace(sequence);
                     }
-                    Ok(PeerEvent::Closed(_))
-                    | Err(broadcast::error::RecvError::Closed)
-                    | Err(broadcast::error::RecvError::Lagged(_)) => break,
+                    Ok(PeerEvent::Closed(reason)) => break ("peer_closed", reason),
+                    Err(broadcast::error::RecvError::Closed) => {
+                        break ("event_stream_closed", "event sender dropped".into());
+                    }
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        break ("event_stream_lagged", format!("missed_events={missed}"));
+                    }
                 }
+            };
+            // Record the cause before cancellation or process cleanup can hide
+            // whether this was a requested shutdown or an unexpected stop.
+            let shutdown_requested = stopped.is_cancelled();
+            let message = format!(
+                "cause={cause} instance={instance} last_processed_sequence={} shutdown_requested={shutdown_requested} reason={reason}",
+                *processed.borrow(),
+            );
+            if shutdown_requested {
+                tracing::info!(target: "bex", operation = "host.codex.event_stream_stopped", message = %message);
+            } else {
+                tracing::error!(target: "bex", operation = "host.codex.event_stream_stopped", message = %message);
             }
             stopped.cancel();
             if let Ok(codex) = &process
