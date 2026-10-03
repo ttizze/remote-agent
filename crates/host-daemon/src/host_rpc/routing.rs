@@ -7,7 +7,7 @@ use std::{
 
 use super::session_actor::SessionActor;
 use agent_protocol::{
-    models::ThreadResponse,
+    models::{Thread, ThreadResponse},
     protocol::Notification,
     session::{OpenedSession, ProviderKind, SessionChange, SessionRef},
 };
@@ -260,34 +260,15 @@ impl SessionRouter {
             .clone()
     }
 
-    pub(crate) fn execution_workspace(&self, target: &SessionRef, cwd: Option<&str>) {
-        if let Some(actor) = lock_state(&self.state).executions.get_mut(target) {
-            actor.live.cwd = cwd.map(str::to_owned);
+    pub(crate) fn overlay_execution(&self, target: &SessionRef, thread: Thread) -> Thread {
+        match lock_state(&self.state).executions.get(target) {
+            Some(actor) => actor.overlay(thread),
+            None => thread,
         }
-    }
-    pub(crate) fn active_sessions_in(
-        &self,
-        dir: &std::path::Path,
-    ) -> std::collections::HashSet<SessionRef> {
-        lock_state(&self.state)
-            .executions
-            .iter()
-            .filter(|(_, actor)| {
-                actor.live.status == agent_protocol::models::SessionStatus::Running
-                    && actor
-                        .live
-                        .cwd
-                        .as_deref()
-                        .is_some_and(|cwd| std::path::Path::new(cwd).starts_with(dir))
-            })
-            .map(|(session, _)| session.clone())
-            .collect()
     }
 
-    pub(crate) fn overlay_execution(&self, target: &SessionRef, response: &mut ThreadResponse) {
-        if let Some(actor) = lock_state(&self.state).executions.get(target) {
-            actor.overlay(response);
-        }
+    pub(super) fn execution_targets(&self) -> Vec<SessionRef> {
+        lock_state(&self.state).executions.keys().cloned().collect()
     }
 
     pub(super) fn submission_receipt(
@@ -420,7 +401,7 @@ impl SessionRouter {
             return Err("native session ID does not match".into());
         }
         if let Some(actor) = state.executions.get(&read.target) {
-            actor.overlay(&mut response);
+            response.thread = actor.overlay(response.thread);
         }
         response
             .thread
@@ -1286,13 +1267,13 @@ mod tests {
                 .as_deref(),
             Some("run")
         );
-        let mut response: ThreadResponse = serde_json::from_value(
-            json!({"thread":{"id":{"provider":"codex","id":"native"},"turns":[]}}),
-        )
-        .unwrap();
-        router.overlay_execution(&target, &mut response);
+        let thread = router.overlay_execution(
+            &target,
+            serde_json::from_value(json!({"id":{"provider":"codex","id":"native"},"turns":[]}))
+                .unwrap(),
+        );
         assert_eq!(
-            response.thread.submissions["send"],
+            thread.submissions["send"],
             agent_protocol::session::SubmissionDelivery::Accepted {
                 turn_id: Some("run".into())
             }
