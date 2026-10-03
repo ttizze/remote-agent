@@ -120,6 +120,13 @@ fn scope_menus_target_real_defaults_without_cross_environment_projects() {
         snapshot.model_environment_scope_choices(choices[1].scope.clone())[0].scope,
         choices[1].scope
     );
+    let offline = Snapshot::default();
+    let projects = offline.model_project_scope_choices(environment.clone());
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].scope, ModelDefaultsScope::Global);
+    let environments = offline.model_environment_scope_choices(environment);
+    assert_eq!(environments.len(), 1);
+    assert_eq!(environments[0].scope, ModelDefaultsScope::Global);
 }
 
 proptest::proptest! {
