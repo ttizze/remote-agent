@@ -563,8 +563,7 @@ impl Desktop {
                     }
                 }
                 // Desktop pages via its virtual list and offers Stop in the composer.
-                ConversationRowContent::OlderItems { .. }
-                | ConversationRowContent::InProgress { .. } => {}
+                ConversationRowContent::InProgress { .. } => {}
             }
         }
         let selector = format!("conversation-turn-{}", turn.id);

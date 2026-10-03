@@ -54,6 +54,10 @@ hydration must not change this default.
 
 - Load the latest bounded page first; request older pages using the server's
   opaque cursor. A refresh must not fetch the entire conversation.
+- Codex timeline pages define one continuous history window. Show only turns
+  represented in that window and one older-history boundary above it. Do not
+  create empty turn placeholders or fetch detached opening questions. Continue
+  from the native timeline cursor without rereading the latest page.
 - Retain cached history only when its suffix matches the refreshed page's
   prefix in order. Apply the same rule to turns and to items within a turn,
   preserving repeated occurrences from the server page. A shared ID elsewhere

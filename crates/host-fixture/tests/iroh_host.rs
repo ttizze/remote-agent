@@ -1231,7 +1231,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         store.dispatch(Intent::ReadThread(op::ReadThread::new(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }))).await.unwrap();
         let snapshot = store.snapshot();
         let thread = &snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }];
-        assert_eq!(thread.turns.as_ref().unwrap().len(), 5, "refresh must not attach disconnected cached turns");
+        assert_eq!(thread.turns.as_ref().unwrap().len(), 1, "only turns present in the timeline may be displayed");
         assert_eq!(thread.history_has_more, Some(true));
         let latest = thread.turns.as_ref().unwrap().last().unwrap();
         assert_eq!(latest.items.as_ref().unwrap().len(), 99);
@@ -1241,14 +1241,22 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         let reads: Vec<Value> = trace.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
         assert_eq!(reads.iter().filter(|entry| entry["method"] == "thread/timeline/list").count(), 1,
             "initial loading must return the provider's smaller page without filling it");
-        assert!(reads.iter().filter(|entry| entry["method"] == "thread/items/list")
-            .all(|entry| entry["sortDirection"] == "asc" && entry["limit"] == 2),
-            "turn bodies must load through the timeline; only an opening question needs an item read");
+        assert!(reads.iter().all(|entry| entry["method"] != "thread/items/list" && entry["method"] != "thread/turns/list"),
+            "initial history must use the timeline alone without disconnected opening questions");
+        let rendered = agent_core::presentation::conversation::project_conversation(&snapshot, thread.clone(), &None);
+        assert_eq!(rendered.turns.len(), 1, "the rendered history must contain no empty turn placeholders");
         for _ in 0..20 {
             let snapshot = store.snapshot();
             if snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }].history_has_more != Some(true) { break; }
             store.dispatch(Intent::ReadOlder { thread_id: agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() } }).await.unwrap();
         }
+        let reads: Vec<Value> = std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap()
+            .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let timeline: Vec<_> = reads.iter().filter(|entry| entry["method"] == "thread/timeline/list").collect();
+        assert!(timeline.len() > 1);
+        assert!(timeline[0]["cursor"].is_null());
+        assert!(timeline[1..].iter().all(|entry| entry["cursor"].is_string()), "older reads must not restart at the newest page");
+        assert_eq!(timeline.iter().map(|entry| entry["cursor"].clone()).collect::<std::collections::HashSet<_>>().len(), timeline.len());
         for reopen in [false, true] {
             if reopen {
                 store.dispatch(Intent::ReadThread(op::ReadThread::open(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }))).await.unwrap();
@@ -1279,16 +1287,18 @@ async fn timeline_history_rejects_repeated_cursors_and_oversized_pages() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
         let cases = [
-            ("oversized", 5, json!({"data":(0..501).map(|position| json!({"type":"realtime","position":position})).collect::<Vec<_>>(),"nextCursor":null}), "timeline page exceeds requested size"),
-            ("loop", 10, json!({"data":[],"nextCursor":"opaque-loop"}), "timeline cursor repeated"),
-            ("ambiguous", 5, json!({"data":[{"type":"realtime","position":1},{"type":"realtime","position":1}],"nextCursor":null}), "timeline position repeated"),
+            ("oversized", 5, json!({"data":(0..101).map(|position| json!({"type":"realtime","position":position})).collect::<Vec<_>>(),"nextCursor":null}), "timeline page exceeds requested size"),
+                        ("ambiguous", 5, json!({"data":[{"type":"realtime","position":1},{"type":"realtime","position":1}],"nextCursor":null}), "timeline position repeated"),
             ("missing-turn", 5, json!({"data":[{"type":"item","position":1,"turnId":"","item":{"id":"item","type":"agentMessage","text":"answer"}}],"nextCursor":null}), "timeline item identity is missing"),
             ("missing-item", 5, json!({"data":[{"type":"item","position":1,"turnId":"turn","item":{"id":"","type":"agentMessage","text":"answer"}}],"nextCursor":null}), "timeline item identity is missing"),
         ];
-        let threads: Vec<_> = cases.iter().map(|(id, _, response, _)| json!({
+        let mut threads: Vec<_> = cases.iter().map(|(id, _, response, _)| json!({
             "id":id,"cwd":directory.path(),"historyMode":"paginated","fixtureTimelineResponse":response,
             "turns":[{"id":"turn","status":"completed","items":[{"id":"answer","type":"agentMessage","text":"saved answer"}]}]
         })).collect();
+        threads.push(json!({"id":"loop","cwd":directory.path(),"historyMode":"paginated",
+            "fixtureTimelineResponse":{"data":[],"nextCursor":"opaque-loop"},
+            "turns":[{"id":"turn","status":"completed","items":[{"id":"answer","type":"agentMessage","text":"saved"}]}]}));
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
@@ -1307,6 +1317,11 @@ async fn timeline_history_rejects_repeated_cursors_and_oversized_pages() {
             assert_eq!(failure.code, "session_open_failed");
             assert_eq!(failure.message, message);
         }
+        let error = local.peer.call(&agent_protocol::session::ReadHistory {
+            session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "loop".into()).unwrap(),
+            cursor: "opaque-loop".into(),
+        }).await.unwrap_err();
+        assert!(error.to_string().contains("timeline cursor repeated"));
         local.close().await;
         fixture.close().await.unwrap();
     }).await.expect("timeline validation exceeded its deadline");
@@ -1339,11 +1354,10 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
         assert!(bytes < 100 * 1024, "collapsed command bodies delayed history: {bytes} bytes");
         let turn = &opened.response.thread.turns.as_ref().unwrap()[0];
         let loaded = turn.items.as_ref().unwrap();
-        assert_eq!(loaded.len(), 499);
-        assert!(matches!(turn.opening_user_message.as_ref().unwrap().body(), agent_protocol::items::ItemBody::UserMessage {content, ..} if content == &vec![agent_protocol::items::MessagePart::Text {text: "Inspect the build".into()}]));
-        assert_eq!(item_text(&(loaded[498])), Some("The build passed"));
-        assert_eq!(loaded.iter().filter(|item| item.is_deferred()).count(), 498);
-        for index in [0, 249, 497] {
+        assert_eq!(loaded.len(), 99);
+        assert_eq!(item_text(&(loaded[98])), Some("The build passed"));
+        assert_eq!(loaded.iter().filter(|item| item.is_deferred()).count(), 98);
+        for index in [0, 49, 97] {
             let detail = local.peer.call(&rpc::ReadItem {
                 thread_id: agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "command-history".into() }, turn_id: "turn".into(), item_id: loaded[index].id.clone(),
             }).await.unwrap();
@@ -1396,26 +1410,25 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
             {"id":"fixture-long-history","cwd":directory.path(),"historyMode":"paginated","updatedAt":1}
         ])).unwrap()).unwrap();
         mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>(json!({"useStateDbOnly":true})).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        let mut page = open_session(&mobile.peer, &json!({"provider":"codex","id":"fixture-long-history"}), 5).await.0["response"].clone();
-        assert_eq!(page["thread"]["turns"].as_array().unwrap().len(), 5);
-        assert_eq!(page["thread"]["turns"].as_array().unwrap().iter().map(|t| t["items"].as_array().unwrap().len()).sum::<usize>(), 497);
-        for turn in &page["thread"]["turns"].as_array().unwrap()[..3] {
-            assert!(turn["items"].as_array().unwrap().is_empty());
-            assert_eq!(turn["itemsHasMore"], true);
+        let history_id = agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "fixture-long-history".into()).unwrap();
+        let mut page: models::ThreadResponse = serde_json::from_value(open_session(&mobile.peer, &json!(history_id), 5).await.0["response"].clone()).unwrap();
+        let initial = page.thread.turns.as_ref().unwrap();
+        assert_eq!(initial.len(), 1, "a timeline page must not create unloaded turn placeholders");
+        assert_eq!(initial[0].items.as_ref().unwrap().len(), 99);
+        assert_eq!(initial[0].items_has_more, Some(true));
+        assert_eq!(initial[0].items.as_ref().unwrap()[98].id, "long-latest-message".into());
+        for _ in 0..100 {
+            let Some(cursor) = page.thread.history_cursor.take() else { break; };
+            let older = mobile.peer.call(&agent_protocol::session::ReadHistory { session: history_id.clone(), cursor }).await.unwrap();
+            page.thread.turns = Some(agent_protocol::session::prepend_history(&older.turns, page.thread.turns.as_deref().unwrap()));
+            page.thread.history_cursor = older.next_cursor;
+            page.thread.history_has_more = Some(page.thread.history_cursor.is_some());
         }
-        assert_eq!(page["thread"]["turns"][3]["itemsHasMore"], true);
-        assert!(!page["thread"]["turns"][3]["items"].as_array().unwrap().is_empty());
-        assert_eq!(page["thread"]["turns"][4]["itemsHasMore"], false);
-        assert_eq!(page["thread"]["turns"][4]["items"][153]["id"], "long-latest-message");
-        for limit in (10..=100).step_by(5) {
-            if page["thread"]["historyHasMore"] != true { break; }
-            page = open_session(&mobile.peer, &json!({"provider":"codex","id":"fixture-long-history"}), limit).await.0["response"].clone();
-        }
-        assert_eq!(page["thread"]["historyHasMore"], false);
-        let turns = page["thread"]["turns"].as_array().unwrap();
+        assert_eq!(page.thread.history_has_more, Some(false));
+        let turns = page.thread.turns.as_ref().unwrap();
         assert_eq!(turns.len(), 10);
-        let items: Vec<_> = turns.iter().flat_map(|turn| turn["items"].as_array().unwrap()).collect();
-        let ids: std::collections::HashSet<_> = items.iter().map(|item| item["id"].as_str().unwrap()).collect();
+        let items: Vec<_> = turns.iter().flat_map(|turn| turn.items.as_ref().unwrap()).collect();
+        let ids: std::collections::HashSet<_> = items.iter().map(|item| &item.id).collect();
         assert_eq!(ids.len(), items.len(), "no item is duplicated when expanding the window");
         assert_eq!(items.len(), 3718);
 
@@ -3210,7 +3223,7 @@ async fn native_history_errors_preserve_failure_and_only_confirmed_empty_history
             (-32603, "wrong-code", "wrong-code", false, false),
             (-32600, "wrong-session", "different-session", false, false),
             (-32600, "invalid", "permission denied", false, false),
-            (-32601, "fallback", "pagination unavailable", true, true),
+            (-32601, "unavailable", "pagination unavailable", false, true),
         ];
         let threads: Vec<_> = cases.iter().map(|(code, id, detail, _, has_history)| {
             let message = if *detail == "permission denied" || *detail == "pagination unavailable" {
@@ -3227,7 +3240,7 @@ async fn native_history_errors_preserve_failure_and_only_confirmed_empty_history
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
         local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
-        for ((_, id, _, succeeds, unavailable), native) in cases.iter().zip(&threads) {
+        for ((_, id, _, succeeds, _), native) in cases.iter().zip(&threads) {
             let result = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
                 &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
                     session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, id.to_string()).unwrap(), limit:5,
@@ -3236,17 +3249,10 @@ async fn native_history_errors_preserve_failure_and_only_confirmed_empty_history
             if *succeeds {
                 let (opened, _updates) = result.unwrap();
                 let thread = opened.response.thread;
-                if *unavailable {
-                    assert!(thread.turns.is_none());
-                    let state = thread.history_read_state.unwrap();
-                    assert_eq!(state.kind, agent_protocol::session::HistoryReadKind::Unavailable);
-                    assert_eq!(state.issues, ["Full history hydration is unavailable; use pagination"]);
-                } else {
-                    assert!(thread.turns.unwrap().is_empty());
-                    let state = thread.history_read_state.unwrap();
-                    assert_eq!(state.kind, agent_protocol::session::HistoryReadKind::Complete);
-                    assert!(state.issues.is_empty());
-                }
+                assert!(thread.turns.unwrap().is_empty());
+                let state = thread.history_read_state.unwrap();
+                assert_eq!(state.kind, agent_protocol::session::HistoryReadKind::Complete);
+                assert!(state.issues.is_empty());
             } else {
                 let error = match result {
                     Err(agent_protocol::error::PeerError::Remote { error, .. }) => error,

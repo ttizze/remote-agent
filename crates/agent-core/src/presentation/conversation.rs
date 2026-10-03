@@ -56,9 +56,6 @@ pub struct ConversationRow {
 #[derive(Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ConversationRowContent {
-    OlderItems {
-        turn_id: agent_protocol::ids::TurnId,
-    },
     User {
         item: Arc<RenderedItem>,
     },
@@ -431,7 +428,6 @@ fn render_turn(
             }
             ActivityHeader { activity } => activity.id.clone(),
             PendingRequest { request } => format!("history-request:{}", request.id),
-            OlderItems { turn_id } => format!("history-gap:{turn_id}"),
             Error { .. } => format!("history-error:{}", source.id),
             InProgress { turn_id } => format!("in-progress:{turn_id}"),
         };
@@ -440,20 +436,6 @@ fn render_turn(
         *occurrence += 1;
         rows.push(ConversationRow { id, content });
     };
-    if let Some(item) = source
-        .opening_user_message
-        .as_ref()
-        .filter(|item| !native.iter().any(|native| native.id == item.id))
-    {
-        push(User {
-            item: render_native(item),
-        });
-    }
-    if source.items_has_more.unwrap_or(false) {
-        push(OlderItems {
-            turn_id: source.id.clone(),
-        });
-    }
     for segment in project_items(&source, order.len(), metadata) {
         let segment = &segment;
         let group = |role| {
@@ -909,23 +891,13 @@ mod tests {
         });
         let turn = Arc::make_mut(&mut thread.turns.as_mut().unwrap()[1]);
         turn.items_has_more = Some(true);
-        turn.opening_user_message = Some(Arc::new(
-            serde_json::from_value(json!({"id":"opening","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":"first","content":[]}}}}}))
-                .unwrap(),
-        ));
         let rendered = project_snapshot(snapshot.clone(), None);
         let rows = rendered.turns[1].conversation_rows();
         let ids: Vec<_> = rows.iter().map(|row| row.id.as_str()).collect();
         assert!(
-            matches!(&rows[0].content, ConversationRowContent::User { item } if item.data.native_id.as_deref() == Some("opening"))
+            matches!(&rows[0].content, ConversationRowContent::User { item } if item.data.native_id.as_deref() == Some("user"))
         );
-        assert!(
-            matches!(&rows[1].content, ConversationRowContent::OlderItems { turn_id } if turn_id.as_str() == "live")
-        );
-        assert!(
-            matches!(&rows[2].content, ConversationRowContent::User { item } if item.data.native_id.as_deref() == Some("user"))
-        );
-        let accepted_id = ids[2].to_owned();
+        let accepted_id = ids[0].to_owned();
         assert_eq!(ids.iter().copied().collect::<HashSet<_>>().len(), ids.len());
         assert!(rows.iter().any(|row| matches!(&row.content, ConversationRowContent::Activity { item, .. } if item.data.native_id.as_deref() == Some("command"))));
         assert!(rows.iter().all(|row| !matches!(

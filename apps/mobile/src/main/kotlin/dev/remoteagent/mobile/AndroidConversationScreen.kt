@@ -99,7 +99,6 @@ internal fun ThreadDetailScreen(
                         threadId,
                         snapshot.navigation().cwd,
                         perform,
-                        older = loadOlder,
                         activityHeader = { activity ->
                             ActivityHeader(activity, activityExpansion[activity.id]) { choice ->
                                 activityExpansion = activityExpansion + (activity.id to choice)
@@ -168,12 +167,9 @@ private fun ConversationContent(
     threadId: dev.remoteagent.core.SessionRef?,
     cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-    older: (() -> Unit)? = null,
     activityHeader: @Composable (ActivityPresentation) -> Unit,
 ) {
     when (content) {
-        is ConversationRowContent.OlderItems ->
-            Button(onClick = { older?.invoke() }, enabled = older != null) { Text("途中の履歴を読み込む") }
         is ConversationRowContent.User -> ThreadMessageCard(content.item, true, cwd, perform)
         is ConversationRowContent.Response -> ThreadMessageCard(content.item, false, cwd, perform)
         is ConversationRowContent.Activity ->

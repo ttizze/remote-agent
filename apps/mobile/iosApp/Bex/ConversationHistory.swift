@@ -12,7 +12,7 @@ extension ThreadScreen {
     func conversationRow(_ row: ThreadConversationRow) -> some View {
         switch row.content {
         case let .historyNotice(message): Text(message).font(.caption).foregroundStyle(.secondary)
-        case .olderTurns: historyBoundary(nil)
+        case .olderTurns: historyBoundary()
         case let .native(content, item): nativeConversationRow(content, item: item)
         case let .queued(item):
             userMessageRow(item)
@@ -22,7 +22,6 @@ extension ThreadScreen {
     @ViewBuilder
     func nativeConversationRow(_ row: ConversationRow, item: ConversationItem?) -> some View {
         switch (row.content, item) {
-        case let (.olderItems(turnId), _): historyBoundary(turnId)
         case let (.user, item?):
             userMessageRow(item)
                 .padding(
@@ -99,35 +98,33 @@ extension ThreadScreen {
 
     func loadVisibleHistory() {
         guard scrollingToOlder, !historyRequestPending, !model.loadingHistory else { return }
-        if let boundary = historyBoundaries.filter({ $0.value >= 0 && $0.value < scrollViewportHeight * 0.6 })
-            .min(by: { $0.value < $1.value }) {
-            let turnId = boundary.key == "older-turns" ? nil : boundary.key
-            requestHistory(turnId)
+        if let position = historyBoundaries["older-turns"], position >= 0, position < scrollViewportHeight * 0.6 {
+            requestHistory()
         }
     }
 
-    func requestHistory(_ turnId: String?) {
+    func requestHistory() {
         guard !model.loadingHistory else { return }
         isFollowingLatest = false
         scrollingToOlder = false
         historyRequestPending = true
-        model.loadOlderHistory(turnId)
+        model.loadOlderHistory()
     }
 
-    func historyBoundary(_ turnId: String?) -> some View {
-        Button { requestHistory(turnId) } label: {
+    func historyBoundary() -> some View {
+        Button { requestHistory() } label: {
             HStack {
                 if model.loadingHistory {
                     ProgressView()
                 }
-                Text(turnId == nil ? "以前の会話を読み込む" : "途中の履歴を読み込む")
+                Text("以前の会話を読み込む")
             }.frame(maxWidth: .infinity)
         }
         .disabled(model.loadingHistory)
-        .accessibilityIdentifier("history.\(turnId ?? "older-turns")")
+        .accessibilityIdentifier("history.older-turns")
         .background(GeometryReader { geometry in
             Color.clear.preference(key: HistoryBoundaryPreferenceKey.self,
-                                   value: [turnId ?? "older-turns": geometry.frame(in: .named("thread-scroll")).minY])
+                                   value: ["older-turns": geometry.frame(in: .named("thread-scroll")).minY])
         })
     }
 

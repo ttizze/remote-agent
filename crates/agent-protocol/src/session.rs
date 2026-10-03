@@ -374,7 +374,6 @@ fn merge_fields(previous: &Turn, incoming: &Turn) -> Turn {
     macro_rules! field { ($($field:ident),* $(,)?) => { $(if incoming.$field.is_some() { merged.$field = incoming.$field.clone(); })* }; }
     field!(
         items_has_more,
-        opening_user_message,
         started_at,
         completed_at,
         duration_ms,
@@ -403,6 +402,106 @@ fn append_items(previous: &[Arc<Item>], incoming: &[Arc<Item>]) -> Vec<Arc<Item>
 pub struct OpenSession {
     pub session: SessionRef,
     pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadHistory {
+    pub session: SessionRef,
+    pub cursor: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    pub turns: Vec<Arc<Turn>>,
+    pub next_cursor: Option<String>,
+}
+
+/// The opaque cursor proves adjacency. Join only a turn split at that boundary;
+/// a repeated native ID in a complete turn denotes a separate occurrence.
+pub fn prepend_history(older: &[Arc<Turn>], current: &[Arc<Turn>]) -> Vec<Arc<Turn>> {
+    let mut turns = older.to_vec();
+    let mut tail = current;
+    if let Some(first) = current.first()
+        && first.items_has_more == Some(true)
+        && let Some(last) = turns.last_mut().filter(|last| last.id == first.id)
+    {
+        let mut joined = (**first).clone();
+        joined.items = Some(
+            last.items
+                .iter()
+                .flatten()
+                .chain(first.items.iter().flatten())
+                .cloned()
+                .collect(),
+        );
+        joined.items_has_more = last.items_has_more;
+        joined.started_at = last.started_at.or(joined.started_at);
+        joined.started_at_ms = last.started_at_ms.or(joined.started_at_ms);
+        *last = Arc::new(joined);
+        tail = &current[1..];
+    }
+    turns.extend_from_slice(tail);
+    turns
+}
+
+/// Retain an older cache only when the refreshed window overlaps in order.
+/// Repeated identities cannot prove which historical occurrence overlaps.
+pub fn retained_history(previous: &[Arc<Turn>], incoming: &[Arc<Turn>]) -> Option<Vec<Arc<Turn>>> {
+    let overlap = ordered_overlap(previous, incoming, |turn| &turn.id);
+    if overlap == 0 {
+        return None;
+    }
+    let prefix = previous.len() - overlap;
+    let mut older = previous[..prefix].to_vec();
+    let first = incoming.first()?;
+    let cached = &previous[prefix];
+    if first.items_has_more == Some(true) {
+        let old_items = cached.items.as_deref().unwrap_or_default();
+        let new_items = first.items.as_deref().unwrap_or_default();
+        let overlap = ordered_overlap(old_items, new_items, |item| &item.id);
+        if overlap == 0 {
+            return None;
+        }
+        let mut head = (**cached).clone();
+        head.items = Some(old_items[..old_items.len() - overlap].to_vec());
+        if !head.items.as_ref()?.is_empty() {
+            older.push(Arc::new(head));
+        }
+    }
+    (!older.is_empty()).then(|| prepend_history(&older, incoming))
+}
+
+fn ordered_overlap<'a, T, K: Eq + std::hash::Hash + 'a>(
+    previous: &'a [T],
+    incoming: &'a [T],
+    key: impl Fn(&'a T) -> &'a K,
+) -> usize {
+    if previous
+        .iter()
+        .map(&key)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        != previous.len()
+        || incoming
+            .iter()
+            .map(&key)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != incoming.len()
+    {
+        return 0;
+    }
+    (1..=previous.len().min(incoming.len()))
+        .rev()
+        .find(|&count| {
+            previous[previous.len() - count..]
+                .iter()
+                .map(&key)
+                .eq(incoming[..count].iter().map(&key))
+        })
+        .unwrap_or(0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,4 +567,101 @@ fn append_part(parts: &mut Vec<String>, index: u32, delta: &str) -> Result<(), U
     }
     parts[index].push_str(delta);
     Ok(())
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn turn(id: usize, range: std::ops::Range<usize>, partial: bool) -> Arc<Turn> {
+        Arc::new(Turn {
+            id: format!("turn-{}", id % 2).into(),
+            status: TurnStatus::Completed,
+            items_has_more: Some(partial),
+            items: Some(
+                range
+                    .map(|item| {
+                        Arc::new(Item::new(
+                            format!("item-{}", item % 3).into(),
+                            Default::default(),
+                            ItemBody::Compaction {},
+                        ))
+                    })
+                    .collect(),
+            ),
+            ..Default::default()
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn cursor_pages_preserve_every_item_and_repeated_turn_occurrence(
+            sizes in prop::collection::vec(1usize..25, 1..12), cut in 0usize..300,
+        ) {
+            let total: usize = sizes.iter().sum();
+            let cut = cut % (total + 1);
+            let mut offset = 0;
+            let (mut full, mut older, mut current) = (Vec::new(), Vec::new(), Vec::new());
+            for (id, &size) in sizes.iter().enumerate() {
+                full.push(turn(id, 0..size, false));
+                let left = cut.saturating_sub(offset).min(size);
+                if left > 0 { older.push(turn(id, 0..left, false)); }
+                if left < size { current.push(turn(id, left..size, left > 0)); }
+                offset += size;
+            }
+            prop_assert_eq!(prepend_history(&older, &current), full);
+        }
+    }
+
+    #[test]
+    fn refresh_retains_only_a_proven_contiguous_prefix() {
+        let make = |range: std::ops::Range<usize>, partial| {
+            Arc::new(Turn {
+                id: "turn".into(),
+                items_has_more: Some(partial),
+                items: Some(
+                    range
+                        .map(|id: usize| {
+                            Arc::new(Item::new(
+                                id.to_string().into(),
+                                Default::default(),
+                                ItemBody::Compaction {},
+                            ))
+                        })
+                        .collect(),
+                ),
+                ..Default::default()
+            })
+        };
+        let cached = [make(0..10, false)];
+        let fresh = [make(7..12, true)];
+        assert_eq!(
+            retained_history(&cached, &fresh),
+            Some(vec![make(0..12, false)])
+        );
+        assert_eq!(retained_history(&cached, &[make(20..22, true)]), None);
+        let repeated = [turn(0, 0..10, false)];
+        assert_eq!(
+            retained_history(&repeated, &[turn(0, 7..12, true)]),
+            None,
+            "repeated IDs do not prove a cache overlap"
+        );
+        let mut repeated = make(2..4, true);
+        let items = Arc::make_mut(&mut repeated).items.as_mut().unwrap();
+        items.push(items.last().unwrap().clone());
+        assert_eq!(
+            retained_history(&[make(0..4, false)], &[repeated]),
+            None,
+            "a repeated ID only in the refreshed page is still ambiguous"
+        );
+        let mut repeated = make(0..4, false);
+        let items = Arc::make_mut(&mut repeated).items.as_mut().unwrap();
+        items.push(items.last().unwrap().clone());
+        assert_eq!(
+            retained_history(&[repeated], &[make(3..5, true)]),
+            None,
+            "a repeated ID only in the cache is still ambiguous"
+        );
+    }
 }

@@ -32,6 +32,17 @@ extension BexLaunchUITests {
                              "Scrolling upward must load older items without tapping a button")
         XCTAssertFalse(latest.isHittable, "Prepending history must not jump back to the latest message")
         captureScreen(app, named: "Older history loaded by scrolling")
+        assertHistoryTopNavigation(app, latest: latest)
+        XCTAssertTrue(latest.isHittable)
+        for _ in 0 ..< 4 {
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+            XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+            XCTAssertTrue(latest.waitForExistence(timeout: 20))
+            XCTAssertTrue(latest.isHittable, "Every reopen must render the latest message in the viewport")
+        }
+    }
+
+    private func assertHistoryTopNavigation(_ app: XCUIApplication, latest: XCUIElement) {
         let latestButton = app.buttons["task.latest"]
         XCTAssertTrue(latestButton.waitForExistence(timeout: 5))
         latestButton.tap()
@@ -43,16 +54,11 @@ extension BexLaunchUITests {
             XCTAssertTrue(latest.isHittable)
             XCTAssertFalse(latestButton.exists)
             scrollToTop()
+            XCTAssertTrue(app.buttons["history.older-turns"].waitForExistence(timeout: 5))
+            XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "history.")).count, 1)
             XCTAssertTrue(latestButton.waitForExistence(timeout: 5))
             XCTAssertFalse(latest.isHittable, "Top navigation must not snap back to the latest message")
             latestButton.tap()
-        }
-        XCTAssertTrue(latest.isHittable)
-        for _ in 0 ..< 4 {
-            app.navigationBars.buttons.element(boundBy: 0).tap()
-            XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
-            XCTAssertTrue(latest.waitForExistence(timeout: 20))
-            XCTAssertTrue(latest.isHittable, "Every reopen must render the latest message in the viewport")
         }
     }
 
