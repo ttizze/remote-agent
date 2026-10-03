@@ -21,16 +21,25 @@ async fn inspect(worktrees: &[PathBuf], common: &Path, dry: bool, budget: u64) -
     .unwrap()
 }
 
-async fn await_cleaned(worktrees: &[PathBuf], common: &Path) {
+async fn await_cleaned(worktrees: &[PathBuf], common: &Path, executable: &Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let report = inspect(worktrees, common, false, 0).await;
-        if report.entries[0].action == Action::Cleaned {
+        if !executable.exists() {
+            assert!(!executable.parent().unwrap().join(".fingerprint").exists());
             return;
         }
         // Concurrent fixture spawns can briefly inherit a held flock until
         // exec closes it. Active-worktree protection must already be gone.
-        assert_eq!(report.entries[0].action, Action::Locked);
+        assert!(
+            !report.entries.is_empty()
+                && report
+                    .entries
+                    .iter()
+                    .all(|entry| entry.action == Action::Locked),
+            "{} remains after cleanup: {report:?}",
+            executable.display()
+        );
         assert!(Instant::now() < deadline, "{report:?}");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -170,7 +179,8 @@ async fn running_binary_and_active_worktree_stay_protected_until_exit() {
                 .success()
         );
     }
-    await_cleaned(&[root], &fixture.common).await;
+    let executable = Fixture::executable(&root);
+    await_cleaned(&[root], &fixture.common, &executable).await;
 }
 
 #[tokio::test]
@@ -279,7 +289,8 @@ async fn nested_worktree_activity_does_not_pin_parent_builds() {
     let mut command = Command::new("sleep");
     command.arg("30").current_dir(&nested);
     let mut process = Child::spawn(command).unwrap();
-    await_cleaned(&[root.clone(), nested], &fixture.common).await;
+    let executable = Fixture::executable(&root);
+    await_cleaned(&[root.clone(), nested], &fixture.common, &executable).await;
     process.stop(false, Duration::from_secs(10)).await.unwrap();
 }
 
