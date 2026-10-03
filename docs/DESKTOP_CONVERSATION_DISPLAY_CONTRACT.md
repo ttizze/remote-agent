@@ -20,7 +20,7 @@ explicitly instead of creating a Codex conversation or dropping the draft.
 | Input state | Expanded work | Header / divider | Transition |
 | --- | --- | --- | --- |
 | No work item yet | n/a | Thinking | Replaced as the first renderable work item arrives |
-| `inProgress` | collapsed by default | Activity summary | Commentary stays visible; each work group opens only on explicit action |
+| `Running` | collapsed by default | Activity summary | Commentary stays visible; each work group opens only on explicit action |
 | Waiting on approval | collapsed by default | Awaiting approval | The pending request stays visible and actionable outside work |
 | Waiting on user input or MCP elicitation | collapsed by default | Waiting for your answer | The request stays outside a hidden collapsed body |
 | Final assistant output starts | collapsed by default | Past-message count | The answer stays visible outside work |
@@ -144,20 +144,18 @@ layout, capability filtering, navigation, quota and selection behavior.
 ## Project registration
 
 Desktop's project heading has a “＋” action. Both this action and the new-chat
-folder picker use Codex's `project/create` API before opening the chat draft.
-The Host reads `project/list` and supplies `projectId` when starting a chat in
-that project. A non-null native assignment is authoritative. Missing or null
-membership uses Host workspace matching for both Codex and Claude, including
-worktree roots. A null alone does not indicate an intentional projectless chat;
-Bex's dedicated chat directory remains projectless. Bex keeps no
-separate persistent project registry and does not read Desktop's retired JSON
-project metadata. A late registration refreshes the list without changing newer
-navigation.
+folder picker register the directory through the Host's ProjectStore before
+opening the chat draft. The Host persists registration in `bex-projects.json`
+and determines membership from workspace paths for both providers, including
+worktree roots. Adapters receive cwd when creating a conversation; native
+project catalogs and assignments do not determine Bex membership. Bex's dedicated
+chat directory remains projectless. A late registration refreshes the list
+without changing newer navigation.
 
 Acceptance: `adding_a_chat_folder_registers_a_project_before_submission` and
 `project_registration_navigates_only_while_current` cover registration, restart,
-duplicate selections, and navigation races. Native assignment and workspace
-matching are covered by `projects::state` tests.
+duplicate selections, and navigation races. Host registration and workspace
+matching are covered by `projects` tests.
 
 ## Workspace folder labels
 

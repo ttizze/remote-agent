@@ -47,7 +47,7 @@ impl ItemStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCategory {
     RateLimited,
@@ -63,6 +63,7 @@ pub enum ErrorCategory {
     Rollback,
     InputUnavailable,
     Internal,
+    Provider(#[serde(with = "crate::protocol::json")] serde_json::Value),
     #[default]
     Other,
 }

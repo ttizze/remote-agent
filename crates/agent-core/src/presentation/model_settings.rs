@@ -208,11 +208,16 @@ impl Snapshot {
 
     /// Keep every weekly bucket (including model-specific limits); never turn
     /// an unavailable quota into a full or empty bar. Labels are Host-normalized.
-    pub fn account_weekly_usage(&self, id: String) -> Vec<UsageWindow> {
+    pub fn account_weekly_usage(&self, provider: ProviderKind, id: String) -> Vec<UsageWindow> {
         self.account
             .accounts
             .as_ref()
-            .and_then(|accounts| accounts.accounts.iter().find(|account| account.id == id))
+            .and_then(|accounts| {
+                accounts
+                    .accounts
+                    .iter()
+                    .find(|account| account.provider == provider && account.id == id)
+            })
             .and_then(|account| account.usage.as_ref())
             .filter(|usage| usage.error.is_none())
             .map(|usage| {
@@ -397,12 +402,20 @@ mod tests {
                 .models_matching(Some(ProviderKind::Codex), "haiku".into())
                 .is_empty()
         );
-        Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(serde_json::json!({"accounts":[
+        Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(
+            serde_json::from_value(serde_json::json!({"accounts":[
             {"id":"a","provider":"codex","usage":{"fetchedAt":1,"windows":[
                 {"label":"5時間枠","remainingPercent":72},{"label":"週間枠","remainingPercent":42},
                 {"label":"Opus 週間枠","remainingPercent":12}]}}
-        ]})).unwrap()));
-        assert_eq!(snapshot.account_weekly_usage("a".into()).len(), 2);
+        ],"selected":{}}))
+            .unwrap(),
+        ));
+        assert_eq!(
+            snapshot
+                .account_weekly_usage(ProviderKind::Codex, "a".into())
+                .len(),
+            2
+        );
         let accounts = Arc::make_mut(
             Arc::make_mut(&mut snapshot.account)
                 .accounts
@@ -410,6 +423,10 @@ mod tests {
                 .unwrap(),
         );
         accounts.accounts[0].usage.as_mut().unwrap().error = Some("unavailable".into());
-        assert!(snapshot.account_weekly_usage("a".into()).is_empty());
+        assert!(
+            snapshot
+                .account_weekly_usage(ProviderKind::Codex, "a".into())
+                .is_empty()
+        );
     }
 }

@@ -146,7 +146,7 @@ async fn failed_list_refresh_releases_the_next_request_and_close_releases_its_wa
     // This independent RPC is also a barrier: the queued refreshes were admitted.
     let models = store.dispatch(Intent::LoadModels(op::LoadModels {}));
     let model_request = read(&mut reader).await;
-    assert_eq!(model_request["method"], "model/list");
+    assert_eq!(model_request["method"], "host/model/list");
     writer
         .reply(
             &model_request,
@@ -246,8 +246,8 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
         let result = match request["method"].as_str().unwrap() {
             "host/session/list" => snapshot.threads.as_ref().map(|threads| json!(threads))
                 .unwrap_or_else(|| json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})),
-            "host/account/list" => json!({"accounts":[]}),
-            "model/list" => json!({"data":snapshot.models,"nextCursor":null}),
+            "host/account/list" => json!({"accounts":[],"selected":{}}),
+            "host/model/list" => json!({"data":snapshot.models,"nextCursor":null}),
             "host/session/open" => json!({"thread": snapshot.conversations[snapshot.navigation.thread_id.as_ref().unwrap()]}),
             "host/workspace/review" => { assert_eq!(request["params"]["cwd"], cwd); review() },
             method => panic!("unexpected connection request: {method}"),
@@ -1873,12 +1873,12 @@ async fn terminal_preserves_output_until_acknowledged_and_serializes_input() {
         assert_eq!(start["method"], "host/terminal/start");
         assert_eq!(start["params"]["cwd"], "/fixture");
         for data in ["YQ==", "Yg=="] {
-            writer.notify(json!({"method":"process/outputDelta","params":{"processHandle":"terminal","stream":"stdout","deltaBase64":data,"capReached":false}})).await.unwrap();
+            writer.notify(json!({"method":"host/terminal/output","params":{"processHandle":"terminal","stream":"stdout","deltaBase64":data,"capReached":false}})).await.unwrap();
         }
         writer.reply(&start, json!({"result":{}})).await.unwrap();
         for data in ["Zmlyc3Q=", "c2Vjb25k"] {
             let request = read(&mut reader).await;
-            assert_eq!(request["method"], "process/writeStdin");
+            assert_eq!(request["method"], "host/terminal/write");
             assert_eq!(request["params"]["deltaBase64"], data);
             writer.reply(&request, json!({"result":{}})).await.unwrap();
         }
@@ -1958,7 +1958,7 @@ async fn terminal_exit_before_spawn_reply_is_not_replaced_by_running() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
-        writer.notify(json!({"method":"process/exited","params":{"processHandle":"terminal","exitCode":17,"stdout":"","stderr":"","stdoutCapReached":false,"stderrCapReached":false}})).await.unwrap();
+        writer.notify(json!({"method":"host/terminal/exited","params":{"processHandle":"terminal","exitCode":17,"stdout":"","stderr":"","stdoutCapReached":false,"stderrCapReached":false}})).await.unwrap();
         writer.reply(&request, json!({"result":{}})).await.unwrap();
         assert!(reader.read_request().await.unwrap().is_none());
     });
@@ -2284,7 +2284,7 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
     let request = read(&mut reader).await;
-    writer.reply(&request, json!({"result":{"accounts":[{"provider":"codex","id":"a"},{"provider":"claude","id":"claude:c"}],"selectedClaudeId":"claude:c","selectedId":"a","error":null}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"accounts":[{"provider":"codex","id":"a"},{"provider":"claude","id":"claude:c"}],"selected":{"codex":"a","claude":"claude:c"},"error":null}})).await.unwrap();
     listing.await.unwrap();
     assert_eq!(
         store
@@ -2293,8 +2293,9 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
             .accounts
             .as_ref()
             .unwrap()
-            .selected_id
-            .as_deref(),
+            .selected
+            .get(&agent_protocol::session::ProviderKind::Codex)
+            .map(String::as_str),
         Some("a")
     );
     // The listing receipt resolves while both usage reads are still pending.
@@ -2302,7 +2303,10 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
     let usage_c = read(&mut reader).await;
     assert_eq!(usage_a["method"], "host/account/usage");
     assert_eq!(usage_c["method"], "host/account/usage");
-    let selecting = store.dispatch(Intent::SelectAccount(op::SelectAccount { id: "b".into() }));
+    let selecting = store.dispatch(Intent::SelectAccount(op::SelectAccount {
+        provider: agent_protocol::session::ProviderKind::Codex,
+        id: "b".into(),
+    }));
     let request = read(&mut reader).await;
     assert_eq!(request["params"]["accountId"], "b");
     writer.reply(&request, json!({"result":{"provider":"codex","selectedId":"b","persistenceError":"store unavailable"}})).await.unwrap();
@@ -2324,8 +2328,9 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
             .accounts
             .as_ref()
             .unwrap()
-            .selected_id
-            .as_deref(),
+            .selected
+            .get(&agent_protocol::session::ProviderKind::Codex)
+            .map(String::as_str),
         Some("b")
     );
     assert_eq!(store.snapshot().error.as_deref(), Some("store unavailable"));
@@ -2336,8 +2341,9 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
             .accounts
             .as_ref()
             .unwrap()
-            .selected_claude_id
-            .as_deref(),
+            .selected
+            .get(&agent_protocol::session::ProviderKind::Claude)
+            .map(String::as_str),
         Some("claude:c")
     );
     // Selecting a newly logged-in account invalidates the login completion's
@@ -2346,9 +2352,9 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
             "host/account/list" => {
-                json!({"accounts":[{"provider":"codex","id":"a"},{"provider":"codex","id":"b"},{"provider":"claude","id":"claude:c"}],"selectedClaudeId":"claude:c","selectedId":"b","error":null})
+                json!({"accounts":[{"provider":"codex","id":"a"},{"provider":"codex","id":"b"},{"provider":"claude","id":"claude:c"}],"selected":{"codex":"b","claude":"claude:c"},"error":null})
             }
-            "model/list" => json!({"data":[]}),
+            "host/model/list" => json!({"data":[]}),
             method => panic!("unexpected account refresh: {method}"),
         };
         writer
@@ -2359,7 +2365,11 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
     wait_for(&store, |s| {
         s.account.accounts.as_ref().is_some_and(|accounts| {
             accounts.accounts.iter().any(|account| account.id == "b")
-                && accounts.selected_id.as_deref() == Some("b")
+                && accounts
+                    .selected
+                    .get(&agent_protocol::session::ProviderKind::Codex)
+                    .map(String::as_str)
+                    == Some("b")
         })
     })
     .await;
@@ -2378,12 +2388,12 @@ async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_lat
     writer
         .reply(
             &list,
-            json!({"result":{"accounts":[],"selectedId":null,"error":null}}),
+            json!({"result":{"accounts":[],"selected":{},"error":null}}),
         )
         .await
         .unwrap();
     listing.await.unwrap();
-    writer.reply(&request, json!({"result":{"loginId":"login","userCode":"fixture-only","requiresCodeSubmission":false,"verificationUrl":"https://example.invalid"}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"provider":"codex","loginId":"login","userCode":"fixture-only","requiresCodeSubmission":false,"verificationUrl":"https://example.invalid"}})).await.unwrap();
     starting.await.unwrap();
     assert_eq!(
         store.snapshot().account.login.as_ref().unwrap().login_id,
@@ -2391,11 +2401,13 @@ async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_lat
     );
 
     let polling = store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin {
+        provider: agent_protocol::session::ProviderKind::Codex,
         id: "login".into(),
         thread_id: None,
     }));
     let poll = read(&mut reader).await;
     let cancelling = store.dispatch(Intent::CancelAccountLogin(op::CancelAccountLogin {
+        provider: agent_protocol::session::ProviderKind::Codex,
         id: "login".into(),
     }));
     let cancel = read(&mut reader).await;
@@ -2522,11 +2534,11 @@ async fn initial_titles_overlap_scope_verification_without_publishing_unverified
                     writer.reply(&current, titles("fresh")).await.unwrap();
                 }
                 let models = read(&mut reader).await;
-                assert_eq!(models["method"], "model/list");
+                assert_eq!(models["method"], "host/model/list");
                 writer.reply(&models, json!({"result":{"data":[],"nextCursor":null}})).await.unwrap();
                 let accounts = read(&mut reader).await;
                 assert_eq!(accounts["method"], "host/account/list");
-                writer.reply(&accounts, json!({"result":{"accounts":[]}})).await.unwrap();
+                writer.reply(&accounts, json!({"result":{"accounts":[],"selected":{}}})).await.unwrap();
                 wait_for(&store, |state| state.threads.is_some()).await;
                 assert_eq!(store.snapshot().threads.as_ref().unwrap().data[0].id.as_ref().map(|session| session.id.as_str()), Some("fresh"));
             }
@@ -2665,8 +2677,8 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                     let request = reader.read_request().await.unwrap().unwrap();
                     let result = match request["method"].as_str().unwrap() {
                         "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"replacement"},"name":"fresh"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
-                        "host/account/list" => json!({"accounts":[]}),
-                        "model/list" => json!({"data":[],"nextCursor":null}),
+                        "host/account/list" => json!({"accounts":[],"selected":{}}),
+                        "host/model/list" => json!({"data":[],"nextCursor":null}),
                         other => panic!("unexpected bootstrap: {other}"),
                     };
                     writer.reply(&request, json!({"result":result})).await.unwrap();
@@ -2947,7 +2959,7 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
         ),
         (
             Intent::ListAccounts(op::ListAccounts {}),
-            json!({"accounts":[],"selectedId":null,"error":null}),
+            json!({"accounts":[],"selected":{},"error":null}),
         ),
     ] {
         let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
@@ -3044,24 +3056,24 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
         .await
         .unwrap();
     writer
-        .reply(&pending["model/list"], json!({"result":{"data":[]}}))
+        .reply(&pending["host/model/list"], json!({"result":{"data":[]}}))
         .await
         .unwrap();
     writer
         .reply(
             &pending["host/account/list"],
-            json!({"result":{"accounts":[]}}),
+            json!({"result":{"accounts":[],"selected":{}}}),
         )
         .await
         .unwrap();
     for _ in 0..2 {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
-            "model/list" => json!({"data":[{
+            "host/model/list" => json!({"data":[{
                 "id":"fresh","model":{"provider": "codex", "id": "fresh"},"displayName":"Fresh model",
                 "isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]
             }]}),
-            "host/account/list" => json!({"accounts":[]}),
+            "host/account/list" => json!({"accounts":[],"selected":{}}),
             method => panic!("unexpected retry: {method}"),
         };
         writer
@@ -3117,9 +3129,9 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
             "host/workspace/review",
             json!({"branch":"main","additions":2,"deletions":1,"files":[],"diff":"fixture diff"}),
         ),
-        ("host/account/list", json!({"accounts":[]})),
+        ("host/account/list", json!({"accounts":[],"selected":{}})),
         (
-            "model/list",
+            "host/model/list",
             json!({"data":[{"id":"fresh","model":{"provider": "codex", "id": "fresh"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}),
         ),
         (
@@ -3189,8 +3201,8 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
                 while let Some(request) = reader.read_request().await.unwrap() {
                     let result = match request["method"].as_str().unwrap() {
                         "host/session/list" => json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
-                        "host/account/list" => json!({"accounts":[]}),
-                        "model/list" => json!({"data":[],"nextCursor":null}),
+                        "host/account/list" => json!({"accounts":[],"selected":{}}),
+                        "host/model/list" => json!({"data":[],"nextCursor":null}),
                         "host/session/open" => {
                             let a = request["params"]["session"]["id"] == "A";
                             json!({"session":request["params"]["session"],"subscriptionId":if a {subscription_a} else {subscription_b},"response":{"thread":{"id":{"provider":"codex","id":if a {"A"} else {"B"}},"turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":if a {json!({"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null,"durationMs":null}}}})} else {json!({"inline":{"body":{"assistantText":{"text":"B prefix","phase":"unknown"}}}})}}]}]}}})
@@ -3411,11 +3423,15 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
             };
             let (store, mut reader, writer) = setup(Snapshot::default()).await;
             let polling = store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin {
+                provider: serde_json::from_value(json!(provider)).unwrap(),
                 id: "login".into(),
                 thread_id: thread_id.map(DraftKey::from),
             }));
             let request = read(&mut reader).await;
-            assert_eq!(request["params"], json!({"loginId":"login"}));
+            assert_eq!(
+                request["params"],
+                json!({"provider":provider,"loginId":"login"})
+            );
             writer
                 .reply(
                     &request,
@@ -3426,7 +3442,10 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
             polling.await.unwrap();
             let select = read(&mut reader).await;
             assert_eq!(select["method"], "host/account/select");
-            assert_eq!(select["params"], json!({"accountId":id}));
+            assert_eq!(
+                select["params"],
+                json!({"provider":provider,"accountId":id})
+            );
             writer
                 .reply(
                     &select,
@@ -3438,9 +3457,9 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
                 let request = read(&mut reader).await;
                 let result = match request["method"].as_str().unwrap() {
                     "host/account/list" => {
-                        json!({"accounts":[{"provider":provider,"id":id}],"selectedId":if provider == "codex" {Some(id)} else {None},"selectedClaudeId":if provider == "claude" {Some(id)} else {None},"error":null})
+                        json!({"accounts":[{"provider":provider,"id":id}],"selected":{(provider):id},"error":null})
                     }
-                    "model/list" => {
+                    "host/model/list" => {
                         json!({"data":[{"id":model_id,"model":{"provider":provider,"id":model_id},"displayName":model_id,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}]})
                     }
                     method => panic!("unexpected login effect: {method}"),
@@ -3519,9 +3538,9 @@ async fn composer_catalog_prefetch_and_refresh_keep_candidates_available() {
         "opening the picker must share the pending prefetch"
     );
     let catalog = json!({"cwd":"/project","loading":false,"candidates":[{
-        "invocation":{"kind":"Skill","name":"review","path":"/project/review/SKILL.md"},
+        "invocation":{"provider":"codex","kind":"Skill","name":"review","path":"/project/review/SKILL.md"},
         "description":"Review changes"
-    }],"errors":[]});
+    }],"errors":{}});
     writer
         .reply(&prefetch.unwrap(), json!({"result":catalog}))
         .await
@@ -3636,7 +3655,7 @@ async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts
     writer
         .reply(
             &pending[0],
-            json!({"result":{"cwd":"/first","loading":false,"candidates":[],"errors":[]}}),
+            json!({"result":{"cwd":"/first","loading":false,"candidates":[],"errors":{}}}),
         )
         .await
         .unwrap();
@@ -3654,6 +3673,7 @@ async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts
     assert!(store.snapshot().composer_catalog.as_ref().unwrap().loading);
 
     let selection = store.dispatch(Intent::SelectAccount(op::SelectAccount {
+        provider: agent_protocol::session::ProviderKind::Codex,
         id: "new".into(),
     }));
     let request = read(&mut reader).await;
@@ -3671,10 +3691,10 @@ async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts
         let request = read(&mut reader).await;
         match request["method"].as_str().unwrap() {
             "host/account/list" => writer
-                .reply(&request, json!({"result":{"accounts":[]}}))
+                .reply(&request, json!({"result":{"accounts":[],"selected":{}}}))
                 .await
                 .unwrap(),
-            "model/list" => writer
+            "host/model/list" => writer
                 .reply(&request, json!({"result":{"data":[]}}))
                 .await
                 .unwrap(),
@@ -3683,11 +3703,11 @@ async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts
         }
     }
     writer.reply(&pending[1], json!({"result":{"cwd":"/second","loading":false,"candidates":[{
-        "invocation":{"kind":"Skill","name":"old-account","path":"/old/SKILL.md"},"description":"Old"
-    }],"errors":[]}})).await.unwrap();
+        "invocation":{"provider":"codex","kind":"Skill","name":"old-account","path":"/old/SKILL.md"},"description":"Old"
+    }],"errors":{}}})).await.unwrap();
     let catalog = json!({"cwd":"/second","loading":false,"candidates":[{
-        "invocation":{"kind":"Skill","name":"new-account","path":"/new/SKILL.md"},"description":"New"
-    }],"errors":[]});
+        "invocation":{"provider":"codex","kind":"Skill","name":"new-account","path":"/new/SKILL.md"},"description":"New"
+    }],"errors":{}});
     writer
         .reply(&refreshed.unwrap(), json!({"result":catalog}))
         .await
@@ -3721,6 +3741,7 @@ async fn selected_invocations_reach_submission_and_return_after_failure() {
     new_chat(&store, &mut reader, &mut writer, "/fixture").await;
     let key = store.snapshot().navigation.draft_key.clone();
     let invocation = Invocation {
+        provider: agent_protocol::session::ProviderKind::Codex,
         kind: InvocationKind::Skill,
         name: "review".into(),
         path: "/fixture/review/SKILL.md".into(),
@@ -3830,14 +3851,14 @@ async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries()
     writer
         .reply(
             &pending["host/account/list"],
-            json!({"result":{"accounts":[]}}),
+            json!({"result":{"accounts":[],"selected":{}}}),
         )
         .await
         .unwrap();
     let model = |provider: &str, id: &str, title: &str| json!({"id":id,"model":{"provider":provider,"id":"same-native-model"},"displayName":title,"defaultReasoningEffort":"","supportedReasoningEfforts":[],"isDefault":false});
-    writer.reply(&pending["model/list"],json!({"result":{"data":[model("codex","shared-entry","Original Codex"),model("claude","shared-entry","Claude")],"nextCursor":"next"}})).await.unwrap();
+    writer.reply(&pending["host/model/list"],json!({"result":{"data":[model("codex","shared-entry","Original Codex"),model("claude","shared-entry","Claude")],"nextCursor":"next"}})).await.unwrap();
     let next = read(&mut reader).await;
-    assert_eq!(next["method"], "model/list");
+    assert_eq!(next["method"], "host/model/list");
     assert_eq!(next["params"]["cursor"], "next");
     writer.reply(&next,json!({"result":{"data":[model("codex","shared-entry","Updated Codex"),model("codex","alias-entry","Codex alias")],"nextCursor":null}})).await.unwrap();
     wait_for(&store, |state| {

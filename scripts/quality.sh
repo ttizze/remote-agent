@@ -12,7 +12,7 @@ if [[ $language == apple || $language == rust ]]; then
     cargo test --locked --features agent-core/bindings -p agent-protocol -p agent-transport -p agent-core -p bex-desktop --lib --bins || failed=1
     cargo test --locked -p agent-cli || failed=1
     cargo build --locked -p bex-process --bin bex-provider-supervisor || failed=1
-    cargo test --locked -p host-daemon -p host-fixture --lib --test iroh_host --test browser_bridge --test management --test codex_accounts || failed=1
+    cargo test --locked -p host-daemon -p host-fixture --lib --test iroh_host --test browser_bridge --test management --test codex_accounts --test claude --test adapter_conformance || failed=1
 fi
 if [[ $language == kotlin ]]; then
     ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt --continue --console=plain || failed=1

@@ -214,44 +214,46 @@ impl Accounts {
         self.save().await
     }
 
+    pub(crate) async fn list(&mut self) -> Result<op::Accounts, String> {
+        self.discover_desktop().await?;
+        let selected = if self.restoration_error.borrow().is_some() {
+            None
+        } else {
+            self.registry.selected_id.as_deref().or_else(|| {
+                self.registry
+                    .accounts
+                    .iter()
+                    .any(|a| a.id == "desktop")
+                    .then_some("desktop")
+            })
+        };
+        Ok(op::Accounts {
+            accounts: self
+                .registry
+                .accounts
+                .iter()
+                .map(|account| op::Account {
+                    id: account.id.clone(),
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    email: account.email.clone(),
+                    plan_type: Some(account.plan_type.clone()),
+                    usage: None,
+                })
+                .collect(),
+            selected: selected
+                .map(|id| (agent_protocol::session::ProviderKind::Codex, id.to_owned()))
+                .into_iter()
+                .collect(),
+            error: self.restoration_error.borrow().clone(),
+        })
+    }
+
     pub(crate) async fn request(
         &mut self,
         primary: &CodexAppServer,
         request: Call,
     ) -> Result<Body, String> {
         match request {
-            Call::ListAccounts(_) => {
-                self.discover_desktop().await?;
-                let selected = if self.restoration_error.borrow().is_some() {
-                    None
-                } else {
-                    self.registry.selected_id.as_deref().or_else(|| {
-                        self.registry
-                            .accounts
-                            .iter()
-                            .any(|a| a.id == "desktop")
-                            .then_some("desktop")
-                    })
-                };
-                Ok(op::Accounts {
-                    accounts: self
-                        .registry
-                        .accounts
-                        .iter()
-                        .map(|account| op::Account {
-                            id: account.id.clone(),
-                            provider: agent_protocol::session::ProviderKind::Codex,
-                            email: account.email.clone(),
-                            plan_type: Some(account.plan_type.clone()),
-                            usage: None,
-                        })
-                        .collect(),
-                    selected_id: selected.map(str::to_owned),
-                    selected_claude_id: None,
-                    error: self.restoration_error.borrow().clone(),
-                }
-                .into())
-            }
             Call::SelectAccount(params) => {
                 self.select(primary, &params.id).await?;
                 Ok(op::AccountSelection {
@@ -342,6 +344,7 @@ impl Accounts {
                     .to_owned();
                 let mut result = result;
                 result["requiresCodeSubmission"] = false.into();
+                result["provider"] = json!(agent_protocol::session::ProviderKind::Codex);
                 let response: AccountLogin = serde_json::from_value(result)
                     .map_err(|_| "ログインを開始できませんでした。")?;
                 self.login = Some(Login {

@@ -58,10 +58,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         codex_home: config.codex_home,
         ..Default::default()
     };
-    let projects = match &app_server_config.codex_home {
-        Some(home) => ProjectStore::new(home.join("bex-worktrees.json")),
-        None => ProjectStore::from_environment().context("cannot locate project state")?,
-    };
+    let projects = ProjectStore::new(directory.join("bex-worktrees.json"));
     let app_server = codex_app_server::CodexAppServer::spawn(app_server_config.clone())
         .await
         .map(Arc::new)
@@ -76,20 +73,22 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         .enable_browser(directory.join("browser"))
         .await
         .map_err(anyhow::Error::msg)?;
-    service
+    if let Err(error) = service
         .enable_claude(
             config.claude,
             account_directory.join("claude"),
             config.claude_home,
         )
         .await
-        .context("cannot enable Claude")?;
-    if app_server.is_ok() {
-        service
+    {
+        tracing::error!(target:"bex", operation="host.claude", message=%error);
+    }
+    if app_server.is_ok()
+        && let Err(error) = service
             .enable_accounts(account_directory.join("codex-accounts"), app_server_config)
             .await
-            .map_err(anyhow::Error::msg)
-            .context("cannot enable Codex accounts")?;
+    {
+        tracing::error!(target:"bex", operation="host.codex.accounts", message=%error);
     }
     service.start();
     let local_ticket = endpoint.local_ticket();

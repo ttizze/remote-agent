@@ -355,7 +355,7 @@ fn worktree_conversation(root: &Path) -> Result<()> {
 }
 
 fn list_fixture(root: &Path, path: &str) -> Result<()> {
-    let projects_path = root.join("projects.json");
+    let projects_path = root.join("bex-projects.json");
     let backup = root.join("projects-before-list-fixture.json");
     let fixture = root.join("list-fixture.json");
     if path.ends_with("/reset") {

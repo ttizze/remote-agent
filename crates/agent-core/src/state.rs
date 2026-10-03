@@ -556,7 +556,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         Intent::EditComposer { thread_id, text, cursor } => {
             let load_catalog = thread_id == previous.navigation.draft_key
                 && previous.connected
-                && previous.composer_query(&text, cursor as usize).is_some_and(|(_, _, filter)| {
+                && crate::composer::query(&text, cursor as usize).is_some_and(|(_, _, filter)| {
                     crate::composer::should_refresh_catalog(
                         previous.composer_catalog.as_ref()
                             .filter(|catalog| catalog.cwd == previous.navigation.cwd)

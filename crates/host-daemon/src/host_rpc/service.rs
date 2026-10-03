@@ -1,5 +1,4 @@
 use agent_protocol::session::ProviderKind;
-use anyhow::Context;
 use std::sync::{Arc, OnceLock};
 
 use agent_protocol::operations as op;
@@ -10,28 +9,25 @@ use agent_protocol::models::Thread;
 
 use agent_protocol::models::ThreadResponse;
 
-use agent_transport::peer::PeerEvent;
-
-use agent_transport::peer::RpcMessage;
-
 use agent_protocol::protocol::{Body, Call, Response};
-use agent_transport::peer::{RpcMessageError, RpcMessageKind};
+use agent_transport::peer::RpcMessageError;
 use codex_app_server::CodexAppServer;
-use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
+use serde::Serialize;
 
-use super::codex::ThreadListParams;
+use super::agent::{Agent, Identity, session_pages};
+use futures_util::{StreamExt, TryStreamExt};
+use std::collections::HashMap;
 
 use super::routing::{HostReply, HostSession, SessionId, SessionRouter};
 use crate::ProjectStore;
 
-#[derive(Debug, Serialize, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, thiserror::Error)]
 #[error("{message}")]
-pub(super) struct Failure {
-    code: &'static str,
-    message: String,
-    delivery: agent_protocol::error::Delivery,
-    pub(super) execution: Option<Box<agent_protocol::execution::ExecutionError>>,
+pub(crate) struct Failure {
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+    pub(crate) delivery: agent_protocol::error::Delivery,
+    pub(crate) execution: Option<Box<agent_protocol::execution::ExecutionError>>,
 }
 impl From<Failure> for agent_protocol::error::RpcFailure {
     fn from(error: Failure) -> Self {
@@ -39,7 +35,7 @@ impl From<Failure> for agent_protocol::error::RpcFailure {
             code: error.code.into(),
             message: error.message,
             delivery: error.delivery,
-            execution: error.execution.map(|execution| *execution),
+            execution: error.execution,
         }
     }
 }
@@ -55,23 +51,12 @@ impl From<serde_json::Error> for Failure {
     }
 }
 
-impl From<crate::claude::OperationError> for Failure {
-    fn from(error: crate::claude::OperationError) -> Self {
-        Self {
-            code: "claude_failed",
-            message: error.message,
-            delivery: error.delivery,
-            execution: None,
-        }
-    }
-}
-
 impl Failure {
-    pub(super) fn before_submission(mut self) -> Self {
+    pub(crate) fn before_submission(mut self) -> Self {
         self.delivery = agent_protocol::error::Delivery::NotSent;
         self
     }
-    pub(super) fn unknown(code: &'static str, error: impl std::fmt::Display) -> Self {
+    pub(crate) fn unknown(code: &'static str, error: impl std::fmt::Display) -> Self {
         Self {
             code,
             message: format!("{error:#}"),
@@ -79,7 +64,7 @@ impl Failure {
             execution: None,
         }
     }
-    pub(super) fn new(code: &'static str, error: impl std::fmt::Display) -> Self {
+    pub(crate) fn new(code: &'static str, error: impl std::fmt::Display) -> Self {
         Self {
             code,
             message: format!("{error:#}"),
@@ -96,14 +81,12 @@ pub struct HostRpcService {
 
 struct ServiceInner {
     browser: OnceLock<Arc<crate::browser::Browser>>,
-    claude: OnceLock<crate::claude::Claude>,
-    accounts: tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>,
-    restoration_error: tokio::sync::watch::Sender<Option<String>>,
-    codex: super::codex::Codex,
+    agents: std::sync::RwLock<HashMap<ProviderKind, Arc<dyn Agent>>>,
+    startup_errors: std::sync::RwLock<HashMap<ProviderKind, Failure>>,
+    codex: Arc<super::codex::Codex>,
     projects: ProjectStore,
-    project_creation: tokio::sync::Mutex<()>,
     router: SessionRouter,
-    event_pump_started: OnceLock<()>,
+    event_pumps: std::sync::Mutex<std::collections::HashSet<ProviderKind>>,
     files: crate::workspace_files::WorkspaceFiles,
     worktrees: crate::worktrees::Worktrees,
     worktree_access: tokio::sync::RwLock<()>,
@@ -117,92 +100,100 @@ impl HostRpcService {
         let files = crate::workspace_files::WorkspaceFiles::new(
             projects.path().with_file_name("bex-attachments"),
         );
+        let adapter = Arc::new(super::codex::Codex::new(codex.clone()));
+        let agents = HashMap::from([(ProviderKind::Codex, adapter.clone() as Arc<dyn Agent>)]);
         Self {
             inner: Arc::new(ServiceInner {
                 browser: OnceLock::new(),
-                claude: OnceLock::new(),
-                accounts: tokio::sync::Mutex::new(None),
-                restoration_error: tokio::sync::watch::channel(None).0,
-                dictation: crate::dictation::Dictation::new(codex.clone()),
-                codex: super::codex::Codex::new(codex),
+                agents: std::sync::RwLock::new(agents),
+                startup_errors: Default::default(),
+                dictation: crate::dictation::Dictation::new(codex),
+                codex: adapter,
                 worktrees: crate::worktrees::Worktrees::new(projects.path()),
                 worktree_access: tokio::sync::RwLock::new(()),
                 permission_settings_access: Default::default(),
                 terminals: Default::default(),
                 projects,
-                project_creation: Default::default(),
                 router: SessionRouter::new(),
-                event_pump_started: OnceLock::new(),
+                event_pumps: Default::default(),
                 files,
             }),
         }
     }
 
-    async fn account_request(
-        &self,
-        request: Call,
-    ) -> Result<agent_protocol::protocol::Body, Failure> {
-        use agent_protocol::protocol::Body;
-        use agent_protocol::session::ProviderKind;
-        let claude_request = match &request {
-            Call::StartAccountLogin(params) => params.provider == ProviderKind::Claude,
-            Call::SelectAccount(params) => params.id.starts_with("claude:"),
-            Call::LogoutAccount(params) => params.id.starts_with("claude:"),
-            Call::ReadAccountLogin(params) => params.id.starts_with("claude:"),
-            Call::CancelAccountLogin(params) => params.id.starts_with("claude:"),
-            Call::SubmitAccountLogin(params) => params.id.starts_with("claude:"),
-            _ => false,
-        };
-        if claude_request {
-            let claude = self.inner.claude.get().ok_or_else(|| {
-                Failure::new("account_unavailable", "Claude が設定されていません。")
-            })?;
-            return claude
-                .accounts
-                .lock()
-                .await
-                .request(request)
-                .await
-                .map_err(|error| Failure::new("account_operation_failed", error));
-        }
-        let listing = matches!(request, Call::ListAccounts(_));
-        let mut accounts = self.inner.accounts.lock().await;
-        let result = match accounts.as_mut() {
-            Some(accounts) => match self.inner.codex.server() {
-                Ok(server) => accounts.request(server, request).await,
-                Err(error) => Err(error.to_string()),
-            },
-            None => Err("Codex のアカウント管理が利用できません。".into()),
-        };
-        drop(accounts);
-        if !listing {
-            return result.map_err(|error| Failure::new("account_operation_failed", error));
-        }
-        let mut result = match result {
-            Ok(Body::Accounts(accounts)) => *accounts,
-            Ok(_) => unreachable!("account listing returns Accounts"),
-            Err(error) => op::Accounts {
+    fn agent(&self, provider: ProviderKind) -> Result<Arc<dyn Agent>, Failure> {
+        self.inner
+            .agents
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&provider)
+            .cloned()
+            .ok_or_else(|| {
+                self.inner
+                    .startup_errors
+                    .read()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(&provider)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        Failure::new(
+                            "provider_unavailable",
+                            format!("{provider:?} is unavailable"),
+                        )
+                    })
+            })
+    }
+
+    fn agents(&self) -> Vec<(ProviderKind, Arc<dyn Agent>)> {
+        let mut agents: Vec<_> = self
+            .inner
+            .agents
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(p, a)| (*p, a.clone()))
+            .collect();
+        agents.sort_by_key(|(p, _)| *p);
+        agents
+    }
+    async fn account_request(&self, request: Call) -> Result<Body, Failure> {
+        if matches!(request, Call::ListAccounts(_)) {
+            let mut combined = op::Accounts {
                 accounts: Vec::new(),
-                selected_id: None,
-                selected_claude_id: None,
-                error: Some(error),
-            },
-        };
-        if let Some(claude) = self.inner.claude.get() {
-            match claude.accounts.lock().await.list().await {
-                Ok((entries, selected)) => {
-                    result.accounts.extend(entries);
-                    result.selected_claude_id = selected;
-                }
-                Err(error) => {
-                    result.error = Some(match result.error {
-                        Some(codex) => format!("{codex}\n{error}"),
-                        None => error,
-                    });
+                selected: HashMap::new(),
+                error: None,
+            };
+            let mut errors = self
+                .inner
+                .startup_errors
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .values()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            for (_, agent) in self.agents() {
+                match Identity::list(agent.as_ref()).await {
+                    Ok(accounts) => {
+                        combined.accounts.extend(accounts.accounts);
+                        combined.selected.extend(accounts.selected);
+                        errors.extend(accounts.error);
+                    }
+                    Err(error) => errors.push(error.to_string()),
                 }
             }
+            combined.error = (!errors.is_empty()).then(|| errors.join("\n"));
+            return Ok(combined.into());
         }
-        Ok(result.into())
+        let provider = match &request {
+            Call::StartAccountLogin(p) => p.provider,
+            Call::SelectAccount(p) => p.provider,
+            Call::LogoutAccount(p) => p.provider,
+            Call::ReadAccountLogin(p) => p.provider,
+            Call::CancelAccountLogin(p) => p.provider,
+            Call::SubmitAccountLogin(p) => p.provider,
+            _ => return Err(Failure::new("invalid_params", "not an account request")),
+        };
+        self.agent(provider)?.login(request).await
     }
 
     pub async fn enable_browser(&self, profile: std::path::PathBuf) -> Result<(), String> {
@@ -230,18 +221,7 @@ impl HostRpcService {
         directory: std::path::PathBuf,
         config: codex_app_server::AppServerConfig,
     ) -> Result<(), String> {
-        let accounts = crate::codex_accounts::Accounts::load(
-            directory,
-            config,
-            self.inner
-                .codex
-                .server()
-                .map_err(|error| error.to_string())?,
-            self.inner.restoration_error.clone(),
-        )
-        .await?;
-        *self.inner.accounts.lock().await = Some(accounts);
-        Ok(())
+        self.inner.codex.enable_accounts(directory, config).await
     }
 
     pub async fn enable_claude(
@@ -254,14 +234,34 @@ impl HostRpcService {
             program,
             directory,
             native_home,
-            self.inner.router.clone(),
             self.inner.browser.get().cloned(),
         )
-        .await?;
-        self.inner
-            .claude
-            .set(claude)
-            .map_err(|_| anyhow::anyhow!("Claude Code is already configured"))
+        .await
+        .inspect_err(|error| {
+            self.inner
+                .startup_errors
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    ProviderKind::Claude,
+                    Failure::new("provider_unavailable", error),
+                );
+        })?;
+        {
+            let mut agents = self.inner.agents.write().unwrap_or_else(|e| e.into_inner());
+            anyhow::ensure!(
+                !agents.contains_key(&ProviderKind::Claude),
+                "Claude Code is already configured"
+            );
+            agents.insert(ProviderKind::Claude, Arc::new(claude));
+            self.inner
+                .startup_errors
+                .write()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&ProviderKind::Claude);
+        }
+        self.start_event_pumps();
+        Ok(())
     }
 
     pub(crate) async fn shutdown_owned_processes(&self) {
@@ -269,8 +269,8 @@ impl HostRpcService {
             browser.shutdown().await;
         }
         self.inner.terminals.shutdown().await;
-        if let Some(claude) = self.inner.claude.get() {
-            claude.shutdown().await;
+        for (_, agent) in self.agents() {
+            agent.shutdown().await;
         }
     }
 
@@ -278,12 +278,12 @@ impl HostRpcService {
         self.inner.terminals.revoke_device(principal);
     }
     pub fn open_session(&self) -> HostSession {
-        self.start_codex_event_pump();
+        self.start_event_pumps();
         self.inner.router.open_session()
     }
 
     pub(crate) fn open_authenticated_session(&self, principal: String) -> HostSession {
-        self.start_codex_event_pump();
+        self.start_event_pumps();
         self.inner
             .router
             .open_authenticated_session(Some(principal))
@@ -296,28 +296,54 @@ impl HostRpcService {
     }
 
     pub(crate) fn data_recipients(&self) -> (Vec<String>, Option<String>) {
-        let mut ai = Vec::new();
-        let transcription = if self.inner.codex.server().is_ok() {
-            ai.push("OpenAI".into());
-            Some("OpenAI".into())
-        } else {
-            None
-        };
-        if self.inner.claude.get().is_some() {
-            ai.push("Anthropic".into());
-        }
-        (ai, transcription)
+        let ai = self
+            .agents()
+            .into_iter()
+            .filter(|(_, a)| a.availability().is_ok())
+            .map(|(p, _)| match p {
+                ProviderKind::Codex => "OpenAI".into(),
+                ProviderKind::Claude => "Anthropic".into(),
+            })
+            .collect();
+        (
+            ai,
+            self.agent(ProviderKind::Codex)
+                .ok()
+                .filter(|a| a.availability().is_ok())
+                .map(|_| "OpenAI".into()),
+        )
     }
-
     pub(crate) fn provider_errors(&self) -> serde_json::Value {
-        match self.inner.codex.server() {
-            Ok(_) => serde_json::json!({}),
-            Err(error) => serde_json::json!({"codex":error}),
-        }
+        let mut errors: serde_json::Map<_, _> = self
+            .agents()
+            .into_iter()
+            .filter_map(|(p, a)| {
+                a.availability().err().map(|e| {
+                    (
+                        provider_key(p),
+                        serde_json::to_value(e).expect("failure serializes"),
+                    )
+                })
+            })
+            .collect();
+        errors.extend(
+            self.inner
+                .startup_errors
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|(provider, error)| {
+                    (
+                        provider_key(*provider),
+                        serde_json::to_value(error).expect("failure serializes"),
+                    )
+                }),
+        );
+        serde_json::Value::Object(errors)
     }
 
     pub fn start(&self) {
-        self.start_codex_event_pump();
+        self.start_event_pumps();
     }
 
     /// Dispatch a classified message from an authenticated session.
@@ -413,124 +439,68 @@ impl HostRpcService {
                 "別のプロバイダーのモデルを使う場合は新しい会話を作成してください。",
             ));
         }
-        if target.provider == ProviderKind::Codex
-            && let Some(error) = self.inner.restoration_error.borrow().as_ref()
-        {
-            return Err(Failure::new("account_unavailable", error));
+        let agent = self.agent(target.provider)?;
+        agent.availability()?;
+        let state = agent.state(&target.id).await?;
+        let mut response = state.response;
+        if response.thread.id.as_ref() != Some(target) {
+            return Err(Failure::new(
+                "invalid_session",
+                "native session identity changed",
+            ));
         }
-        let claude = if target.provider == ProviderKind::Claude {
+        let workspace = if let Some(cwd) = response.thread.cwd.as_deref() {
             Some(
-                self.inner
-                    .claude
-                    .get()
-                    .ok_or_else(|| Failure::new("claude_unavailable", "Claude is unavailable"))?,
+                tokio::fs::canonicalize(cwd)
+                    .await
+                    .unwrap_or_else(|_| cwd.into()),
             )
         } else {
             None
         };
-        // Loaded state is native routing evidence; it is not a BEX session status.
-        let (mut response, requires_resume) = match claude {
-            Some(claude) => (
-                claude
-                    .read(&target.id, 1)
-                    .await
-                    .map_err(|e| Failure::new("session_read_failed", e))?,
-                false,
-            ),
-            None => self.inner.codex.submission_state(&target.id).await?,
-        };
-        if response.thread.id.as_ref() != Some(target) {
-            return Err(Failure::new(
-                "invalid_thread",
-                "native session identity changed",
-            ));
-        }
+        self.inner.router.execution_workspace(
+            target,
+            workspace
+                .as_deref()
+                .and_then(|path| dunce::simplified(path).to_str()),
+        );
         self.inner.router.overlay_execution(target, &mut response);
-        use super::submission::{SubmissionTarget, submission_target};
-        let route = submission_target(
-            response.thread.status,
-            response.thread.turns.as_deref().unwrap_or_default(),
-            response.thread.cwd.as_deref(),
-        )
-        .map_err(|error| Failure::new("submission_unavailable", error))?;
-        let turn_id = match route {
-            SubmissionTarget::Steer(turn_id) => {
-                if let Some(claude) = claude {
-                    claude
-                        .additional_input(
-                            &target.id,
-                            Some(turn_id),
-                            &input.input,
-                            &input.client_user_message_id,
-                        )
-                        .await
-                        .map_err(Failure::from)?;
-                } else {
-                    self.inner
-                        .codex
-                        .steer(
-                            &target.id,
-                            turn_id,
-                            &input.client_user_message_id,
-                            &input.input,
-                        )
-                        .await?;
-                }
-                Some(turn_id.into())
+        let running_turn = response
+            .thread
+            .turns
+            .iter()
+            .flatten()
+            .rev()
+            .find(|t| {
+                t.status == agent_protocol::models::TurnStatus::Running && !t.id.trim().is_empty()
+            })
+            .map(|t| t.id.clone());
+        let routing_state = agent.session_state(response.thread.status, running_turn);
+        let route =
+            super::submission::submission_target(&routing_state, response.thread.cwd.as_deref())
+                .map_err(|e| Failure::new("submission_unavailable", e))?;
+        let mut reload = state.needs_reload;
+        if let super::submission::SubmissionTarget::Start { cwd } = route
+            && let Some(directory) = self
+                .inner
+                .worktrees
+                .ensure_available(cwd)
+                .await
+                .map_err(|e| Failure::new("worktree_creation_failed", e))?
+        {
+            for (_, adapter) in self.agents() {
+                adapter.discard_workspace_processes(&directory).await?;
             }
-            SubmissionTarget::Queue => {
-                if let Some(claude) = claude {
-                    claude
-                        .additional_input(
-                            &target.id,
-                            None,
-                            &input.input,
-                            &input.client_user_message_id,
-                        )
-                        .await
-                        .map_err(Failure::from)?;
-                } else {
-                    self.inner
-                        .codex
-                        .queue_input(&target.id, &input.client_user_message_id, &input.input)
-                        .await?;
-                }
-                None
-            }
-            SubmissionTarget::Start { cwd } => {
-                let recreated = self
-                    .inner
-                    .worktrees
-                    .ensure_available(cwd)
-                    .await
-                    .map_err(|error| Failure::new("worktree_creation_failed", error))?;
-                if let Some(directory) = &recreated
-                    && let Some(claude) = self.inner.claude.get()
-                {
-                    claude
-                        .discard_workspace_processes(directory)
-                        .await
-                        .map_err(|error| Failure::new("workspace_resume_failed", error))?;
-                }
-                Some(if let Some(claude) = claude {
-                    claude
-                        .start_turn(&target.id, input)
-                        .await
-                        .map_err(Failure::from)?
-                } else {
-                    self.inner
-                        .codex
-                        .start_turn(
-                            input,
-                            cwd,
-                            requires_resume || recreated.is_some(),
-                            self.browser_config(&target.to_string())?,
-                        )
-                        .await?
-                })
-            }
-        };
-        Ok(op::SubmissionReceipt { turn_id })
+            reload = true;
+        }
+        agent
+            .submit(
+                input,
+                route,
+                reload,
+                self.browser_config(&target.to_string())?,
+            )
+            .await
     }
 
     async fn answer_request(
@@ -539,7 +509,6 @@ impl HostRpcService {
         id: agent_protocol::ids::RequestId,
         answer: agent_protocol::requests::Answer,
     ) -> Result<agent_protocol::models::Empty, Failure> {
-        use super::requests::RequestDestination;
         use agent_protocol::session::RequestDelivery;
         let (origin, result) = self
             .inner
@@ -550,54 +519,10 @@ impl HostRpcService {
         let mut delivery = scopeguard::guard((id, RequestDelivery::Awaiting), |(id, state)| {
             self.inner.router.response_delivery(&id, state)
         });
-        match origin.destination {
-            RequestDestination::Claude { input } => {
-                let request_id = origin.native_id.as_str().ok_or_else(|| {
-                    Failure::new("invalid_answer", "Claude request ID must be a string")
-                })?;
-                let permit = input
-                    .reserve()
-                    .await
-                    .map_err(|_| Failure::new("answer_not_sent", "Claude Code input is closed"))?;
-                let (delivered, receipt) = tokio::sync::oneshot::channel();
-                delivery.1 = RequestDelivery::Unknown;
-                permit.send(crate::claude::Command {
-                    value: serde_json::json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}),
-                    user: None,
-                    delivered: Some(delivered),
-                });
-                tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
-                    .await
-                    .map_err(|_| "Claude answer delivery timed out".to_owned())
-                    .and_then(|receipt| {
-                        receipt.map_err(|_| {
-                            "Claude exited before confirming the answer write".to_owned()
-                        })
-                    })
-                    .flatten()
-                    .map_err(|error| Failure::unknown("answer_delivery_unknown", error))?;
-            }
-            RequestDestination::Codex { .. } => {
-                let codex = self
-                    .inner
-                    .codex
-                    .server()
-                    .map_err(|error| Failure::new("answer_not_sent", error))?;
-                if origin.instance != self.inner.codex.instance {
-                    return Err(Failure::new(
-                        "answer_not_sent",
-                        "request source has changed",
-                    ));
-                }
-                delivery.1 = RequestDelivery::Unknown;
-                codex
-                    .send_raw(
-                        &serde_json::json!({"id":origin.native_id,"result":result}).to_string(),
-                    )
-                    .await
-                    .map_err(|error| Failure::unknown("answer_delivery_unknown", error))?;
-            }
-        }
+        let provider = origin.provider();
+        let write = self.agent(provider)?.answer(origin, result).await?;
+        delivery.1 = RequestDelivery::Unknown;
+        write.await?;
         delivery.1 = RequestDelivery::Sent;
         Ok(agent_protocol::models::Empty {})
     }
@@ -612,9 +537,7 @@ impl HostRpcService {
                 anyhow::bail!("invalid session reference or zero history limit");
             }
             let target = params.session.clone();
-            if target.provider == agent_protocol::session::ProviderKind::Codex {
-                self.inner.codex.server()?;
-            }
+            let agent = self.agent(target.provider)?;
             let limit = params.limit;
             let read = self
                 .inner
@@ -622,26 +545,14 @@ impl HostRpcService {
                 .retain_execution(target.clone())
                 .map_err(anyhow::Error::msg)?;
             let started = std::time::Instant::now();
-            let mut response = match target.provider {
-                agent_protocol::session::ProviderKind::Claude => {
-                    self.inner
-                        .claude
-                        .get()
-                        .context("Claude is unavailable")?
-                        .read(&target.id, limit)
-                        .await?
-                }
-                agent_protocol::session::ProviderKind::Codex => {
-                    self.inner.codex.read(&target.id, limit).await?
-                }
-            };
+            let mut response = agent.open(&target.id, limit).await?;
             let native_ms = started.elapsed().as_millis();
             if response.thread.id.as_ref() != Some(&target) {
                 return Err(anyhow::anyhow!("native session identity changed"));
             }
             describe_thread(
                 &mut response.thread,
-                target.provider,
+                agent.capabilities(),
                 &self.project_snapshot().await?,
             );
             let project_ms = started.elapsed().as_millis() - native_ms;
@@ -706,23 +617,8 @@ impl HostRpcService {
                 item: Arc::unwrap_or_clone(item),
                 transfer: None,
             }
-        } else if target.provider == agent_protocol::session::ProviderKind::Claude {
-            let claude = self
-                .inner
-                .claude
-                .get()
-                .ok_or_else(|| Failure::new("claude_unavailable", "Claude is unavailable"))?;
-            claude
-                .read_item(&target.id, params)
-                .await
-                .map_err(|error| Failure::new("item_read_failed", error))?
         } else {
-            let params = op::ReadItem {
-                thread_id: target.clone(),
-                turn_id: params.turn_id.clone(),
-                item_id: params.item_id.clone(),
-            };
-            self.inner.codex.item_read(params).await?
+            self.agent(target.provider)?.read_item(params).await?
         };
         let bytes = agent_protocol::protocol::encode(&response.item).expect("item serializes");
         if bytes.len() > agent_protocol::models::MAX_INLINE_ITEM_BYTES {
@@ -768,7 +664,7 @@ impl HostRpcService {
                 .map(Into::into);
         }
         if let Some(target) = target_session {
-            let capabilities = provider_capabilities(target.provider);
+            let capabilities = self.agent(target.provider)?.capabilities();
             if matches!(request, Call::ForkSession(_)) && !capabilities.fork
                 || matches!(request, Call::RenameSession(_)) && !capabilities.rename
             {
@@ -777,97 +673,56 @@ impl HostRpcService {
                     format!("{method} is unsupported by this provider"),
                 ));
             }
-            if target.provider == ProviderKind::Claude {
-                let claude =
-                    self.inner.claude.get().ok_or_else(|| {
-                        Failure::new("claude_unavailable", "Claude is unavailable")
-                    })?;
-                return match request {
-                    Call::Interrupt(params) => claude
-                        .interrupt(&target.id, &params.turn_id)
-                        .await
-                        .map(|()| agent_protocol::models::Empty {}.into())
-                        .map_err(Failure::from),
-                    _ => Err(Failure::new(
-                        "unsupported_operation",
-                        format!("{method} is unsupported by this provider"),
-                    )),
-                };
-            }
         }
         let response = match request {
             Call::ReadPermissionSettings(params) => {
                 let _guard = self.inner.permission_settings_access.lock().await;
-                match params.provider {
-                    ProviderKind::Codex => self.inner.codex.read_permissions().await?,
-                    ProviderKind::Claude => super::permissions::read_claude_permissions(
-                        self.inner
-                            .claude
-                            .get()
-                            .ok_or_else(|| {
-                                Failure::new("claude_unavailable", "Claude が設定されていません。")
-                            })?
-                            .storage_directory(),
-                    )?,
-                }
-                .into()
+                self.agent(params.provider)?
+                    .read_permissions()
+                    .await?
+                    .into()
             }
             Call::UpdatePermissionSettings(params) => {
                 let _guard = self.inner.permission_settings_access.lock().await;
-                match params.provider {
-                    ProviderKind::Codex => {
-                        self.inner
-                            .codex
-                            .update_permissions(params.mode, &params.version)
-                            .await?
-                    }
-                    ProviderKind::Claude => super::permissions::update_claude_permissions(
-                        self.inner
-                            .claude
-                            .get()
-                            .ok_or_else(|| {
-                                Failure::new("claude_unavailable", "Claude が設定されていません。")
-                            })?
-                            .storage_directory(),
-                        params.mode,
-                        &params.version,
-                    )?,
-                }
-                .into()
+                self.agent(params.provider)?
+                    .update_permissions(params.mode, &params.version)
+                    .await?
+                    .into()
             }
             Call::ComposerCatalog(params) => {
-                self.inner.codex.composer_catalog(&params.cwd).await.into()
+                let cwd = params.cwd.as_str();
+                let results = futures_util::future::join_all(
+                    self.agents()
+                        .into_iter()
+                        .map(|(_, agent)| async move { agent.catalog(cwd).await }),
+                )
+                .await;
+                let mut catalog = agent_protocol::composer::ComposerCatalog {
+                    cwd: params.cwd.clone(),
+                    ..Default::default()
+                };
+                for (provider, error) in self.inner.startup_errors.read().unwrap().iter() {
+                    catalog.errors.insert(*provider, vec![error.to_string()]);
+                }
+                for result in results {
+                    catalog.candidates.extend(result.candidates);
+                    catalog.errors.extend(result.errors);
+                }
+                catalog.candidates.sort_by(|a, b| {
+                    a.invocation
+                        .name
+                        .to_lowercase()
+                        .cmp(&b.invocation.name.to_lowercase())
+                        .then(a.invocation.path.cmp(&b.invocation.path))
+                        .then(a.invocation.provider.cmp(&b.invocation.provider))
+                });
+                catalog
+                    .candidates
+                    .dedup_by(|a, b| a.invocation == b.invocation);
+                catalog.into()
             }
             Call::ReadAccountUsage(params) => {
-                let usage = if params.id.starts_with("claude:") {
-                    let claude = self.inner.claude.get().ok_or_else(|| {
-                        Failure::new("account_unavailable", "Claude が設定されていません。")
-                    })?;
-                    let fetch = claude
-                        .accounts
-                        .lock()
-                        .await
-                        .usage_request(&params.id)
-                        .map_err(|error| Failure::new("account_operation_failed", error))?;
-                    fetch.await
-                } else {
-                    let fetch = self
-                        .inner
-                        .accounts
-                        .lock()
-                        .await
-                        .as_mut()
-                        .ok_or_else(|| {
-                            Failure::new(
-                                "account_unavailable",
-                                "Codex のアカウント管理が利用できません。",
-                            )
-                        })?
-                        .usage_request(&params.id)
-                        .map_err(|error| Failure::new("account_operation_failed", error))?;
-                    fetch.await
-                };
-                usage.into()
+                self.agent(params.provider)?.usage(&params.id).await?.into()
             }
             Call::ListAccounts(_)
             | Call::SelectAccount(_)
@@ -878,40 +733,62 @@ impl HostRpcService {
             | Call::CancelAccountLogin(_) => self.account_request(request.clone()).await?,
 
             Call::ListModels(params) => {
-                let first_page = params.cursor.is_none();
-                let (codex, claude) = tokio::join!(self.inner.codex.models(params), async {
-                    if first_page && let Some(claude) = self.inner.claude.get() {
-                        claude.models().await
-                    } else {
-                        Ok(Vec::new())
-                    }
-                });
-                let mut page = codex.unwrap_or_else(|error| op::ModelPage {
+                let cursors: std::collections::BTreeMap<ProviderKind, Option<String>> = params
+                    .cursor
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()?
+                    .unwrap_or_else(|| self.agents().into_iter().map(|(p, _)| (p, None)).collect());
+                let mut page = op::ModelPage {
                     data: Vec::new(),
                     next_cursor: None,
-                    provider_errors: Some(serde_json::Map::from_iter([(
-                        "codex".into(),
-                        serde_json::to_value(error).expect("Failure serializes"),
-                    )])),
-                });
-                match claude {
-                    Ok(models) => page.data.extend(models),
-                    Err(error) => {
-                        let errors = page.provider_errors.get_or_insert_default();
-                        errors.insert(
-                            "claude".into(),
-                            serde_json::json!({"message":format!("{error:#}")}),
-                        );
+                    provider_errors: if params.cursor.is_none() {
+                        self.provider_errors()
+                            .as_object()
+                            .filter(|errors| !errors.is_empty())
+                            .cloned()
+                    } else {
+                        None
+                    },
+                };
+                let mut next = std::collections::BTreeMap::new();
+                for (provider, cursor) in cursors {
+                    let result = match self.agent(provider) {
+                        Ok(agent) => {
+                            agent
+                                .models(&op::ListModels {
+                                    cursor,
+                                    ..params.clone()
+                                })
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(result) => {
+                            page.data.extend(result.data);
+                            if let Some(cursor) = result.next_cursor {
+                                next.insert(provider, Some(cursor));
+                            }
+                        }
+                        Err(error) => {
+                            page.provider_errors
+                                .get_or_insert_default()
+                                .insert(provider_key(provider), serde_json::to_value(error)?);
+                        }
                     }
                 }
-                if first_page && page.data.is_empty() && page.provider_errors.is_some() {
+                if !next.is_empty() {
+                    page.next_cursor = Some(serde_json::to_string(&next)?);
+                }
+                if params.cursor.is_none() && page.data.is_empty() && page.provider_errors.is_some()
+                {
                     return Err(Failure::new(
                         "models_unavailable",
                         serde_json::to_value(&page.provider_errors)?,
                     ));
-                } else {
-                    page.into()
                 }
+                page.into()
             }
 
             Call::RequestSession(params) => (self
@@ -924,14 +801,17 @@ impl HostRpcService {
             .into(),
             Call::SessionScope(_) => {
                 let started = std::time::Instant::now();
-                let codex = self
-                    .inner
-                    .projects
-                    .path()
-                    .parent()
-                    .unwrap_or_else(|| std::path::Path::new("."));
-                let path = canonical_storage_path;
-                let areas = serde_json::json!({"codex":path(codex),"claude":self.inner.claude.get().map(|claude| path(claude.storage_directory()))});
+                let areas: std::collections::BTreeMap<_, _> = self
+                    .agents()
+                    .into_iter()
+                    .map(|(p, a)| {
+                        (
+                            provider_key(p),
+                            canonical_storage_path(a.storage_directory()),
+                        )
+                    })
+                    .collect();
+                let areas = serde_json::to_value(areas)?;
                 let digest =
                     ring::digest::digest(&ring::digest::SHA256, areas.to_string().as_bytes());
                 let scope: String = digest
@@ -957,7 +837,9 @@ impl HostRpcService {
                 .await?)
                 .into(),
             Call::AddProject(params) => (self
-                .add_project(&params.cwd)
+                .inner
+                .projects
+                .register(std::path::Path::new(&params.cwd))
                 .await
                 .map_err(|error| Failure::new("project_add_failed", error))?)
             .into(),
@@ -1038,10 +920,9 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("file_operation_failed", error))?,
             Call::ForkSession(params) => {
                 let target = target_session.expect("session-scoped fork");
+                let agent = self.agent(target.provider)?;
                 let scope = uuid::Uuid::new_v4().to_string();
-                let mut response = self
-                    .inner
-                    .codex
+                let mut response = agent
                     .fork(
                         &target.id,
                         &params.last_turn_id,
@@ -1056,29 +937,25 @@ impl HostRpcService {
                 }
                 describe_thread(
                     &mut response.thread,
-                    ProviderKind::Codex,
+                    agent.capabilities(),
                     &self.project_snapshot().await?,
                 );
                 response.into()
             }
-            Call::Interrupt(params) => self
-                .inner
-                .codex
-                .interrupt(
-                    &target_session.expect("session-scoped interrupt").id,
-                    &params.turn_id,
-                )
-                .await?
-                .into(),
-            Call::RenameSession(params) => self
-                .inner
-                .codex
-                .rename(
-                    &target_session.expect("session-scoped rename").id,
-                    &params.name,
-                )
-                .await?
-                .into(),
+            Call::Interrupt(params) => {
+                let target = target_session.expect("session-scoped interrupt");
+                self.agent(target.provider)?
+                    .interrupt(&target.id, &params.turn_id)
+                    .await?
+                    .into()
+            }
+            Call::RenameSession(params) => {
+                let target = target_session.expect("session-scoped rename");
+                self.agent(target.provider)?
+                    .rename(&target.id, &params.name)
+                    .await?
+                    .into()
+            }
             _ => {
                 return Err(Failure::new(
                     "method_not_found",
@@ -1103,45 +980,57 @@ impl HostRpcService {
         if worktrees.is_empty() {
             return Ok(worktrees);
         }
-        let mut params = ThreadListParams {
-            limit: 100,
-            sort_key: "updated_at",
-            sort_direction: "desc",
-            use_state_db_only: true,
-            search_term: None,
-            cursor: None,
-        };
-        let mut cursors = std::collections::HashSet::new();
-        let mut threads = match self.inner.claude.get() {
-            Some(claude) => claude
-                .list("")
-                .await
-                .map_err(|error| Failure::new("claude_history_unavailable", error))?,
-            None => Vec::new(),
-        };
-        loop {
-            let page = match self.inner.codex.thread_page(&params).await {
-                Ok(page) => page,
-                Err(error) => {
-                    for worktree in &mut worktrees {
-                        worktree.blocked_reason = Some(format!(
-                            "Codexの稼働状況を確認できないため削除できません: {error}"
-                        ));
-                    }
-                    break;
-                }
-            };
-            threads.extend(page.data);
-            params.cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
-            let Some(cursor) = &params.cursor else {
-                break;
-            };
-            if !cursors.insert(cursor.clone()) {
-                return Err(Failure::new(
-                    "invalid_thread_list",
-                    "thread list cursor repeated",
-                ));
+        for error in self
+            .inner
+            .startup_errors
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+        {
+            for worktree in &mut worktrees {
+                worktree.blocked_reason =
+                    Some(format!("稼働状況を確認できないため削除できません: {error}"));
             }
+        }
+        let mut threads = Vec::new();
+        let agents = self.agents();
+        for (_, agent) in &agents {
+            let pages = session_pages(agent.as_ref(), "");
+            futures_util::pin_mut!(pages);
+            while let Some(result) = pages.next().await {
+                match result {
+                    Ok(page) => threads.extend(page),
+                    Err(error) if error.code == "invalid_session_list" => return Err(error),
+                    Err(error) => {
+                        for w in &mut worktrees {
+                            w.blocked_reason =
+                                Some(format!("稼働状況を確認できないため削除できません: {error}"));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        let mut active_sessions = std::collections::HashSet::new();
+        for worktree in &mut worktrees {
+            let directory = std::path::Path::new(&worktree.path);
+            let mut active = self.inner.router.active_sessions_in(directory);
+            for (_, agent) in &agents {
+                match agent.active_sessions_in(directory).await {
+                    Ok(sessions) => active.extend(sessions),
+                    Err(error) => {
+                        worktree.blocked_reason =
+                            Some(format!("稼働状況を確認できないため削除できません: {error}"))
+                    }
+                }
+            }
+            if !active.is_empty() {
+                worktree.blocked_reason = Some(
+                    "このワークツリーで作業を実行中です。完了または停止してから削除してください。"
+                        .into(),
+                );
+            }
+            active_sessions.extend(active);
         }
         for thread in threads {
             let Some(cwd) = thread.cwd.as_deref() else {
@@ -1155,10 +1044,10 @@ impl HostRpcService {
                 if !cwd.starts_with(&worktree.path) {
                     continue;
                 }
-                let active = thread.status == agent_protocol::models::SessionStatus::Running;
-                if active {
-                    worktree.blocked_reason = Some("このワークツリーで作業を実行中です。完了または停止してから削除してください。".into());
-                }
+                let active = thread
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| active_sessions.contains(id));
                 if let Some(id) = &thread.id {
                     worktree
                         .threads
@@ -1215,148 +1104,81 @@ impl HostRpcService {
     }
 
     async fn project_snapshot(&self) -> Result<crate::projects::state::Snapshot, Failure> {
-        let projects = if self.inner.codex.server().is_ok() {
-            Some(self.inner.codex.projects().await?)
-        } else {
-            None
-        };
         self.inner
             .projects
-            .load(projects)
+            .load()
             .await
             .map_err(|error| Failure::new("project_state_unavailable", error))
-    }
-
-    async fn add_project(&self, cwd: &str) -> anyhow::Result<String> {
-        anyhow::ensure!(
-            std::path::Path::new(cwd).is_absolute(),
-            "project directory must be absolute"
-        );
-        let root = dunce::simplified(&tokio::fs::canonicalize(cwd).await?).to_owned();
-        anyhow::ensure!(
-            tokio::fs::metadata(&root).await?.is_dir(),
-            "project path must be a directory"
-        );
-        let _registration = self.inner.project_creation.lock().await;
-        if !self.project_snapshot().await?.has_root(&root) {
-            self.inner.codex.create_project(&root).await?;
-        }
-        root.into_os_string()
-            .into_string()
-            .map_err(|_| anyhow::anyhow!("project path is not UTF-8"))
     }
 
     async fn host_title_list(
         &self,
         query: ListQuery,
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
-        let mut params = ThreadListParams {
-            limit: 100,
-            sort_key: "updated_at",
-            sort_direction: "desc",
-            use_state_db_only: true,
-            search_term: (!query.search_term.trim().is_empty())
-                .then_some(query.search_term.as_str()),
-            cursor: None,
-        };
-        let claude_listing = async {
-            match self.inner.claude.get() {
-                Some(claude) => claude.list(&query.search_term).await,
-                None => Ok(Vec::new()),
-            }
-        };
-        // Membership is needed to assemble the list, not to fetch provider metadata.
-        // Start all reads together so opening the app does not pay their latency in series.
-        let (snapshot, (claude_result, codex_result)) =
-            tokio::try_join!(self.project_snapshot(), async {
-                Ok(tokio::join!(
-                    tokio::time::timeout(std::time::Duration::from_secs(5), claude_listing),
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        self.inner.codex.thread_page(&params)
-                    ),
-                ))
-            })?;
+        let search = query.search_term.as_str();
+        let (snapshot, listings) = tokio::join!(
+            self.project_snapshot(),
+            futures_util::future::join_all(self.agents().into_iter().map(|(provider, agent)| {
+                async move {
+                    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        session_pages(agent.as_ref(), search)
+                            .try_fold(Vec::new(), |mut threads, page| async move {
+                                threads.extend(page);
+                                Ok(threads)
+                            })
+                            .await
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(Failure::new(
+                            "provider_timeout",
+                            "session listing timed out; results are partial",
+                        ))
+                    });
+                    (provider, agent.capabilities(), result)
+                }
+            }))
+        );
+        let snapshot = snapshot?;
         let mut titles = crate::projects::titles::TitleList::new(&snapshot.projects, &query);
-        let mut provider_errors = serde_json::Map::new();
-        let mut claude_threads = match claude_result.unwrap_or_else(|_| {
-            Err(anyhow::anyhow!(
-                "Claude listing timed out; results are partial"
-            ))
-        }) {
-            Ok(threads) => threads,
-            Err(error) => {
-                provider_errors.insert(
-                    "claude".into(),
-                    serde_json::json!({"message":format!("{error:#}")}),
-                );
-                Vec::new()
+        let mut provider_errors = self
+            .provider_errors()
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        let mut successful = 0;
+        let mut threads = Vec::new();
+        for (provider, capabilities, result) in listings {
+            match result {
+                Ok(data) => {
+                    successful += 1;
+                    threads.extend(data.into_iter().map(|mut t| {
+                        describe_thread(&mut t, capabilities, &snapshot);
+                        t
+                    }));
+                }
+                Err(error) => {
+                    provider_errors.insert(provider_key(provider), serde_json::to_value(error)?);
+                }
             }
         }
-        .into_iter()
-        .peekable();
-        let mut first_page = Some(codex_result.unwrap_or_else(|_| {
-            Err(Failure::new(
-                "provider_timeout",
-                "Codex listing timed out; results are partial",
-            ))
-        }));
-        let mut cursors = std::collections::HashSet::new();
-        loop {
-            // DB metadata avoids scanning or repairing the rollout. Every page
-            // uses one Desktop snapshot and the same membership decisions.
-            let result = match first_page.take() {
-                Some(result) => result,
-                None => self.inner.codex.thread_page(&params).await,
-            };
-            let page = match result {
-                Ok(page) => page,
-                Err(error) if self.inner.claude.get().is_some() => {
-                    provider_errors.insert(
-                        "codex".into(),
-                        serde_json::to_value(error).expect("Failure serializes"),
-                    );
-                    break;
-                }
-                Err(error) => return Err(error),
-            };
-            for mut thread in page.data {
-                describe_thread(
-                    &mut thread,
-                    agent_protocol::session::ProviderKind::Codex,
-                    &snapshot,
-                );
-                while claude_threads.peek().is_some_and(|claude| {
-                    crate::claude::updated_at(claude) >= crate::claude::updated_at(&thread)
-                }) {
-                    let mut claude = claude_threads.next().unwrap();
-                    describe_thread(
-                        &mut claude,
-                        agent_protocol::session::ProviderKind::Claude,
-                        &snapshot,
-                    );
-                    titles.push(claude);
-                }
-                titles.push(thread);
-            }
-            params.cursor = page.next_cursor.filter(|cursor| !cursor.is_empty());
-            if titles.complete() || params.cursor.is_none() {
+        if successful == 0 && !provider_errors.is_empty() {
+            return Err(Failure::new(
+                "sessions_unavailable",
+                serde_json::to_value(provider_errors)?,
+            ));
+        }
+        threads.sort_by(|a, b| {
+            b.updated_at
+                .unwrap_or_default()
+                .total_cmp(&a.updated_at.unwrap_or_default())
+                .then(a.id.cmp(&b.id))
+        });
+        for thread in threads {
+            titles.push(thread);
+            if titles.complete() {
                 break;
             }
-            if !cursors.insert(params.cursor.as_ref().unwrap().clone()) {
-                return Err(Failure::new(
-                    "invalid_thread_list",
-                    "thread list cursor repeated",
-                ));
-            }
-        }
-        for mut thread in claude_threads {
-            describe_thread(
-                &mut thread,
-                agent_protocol::session::ProviderKind::Claude,
-                &snapshot,
-            );
-            titles.push(thread);
         }
         let mut page = titles.finish();
         let merged = crate::worktrees::merged_directories(
@@ -1392,17 +1214,8 @@ impl HostRpcService {
                 "model must name a model of the requested provider",
             ));
         }
-        if provider == agent_protocol::session::ProviderKind::Codex {
-            self.inner.codex.server()?;
-        }
-        let project_id = if let Some(cwd) = params.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
-            self.project_snapshot()
-                .await?
-                .project_for_workspace(cwd)
-                .map(str::to_owned)
-        } else {
-            None
-        };
+        let agent = self.agent(provider)?;
+        agent.validate_create()?;
         // A missing selection must not inherit the App Server's checkout.
         // Keep the real cwd on the thread; project enrichment identifies
         // this persisted location as a chat even after a Host restart.
@@ -1433,158 +1246,49 @@ impl HostRpcService {
                 Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
             }
         }
-        let mut response = if provider == agent_protocol::session::ProviderKind::Claude {
-            let claude = self.inner.claude.get().ok_or_else(|| {
-                Failure::new(
-                    "claude_unavailable",
-                    "このHostではClaude Codeが有効になっていません。",
-                )
-            })?;
-            let model = params
-                .model
-                .as_ref()
-                .map_or("default", |model| model.id.as_str());
-            claude
-                .create(params.cwd.as_deref().unwrap_or_default(), model)
-                .await
-                .map_err(|error| Failure::new("claude_unavailable", error))?
-        } else {
-            let scope = uuid::Uuid::new_v4().to_string();
-            let response = self
-                .inner
-                .codex
-                .create(
-                    params.cwd.as_deref(),
-                    params.model.as_ref().map(|model| model.id.as_str()),
-                    project_id.as_deref(),
-                    self.browser_config(&scope)?,
-                )
-                .await?;
-            if let Some(browser) = self.inner.browser.get()
-                && let Some(id) = &response.thread.id
-            {
-                browser.bind_scope(scope, id.to_string()).await;
-            }
-            response
-        };
+        let scope = uuid::Uuid::new_v4().to_string();
+        let mut response = agent
+            .create(
+                params.cwd.as_deref().unwrap_or_default(),
+                params.model.as_ref().map(|m| m.id.as_str()),
+                self.browser_config(&scope)?,
+            )
+            .await?;
+        if let Some(browser) = self.inner.browser.get()
+            && let Some(id) = &response.thread.id
+        {
+            browser.bind_scope(scope, id.to_string()).await;
+        }
         describe_thread(
             &mut response.thread,
-            provider,
+            agent.capabilities(),
             &self.project_snapshot().await?,
         );
         Ok(response)
     }
 
-    fn start_codex_event_pump(&self) {
-        if self.inner.event_pump_started.set(()).is_err() {
-            return;
-        }
-        // Subscribe before spawning the pump. Otherwise Codex can emit a
-        // server request in the scheduling gap and it would be lost before
-        // there is a receiver to retain it for the next phone.
-        let Ok(codex) = &self.inner.codex.process else {
-            return;
-        };
-        let mut events = codex.subscribe();
-        let router = self.inner.router.clone();
-        let stopped = self.inner.codex.stopped.clone();
-        let instance = self.inner.codex.instance;
-        let processed = self.inner.codex.processed.clone();
-        let inner = Arc::downgrade(&self.inner);
-        tokio::spawn(async move {
-            loop {
-                match events.recv().await {
-                    Ok(PeerEvent::Message(message)) => {
-                        let sequence = message.sequence;
-                        let _processed = scopeguard::guard(sequence, |sequence| {
-                            processed.send_replace(sequence);
-                        });
-                        let line = message.value;
-                        let Ok(request) = RpcMessage::parse(&line) else {
-                            continue;
-                        };
-                        if request.kind() == RpcMessageKind::Request
-                            && request.method() == Some("account/chatgptAuthTokens/refresh")
-                        {
-                            let Some(inner) = inner.upgrade() else {
-                                return;
-                            };
-                            tokio::spawn(async move {
-                                #[derive(Deserialize)]
-                                #[serde(rename_all = "camelCase")]
-                                struct Refresh<'a> {
-                                    previous_account_id: Option<&'a str>,
-                                }
-                                let Ok(request) = RpcMessage::parse(&line) else {
-                                    return;
-                                };
-                                let Ok(params) = request.params::<Refresh>() else {
-                                    return;
-                                };
-                                let mut accounts = inner.accounts.lock().await;
-                                let result = match accounts.as_mut() {
-                                    Some(accounts) => {
-                                        accounts.refresh(params.previous_account_id).await
-                                    }
-                                    None => Err("アカウントを選択してください。".into()),
-                                };
-                                let response = match result {
-                                    Ok(result) => request.response::<_, ()>(Ok(result)),
-                                    Err(error) => request.error(-32000, &error),
-                                };
-                                let Ok(response) = response else {
-                                    return;
-                                };
-                                let line = zeroize::Zeroizing::new(response);
-                                if let Ok(codex) = &inner.codex.process {
-                                    let _ = codex.send_raw(&line).await;
-                                }
-                            });
-                        } else if request.kind() == RpcMessageKind::Request {
-                            let admission = serde_json::from_str(&line)
-                                .map_err(|error| error.to_string())
-                                .and_then(|request| {
-                                    super::codex::request(
-                                        &router,
-                                        instance,
-                                        stopped.clone(),
-                                        request,
-                                    )
-                                });
-                            if let Err(error) = &admission {
-                                tracing::warn!(target: "bex", operation = "host.codex.request_rejected", message = %error);
-                            }
-                            if let Err(error) = admission
-                                && let Some(inner) = inner.upgrade()
-                                && let Ok(codex) = &inner.codex.process
-                                && let Ok(response) = request.error(-32000, &error)
-                            {
-                                let _ = codex.send_raw(&response).await;
-                            }
-                        } else if let Err(error) = super::codex::event(&router, instance, &request)
-                        {
-                            tracing::error!(target: "bex", operation = "host.codex.event", message = %error);
-                            break;
+    fn start_event_pumps(&self) {
+        let mut started = self
+            .inner
+            .event_pumps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (provider, agent) in self.agents() {
+            if !started.insert(provider) {
+                continue;
+            }
+            if let Some(mut events) = agent.event_stream() {
+                let router = self.inner.router.clone();
+                tokio::spawn(async move {
+                    while let Some(event) = events.recv().await {
+                        let result = event.change.apply(&router);
+                        if let Some(applied) = event.applied {
+                            let _ = applied.send(result);
                         }
                     }
-                    Ok(PeerEvent::Response { sequence, .. }) => {
-                        processed.send_replace(sequence);
-                    }
-                    Ok(PeerEvent::Closed(_))
-                    | Err(broadcast::error::RecvError::Closed)
-                    | Err(broadcast::error::RecvError::Lagged(_)) => break,
-                }
+                });
             }
-            stopped.cancel();
-            if let Some(inner) = inner.upgrade()
-                && let Ok(codex) = &inner.codex.process
-                && let Err(error) = codex.shutdown().await
-            {
-                tracing::error!(target: "bex", operation = "host.codex.shutdown", message = %error);
-            }
-            router.fail_provider(agent_protocol::session::ProviderKind::Codex,
-                            "Codexとの接続が終了したため、この実行は継続できません。Hostを再起動してから再送信してください。");
-        });
+        }
     }
 }
 
@@ -1619,26 +1323,75 @@ fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRe
     }
 }
 
-fn provider_capabilities(
-    provider: agent_protocol::session::ProviderKind,
-) -> agent_protocol::session::Capabilities {
-    match provider {
-        agent_protocol::session::ProviderKind::Codex => super::codex::Codex::capabilities(),
-        agent_protocol::session::ProviderKind::Claude => crate::claude::Claude::capabilities(),
-    }
+fn provider_key(provider: ProviderKind) -> String {
+    serde_json::to_value(provider)
+        .expect("provider serializes")
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 
 fn describe_thread(
     thread: &mut Thread,
-    provider: agent_protocol::session::ProviderKind,
+    capabilities: agent_protocol::session::Capabilities,
     projects: &crate::projects::state::Snapshot,
 ) {
-    thread.project_id = projects.project_membership(thread.cwd.as_deref(), &thread.project_id);
-    thread.capabilities = Some(provider_capabilities(provider));
+    thread.project_id = projects.project_membership(thread.cwd.as_deref());
+    thread.capabilities = Some(capabilities);
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn successful_configuration_clears_the_provider_startup_error() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("claude");
+        let registry = directory.join("accounts/accounts.json");
+        std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        std::fs::write(&registry, "invalid registry").unwrap();
+        let program = root.path().join("native-cli.exe");
+        std::fs::write(&program, []).unwrap();
+        let service = HostRpcService::new(
+            Err("unavailable".into()),
+            ProjectStore::new(root.path().join("worktrees.json")),
+        );
+        let configure = || {
+            service.enable_claude(
+                program.clone(),
+                directory.clone(),
+                Some(root.path().join("native")),
+            )
+        };
+        assert!(configure().await.is_err());
+        assert_eq!(
+            service.provider_errors()["claude"]["code"],
+            "provider_unavailable"
+        );
+        std::fs::write(&registry, r#"{"accounts":[],"selectedId":null}"#).unwrap();
+        configure().await.unwrap();
+        assert!(service.provider_errors().get("claude").is_none());
+        let session = service.open_session();
+        let response = service
+            .dispatch(
+                session.id(),
+                &Call::CreateSession(op::CreateSession {
+                    provider: ProviderKind::Claude,
+                    cwd: Some(root.path().to_string_lossy().into_owned()),
+                    model: None,
+                }),
+            )
+            .await
+            .unwrap();
+        let Response::Success { result: response } =
+            agent_protocol::protocol::decode::<Response<ThreadResponse>>(&response.initial)
+                .unwrap()
+        else {
+            panic!("provider did not recover");
+        };
+        assert_eq!(response.thread.id.unwrap().provider, ProviderKind::Claude);
+    }
+
     #[tokio::test]
     async fn answers_keep_delivery_evidence_until_the_source_resolves_them() {
         use super::super::requests::{RequestDestination, RequestOrigin};
@@ -1653,6 +1406,14 @@ mod tests {
             Err("not used".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
         );
+        service
+            .enable_claude(
+                root.path().join("unused-cli"),
+                root.path().join("claude"),
+                Some(root.path().join("native")),
+            )
+            .await
+            .unwrap();
         let connection = service.open_session();
         let router = &service.inner.router;
         let target =
@@ -1775,6 +1536,16 @@ mod tests {
             } else {
                 ProviderKind::Codex
             };
+            if claude {
+                service
+                    .enable_claude(
+                        root.path().join("unused-cli"),
+                        root.path().join("claude"),
+                        Some(root.path().join("native")),
+                    )
+                    .await
+                    .unwrap();
+            }
             let target =
                 agent_protocol::session::SessionRef::new(provider, "native".into()).unwrap();
             let (input, mut receiver) = tokio::sync::mpsc::channel(1);
@@ -1888,11 +1659,19 @@ mod tests {
             Err("not available".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
         );
+        service
+            .enable_claude(
+                root.path().join("missing-claude"),
+                root.path().join("claude"),
+                Some(root.path().join("native")),
+            )
+            .await
+            .unwrap();
         let session = service.open_session();
         for (method, expected) in [
             ("host/session/fork", "unsupported_operation"),
             ("host/session/rename", "unsupported_operation"),
-            ("host/session/submit", "claude_unavailable"),
+            ("host/session/submit", "provider_unavailable"),
         ] {
             let call = agent_protocol::protocol::json_boundary::call(method, serde_json::json!({"threadId":{"provider":"claude","id":"native"},"clientUserMessageId":method,"lastTurnId":"turn","excludeTurns":false,"name":"Renamed","input":[],"expectedTurnId":"turn"})).unwrap();
             let response = service.dispatch(session.id(), &call).await.unwrap();
@@ -1924,7 +1703,7 @@ mod tests {
                 let response = agent_protocol::protocol::decode::<Response<()>>(&response.initial)
                     .unwrap()
                     .into_value();
-                assert_eq!(response["error"]["code"], "codex_unavailable");
+                assert_eq!(response["error"]["code"], "provider_unavailable");
                 assert_eq!(response["error"]["delivery"], "notSent");
             }
         }

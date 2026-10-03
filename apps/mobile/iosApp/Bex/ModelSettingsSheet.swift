@@ -56,7 +56,10 @@ struct ModelSettingsScreen: View {
     }
 
     private var selectedAccount: Account? {
-        model.accounts.first { $0.provider == provider && model.snapshot.accountIsSelected(id: $0.id) }
+        model.accounts.first { $0.provider == provider && model.snapshot.accountIsSelected(
+            provider: $0.provider,
+            id: $0.id
+        ) }
     }
 
     var body: some View {
@@ -82,7 +85,9 @@ struct ModelSettingsScreen: View {
                     }
                     .accessibilityIdentifier("model.accounts.manage")
                     if let account = selectedAccount {
-                        WeeklyUsageView(windows: model.snapshot.accountWeeklyUsage(id: account.id), compact: true)
+                        WeeklyUsageView(windows: model.snapshot.accountWeeklyUsage(
+                            provider: account.provider, id: account.id
+                        ), compact: true)
                             .accessibilityIdentifier("model.account.usage")
                     }
                 }

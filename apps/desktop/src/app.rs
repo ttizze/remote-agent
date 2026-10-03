@@ -290,9 +290,11 @@ impl Desktop {
                             && let Some(login) = &view.snapshot.account.login
                         {
                             let id = login.login_id.clone();
+                            let provider = login.provider;
                             view.account_busy = true;
                             view.perform(
                                 Intent::ReadAccountLogin(op::ReadAccountLogin {
+                                    provider,
                                     id,
                                     thread_id: view.account_login_draft.clone(),
                                 }),

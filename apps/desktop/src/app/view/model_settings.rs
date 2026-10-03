@@ -339,6 +339,7 @@ impl Desktop {
                 {
                     found = true;
                     let id = account.id.clone();
+                    let provider = account.provider;
                     let logout_id = id.clone();
                     let identity = account.email.as_deref().unwrap_or(&account.id);
                     let mut row = v_flex()
@@ -358,6 +359,7 @@ impl Desktop {
                                 .on_click(cx.listener(move |s, _, _, cx| {
                                     s.account_operation(Intent::SelectAccountForDraft(
                                         op::SelectAccountForDraft {
+                                            provider,
                                             id: id.clone(),
                                             thread_id: s.draft_key().clone(),
                                         },
@@ -383,7 +385,8 @@ impl Desktop {
                             account_usage_view(account.usage.as_ref())
                         } else {
                             weekly_usage_view(
-                                self.snapshot.account_weekly_usage(account.id.clone()),
+                                self.snapshot
+                                    .account_weekly_usage(account.provider, account.id.clone()),
                             )
                         });
                     if manage && self.account_sign_out.as_deref() == Some(account.id.as_str()) {
@@ -403,6 +406,7 @@ impl Desktop {
                                                 s.account_sign_out = None;
                                                 s.account_operation(Intent::LogoutAccount(
                                                     op::LogoutAccount {
+                                                        provider,
                                                         id: logout_id.clone(),
                                                     },
                                                 ));
@@ -564,6 +568,7 @@ impl Desktop {
         let disabled = !self.snapshot.connected || self.account_busy || self.busy > 0;
         let url = login.verification_url.clone();
         let cancel_id = login.login_id.clone();
+        let provider = login.provider;
         let cancel = self
             .button(
                 "account-cancel-login",
@@ -571,6 +576,7 @@ impl Desktop {
                 cx,
                 move |s, _, _| {
                     s.account_operation(Intent::CancelAccountLogin(op::CancelAccountLogin {
+                        provider,
                         id: cancel_id.clone(),
                     }));
                 },
@@ -618,6 +624,7 @@ impl Desktop {
                             }
                             s.account_operation(Intent::SubmitAccountLogin(
                                 op::SubmitAccountLogin {
+                                    provider,
                                     id: submit_id.clone(),
                                     code,
                                 },
@@ -912,7 +919,9 @@ impl Desktop {
                         )
                         .child(weekly_usage_view(
                             account
-                                .map(|a| self.snapshot.account_weekly_usage(a.id.clone()))
+                                .map(|a| {
+                                    self.snapshot.account_weekly_usage(a.provider, a.id.clone())
+                                })
                                 .unwrap_or_default(),
                         )),
                 ),
@@ -1253,7 +1262,7 @@ mod tests {
                 snapshot.connected = true;
                 Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(serde_json::json!({
                     "accounts":[{"provider":"codex","id":"first","email":"first@example.invalid","usage":{"windows":[{"label":"週間枠","remainingPercent":42}],"fetchedAt":1}},
-                    {"provider":"claude","id":"claude:second"}],"selectedId":"first","selectedClaudeId":"claude:second"
+                    {"provider":"claude","id":"claude:second"}],"selected":{"codex":"first","claude":"claude:second"}
                 })).unwrap()));
                 snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
                     {"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"priority"}]},
