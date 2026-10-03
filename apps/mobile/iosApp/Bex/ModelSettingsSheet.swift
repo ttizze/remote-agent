@@ -90,7 +90,6 @@ struct ModelSettingsScreen: View {
                         .accessibilityIdentifier("model.account.usage")
                 }
             }
-            modelSection
             let controls = defaults ? model.snapshot.defaultModelControls(scope: scope ?? .global)
                 : model.snapshot.modelQuickControls(threadId: model.coreDraftKey)
             if !controls.efforts.isEmpty || controls.toggleFastTo != nil {
@@ -137,6 +136,7 @@ struct ModelSettingsScreen: View {
                     }
                 }.disabled(disabled)
             }
+            modelSection
             if let scope, model.snapshot.hasModelDefaultsOverride(scope: scope) {
                 Section {
                     Button("共通設定を使う") { model.perform(.inheritModelDefaults(scope: scope)) }

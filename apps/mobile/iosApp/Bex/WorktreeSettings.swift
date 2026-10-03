@@ -183,7 +183,6 @@ struct SettingsScopeBar<Projects: View, Environment: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 20).padding(.vertical, 12)
         .background(Color(UIColor.secondarySystemGroupedBackground))
-        .accessibilityIdentifier("settings.scope")
     }
 }
 
