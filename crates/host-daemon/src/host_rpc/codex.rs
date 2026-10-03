@@ -72,6 +72,80 @@ struct HistoryItem {
     pub turn_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct TimelineEntry {
+    position: u64,
+    #[serde(flatten)]
+    event: serde_json::Map<String, Value>,
+}
+
+/// Positions preserve canonical item order; start boundaries prove completeness.
+fn timeline_turns(
+    turns: Vec<Arc<Turn>>,
+    entries: Vec<TimelineEntry>,
+    exhausted: bool,
+) -> Result<Vec<Arc<Turn>>, String> {
+    let mut positions = std::collections::BTreeMap::new();
+    for entry in entries {
+        if positions
+            .insert(entry.position, Value::Object(entry.event))
+            .is_some()
+        {
+            return Err("timeline position repeated".into());
+        }
+    }
+    let mut turns: Vec<_> = turns.into_iter().map(Arc::unwrap_or_clone).collect();
+    let indices: std::collections::HashMap<_, _> = turns
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| (turn.id.to_string(), index))
+        .collect();
+    for turn in &mut turns {
+        turn.items = Some(Vec::new());
+        turn.items_has_more = Some(!exhausted);
+    }
+    for mut event in positions.into_values() {
+        let id = event["turnId"].as_str().unwrap_or_default();
+        if id.is_empty() && event["type"] != "realtime" {
+            return Err("timeline item identity is missing".into());
+        }
+        let index = indices.get(id).copied();
+        match event["type"].as_str() {
+            Some("item") => {
+                let item = super::native::codex_item(event["item"].take())
+                    .map_err(|error| error.to_string())?;
+                if item.id.is_empty() {
+                    return Err("timeline item identity is missing".into());
+                }
+                if let Some(index) = index {
+                    turns[index].items.as_mut().unwrap().push(Arc::new(item));
+                }
+            }
+            Some("turnStarted") => {
+                if let Some(index) = index {
+                    turns[index].items_has_more = Some(false);
+                }
+            }
+            Some("turnCompleted") => {
+                event["id"] = event["turnId"].take();
+                let completed =
+                    super::native::codex_turn(event).map_err(|error| error.to_string())?;
+                if let Some(index) = index {
+                    let turn = &mut turns[index];
+                    turn.status = completed.status;
+                    turn.started_at = completed.started_at;
+                    turn.completed_at = completed.completed_at;
+                    turn.duration_ms = completed.duration_ms;
+                    turn.error = completed.error;
+                }
+            }
+            Some("realtime") => {}
+            _ => return Err("unknown timeline event".into()),
+        }
+    }
+    Ok(turns.into_iter().map(Arc::new).collect())
+}
+
 fn unmaterialized_history(code: Option<&str>, message: &str, thread_id: &str) -> bool {
     code == Some("-32600")
         && message
@@ -81,12 +155,11 @@ fn unmaterialized_history(code: Option<&str>, message: &str, thread_id: &str) ->
 }
 
 impl Page<HistoryItem> {
-    fn into_items(self) -> Result<(Vec<Arc<Item>>, Option<String>), &'static str> {
-        if self.data.len() > 100 {
+    fn into_items(self, limit: usize) -> Result<Vec<Arc<Item>>, &'static str> {
+        if self.data.len() > limit {
             return Err("item page exceeds requested size");
         }
-        let items = self
-            .data
+        self.data
             .into_iter()
             .map(|entry| {
                 if entry.item.id.is_empty() {
@@ -95,8 +168,7 @@ impl Page<HistoryItem> {
                     Ok(entry.item)
                 }
             })
-            .collect::<Result<_, _>>()?;
-        Ok((items, self.next_cursor))
+            .collect()
     }
 }
 
@@ -231,7 +303,7 @@ impl Codex {
             sort_direction: "desc",
             items_view: Some("notLoaded"),
         };
-        let mut page = match self
+        let page = match self
             .request::<_, Page<super::native::NativeTurn>>("thread/turns/list", &query)
             .await
         {
@@ -279,7 +351,8 @@ impl Codex {
             }
             Err(error) => return Err(Failure::new("invalid_thread_history", error)),
         };
-        self.hydrate_turn_page(&mut page, &query)
+        let mut page = self
+            .hydrate_turn_page(page, &query)
             .await
             .map_err(|error| Failure::new("invalid_thread_history", error))?;
         page.data.reverse();
@@ -289,13 +362,13 @@ impl Codex {
             has_more: Some(page.next_cursor.is_some_and(|cursor| !cursor.is_empty())),
         })
     }
-    // Keep App Server cursors opaque. Both initial hydration and older pages
-    // use the desktop five-turn / 500-item initial window, in pages of 100.
+    // Read a bounded timeline window rather than paging each turn separately.
+    // Expansion follows opaque timeline cursors in pages of at most 500 entries.
     async fn hydrate_turn_page(
         &self,
-        page: &mut Page<Arc<Turn>>,
+        mut page: Page<Arc<Turn>>,
         query: &HistoryParams<'_>,
-    ) -> Result<(), String> {
+    ) -> Result<Page<Arc<Turn>>, String> {
         if page.data.len() > query.limit {
             return Err("turn page exceeds requested size".into());
         }
@@ -303,8 +376,8 @@ impl Codex {
         let mut ids = std::collections::HashSet::new();
         let repeated = page.data.iter().any(|turn| !ids.insert(turn.id.as_str()));
         if repeated {
-            // Item pagination is keyed only by turn ID, so it cannot preserve
-            // boundaries between historical occurrences sharing that ID.
+            // Timeline hydration groups items by turn ID. Read full turns to
+            // keep each repeated historical occurrence's own items.
             let native_full = self
                 .request::<_, Page<super::native::NativeTurn>>(
                     "thread/turns/list",
@@ -336,72 +409,68 @@ impl Codex {
             if !items_loaded {
                 return Err("full turn history omitted repeated-turn items".into());
             }
-            *page = full;
-            return Ok(());
+            return Ok(full);
         }
-        let mut budget = query.limit.saturating_mul(100).min(100_000);
+        if page.data.is_empty() {
+            return Ok(page);
+        }
+        let budget = query.limit.saturating_mul(100).min(100_000);
+        let mut entries = Vec::new();
+        let mut cursor = None;
+        let mut cursors = std::collections::HashSet::new();
+        // A provider may return a smaller page than requested. Do not fill
+        // the initial window by waiting for more pages; expansion adds pages.
+        for offset in (0..budget).step_by(500) {
+            let limit = (budget - offset).min(500);
+            let timeline: Page<TimelineEntry> = self
+                .request(
+                    "thread/timeline/list",
+                    &serde_json::json!({"threadId":thread_id,"cursor":cursor,"limit":limit}),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            if timeline.data.len() > limit {
+                return Err("timeline page exceeds requested size".into());
+            }
+            entries.extend(timeline.data);
+            cursor = timeline.next_cursor.filter(|cursor| !cursor.is_empty());
+            if let Some(cursor) = &cursor
+                && !cursors.insert(cursor.clone())
+            {
+                return Err("timeline cursor repeated".into());
+            }
+            if cursor.is_none() {
+                break;
+            }
+        }
+        page.data = timeline_turns(page.data, entries, cursor.is_none())?;
+        page.next_cursor = page.next_cursor.or(cursor);
+        // Only a truncated turn needs a separate read for its opening question.
         for turn in &mut page.data {
             let turn = Arc::make_mut(turn);
-            let mut values = Vec::new();
-            let mut cursor = None;
-            let mut has_more = true;
-            let mut cursors = std::collections::HashSet::new();
-            let mut ids = std::collections::HashSet::new();
-            while has_more && budget > 0 {
-                let page = self
-                    .request::<_, Page<HistoryItem>>(
-                        "thread/items/list",
-                        &HistoryParams {
-                            thread_id,
-                            turn_id: Some(&turn.id),
-                            cursor: cursor.as_deref(),
-                            limit: budget.min(100),
-                            sort_direction: "desc",
-                            items_view: None,
-                        },
-                    )
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let (items, next_cursor) = page.into_items()?;
-                cursor = next_cursor;
-                for item in items {
-                    if ids.insert(item.id.clone()) {
-                        budget = budget
-                            .checked_sub(1)
-                            .ok_or("item page exceeds requested budget")?;
-                        values.push(item);
-                    }
-                }
-                has_more = cursor.is_some();
-                if let Some(cursor) = &cursor
-                    && !cursors.insert(cursor.clone())
-                {
-                    return Err("history cursor repeated".into());
-                }
+            let items = turn.items.as_deref().unwrap();
+            if turn.items_has_more == Some(true)
+                && !items.is_empty()
+                && let Some(item) = self.opening_question(thread_id, &turn.id, items).await?
+            {
+                turn.opening_user_message = Some(item);
             }
-            values.reverse();
-            turn.items_has_more = Some(has_more);
-            turn.items = Some(values);
-            self.preserve_opening_question(turn, thread_id).await?;
         }
-        Ok(())
+        Ok(page)
     }
 
-    async fn preserve_opening_question(
+    async fn opening_question(
         &self,
-        turn: &mut Turn,
         thread_id: &str,
-    ) -> Result<(), String> {
-        let values = turn.items.as_deref().ok_or("turn items are missing")?;
-        if turn.items_has_more != Some(true) || values.is_empty() {
-            return Ok(());
-        }
+        turn_id: &str,
+        items: &[Arc<Item>],
+    ) -> Result<Option<Arc<Item>>, String> {
         let opening = self
             .request::<_, Page<HistoryItem>>(
                 "thread/items/list",
                 &HistoryParams {
                     thread_id,
-                    turn_id: Some(&turn.id),
+                    turn_id: Some(turn_id),
                     cursor: None,
                     limit: 2,
                     sort_direction: "asc",
@@ -409,23 +478,17 @@ impl Codex {
                 },
             )
             .await
-            .map_err(|error| error.to_string())?;
-        if let Some(item) = opening
-            .into_items()?
-            .0
+            .map_err(|error| error.to_string())?
+            .into_items(2)?;
+        Ok(opening
             .into_iter()
             .find(|item| !matches!(item.body(), agent_protocol::items::ItemBody::Compaction {}))
             .filter(|item| {
                 matches!(
                     item.body(),
                     agent_protocol::items::ItemBody::UserMessage { .. }
-                )
-            })
-            && !values.iter().any(|value| value.id == item.id)
-        {
-            turn.opening_user_message = Some(item);
-        }
-        Ok(())
+                ) && !items.iter().any(|value| value.id == item.id)
+            }))
     }
 }
 
@@ -1114,6 +1177,77 @@ impl Agent for Codex {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn timeline_hydration_preserves_order_boundaries_and_terminal_metadata() {
+        use super::*;
+        use serde_json::json;
+        let entries = json!([
+            {"type":"item","position":9,"turnId":"finished","item":{"id":"later","type":"agentMessage","text":"later"}},
+            {"type":"turnCompleted","position":10,"turnId":"finished","status":"failed","startedAt":1.5,"completedAt":3.5,"durationMs":2000,"error":{"message":"saved failure"}},
+            {"type":"item","position":3,"turnId":"partial","item":{"id":"repeated","type":"agentMessage","text":"second occurrence"}},
+            {"type":"realtime","position":5,"item":{}},
+            {"type":"turnStarted","position":7,"turnId":"finished"},
+            {"type":"item","position":8,"turnId":"finished","item":{"id":"earlier","type":"agentMessage","text":"earlier"}},
+            {"type":"item","position":2,"turnId":"partial","item":{"id":"repeated","type":"agentMessage","text":"first occurrence"}}
+        ]);
+        for exhausted in [false, true] {
+            let turns = ["finished", "partial", "unloaded"]
+                .map(|id| {
+                    Arc::new(Turn {
+                        id: id.into(),
+                        status: agent_protocol::execution::TurnStatus::Running,
+                        ..Default::default()
+                    })
+                })
+                .into();
+            let turns = timeline_turns(
+                turns,
+                serde_json::from_value(entries.clone()).unwrap(),
+                exhausted,
+            )
+            .unwrap();
+            assert_eq!(
+                turns[0].status,
+                agent_protocol::execution::TurnStatus::Failed
+            );
+            assert_eq!(
+                (
+                    turns[0].started_at,
+                    turns[0].completed_at,
+                    turns[0].duration_ms
+                ),
+                (Some(1.5), Some(3.5), Some(2000))
+            );
+            assert_eq!(turns[0].error.as_ref().unwrap().message, "saved failure");
+            assert_eq!(turns[0].items_has_more, Some(false));
+            assert_eq!(
+                turns[0]
+                    .items
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|item| item.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["earlier", "later"]
+            );
+            let partial = turns[1].items.as_ref().unwrap();
+            assert_eq!(
+                partial.len(),
+                2,
+                "repeated item IDs must retain both occurrences"
+            );
+            assert!(
+                matches!(partial[0].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "first occurrence")
+            );
+            assert!(
+                matches!(partial[1].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "second occurrence")
+            );
+            assert!(turns[2].items.as_ref().unwrap().is_empty());
+            assert_eq!(turns[1].items_has_more, Some(!exhausted));
+            assert_eq!(turns[2].items_has_more, Some(!exhausted));
+        }
+    }
+
     #[test]
     fn empty_provider_errors_keep_a_localized_recovery_message() {
         for message in ["", "  "] {
