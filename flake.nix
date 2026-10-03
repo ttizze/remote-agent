@@ -107,8 +107,9 @@
               export PATH="/usr/sbin:$PATH"
               export MOBILE_CARGO="${rustToolchain}/bin/cargo"
               export MOBILE_RUSTC="${rustToolchain}/bin/rustc"
-              if [ -d "''${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" ]; then
-                export DEVELOPER_DIR="''${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+              # The Nix compiler setup overwrites DEVELOPER_DIR with its own SDK.
+              if [ -d "''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" ]; then
+                export DEVELOPER_DIR="''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
                 unset SDKROOT
                 # Xcode expects to drive clang itself. Nix's LD override makes
                 # xcodebuild invoke ld directly with clang-only -Xlinker flags.

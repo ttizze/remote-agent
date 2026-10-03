@@ -83,7 +83,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 120
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      BEX_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       # Share this 7 GiB Apple Silicon runner with the concurrent Mac WebView E2E.
       BEX_IOS_TEST_WORKERS: 2
     steps:
@@ -92,6 +92,7 @@ jobs:
           persist-credentials: false
       - name: Select stable Xcode and free unused SDK space
         run: |
+          export DEVELOPER_DIR="$BEX_XCODE_DEVELOPER_DIR"
           test -d "$DEVELOPER_DIR"
           selected_xcode=$(dirname "$(dirname "$DEVELOPER_DIR")")
           for xcode in /Applications/Xcode*.app; do
