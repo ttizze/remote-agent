@@ -15,7 +15,7 @@ if [[ $language == apple || $language == rust ]]; then
         -p agent-cli -p host-daemon -p host-fixture -p xtask \
         --lib --bins --test errors --test iroh --test iroh_host --test browser_bridge \
         --test management --test codex_accounts --test claude --test adapter_conformance \
-        --test quality_background --test crate_boundaries --test build_cleanup --test diagnostics || failed=1
+        --test crate_boundaries --test build_cleanup --test diagnostics || failed=1
 fi
 if [[ $language == kotlin ]]; then
     ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt --continue --console=plain || failed=1

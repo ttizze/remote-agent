@@ -12,7 +12,6 @@ pub(crate) struct Fixture {
     _process_table: tokio::sync::SemaphorePermit<'static>,
     _temporary: tempfile::TempDir,
     pub root: PathBuf,
-    pub common: PathBuf,
     env: BTreeMap<OsString, OsString>,
 }
 
@@ -24,8 +23,6 @@ impl Fixture {
         let process_table = PROCESS_TABLE.acquire().await.unwrap();
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().canonicalize().unwrap();
-        let common = root.join("git-common");
-        fs::create_dir(&common).unwrap();
         let mut env = std::env::vars_os()
             .filter(|(key, _)| {
                 let key = key.to_string_lossy();
@@ -44,7 +41,6 @@ impl Fixture {
             _process_table: process_table,
             _temporary: temporary,
             root,
-            common,
             env,
         }
     }

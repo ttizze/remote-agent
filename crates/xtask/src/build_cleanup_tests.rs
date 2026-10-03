@@ -3,11 +3,10 @@ use crate::{supervision::Child, test_support::Fixture};
 use std::{os::unix::fs::symlink, time::Instant};
 use tokio::{io::AsyncWriteExt, process::Command};
 
-async fn inspect(worktrees: &[PathBuf], common: &Path, dry: bool, budget: u64) -> Report {
+async fn inspect(worktrees: &[PathBuf], dry: bool, budget: u64) -> Report {
     let (_sender, cancel) = watch::channel(false);
     prune(
         worktrees,
-        common,
         dry,
         budget,
         MAX_AGE,
@@ -21,10 +20,10 @@ async fn inspect(worktrees: &[PathBuf], common: &Path, dry: bool, budget: u64) -
     .unwrap()
 }
 
-async fn await_cleaned(worktrees: &[PathBuf], common: &Path, executable: &Path) {
+async fn await_cleaned(worktrees: &[PathBuf], executable: &Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let report = inspect(worktrees, common, false, 0).await;
+        let report = inspect(worktrees, false, 0).await;
         if !executable.exists() {
             assert!(!executable.parent().unwrap().join(".fingerprint").exists());
             return;
@@ -65,38 +64,22 @@ async fn old_outputs_rebuild_while_records_backups_external_links_and_lock_inode
     let locks = LOCKS.map(|name| fs::metadata(profile.join(name)).unwrap().ino());
     Fixture::age(&profile, 2);
     assert_eq!(
-        inspect(
-            std::slice::from_ref(&root),
-            &fixture.common,
-            false,
-            MAX_BYTES
-        )
-        .await
-        .entries[0]
+        inspect(std::slice::from_ref(&root), false, MAX_BYTES)
+            .await
+            .entries[0]
             .action,
         Action::Keep
     );
     Fixture::age(&profile, 4);
     assert_eq!(
-        inspect(
-            std::slice::from_ref(&root),
-            &fixture.common,
-            true,
-            MAX_BYTES
-        )
-        .await
-        .entries[0]
+        inspect(std::slice::from_ref(&root), true, MAX_BYTES)
+            .await
+            .entries[0]
             .action,
         Action::WouldClean
     );
     Fixture::runs(&root);
-    let report = inspect(
-        std::slice::from_ref(&root),
-        &fixture.common,
-        false,
-        MAX_BYTES,
-    )
-    .await;
+    let report = inspect(std::slice::from_ref(&root), false, MAX_BYTES).await;
     assert_eq!(report.entries[0].action, Action::Cleaned);
     assert!(report.reclaimed_bytes > 0);
     assert!(!Fixture::executable(&root).exists());
@@ -128,18 +111,12 @@ async fn capacity_evicts_oldest_recent_profile_and_keeps_newer_build() {
     let newer = fixture.project("newer").await;
     Fixture::age(&older.join("target/debug"), 1);
     let budget = usage(&newer.join("target/debug")).unwrap().0;
-    let report = inspect(
-        &[older.clone(), newer.clone()],
-        &fixture.common,
-        false,
-        budget,
-    )
-    .await;
+    let report = inspect(&[older.clone(), newer.clone()], false, budget).await;
     assert!(report.after_idle_bytes <= budget);
     assert!(!Fixture::executable(&older).exists());
     Fixture::runs(&newer);
     assert_eq!(
-        inspect(&[older, newer], &fixture.common, false, budget)
+        inspect(&[older, newer], false, budget)
             .await
             .reclaimed_bytes,
         0
@@ -160,10 +137,7 @@ async fn running_binary_and_active_worktree_stay_protected_until_exit() {
         let mut process = Child::spawn(command).unwrap();
         let mut stdin = process.take_stdin().unwrap();
         assert_eq!(
-            inspect(std::slice::from_ref(&root), &fixture.common, false, 0)
-                .await
-                .entries[0]
-                .action,
+            inspect(std::slice::from_ref(&root), false, 0).await.entries[0].action,
             Action::InUse
         );
         Fixture::runs(&root);
@@ -180,7 +154,7 @@ async fn running_binary_and_active_worktree_stay_protected_until_exit() {
         );
     }
     let executable = Fixture::executable(&root);
-    await_cleaned(&[root], &fixture.common, &executable).await;
+    await_cleaned(&[root], &executable).await;
 }
 
 #[tokio::test]
@@ -203,10 +177,10 @@ async fn real_cargo_waits_for_the_same_cleanup_lock_inode() {
 }
 
 #[tokio::test]
-async fn active_cargo_in_shared_target_is_not_cleaned() {
+async fn active_cargo_in_nested_target_is_not_cleaned() {
     let fixture = Fixture::new().await;
-    let root = fixture.project("shared").await;
-    let target = fixture.common.join("bex-quality/cargo-target");
+    let root = fixture.project("nested").await;
+    let target = root.join("target/native");
     fixture.build(&root, &target).await;
     fs::write(root.join("build.rs"), "fn main() { std::fs::write(\"ready\", \"\").unwrap(); while !std::path::Path::new(\"release-build\").exists() { std::thread::sleep(std::time::Duration::from_millis(20)); } }").unwrap();
     let mut process = Child::spawn(fixture.cargo(&root, &target)).unwrap();
@@ -216,7 +190,7 @@ async fn active_cargo_in_shared_target_is_not_cleaned() {
         assert!(Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let report = inspect(&[], &fixture.common, false, 0).await;
+    let report = inspect(std::slice::from_ref(&root), false, 0).await;
     assert!(matches!(
         report.entries[0].action,
         Action::InUse | Action::Locked
@@ -233,7 +207,7 @@ async fn active_cargo_in_shared_target_is_not_cleaned() {
             .success()
     );
     assert_eq!(
-        inspect(&[], &fixture.common, false, 0).await.entries[0].action,
+        inspect(std::slice::from_ref(&root), false, 0).await.entries[0].action,
         Action::Cleaned
     );
 }
@@ -246,7 +220,7 @@ async fn external_symlink_and_untagged_nested_outputs_are_not_candidates() {
     fs::create_dir(&root).unwrap();
     symlink(outside.join("target"), root.join("target")).unwrap();
     assert!(
-        inspect(std::slice::from_ref(&root), &fixture.common, false, 0)
+        inspect(std::slice::from_ref(&root), false, 0)
             .await
             .entries
             .is_empty()
@@ -256,7 +230,7 @@ async fn external_symlink_and_untagged_nested_outputs_are_not_candidates() {
     fs::remove_file(outside.join("target/CACHEDIR.TAG")).unwrap();
     fs::rename(outside.join("target"), root.join("target/unknown")).unwrap();
     assert!(
-        inspect(std::slice::from_ref(&root), &fixture.common, false, 0)
+        inspect(std::slice::from_ref(&root), false, 0)
             .await
             .entries
             .is_empty()
@@ -271,7 +245,7 @@ async fn untagged_cargo_profile_is_not_cleaned() {
     let root = fixture.project("untagged").await;
     fs::remove_file(root.join("target/CACHEDIR.TAG")).unwrap();
     assert!(
-        inspect(std::slice::from_ref(&root), &fixture.common, false, 0)
+        inspect(std::slice::from_ref(&root), false, 0)
             .await
             .entries
             .is_empty()
@@ -290,7 +264,7 @@ async fn nested_worktree_activity_does_not_pin_parent_builds() {
     command.arg("30").current_dir(&nested);
     let mut process = Child::spawn(command).unwrap();
     let executable = Fixture::executable(&root);
-    await_cleaned(&[root.clone(), nested], &fixture.common, &executable).await;
+    await_cleaned(&[root.clone(), nested], &executable).await;
     process.stop(false, Duration::from_secs(10)).await.unwrap();
 }
 
@@ -304,17 +278,9 @@ async fn symlinked_lock_leaves_builds_and_external_data_untouched() {
     symlink(&outside, root.join("target/debug/.cargo-build-lock")).unwrap();
     let (_sender, cancel) = watch::channel(false);
     assert!(
-        prune(
-            std::slice::from_ref(&root),
-            &fixture.common,
-            false,
-            0,
-            MAX_AGE,
-            0.0,
-            &cancel
-        )
-        .await
-        .is_err()
+        prune(std::slice::from_ref(&root), false, 0, MAX_AGE, 0.0, &cancel)
+            .await
+            .is_err()
     );
     Fixture::runs(&root);
     assert_eq!(fs::read_to_string(outside).unwrap(), "private");

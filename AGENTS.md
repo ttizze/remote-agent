@@ -7,4 +7,4 @@
 - Build the Host and affected clients from the same revision. Before restarting, identify the running executable and active tasks. Verify changed operations against that process; rebuilding does not update a running Host.
 - Preserve approved interactions in `docs/DESKTOP_CONVERSATION_DISPLAY_CONTRACT.md`. Change acceptance assertions only when the product requirement changes.
 - Follow `docs/TEST_MAINTENANCE.md`: run proptest in normal tests, use cargo-mutants for focused audits of changed logic, and reserve Kani for small, important pure functions with explicit verification bounds.
-- Lefthook queues checks after each commit. Before reporting a commit verified, run `nix develop . --command cargo xtask quality-status --wait`. Require `passed` for the current commit with `workingTreeDirty: false`; results are not injected into the conversation.
+- Run automated verification in the Native clients GitHub Actions workflow. Before reporting a commit verified or merging, require successful CI checks for the current commit and a clean working tree. Do not queue local background QA or wait for local E2E; local check commands are for explicitly requested debugging.

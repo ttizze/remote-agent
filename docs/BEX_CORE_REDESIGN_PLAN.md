@@ -360,13 +360,13 @@ nix develop . --command cargo test --locked --workspace
 nix develop . --command cargo fmt --all -- --check
 nix develop . --command cargo clippy --locked --workspace --all-targets -- -D warnings
 
-# commit後、そのcommitの必須quality結果を確認
-nix develop . --command cargo xtask quality-status --wait
+# PRのCI結果を確認（現在のcommitに対する結果を使う）
+gh pr checks --watch
 ```
 
 supervisorの配置を変更した段階では、ビルドコマンドとfixtureの参照も実装に合わせて更新する。存在しなくなった旧コマンドを手順に残さない。
 
-`quality-status`は対象commitで `passed`、`workingTreeDirty: false` を確認する。以前のcommitの成功を流用しない。実認証のprovider推論、Windowsのプロセス管理、iOS/Android/desktopの受け入れ検証は、実施した環境・範囲を区別して報告する。未実施を合格に数えない。[プロジェクトルール][agents] [既存の検証手順][readme]
+Native clients CIが現在のcommitに対して成功し、作業ツリーがcleanであることを確認する。コミット後のローカルQAは実行しない。以前のcommitの成功を流用しない。実認証のprovider推論、Windowsのプロセス管理、iOS/Android/desktopの受け入れ検証は、実施した環境・範囲を区別して報告する。未実施を合格に数えない。[プロジェクトルール][agents] [既存の検証手順][readme]
 
 ### 各段階の提出物
 

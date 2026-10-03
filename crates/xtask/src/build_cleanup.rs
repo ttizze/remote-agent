@@ -38,7 +38,7 @@ struct Entry {
     path: PathBuf,
     bytes: Option<u64>,
     modified: f64,
-    owner: Option<PathBuf>,
+    owner: PathBuf,
     action: Action,
 }
 
@@ -87,9 +87,8 @@ fn directory(path: &Path) -> bool {
 
 async fn profiles(
     worktrees: &[PathBuf],
-    common: &Path,
     cancel: &watch::Receiver<bool>,
-) -> Result<BTreeMap<PathBuf, Option<PathBuf>>> {
+) -> Result<BTreeMap<PathBuf, PathBuf>> {
     let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let targets = command(
         &[rustc, "--print".into(), "target-list".into()],
@@ -102,14 +101,8 @@ async fn profiles(
         .map(OsString::from)
         .collect();
     let mut found = BTreeMap::new();
-    let sources = worktrees
-        .iter()
-        .map(|root| (Some(root.clone()), root.join("target")))
-        .chain(std::iter::once((
-            None,
-            common.join("bex-quality/cargo-target"),
-        )));
-    for (owner, target) in sources {
+    for owner in worktrees {
+        let target = owner.join("target");
         if !directory(&target) {
             continue;
         }
@@ -252,10 +245,10 @@ async fn open_paths(
     parse_open_paths(&ps, &lsof, worktrees, std::process::id())
 }
 
-fn in_use(path: &Path, owner: Option<&Path>, opened: &[(PathBuf, Option<PathBuf>)]) -> bool {
-    opened.iter().any(|(opened, cwd_owner)| {
-        opened.starts_with(path) || owner.is_some_and(|owner| cwd_owner.as_deref() == Some(owner))
-    })
+fn in_use(path: &Path, owner: &Path, opened: &[(PathBuf, Option<PathBuf>)]) -> bool {
+    opened
+        .iter()
+        .any(|(opened, cwd_owner)| opened.starts_with(path) || cwd_owner.as_deref() == Some(owner))
 }
 
 fn profile_locks(path: &Path) -> Result<Option<Vec<File>>> {
@@ -284,21 +277,19 @@ fn disposable(bytes: u64, max_bytes: u64, modified: f64, cutoff: f64) -> bool {
 
 async fn prune(
     worktrees: &[PathBuf],
-    common: &Path,
     dry_run: bool,
     max_bytes: u64,
     max_age: f64,
     now: f64,
     cancel: &watch::Receiver<bool>,
 ) -> Result<Report> {
-    let common = common.canonicalize()?;
     let worktrees = worktrees
         .iter()
         .map(|root| root.canonicalize())
         .collect::<std::io::Result<Vec<_>>>()?;
     let opened = open_paths(&worktrees, cancel).await?;
     let mut entries = Vec::new();
-    for (path, owner) in profiles(&worktrees, &common, cancel).await? {
+    for (path, owner) in profiles(&worktrees, cancel).await? {
         let mut entry = Entry {
             path,
             owner,
@@ -306,7 +297,7 @@ async fn prune(
             modified: 0.0,
             action: Action::InUse,
         };
-        if !in_use(&entry.path, entry.owner.as_deref(), &opened) {
+        if !in_use(&entry.path, &entry.owner, &opened) {
             if let Some(_locks) = profile_locks(&entry.path)? {
                 let (bytes, modified) = usage(&entry.path)?;
                 entry.bytes = Some(bytes);
@@ -334,7 +325,7 @@ async fn prune(
         };
         if in_use(
             &entry.path,
-            entry.owner.as_deref(),
+            &entry.owner,
             &open_paths(&worktrees, cancel).await?,
         ) {
             remaining -= entry.bytes.take().unwrap();
@@ -437,10 +428,7 @@ pub async fn run(dry_run: bool) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &prune(
-                &worktrees, &common, dry_run, MAX_BYTES, MAX_AGE, now, &cancel
-            )
-            .await?
+            &prune(&worktrees, dry_run, MAX_BYTES, MAX_AGE, now, &cancel).await?
         )?
     );
     Ok(())
@@ -485,12 +473,8 @@ mod tests {
         let opened =
             parse_open_paths(ps, lsof.as_bytes(), &[parent.clone(), nested.clone()], 3).unwrap();
         assert_eq!(opened.len(), 2);
-        assert!(!in_use(
-            &parent.join("target/debug"),
-            Some(&parent),
-            &opened
-        ));
-        assert!(in_use(&nested.join("target/debug"), Some(&nested), &opened));
-        assert!(in_use(&nested, None, &opened));
+        assert!(!in_use(&parent.join("target/debug"), &parent, &opened));
+        assert!(in_use(&nested.join("target/debug"), &nested, &opened));
+        assert!(in_use(&nested, &parent, &opened));
     }
 }

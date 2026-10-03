@@ -88,7 +88,6 @@
               actionlint
               rustToolchain
               cargo-mutants
-              lefthook
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               lsof
               gradle

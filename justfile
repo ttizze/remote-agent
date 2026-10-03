@@ -52,7 +52,7 @@ android-e2e:
     ./gradlew :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest --console=plain
     nix develop .#android-test --command bash scripts/android-e2e.sh
 
-# Native conversation contracts used by the post-commit Swift check.
+# Native conversation acceptance used by Apple CI and manual checks.
 conversation-ui:
     scripts/ios-e2e.sh \
         testSimulatorNativeTerminalRetainsShellAfterReopening \

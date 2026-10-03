@@ -1,9 +1,7 @@
-mod quality_background;
-
 use std::process::ExitCode;
 use xtask::Result;
 
-const USAGE: &str = "Usage: cargo xtask <command>\n  quality-worker\n  quality-status [--wait]\n  clean-builds [--dry-run]\n  ios-e2e [--without-codex] TEST...\n  ios-markdown\n  connection-diagnostics [--log PATH] [--platform Ios|Macos] [--trace ID] [--attempt ID]\n  android-console SOCKET\n  android-network-permission SERIAL LOG ADB_PORT\n  terminal-query-probe\nBuilds and foreground checks: just --list\n";
+const USAGE: &str = "Usage: cargo xtask <command>\n  clean-builds [--dry-run]\n  ios-e2e [--without-codex] TEST...\n  ios-markdown\n  connection-diagnostics [--log PATH] [--platform Ios|Macos] [--trace ID] [--attempt ID]\n  android-console SOCKET\n  android-network-permission SERIAL LOG ADB_PORT\n  terminal-query-probe\nBuilds and manual checks: just --list\n";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -24,11 +22,6 @@ async fn main() -> ExitCode {
 
 async fn execute(arguments: &[String]) -> Result<()> {
     match (arguments[0].as_str(), &arguments[1..]) {
-        ("quality-worker", []) => quality_background::worker().await,
-        ("quality-status", flags) if flags.is_empty() || flags == ["--wait"] => tokio::select! {
-            result = quality_background::status(!flags.is_empty()) => result,
-            signal = tokio::signal::ctrl_c() => signal.map_err(Into::into).and_then(|_| Err("interrupted".into())),
-        },
         #[cfg(unix)]
         ("clean-builds", flags) if flags.is_empty() || flags == ["--dry-run"] => {
             xtask::build_cleanup::run(!flags.is_empty()).await
