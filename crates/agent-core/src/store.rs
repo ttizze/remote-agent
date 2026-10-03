@@ -2,6 +2,7 @@
 use crate::{
     client::{ClientExt, SessionImage},
     diagnostics::{ConnectionPerformance, ConnectionPhase as Phase},
+    models::ListQuery,
     peer::PeerError,
     state::{Event, Intent, Snapshot, operations as op, reduce},
 };
@@ -136,7 +137,7 @@ impl Receipt {
             if waiters.len() >= 128 {
                 drop(waiters);
                 other.send(Err(PeerError::InvalidMessage(
-                    "too many waiters for item read".into(),
+                    "too many waiters for operation".into(),
                 )));
             } else {
                 waiters.extend(other.0.lock().unwrap().drain(..));
@@ -152,6 +153,7 @@ impl Receipt {
 struct Completed {
     subscriptions: Vec<(uuid::Uuid, agent_transport::client::Updates)>,
     item_read: Option<op::ReadItem>,
+    list_query: Option<ListQuery>,
     delivery_attempted: bool,
     epoch: u64,
     result: Result<Applied, PeerError>,
@@ -589,6 +591,7 @@ fn publish_locked(
 ) -> (Vec<Effect>, bool) {
     // No `..`: adding a Snapshot field must update the publication contract.
     let Snapshot {
+        model_defaults,
         permission_settings,
         composer_catalog,
         host_name,
@@ -618,7 +621,8 @@ fn publish_locked(
         (None, None) => true,
         _ => false,
     };
-    if current.host_name == *host_name
+    if current.model_defaults == *model_defaults
+        && current.host_name == *host_name
         && current.permission_settings == *permission_settings
         && current.composer_catalog == *composer_catalog
         && current.storage_scope == *storage_scope
@@ -652,9 +656,12 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
     let mut scheduled = Vec::new();
     let mut result = Ok(Outcome::Applied);
     updates.send_if_modified(|snapshot| {
-        // Dispatch and completion share this lock: navigation cannot change
-        // between the epoch comparison and publication.
-        let current = completed.epoch == snapshot.epoch;
+        // Dispatch and completion share this lock. List results and failures
+        // belong to their query; view work belongs to the navigation epoch.
+        let current = completed.list_query.as_ref().map_or_else(
+            || completed.epoch == snapshot.epoch,
+            |query| query == snapshot.list_query.as_ref(),
+        );
         let mut next = snapshot.as_ref().clone();
         result = match completed.result {
             Ok(applied) => match applied.application.apply(&mut next, current) {
@@ -710,6 +717,7 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
                 Err(error)
             }
         };
+        effects.extend(op::prefetch_composer_catalog(&mut next));
         let changed = publish_locked(snapshot, next, Vec::new()).1;
         scheduled = effects
             .drain(..)
@@ -721,9 +729,10 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
             .collect();
         changed
     });
-    let continuation = scheduled
-        .iter()
-        .position(|scheduled| scheduled.effect.1 || scheduled.effect.0.submission_id().is_some());
+    let continuation = scheduled.iter().position(|scheduled| {
+        scheduled.effect.1 == ReceiptPolicy::Continue
+            || scheduled.effect.0.submission_id().is_some()
+    });
     let mut complete = completed.complete;
     if continuation.is_none()
         && let Some(complete) = complete.take()
@@ -750,7 +759,7 @@ impl ItemReads {
             if let Some(complete) = scheduled.complete.take() {
                 receipt.join(complete);
             }
-            if !scheduled.effect.1 {
+            if scheduled.effect.1 != ReceiptPolicy::Continue {
                 return Ok(());
             }
             scheduled.complete = Some(receipt.clone());
@@ -768,7 +777,7 @@ impl ItemReads {
             let receipt = scheduled.complete.get_or_insert_default().clone();
             self.receipts.insert(key, receipt);
         }
-        if scheduled.effect.1 {
+        if scheduled.effect.1 == ReceiptPolicy::Continue {
             // Continue the same item before issuing new grants. Its slot covers
             // the control response, body transfer, and final application.
             self.pending.push_front(scheduled);
@@ -795,9 +804,9 @@ impl ItemReads {
         let key = completed.item_read.clone();
         let effects = finish(updates, completed);
         if let Some(key) = key
-            && !effects
-                .iter()
-                .any(|s| s.effect.1 && s.effect.0.item_read() == Some(&key))
+            && !effects.iter().any(|s| {
+                s.effect.1 == ReceiptPolicy::Continue && s.effect.0.item_read() == Some(&key)
+            })
         {
             self.running.remove(&key);
             self.receipts.remove(&key);
@@ -822,6 +831,8 @@ async fn run(
     let mut terminal_commands = VecDeque::new();
     let mut item_reads = ItemReads::default();
     let mut terminal_running = false;
+    let mut list_running = false;
+    let mut pending_list: Option<Receipt> = None;
     let mut disconnected = None;
     let reason = loop {
         let unused: Vec<_> = subscriptions
@@ -844,6 +855,16 @@ async fn run(
             complete,
         } in effects.drain(..)
         {
+            if effect.0.list_query().is_some() {
+                if list_running {
+                    let receipt = pending_list.get_or_insert_default();
+                    if let Some(complete) = complete {
+                        receipt.join(complete);
+                    }
+                    continue;
+                }
+                list_running = true;
+            }
             if effect.0.terminal_handle().is_some() {
                 terminal_commands.push_back(Scheduled {
                     effect,
@@ -937,7 +958,11 @@ async fn run(
                 };
                 let mut complete = Some(Receipt::new(command.complete));
                 for effect in command.effects {
-                    effects.push(Scheduled { effect, snapshot: command.snapshot.clone(), complete: complete.take() });
+                    let receipt = if effect.1 == ReceiptPolicy::Background { None } else { complete.take() };
+                    effects.push(Scheduled { effect, snapshot: command.snapshot.clone(), complete: receipt });
+                }
+                if let Some(complete) = complete {
+                    complete.send(Ok(Outcome::Applied));
                 }
             }
             _ = browser_jobs.next(), if !browser_jobs.is_empty() => {},
@@ -950,6 +975,17 @@ async fn run(
                     Err(std::io::Error::other("subscription ended"))
                 })).boxed()); }
                 if result.terminal.is_some() { terminal_running = false; }
+                if result.list_query.is_some() {
+                    list_running = false;
+                    if let Some(complete) = pending_list.take() {
+                        let snapshot = updates.borrow().clone();
+                        effects.push(Scheduled {
+                            effect: Effect::execute(op::ListSessions::new((*snapshot.list_query).clone())),
+                            snapshot,
+                            complete: Some(complete),
+                        });
+                    }
+                }
                 effects.extend(item_reads.finish(&updates, result));
             }
             Some((id, update)) = subscriptions.next(), if !subscriptions.is_empty() => {
@@ -1031,14 +1067,12 @@ async fn run_offline(
         };
         let mut complete = Some(Receipt::new(command.complete));
         for effect in command.effects {
-            let result = perform(
-                None,
-                None,
-                command.snapshot.clone(),
-                effect,
-                complete.take(),
-            )
-            .await;
+            let receipt = if effect.1 == ReceiptPolicy::Background {
+                None
+            } else {
+                complete.take()
+            };
+            let result = perform(None, None, command.snapshot.clone(), effect, receipt).await;
             drop(finish(updates, result));
         }
         if let Some(complete) = complete {
@@ -1056,6 +1090,7 @@ async fn perform(
     complete: Option<Receipt>,
 ) -> Completed {
     let item_read = effect.0.item_read().cloned();
+    let list_query = effect.0.list_query().cloned();
     let terminal = effect.0.terminal_handle().map(str::to_owned);
     let failed_submission = effect
         .0
@@ -1077,6 +1112,7 @@ async fn perform(
     Completed {
         subscriptions,
         item_read,
+        list_query,
         delivery_attempted: client.is_some(),
         epoch: snapshot.epoch,
         result,
@@ -1113,12 +1149,18 @@ impl<O: op::Operation> Application for Completion<O> {
 // Intent is replayable data. Only the effect queue erases an operation's type;
 // the same allocation carries its output until its result is applied.
 #[derive(Debug)]
-pub struct Effect(Box<dyn Pending>, bool);
+pub struct Effect(Box<dyn Pending>, ReceiptPolicy);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiptPolicy {
+    First,
+    Continue,
+    Background,
+}
 impl Effect {
     /// Continue the dispatch receipt after this step is applied.
     pub(crate) fn continuation<O: op::Operation>(operation: O) -> Self {
         let mut effect = Self::execute(operation);
-        effect.1 = true;
+        effect.1 = ReceiptPolicy::Continue;
         effect
     }
     pub fn execute<O: op::Operation>(operation: O) -> Self {
@@ -1127,12 +1169,17 @@ impl Effect {
                 operation,
                 output: None,
             }),
-            false,
+            if O::BACKGROUND {
+                ReceiptPolicy::Background
+            } else {
+                ReceiptPolicy::First
+            },
         )
     }
 }
 trait Pending: Application {
     fn item_read(&self) -> Option<&op::ReadItem>;
+    fn list_query(&self) -> Option<&ListQuery>;
     fn submission_id(&self) -> Option<&str>;
     fn terminal_handle(&self) -> Option<&str>;
     fn run<'a>(
@@ -1143,6 +1190,9 @@ trait Pending: Application {
 impl<O: op::Operation> Pending for Completion<O> {
     fn item_read(&self) -> Option<&op::ReadItem> {
         self.operation.item_read()
+    }
+    fn list_query(&self) -> Option<&ListQuery> {
+        self.operation.list_query()
     }
     fn submission_id(&self) -> Option<&str> {
         self.operation.submission_id()

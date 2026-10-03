@@ -260,6 +260,30 @@ impl SessionRouter {
             .clone()
     }
 
+    pub(crate) fn execution_workspace(&self, target: &SessionRef, cwd: Option<&str>) {
+        if let Some(actor) = lock_state(&self.state).executions.get_mut(target) {
+            actor.live.cwd = cwd.map(str::to_owned);
+        }
+    }
+    pub(crate) fn active_sessions_in(
+        &self,
+        dir: &std::path::Path,
+    ) -> std::collections::HashSet<SessionRef> {
+        lock_state(&self.state)
+            .executions
+            .iter()
+            .filter(|(_, actor)| {
+                actor.live.status == agent_protocol::models::SessionStatus::Running
+                    && actor
+                        .live
+                        .cwd
+                        .as_deref()
+                        .is_some_and(|cwd| std::path::Path::new(cwd).starts_with(dir))
+            })
+            .map(|(session, _)| session.clone())
+            .collect()
+    }
+
     pub(crate) fn overlay_execution(&self, target: &SessionRef, response: &mut ThreadResponse) {
         if let Some(actor) = lock_state(&self.state).executions.get(target) {
             actor.overlay(response);
@@ -1170,14 +1194,12 @@ mod tests {
     #[tokio::test]
     async fn completion_during_native_read_is_overlaid_before_live_updates() {
         let router = SessionRouter::new();
+        let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
         let connection = router.open_session();
         let read = open(&router, "native");
         turn(&router, false);
         router.session_change(
-            &SessionRef {
-                provider: ProviderKind::Codex,
-                id: "native".into(),
-            },
+            &target,
             SessionChange::Item {
                 turn_id: "run".into(),
                 item: Item::new(
@@ -1193,10 +1215,7 @@ mod tests {
             },
         );
         router.session_change(
-            &SessionRef {
-                provider: ProviderKind::Codex,
-                id: "native".into(),
-            },
+            &target,
             SessionChange::Text {
                 turn_id: "run".into(),
                 item_id: "answer".into(),
@@ -1204,7 +1223,19 @@ mod tests {
                 delta: " final".into(),
             },
         );
-        turn(&router, true);
+        router.session_change(&target, SessionChange::Turn {
+            turn: serde_json::from_value(json!({"id":"run","status":"completed","items":[{"id":"other","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"done","phase":"final"}}}}}]})).unwrap(),
+            completed: true,
+        });
+        router.session_change(
+            &target,
+            SessionChange::Text {
+                turn_id: "run".into(),
+                item_id: "answer".into(),
+                field: TextField::AssistantText,
+                delta: " suffix".into(),
+            },
+        );
         let response = router
             .finish_session_read(
                 read,
@@ -1222,7 +1253,7 @@ mod tests {
         assert_eq!(current["status"], "completed");
         assert_eq!(
             current["items"][0]["body"]["inline"]["body"]["assistantText"]["text"],
-            "start final"
+            "start final suffix"
         );
         assert!(lock_state(&router.state).executions.is_empty());
     }
@@ -1555,22 +1586,16 @@ fn identical_native_request_ids_keep_their_source_instance() {
         serde_json::json!({"id":1,"method":"serverRequest/resolved","params":{"requestId":native}})
             .to_string();
     assert!(
-        super::codex::event(
-            &router,
-            requests[0].0,
-            &RpcMessage::parse(&malformed).unwrap()
-        )
-        .is_err()
+        super::codex::event_change(requests[0].0, &RpcMessage::parse(&malformed).unwrap()).is_err()
     );
     let resolved =
         serde_json::json!({"method":"serverRequest/resolved","params":{"requestId":native}})
             .to_string();
-    super::codex::event(
-        &router,
-        requests[0].0,
-        &RpcMessage::parse(&resolved).unwrap(),
-    )
-    .unwrap();
+    super::codex::event_change(requests[0].0, &RpcMessage::parse(&resolved).unwrap())
+        .unwrap()
+        .unwrap()
+        .apply(&router)
+        .unwrap();
     assert!(router.request_session(&requests[0].2).is_none());
     for (_, target, id) in &requests[1..] {
         assert_eq!(router.request_session(id).as_ref(), Some(target));

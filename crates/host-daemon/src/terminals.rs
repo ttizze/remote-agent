@@ -98,6 +98,7 @@ impl Terminals {
         let cwd = tokio::fs::canonicalize(cwd)
             .await
             .map_err(|error| error.to_string())?;
+        let cwd = dunce::simplified(&cwd).to_owned();
         if !cwd.is_dir() {
             return Err("terminal directory is unavailable".into());
         }
@@ -581,7 +582,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(20), async {
             for disconnect in [false, true] {
                 let directory = tempfile::tempdir().unwrap();
-                let cwd = std::fs::canonicalize(directory.path()).unwrap();
+                let cwd = dunce::canonicalize(directory.path()).unwrap();
                 let terminals = Terminals::default();
                 let router = SessionRouter::new();
                 let connection = router.open_session();

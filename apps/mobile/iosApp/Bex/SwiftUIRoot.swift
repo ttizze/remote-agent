@@ -22,23 +22,28 @@ struct BexSwiftUIRoot: View {
 private struct BexScreen: View {
     @ObservedObject var model: BexAppViewModel
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: Binding<[AppScreen]>(
+            get: {
+                switch model.screen {
+                case .thread: [.threads, .thread]
+                case .threads: [.threads]
+                default: []
+                }
+            },
+            set: { path in
+                if path.last == .threads, model.screen == .thread {
+                    model.showThreadList()
+                } else if path.isEmpty, model.screen == .threads || model.screen == .thread {
+                    model.showProfiles()
+                }
+            }
+        )) {
             Group {
                 if model.profiles.isEmpty {
                     pairingScreen
                 } else {
                     ProfilesScreen(profiles: model.profiles, notice: model.notice,
                                    select: model.selectProfile, remove: model.removeProfile, add: model.openPairing)
-                        .navigationDestination(isPresented: Binding(
-                            get: { model.screen == .threads || model.screen == .thread },
-                            set: {
-                                if !$0, model.selectedProfileId != nil {
-                                    model.showProfiles()
-                                }
-                            }
-                        )) {
-                            threadList
-                        }
                         .sheet(isPresented: Binding(
                             get: { model.screen == .pairing },
                             set: {
@@ -49,6 +54,13 @@ private struct BexScreen: View {
                         )) {
                             NavigationStack { pairingScreen }
                         }
+                }
+            }
+            .navigationDestination(for: AppScreen.self) { screen in
+                switch screen {
+                case .threads: ThreadsScreen(model: model)
+                case .thread: ConversationDestination(model: model)
+                default: EmptyView()
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -65,20 +77,6 @@ private struct BexScreen: View {
                       transcriptionRecipient: model.pairingInvitation?.transcriptionRecipient,
                       prepare: model.preparePairing, confirm: model.confirmPairing,
                       change: model.openPairing, cancel: model.dismissPairing)
-    }
-
-    private var threadList: some View {
-        ThreadsScreen(model: model)
-            .navigationDestination(isPresented: Binding(
-                get: { model.screen == .thread },
-                set: {
-                    if !$0, model.screen == .thread {
-                        model.showThreadList()
-                    }
-                }
-            )) {
-                ConversationDestination(model: model)
-            }
     }
 }
 
@@ -306,6 +304,9 @@ private struct ProfilesScreen: View {
             }
         }
         .background(Color(UIColor.systemGroupedBackground).ignoresSafeArea())
+        .safeAreaInset(edge: .top, spacing: 0) {
+            SettingsScopeBar(projects: "すべてのプロジェクト", environment: "このiPhone")
+        }
         .navigationTitle("Bex")
         .alert("このPCとの接続を解除しますか？", isPresented: Binding(
             get: { removing != nil }, set: {

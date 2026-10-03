@@ -201,12 +201,12 @@ impl Operation for SendSubmission {
     }
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
         if !context.snapshot.subscriptions.contains_key(&self.thread_id) {
+            let cached = context.snapshot.conversations.get(&self.thread_id);
             let open = ReadThread::new(self.thread_id.clone()).with_history(
-                context
-                    .snapshot
-                    .conversations
-                    .get(&self.thread_id)
-                    .map(Arc::as_ref),
+                cached.and_then(|thread| thread.history_limit),
+                cached
+                    .and_then(|thread| thread.turns.as_ref())
+                    .map_or(0, Vec::len),
             );
             return context
                 .call(&open)
@@ -225,7 +225,9 @@ impl Operation for SendSubmission {
             self.draft
                 .invocations
                 .iter()
-                .filter(|item| item.is_in(&self.draft.text))
+                .filter(|item| {
+                    item.provider == self.thread_id.provider && item.is_in(&self.draft.text)
+                })
                 .map(agent_protocol::composer::Invocation::input),
         );
         for attachment in &self.draft.attachments {

@@ -1,5 +1,5 @@
 use super::*;
-use agent_core::composer::{ComposerSuggestions, insert_invocation};
+use agent_core::composer::{ComposerSuggestions, candidate_label, insert_invocation};
 use agent_protocol::composer::Invocation;
 
 impl Desktop {
@@ -121,17 +121,42 @@ impl Desktop {
             menu = menu.child(
                 div()
                     .id(("invocation", index))
+                    .debug_selector(move || format!("composer-candidate-{index}"))
+                    .flex()
+                    .items_center()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
                     .rounded(px(8.))
                     .px_2()
                     .py_1()
                     .cursor_pointer()
                     .when(selected, |row| row.bg(rgb(0x444444)))
-                    .child(div().text_sm().child(candidate.invocation.name.clone()))
+                    .when(
+                        candidate.invocation.kind
+                            == agent_protocol::composer::InvocationKind::Skill,
+                        |row| row.child(Icon::new(IconName::BookOpen).size(px(14.))),
+                    )
                     .child(
                         div()
-                            .text_xs()
+                            .debug_selector(move || format!("composer-candidate-name-{index}"))
+                            .max_w(relative(0.5))
+                            .flex_shrink_0()
+                            .text_sm()
+                            .truncate()
+                            .child(candidate_label(&candidate.invocation.name)),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(move || {
+                                format!("composer-candidate-description-{index}")
+                            })
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .truncate()
                             .text_color(rgb(0xaaaaaa))
-                            .child(candidate.description.clone()),
+                            .child(candidate_label(&candidate.description)),
                     )
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(cx.listener(move |s, _, window, cx| {
@@ -154,7 +179,80 @@ mod tests {
     use agent_protocol::composer::Invocation;
     use agent_protocol::composer::InvocationKind;
     use gpui_kit as gpui;
-    use gpui_kit::{AppContext, EntityInputHandler, Focusable, TestAppContext};
+    use gpui_kit::{
+        AppContext, Context, Entity, EntityInputHandler, Focusable, IntoElement, ParentElement,
+        Render, Styled, TestAppContext, Window, div, px,
+    };
+
+    struct CompletionView(Entity<Desktop>, f32);
+    impl Render for CompletionView {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(self.1))
+                .child(self.0.update(cx, |view, cx| view.completion_menu(cx)))
+        }
+    }
+
+    #[gpui::test]
+    fn completion_candidates_keep_names_and_descriptions_on_one_line(cx: &mut TestAppContext) {
+        let _runtime = runtime(cx);
+        for width in [360., 850.] {
+            let (_, window) = cx.add_window_view(|window, cx| {
+                let desktop = cx.new(|cx| Desktop::new(Mode::SideChat {
+                    remote: Some(super::RemoteHost { id: "fixture".into(), name: "fixture".into(), ticket: "invalid-fixture-ticket".into() }),
+                    cwd: "/fixture".into(),
+                }, window, cx));
+                desktop.update(cx, |view, cx| {
+                    let snapshot = Arc::make_mut(&mut view.snapshot);
+                    snapshot.connected = true;
+                    snapshot.composer_catalog = Some(Arc::new(ComposerCatalog {
+                        cwd: snapshot.navigation.cwd.clone(), loading: true,
+                        candidates: [
+                            ("Review", "Investigate whether structured datasets and query results are trustworthy enough to use, including freshness, duplicates and missing values"),
+                            ("Analyze Data Quality With A Very Long Skill Name", "First line\nSecond line"),
+                        ].into_iter().map(|(name, description)| ComposerCandidate {
+                            invocation: Invocation { provider: agent_protocol::session::ProviderKind::Codex, kind: InvocationKind::Skill, name: name.into(), path: format!("/fixture/{name}/SKILL.md") },
+                            description: description.into(),
+                        }).collect(), ..Default::default()
+                    }));
+                    view.composer.update(cx, |input, cx| {
+                        input.set_value("/", window, cx);
+                        input.set_selected_range(1..1, cx);
+                    });
+                });
+                CompletionView(desktop, width)
+            });
+            window.run_until_parked();
+            for (row_selector, name_selector, description_selector) in [
+                (
+                    "composer-candidate-0",
+                    "composer-candidate-name-0",
+                    "composer-candidate-description-0",
+                ),
+                (
+                    "composer-candidate-1",
+                    "composer-candidate-name-1",
+                    "composer-candidate-description-1",
+                ),
+            ] {
+                let row = window.debug_bounds(row_selector).unwrap();
+                let name = window.debug_bounds(name_selector).unwrap();
+                let description = window.debug_bounds(description_selector).unwrap();
+                assert_eq!(name.top(), description.top());
+                assert_eq!(name.size.height, description.size.height);
+                assert!(
+                    name.left() >= row.left() + px(22.),
+                    "every skill reserves the same leading icon"
+                );
+                assert!(name.right() <= description.left());
+                assert!(description.right() <= row.right());
+                assert!(
+                    row.size.height <= px(32.),
+                    "long descriptions must not increase row height"
+                );
+            }
+        }
+    }
 
     fn runtime(cx: &mut TestAppContext) -> tokio::runtime::Runtime {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -273,6 +371,7 @@ mod tests {
                 cwd: snapshot.navigation.cwd.clone(),
                 candidates: vec![ComposerCandidate {
                     invocation: Invocation {
+                        provider: agent_protocol::session::ProviderKind::Codex,
                         kind: InvocationKind::Skill,
                         name: "review".into(),
                         path: "/fixture/review/SKILL.md".into(),

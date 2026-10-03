@@ -86,7 +86,7 @@ impl LocalHostRegistry {
             );
         }
         crate::platform::create_state_directory(directory)?;
-        let directory = directory.canonicalize()?;
+        let directory = dunce::canonicalize(directory)?;
         let lock = open_lock(&directory.join("host.lock"))?;
         lock.try_lock()
             .context("Host is already running or its lock is unavailable")?;
@@ -278,7 +278,7 @@ mod tests {
             .unwrap();
         lease.publish(&endpoint.local_ticket()).unwrap();
         let location = registry.resolve(&desktop).unwrap();
-        assert_eq!(location.directory, host.canonicalize().unwrap());
+        assert_eq!(location.directory, dunce::canonicalize(&host).unwrap());
         assert!(
             matches!(location.state, LocalHostState::Ready(ref ticket) if *ticket == endpoint.local_ticket())
         );
@@ -297,7 +297,7 @@ mod tests {
         let registry = LocalHostRegistry::new(registry.directory().to_owned());
         let location = registry.resolve(&desktop).unwrap();
         assert!(matches!(location.state, LocalHostState::Stopped));
-        assert_eq!(location.directory, host.canonicalize().unwrap());
+        assert_eq!(location.directory, dunce::canonicalize(&host).unwrap());
         let lease = registry.acquire(&location.directory).unwrap();
         assert!(matches!(
             registry.resolve(&desktop).unwrap().state,

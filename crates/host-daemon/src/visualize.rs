@@ -58,9 +58,11 @@ mod tests {
     use super::*;
     #[test]
     fn local_reference_resolution_and_sandbox_contract() {
+        let directory = std::env::temp_dir();
+        let cwd = directory.to_str().unwrap();
         assert_eq!(
-            visualization_path("target/../options.html", "/fixture").unwrap(),
-            Path::new("/fixture/options.html")
+            visualization_path("target/../options.html", cwd).unwrap(),
+            directory.join("options.html")
         );
         for source in [
             "https://example.com/x.html",
@@ -69,7 +71,7 @@ mod tests {
             "",
             "a\0.html",
         ] {
-            assert!(visualization_path(source, "/fixture").is_err());
+            assert!(visualization_path(source, cwd).is_err());
         }
         let doc = visualization_document(include_str!(
             "../../agent-core/tests/fixtures/visualize/icon-options.html"

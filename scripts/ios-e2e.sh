@@ -31,9 +31,11 @@ if [[ $# == 0 ]]; then
         testSimulatorReviewsTheOpenSessionsWorktree \
         testSimulatorStartsOnListAndPreservesDetailOnForeground \
         testSimulatorOpensAccountManagementFromSettingsAndModelPicker \
+        testSimulatorModelDefaultsPersistAndApplyOnlyToNewConversations \
         testSimulatorSignsInDirectlyFromModelSettings \
         testSimulatorGoesBackFromAccountLoginAndCanStartAgain \
         testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone \
+        testSimulatorAutomaticallyShowsModelControlsInExistingAndRunningConversations \
         testSimulatorSwitchesCodexAccountsAndForksConversation \
         testSimulatorAddsClaudeAccountAndKeepsCodexSelected \
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \

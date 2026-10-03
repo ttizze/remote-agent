@@ -1,7 +1,22 @@
 use crate::state::Snapshot;
 use agent_protocol::composer::*;
+
+pub fn candidate_label(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub(crate) fn should_refresh_catalog(
+    loading: Option<bool>,
+    filter: &str,
+    text_changed: bool,
+) -> bool {
+    loading.is_none_or(|loading| !loading && filter.is_empty() && text_changed)
+}
 /// Cursor and range are UTF-8 byte offsets. Reject mail addresses, paths and URLs.
-fn query(text: &str, cursor: usize) -> Option<(std::ops::Range<usize>, InvocationKind, &str)> {
+pub(crate) fn query(
+    text: &str,
+    cursor: usize,
+) -> Option<(std::ops::Range<usize>, InvocationKind, &str)> {
     let before = text.get(..cursor)?;
     let start = before
         .rfind(char::is_whitespace)
@@ -30,17 +45,19 @@ pub struct ComposerSuggestions {
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
     pub fn composer_suggestions(&self, text: String, cursor: u32) -> Option<ComposerSuggestions> {
-        let (_, kind, filter) = self.composer_query(&text, cursor as usize)?;
+        let (_, kind, filter) = query(&text, cursor as usize)?;
         let catalog = self
             .composer_catalog
             .as_ref()
             .filter(|c| c.cwd == self.navigation.cwd);
         let filter = filter.to_lowercase();
+        let provider = self.model_provider_for_draft(self.navigation.draft_key.clone());
         let candidates: Vec<_> = catalog
             .into_iter()
             .flat_map(|c| &c.candidates)
             .filter(|c| {
-                c.invocation.kind == kind
+                c.invocation.provider == provider
+                    && c.invocation.kind == kind
                     && (c.invocation.name.to_lowercase().contains(&filter)
                         || c.description.to_lowercase().contains(&filter))
             })
@@ -48,30 +65,18 @@ impl Snapshot {
             .collect();
         let status = match catalog {
             None => Some("候補を読み込み中…".into()),
-            Some(c) if c.loading => Some("候補を読み込み中…".into()),
-            Some(c) if !c.errors.is_empty() => Some(c.errors.join("\n")),
+            Some(c) if c.loading && candidates.is_empty() => Some("候補を読み込み中…".into()),
+            Some(c)
+                if c.errors
+                    .get(&provider)
+                    .is_some_and(|errors| !errors.is_empty()) =>
+            {
+                Some(c.errors[&provider].join("\n"))
+            }
             Some(_) if candidates.is_empty() => Some("該当する候補がありません".into()),
             _ => None,
         };
         Some(ComposerSuggestions { candidates, status })
-    }
-}
-
-impl Snapshot {
-    pub(crate) fn composer_query<'a>(
-        &self,
-        text: &'a str,
-        cursor: usize,
-    ) -> Option<(std::ops::Range<usize>, InvocationKind, &'a str)> {
-        if self
-            .drafts
-            .get(&self.navigation.draft_key)
-            .and_then(|d| d.model.as_ref())
-            .is_some_and(|m| m.provider == agent_protocol::session::ProviderKind::Claude)
-        {
-            return None;
-        }
-        query(text, cursor)
     }
 }
 
@@ -110,10 +115,38 @@ mod tests {
 
     fn skill() -> Invocation {
         Invocation {
+            provider: agent_protocol::session::ProviderKind::Codex,
             kind: InvocationKind::Skill,
             name: "review".into(),
             path: "/project/.agents/skills/review/SKILL.md".into(),
         }
+    }
+
+    #[rstest::rstest]
+    #[case("Review code", "Review code")]
+    #[case("  First line\nSecond line\r\n", "First line Second line")]
+    #[case("Review\t\u{2028}code", "Review code")]
+    #[case("\n\t  ", "")]
+    fn candidate_labels_keep_words_on_one_line(#[case] text: &str, #[case] expected: &str) {
+        assert_eq!(candidate_label(text), expected);
+    }
+
+    #[rstest::rstest]
+    #[case::missing(None, "rev", false, true)]
+    #[case::prefetch(Some(true), "", true, false)]
+    #[case::refresh(Some(false), "", true, true)]
+    #[case::same_text(Some(false), "", false, false)]
+    #[case::filtering(Some(false), "rev", true, false)]
+    fn catalog_refreshes_only_when_needed(
+        #[case] loading: Option<bool>,
+        #[case] filter: &str,
+        #[case] text_changed: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            should_refresh_catalog(loading, filter, text_changed),
+            expected
+        );
     }
 
     #[test]
@@ -178,11 +211,59 @@ mod tests {
         for text in ["$review", "$review 日本語", "$review。"] {
             assert!(skill().is_in(text));
         }
+        assert_eq!(
+            skill().replace_in(
+                "日本語 $review。 $review-other prefix$review $review",
+                "/review"
+            ),
+            "日本語 /review。 $review-other prefix$review /review"
+        );
+    }
+
+    #[test]
+    fn catalog_candidates_and_failures_belong_to_the_selected_provider() {
+        use agent_protocol::session::ProviderKind;
+        let codex = skill();
+        let mut claude = codex.clone();
+        claude.provider = ProviderKind::Claude;
+        let mut snapshot = Snapshot {
+            composer_catalog: Some(std::sync::Arc::new(ComposerCatalog {
+                candidates: [codex.clone(), claude.clone()]
+                    .map(|invocation| ComposerCandidate {
+                        invocation,
+                        description: String::new(),
+                    })
+                    .into(),
+                errors: [(ProviderKind::Claude, vec!["Claude unavailable".into()])].into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let suggestions = snapshot.composer_suggestions("/".into(), 1).unwrap();
+        assert_eq!(suggestions.candidates[0].invocation, codex);
+        assert_eq!(suggestions.candidates.len(), 1);
+        assert!(suggestions.status.is_none());
+        std::sync::Arc::make_mut(
+            std::sync::Arc::make_mut(&mut snapshot.drafts)
+                .entry(snapshot.navigation.draft_key.clone())
+                .or_default(),
+        )
+        .model = Some(agent_protocol::models::ModelRef {
+            provider: ProviderKind::Claude,
+            id: "model".into(),
+        });
+        let suggestions = snapshot.composer_suggestions("/".into(), 1).unwrap();
+        assert_eq!(suggestions.candidates[0].invocation, claude);
+        assert_eq!(suggestions.candidates.len(), 1);
+        assert_eq!(suggestions.status.as_deref(), Some("Claude unavailable"));
     }
 
     #[test]
     fn editing_loads_catalog_once_and_selection_preserves_settings() {
-        let snapshot = Snapshot::default();
+        let snapshot = Snapshot {
+            connected: true,
+            ..Default::default()
+        };
         let key = snapshot.navigation.draft_key.clone();
         let (snapshot, effects) = reduce(
             &snapshot,
@@ -238,11 +319,96 @@ mod tests {
     }
 
     #[test]
+    fn prefetch_follows_connection_directory_and_provider() {
+        let (offline, _) = reduce(
+            &Snapshot::default(),
+            Event::Intent(Intent::NewChat {
+                cwd: "/project".into(),
+            }),
+        );
+        assert!(offline.composer_catalog.is_none());
+        let (connected, _) = reduce(&offline, Event::Connected);
+        let catalog = connected.composer_catalog.as_ref().unwrap();
+        assert_eq!(catalog.cwd, "/project");
+        assert!(catalog.loading);
+        let (edited, effects) = reduce(
+            &connected,
+            Event::Intent(Intent::EditComposer {
+                thread_id: connected.navigation.draft_key.clone(),
+                text: "/".into(),
+                cursor: 1,
+            }),
+        );
+        assert!(
+            effects.is_empty(),
+            "typing must share the prefetch already in flight"
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            catalog,
+            edited.composer_catalog.as_ref().unwrap()
+        ));
+        let (other, _) = reduce(
+            &edited,
+            Event::Intent(Intent::NewChat {
+                cwd: "/other".into(),
+            }),
+        );
+        assert_eq!(other.composer_catalog.as_ref().unwrap().cwd, "/other");
+        assert!(
+            other
+                .composer_catalog
+                .as_ref()
+                .unwrap()
+                .candidates
+                .is_empty()
+        );
+        let (disconnected, _) = reduce(&other, Event::Disconnected("offline".into()));
+        assert!(disconnected.composer_catalog.is_none());
+        let (reconnected, _) = reduce(&disconnected, Event::Connected);
+        assert_eq!(reconnected.composer_catalog.as_ref().unwrap().cwd, "/other");
+        let mut claude = offline;
+        std::sync::Arc::make_mut(
+            std::sync::Arc::make_mut(&mut claude.drafts)
+                .get_mut(&claude.navigation.draft_key)
+                .unwrap(),
+        )
+        .model = Some(agent_protocol::models::ModelRef {
+            provider: agent_protocol::session::ProviderKind::Claude,
+            id: "claude".into(),
+        });
+        let (claude, _) = reduce(&claude, Event::Connected);
+        assert!(claude.composer_catalog.is_some());
+        assert!(claude.composer_suggestions("/".into(), 1).is_some());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn refresh_keeps_matching_candidates_without_a_loading_message(filter in "[a-z]{0,12}") {
+            use crate::state::operations::Operation;
+            let mut snapshot = Snapshot {
+                composer_catalog: Some(std::sync::Arc::new(ComposerCatalog {
+                    candidates: vec![ComposerCandidate { invocation: skill(), description: "Review code".into() }],
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+            crate::state::operations::LoadComposerCatalog { cwd: String::new() }.prepare(&mut snapshot).unwrap();
+            let text = format!("/{filter}");
+            let suggestions = snapshot.composer_suggestions(text.clone(), text.len() as u32).unwrap();
+            let matches = "review".contains(&filter) || "review code".contains(&filter);
+            proptest::prop_assert_eq!(suggestions.candidates.len(), usize::from(matches));
+            proptest::prop_assert_eq!(suggestions.status.as_deref(), if matches { None } else { Some("候補を読み込み中…") });
+            proptest::prop_assert_eq!(&snapshot.composer_catalog.as_ref().unwrap().candidates[0].invocation, &skill());
+        }
+    }
+
+    #[test]
     fn selected_paths_survive_wire_encoding_and_reselection() {
         let mut snapshot = Snapshot::default();
         let mut other = skill();
         other.path = "/other/review/SKILL.md".into();
         let plugin = Invocation {
+            provider: agent_protocol::session::ProviderKind::Codex,
             kind: InvocationKind::Plugin,
             name: "Example Plugin".into(),
             path: "plugin://example@marketplace".into(),

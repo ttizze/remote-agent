@@ -6,7 +6,7 @@ use crate::{
 use std::{borrow::Cow, fmt::Write};
 
 pub struct ItemBody {
-    pub text: String,
+    pub text: Option<String>,
     pub images: Vec<String>,
 }
 fn attachment(text: &mut String, name: &str, path: &str) {
@@ -32,21 +32,25 @@ fn message(text: Option<&str>, content: &[MessagePart]) -> String {
     }
     result
 }
-pub fn item_body(item: &Item, presentation: &super::ItemPresentation) -> ItemBody {
+pub fn item_body(item: &Item) -> ItemBody {
     let text = match item.body() {
-        WireBody::UserMessage { text, content } => message(text.as_deref(), content),
-        WireBody::AssistantText { text, .. } => text.clone(),
-        WireBody::Reasoning { .. } => "詳細を表示".into(),
-        WireBody::ImageGeneration { .. } => presentation.title.clone(),
-        _ => match item.status {
-            ItemStatus::Unknown => "詳細を表示",
-            ItemStatus::Running => "running",
-            ItemStatus::Completed => "completed",
-            ItemStatus::Failed => "failed",
-            ItemStatus::Declined => "declined",
-            ItemStatus::Interrupted => "interrupted",
+        WireBody::UserMessage { text, content } => Some(message(text.as_deref(), content)),
+        WireBody::AssistantText { text, .. } => Some(text.clone()),
+        WireBody::Reasoning { .. } => Some("詳細を表示".into()),
+        WireBody::ImageGeneration { .. } => {
+            (item.status == ItemStatus::Failed).then(|| "画像を生成できませんでした".into())
         }
-        .into(),
+        _ => Some(
+            match item.status {
+                ItemStatus::Unknown => "詳細を表示",
+                ItemStatus::Running => "running",
+                ItemStatus::Completed => "completed",
+                ItemStatus::Failed => "failed",
+                ItemStatus::Declined => "declined",
+                ItemStatus::Interrupted => "interrupted",
+            }
+            .into(),
+        ),
     };
     let images = match item.body() {
         WireBody::ImageGeneration {
@@ -82,7 +86,10 @@ pub fn draft_body(draft: &Draft) -> ItemBody {
             attachment(&mut text, &file.name, &file.path);
         }
     }
-    ItemBody { text, images }
+    ItemBody {
+        text: Some(text),
+        images,
+    }
 }
 pub struct FileChange<'a> {
     pub path: Cow<'a, str>,
@@ -234,11 +241,8 @@ mod tests {
         #[case] images: &[&str],
     ) {
         let item: Item = serde_json::from_value(wire).unwrap();
-        let body = item_body(
-            &item,
-            &super::super::item_presentation(&item, Some(crate::session::ProviderKind::Codex)),
-        );
-        assert_eq!(body.text, collapsed);
+        let body = item_body(&item);
+        assert_eq!(body.text.as_deref(), Some(collapsed));
         assert_eq!(body.images, images);
         assert_eq!(expanded_body(&item), expanded);
     }
@@ -246,16 +250,6 @@ mod tests {
     #[test]
     fn generated_image_paths_are_displayed() {
         let generated: Item = serde_json::from_value(json!({"id":"image","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"imageGeneration":{"savedPath":"/saved.png","data":"base64","revisedPrompt":null}}}}})).unwrap();
-        assert_eq!(
-            item_body(
-                &generated,
-                &super::super::item_presentation(
-                    &generated,
-                    Some(crate::session::ProviderKind::Codex)
-                )
-            )
-            .images,
-            ["/saved.png"]
-        );
+        assert_eq!(item_body(&generated).images, ["/saved.png"]);
     }
 }

@@ -29,6 +29,8 @@ val generateAgentBindings by
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
         inputs.dir(rootProject.file("crates/agent-ffi"))
         inputs.dir(rootProject.file("crates/agent-core"))
+        inputs.dir(rootProject.file("crates/agent-protocol"))
+        inputs.dir(rootProject.file("crates/agent-transport"))
         outputs.dir(rootProject.file("target/agent-bindings"))
     }
 val buildAgentAndroid by
@@ -51,6 +53,8 @@ val buildAgentAndroid by
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
         inputs.dir(rootProject.file("crates/agent-ffi"))
         inputs.dir(rootProject.file("crates/agent-core"))
+        inputs.dir(rootProject.file("crates/agent-protocol"))
+        inputs.dir(rootProject.file("crates/agent-transport"))
         outputs.dir(layout.buildDirectory.dir("generated/jniLibs"))
     }
 

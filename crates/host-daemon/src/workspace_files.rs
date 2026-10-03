@@ -136,7 +136,7 @@ impl WorkspaceFiles {
                 Ok(Body::from(visualization_document(fragment)))
             }
             Call::ListFiles(params) => {
-                let path = absolute_path(&params.path)?.canonicalize()?;
+                let path = dunce::canonicalize(absolute_path(&params.path)?)?;
                 let mut entries = Vec::new();
                 let mut truncated = false;
                 for entry in fs::read_dir(&path)? {
@@ -165,13 +165,14 @@ impl WorkspaceFiles {
                 }))
             }
             Call::ReadFile(params) => {
-                let path = absolute_path(&params.path)?.canonicalize()?;
+                let path = dunce::canonicalize(absolute_path(&params.path)?)?;
                 read_editable(&path).map(Body::from)
             }
             Call::WriteFile(params) => {
-                let path = absolute_path(&params.path)?.canonicalize()?;
+                let path = dunce::canonicalize(absolute_path(&params.path)?)?;
                 let _lock = self.writes.lock().unwrap_or_else(|e| e.into_inner());
-                let original = read_bounded(&path, EDIT_LIMIT)?;
+                let original =
+                    read_bounded(&path, EDIT_LIMIT).context("read file before saving")?;
                 if hash(&original) != params.revision {
                     return Err(anyhow!(
                         "revision_conflict: file changed; reload before saving"
@@ -192,11 +193,19 @@ impl WorkspaceFiles {
                 atomicwrites::AtomicFile::new(&path, atomicwrites::AllowOverwrite)
                     .write_with_options(
                         |output| -> Result<()> {
-                            output.set_permissions(fs::metadata(&path)?.permissions())?;
+                            output
+                                .set_permissions(
+                                    fs::metadata(&path)
+                                        .context("read file permissions before saving")?
+                                        .permissions(),
+                                )
+                                .context("apply permissions to replacement file")?;
                             if bom {
                                 output.write_all(&[0xef, 0xbb, 0xbf])?;
                             }
-                            output.write_all(text.as_bytes())?;
+                            output
+                                .write_all(text.as_bytes())
+                                .context("write replacement file")?;
                             // Other editors don't share our mutex; recheck before replacement.
                             if hash(&read_bounded(&path, EDIT_LIMIT)?) != params.revision {
                                 return Err(anyhow!(
@@ -208,7 +217,9 @@ impl WorkspaceFiles {
                         crate::platform::private_file_options(),
                     )
                     .map_err(|error| match error {
-                        atomicwrites::Error::Internal(error) => anyhow::Error::new(error),
+                        atomicwrites::Error::Internal(error) => {
+                            anyhow::Error::new(error).context("prepare or commit file replacement")
+                        }
                         atomicwrites::Error::User(error) => error,
                     })?;
                 read_editable(&path).map(Body::from)
@@ -223,7 +234,7 @@ impl WorkspaceFiles {
                 } else {
                     absolute_path(&params.directory)?
                 };
-                let directory = directory.canonicalize()?;
+                let directory = dunce::canonicalize(directory)?;
                 if !directory.is_dir() {
                     return Err(anyhow!("upload directory is unavailable"));
                 }

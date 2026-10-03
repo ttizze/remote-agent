@@ -1,7 +1,6 @@
 included:
   - apps/mobile/iosApp/Bex
   - apps/mobile/iosApp/BexUITests
-  - apps/desktop/macos
 
 strict: true
 check_for_updates: false

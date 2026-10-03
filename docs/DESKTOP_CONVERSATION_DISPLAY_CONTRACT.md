@@ -20,7 +20,7 @@ explicitly instead of creating a Codex conversation or dropping the draft.
 | Input state | Expanded work | Header / divider | Transition |
 | --- | --- | --- | --- |
 | No work item yet | n/a | Thinking | Replaced as the first renderable work item arrives |
-| `inProgress` | collapsed by default | Activity summary | Commentary stays visible; each work group opens only on explicit action |
+| `Running` | collapsed by default | Activity summary | Commentary stays visible; each work group opens only on explicit action |
 | Waiting on approval | collapsed by default | Awaiting approval | The pending request stays visible and actionable outside work |
 | Waiting on user input or MCP elicitation | collapsed by default | Waiting for your answer | The request stays outside a hidden collapsed body |
 | Final assistant output starts | collapsed by default | Past-message count | The answer stays visible outside work |
@@ -38,6 +38,10 @@ hydration must not change this default.
 
 - List query limits and search are not persisted; reopening restores five-item
   defaults. Live navigation and reconnection retain the current query.
+- While a list refresh is running, coalesce further refreshes into one follow-up
+  using the latest query. A reply for that query remains valid after task
+  navigation; a reply for an older search or display limit must not replace it.
+  List publication must preserve the selected task and draft.
 
 - Load the latest bounded page first; request older pages using the server's
   opaque cursor. A refresh must not fetch the entire conversation.
@@ -95,16 +99,33 @@ Controls have no persistent border or model chevron. Fast toggles directly;
 effort opens the model's supported choices and its icon indicates the current
 level. Hide unsupported controls, and retain accessible labels and values.
 
-The model name opens a searchable catalog with separate agent and
-connection/account rows. The account row includes the Host-reported weekly
-quota windows; clicking it opens account switching, then account management
-(add/login/confirmed sign-out). Settings opens that same management view.
+The model name opens a searchable catalog. Desktop's account row includes the
+Host-reported weekly quota windows; clicking it opens account switching, then
+account management (add/login/confirmed sign-out). On iPhone, new conversations
+choose Codex or Claude Code with a segmented control; existing conversations
+keep their agent fixed. The account is read-only in the model picker, and
+Manage opens the same agent/account screen used by Settings. Browsing agent
+settings must not change the conversation's model. The selected account shows
+weekly quotas and reset times, with full usage details collapsed by default.
 Never invent quota values, account nicknames, unavailable agents or unsupported
 agent/connection combinations. Current Host adapters remain Codex and Claude;
 Pi and third-party connection adapters are not implied by the picker UI.
 Refresh must not change the selected provider. Account changes retain supported
 model/effort/speed choices, and normalize only settings the new catalog lacks.
 Account/model changes continue through the shared Store.
+
+Desktop's conversation and settings pages share the sidebar shell, width,
+header and collapse state. Only navigation contents and footer actions change;
+Back stays at the bottom and returns to the selected conversation and draft.
+Settings pages show a common applicability bar above their contents. It shows
+the current storage scope rather than implying that settings are written to
+every environment. Environment settings apply to every project on that Host;
+iPhone connection registrations belong to that iPhone. New-conversation model
+defaults are device preferences across environments, so their desktop
+applicability bars name all environments and the current device as the storage
+owner. iPhone Settings includes model defaults, using the same catalog and core
+preference intents as the conversation picker. Applying defaults on another
+Host must preserve that Host's existing drafts and pending submissions.
 
 Acceptance: desktop
 `model_picker_keeps_quick_controls_and_routes_quota_to_account_management`, core
@@ -116,20 +137,18 @@ layout, capability filtering, navigation, quota and selection behavior.
 ## Project registration
 
 Desktop's project heading has a “＋” action. Both this action and the new-chat
-folder picker use Codex's `project/create` API before opening the chat draft.
-The Host reads `project/list` and supplies `projectId` when starting a chat in
-that project. A non-null native assignment is authoritative. Missing or null
-membership uses Host workspace matching for both Codex and Claude, including
-worktree roots. A null alone does not indicate an intentional projectless chat;
-Bex's dedicated chat directory remains projectless. Bex keeps no
-separate persistent project registry and does not read Desktop's retired JSON
-project metadata. A late registration refreshes the list without changing newer
-navigation.
+folder picker register the directory through the Host's ProjectStore before
+opening the chat draft. The Host persists registration in `bex-projects.json`
+and determines membership from workspace paths for both providers, including
+worktree roots. Adapters receive cwd when creating a conversation; native
+project catalogs and assignments do not determine Bex membership. Bex's dedicated
+chat directory remains projectless. A late registration refreshes the list
+without changing newer navigation.
 
 Acceptance: `adding_a_chat_folder_registers_a_project_before_submission` and
 `project_registration_navigates_only_while_current` cover registration, restart,
-duplicate selections, and navigation races. Native assignment and workspace
-matching are covered by `projects::state` tests.
+duplicate selections, and navigation races. Host registration and workspace
+matching are covered by `projects` tests.
 
 ## Workspace folder labels
 
@@ -369,7 +388,14 @@ Desktop file-change headers and patches, and the mobile expanded text, read
 field, so it must never be looked up in `Item::extra`. Deferred items retain
 file headers while their diff bodies are fetched separately.
 
-When a provider is unavailable, the model menu displays the remaining catalog and the provider error. An existing draft keeps its saved model and settings until the user changes them; a new draft selects an available default. iOS exposes the model catalog without requiring a Codex account. Codex exit fails its active turn but leaves the Host connection and Claude approvals/conversations usable.
+When a provider is unavailable, the model menu displays the remaining catalog.
+Missing Claude installation or account selection returns an empty catalog,
+without a model error. Genuine model failures appear only for the provider
+being viewed; device defaults in automatic mode may show failures across
+providers. An existing draft keeps its saved model and settings until the user
+changes them; a new draft selects an available default. iOS exposes the model
+catalog without requiring a Codex account. Codex exit fails its active turn but
+leaves the Host connection and Claude approvals/conversations usable.
 
 
 The September 2026 test consolidation preserves the assertions above. Full and
@@ -424,6 +450,12 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
 
 ## Image preview and draft attachments
 
+- Desktop, iPhone and Android generated images display only the clickable image,
+  without a “生成画像” heading or a separate “画像を開く” button. Activating
+  the desktop image opens the gallery; generation failures retain their error message.
+- iOS `testSimulatorShowsGeneratedImagesAndOpensFileLinksAfterReopening` verifies
+  caption-free generated images from saved paths and inline data, including
+  reopened history.
 - Desktop, iPhone and Android image generation without an image source shows a
   rounded skeleton with a pulse animation while the item is in progress. It fits
   the conversation width (up to 320 px), yields to the image when available,
@@ -498,6 +530,13 @@ checks for both providers, and iOS
   opens enabled skill candidates from the selected Host and working directory.
   Full-width `＠` and `／` also open the picker. Names and descriptions filter the
   list; loading, empty and partial catalog failures remain visible.
+- Prefetch candidates on connection and when opening a Codex conversation or
+  draft in a working directory. Opening the picker refreshes in the background,
+  keeps candidates available, and shows loading only when no matching candidates
+  are available. Host/account changes invalidate the catalog; late replies never
+  restore candidates from an invalidated catalog.
+- Desktop candidates show a book icon before skill names, with the name and
+  secondary description on one line. Long text is truncated to fit the picker.
 - Desktop supports clicking, Up/Down, Enter/Tab to select, and Escape to dismiss.
   IME confirmation never selects a candidate or sends the message. Mobile uses
   tappable candidates. Skill selection inserts `$name`; plugin selection inserts
@@ -508,7 +547,10 @@ checks for both providers, and iOS
   attachments, and newer draft content.
 
 Acceptance: core `composer::tests`,
+`composer_catalog_prefetch_and_refresh_keep_candidates_available`,
+`composer_catalog_ignores_replies_from_previous_directories_and_accounts`,
 `selected_invocations_reach_submission_and_return_after_failure`, Host
 `composer_catalog_uses_host_provider_and_excludes_disabled_entries`, desktop
-`invocation_completion_preserves_suffix_and_does_not_accept_ime`, and iOS
+`invocation_completion_preserves_suffix_and_does_not_accept_ime`,
+`completion_candidates_keep_names_and_descriptions_on_one_line`, and iOS
 `testSimulatorSelectsPluginAndSkillFromComposer`.

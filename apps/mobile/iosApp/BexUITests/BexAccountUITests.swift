@@ -64,7 +64,7 @@ extension BexLaunchUITests {
         openModelChoices(app)
         XCTAssertTrue(app.buttons["model.choice.default"].waitForExistence(timeout: 15))
         selectFixtureProvider(app, "Codex")
-        app.buttons["model.accounts"].tap()
+        openAccountManagement(app)
         XCTAssertEqual(app.buttons["model.account.desktop"].value as? String, "選択中")
         app.buttons["model.close"].tap()
     }
@@ -77,7 +77,7 @@ extension BexLaunchUITests {
             selectFixtureProvider(app, provider)
             openAccountManagement(app)
             let originalAccounts = app.buttons.matching(NSPredicate(
-                format: "identifier BEGINSWITH 'account.logout.'"
+                format: "identifier BEGINSWITH 'model.account.' AND identifier != 'model.account.add'"
             )).allElementsBoundByIndex.map(\.identifier).sorted()
             for attempt in 0 ..< 2 {
                 let add = app.buttons["model.account.add"]
@@ -100,7 +100,7 @@ extension BexLaunchUITests {
                 )
                 wait(for: [cancelled], timeout: 15)
                 XCTAssertEqual(app.buttons.matching(NSPredicate(
-                    format: "identifier BEGINSWITH 'account.logout.'"
+                    format: "identifier BEGINSWITH 'model.account.' AND identifier != 'model.account.add'"
                 )).allElementsBoundByIndex.map(\.identifier).sorted(), originalAccounts)
             }
         }
@@ -113,31 +113,32 @@ extension BexLaunchUITests {
         app.buttons["tasks.new.project.simulator-project"].tap()
         app.buttons["model.settings"].tap()
         let id = addFixtureClaudeAccount(app)
-        XCTAssertTrue(app.navigationBars["アカウントを管理"].exists)
-        let logout = app.buttons["account.logout." + id]
-        for _ in 0 ..< 6 where !logout.isHittable {
+        XCTAssertTrue(app.navigationBars["エージェント"].exists)
+        let actions = app.buttons["account.actions." + id]
+        for _ in 0 ..< 6 where !actions.isHittable {
             app.swipeUp()
         }
-        XCTAssertTrue(logout.isHittable); logout.tap()
+        XCTAssertTrue(actions.isHittable); actions.tap()
+        app.buttons["account.logout." + id].tap()
         let confirm = app.alerts.buttons.matching(identifier: "account.logout.confirm").firstMatch
         XCTAssertTrue(confirm.waitForExistence(timeout: 5))
         app.alerts.buttons.matching(identifier: "account.logout.cancel").firstMatch.tap()
-        XCTAssertTrue(logout.exists)
-        logout.tap(); confirm.tap()
-        let removed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: logout)
+        XCTAssertTrue(actions.exists)
+        actions.tap()
+        app.buttons["account.logout." + id].tap(); confirm.tap()
+        let removed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: actions)
         wait(for: [removed], timeout: 15)
         captureScreen(app, named: "Account management preserves sign-out confirmation")
     }
 
     func selectFixtureProvider(_ app: XCUIApplication, _ name: String) {
         openModelChoices(app)
-        let picker = app.buttons["model.provider"]
-        XCTAssertTrue(picker.waitForExistence(timeout: 10)); picker.tap()
-        app.buttons["model.provider." + (name == "Codex" ? "codex" : "claude")].tap()
+        let picker = app.segmentedControls["model.provider"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10))
+        picker.buttons[name == "Codex" ? "Codex" : "Claude Code"].tap()
     }
 
     func openAccountManagement(_ app: XCUIApplication) {
-        app.buttons["model.accounts"].tap()
         let manage = app.buttons["model.accounts.manage"]
         XCTAssertTrue(manage.waitForExistence(timeout: 10)); manage.tap()
     }
@@ -145,46 +146,104 @@ extension BexLaunchUITests {
     func addFixtureClaudeAccount(_ app: XCUIApplication) -> String {
         selectFixtureProvider(app, "Claude")
         openAccountManagement(app)
-        let existingIDs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'account.logout.claude:'"))
+        let existingIDs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'model.account.claude:'"))
             .allElementsBoundByIndex.map(\.identifier)
         let add = app.buttons["model.account.add"]
         XCTAssertTrue(add.waitForExistence(timeout: 10)); XCTAssertTrue(add.isHittable); add.tap()
         let code = app.secureTextFields["model.login.input"]
         XCTAssertTrue(code.waitForExistence(timeout: 15))
-        XCTAssertTrue(app.navigationBars["アカウントを管理"].exists)
+        XCTAssertTrue(app.navigationBars["エージェント"].exists)
         captureScreen(app, named: "Claude sign in from account management")
         code.tap(); code.typeText("fixture-code")
         app.buttons["model.login.submit"].tap()
         let logout = app.buttons.matching(NSPredicate(
-            format: "identifier BEGINSWITH 'account.logout.claude:' AND NOT (identifier IN %@)", existingIDs
+            format: "identifier BEGINSWITH 'model.account.claude:' AND NOT (identifier IN %@)", existingIDs
         )).firstMatch
         XCTAssertTrue(logout.waitForExistence(timeout: 20))
-        return String(logout.identifier.dropFirst("account.logout.".count))
+        return String(logout.identifier.dropFirst("model.account.".count))
     }
 
     func testSimulatorOpensAccountManagementFromSettingsAndModelPicker() throws {
         let app = try connectedSimulatorApp()
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.settings"].tap()
-        XCTAssertTrue(app.buttons["account.logout.desktop"].waitForExistence(timeout: 15))
-        XCTAssertTrue(app.staticTexts["残り 72%"].exists)
+        XCTAssertTrue(app.buttons["settings.agents"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["settings.connections"].exists)
+        XCTAssertTrue(app.buttons["settings.worktrees"].exists)
+        XCTAssertFalse(app.segmentedControls["account.provider"].exists)
+        let scope = app.descendants(matching: .any)["settings.scope"]
+        XCTAssertTrue(scope.label.contains("検証 Host"))
+        captureScreen(app, named: "Settings navigation list")
+        app.buttons["settings.agents"].tap()
+        XCTAssertTrue(app.buttons["account.actions.desktop"].waitForExistence(timeout: 15))
+        XCTAssertTrue(scope.label.contains("すべてのプロジェクト"))
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "週間残量 86%"))
+            .firstMatch.waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["model.account.add"].isHittable)
-        captureScreen(app, named: "Account management from settings")
-        app.buttons["model.close"].tap()
+        app.segmentedControls["account.provider"].buttons["Claude Code"].tap()
+        XCTAssertFalse(app.buttons["model.account.desktop"].exists)
+        app.segmentedControls["account.provider"].buttons["Codex"].tap()
+        captureScreen(app, named: "Agent account settings")
+        app.buttons["model.back"].tap()
+        app.buttons["settings.connections"].tap()
+        XCTAssertTrue(app.buttons["profiles.add"].waitForExistence(timeout: 10))
+        XCTAssertTrue(scope.label.contains("このiPhone"))
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'profiles.' AND identifier != 'profiles.add'"))
+            .firstMatch.tap()
+        XCTAssertTrue(app.buttons["tasks.new.project.simulator-project"].waitForExistence(timeout: 10))
         app.buttons["tasks.new.project.simulator-project"].tap()
+        chooseFixtureModel(app)
         app.buttons["model.settings"].tap()
-        selectFixtureProvider(app, "Codex")
-        XCTAssertTrue(app.buttons["model.accounts"].waitForExistence(timeout: 15))
-        XCTAssertFalse(app.buttons["account.logout.desktop"].exists)
-        XCTAssertFalse(app.buttons["model.accounts.manage"].exists)
-        captureScreen(app, named: "Model picker with weekly quota entry")
-        app.buttons["model.accounts"].tap()
-        XCTAssertTrue(app.buttons["model.account.desktop"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["account.logout.desktop"].exists)
-        app.buttons["model.accounts.manage"].tap()
-        XCTAssertTrue(app.buttons["account.logout.desktop"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["model.account.add"].isHittable)
-        captureScreen(app, named: "Weekly quota opens account switching and management")
+        XCTAssertTrue(app.segmentedControls["model.provider"].exists)
+        XCTAssertTrue(scope.label.contains("この会話"))
+        XCTAssertFalse(app.buttons["model.account.desktop"].exists)
+        XCTAssertFalse(app.buttons["account.actions.desktop"].exists)
+        captureScreen(app, named: "Model picker with read-only account")
+        openAccountManagement(app)
+        app.segmentedControls["account.provider"].buttons["Claude Code"].tap()
+        openModelChoices(app)
+        XCTAssertEqual(app.buttons["model.choice.fixture-model"].value as? String, "選択中",
+                       "Browsing agent settings must not change the draft model")
+        app.buttons["model.close"].tap()
+        let prompt = app.textFields["task.message"]
+        prompt.tap(); prompt.typeText("[success] Keep the conversation agent")
+        app.buttons["task.send"].tap()
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
+        app.buttons["model.settings"].tap()
+        XCTAssertFalse(app.segmentedControls["model.provider"].exists)
+        XCTAssertTrue(app.buttons["model.choice.fixture-model"].exists)
+        XCTAssertFalse(app.buttons["model.choice.default"].exists)
+        captureScreen(app, named: "Existing conversation fixes the agent")
+    }
+
+    func testSimulatorAutomaticallyShowsModelControlsInExistingAndRunningConversations() throws {
+        let app = try connectedSimulatorApp()
+        try useSimulatorListFixture("external-conversation")
+        app.buttons["tasks.menu"].tap()
+        app.buttons["tasks.refresh"].tap()
+        let row = app.buttons["tasks.row.codex:fixture-external-thread"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["item.answer-fixture-external-thread"]
+            .waitForExistence(timeout: 15))
+        captureScreen(app, named: "Model controls on an externally created conversation")
+        let model = app.buttons["model.settings"]
+        XCTAssertEqual(model.value as? String, "Fixture Model",
+                       "Opening an existing conversation must select from the automatically loaded model catalog")
+        XCTAssertTrue(app.buttons["model.effort"].isHittable)
+        let prompt = app.textFields["task.message"]
+        prompt.tap(); prompt.typeText("[delayed-input] Keep model settings available while working")
+        app.buttons["task.send"].tap()
+        XCTAssertTrue(prefixedButton(app, prefix: "turn.interrupt.").waitForExistence(timeout: 10))
+        XCTAssertTrue(model.isHittable)
+        XCTAssertEqual(model.value as? String, "Fixture Model")
+        captureScreen(app, named: "Model selection remains visible during a running turn")
+        model.tap()
+        let selected = app.buttons["model.choice.fixture-model"]
+        XCTAssertTrue(selected.waitForExistence(timeout: 10))
+        XCTAssertEqual(selected.value as? String, "選択中")
+        app.buttons["model.close"].tap()
+        try simulatorFixture("release-inputs")
+        XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
     }
 
     func testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone() throws {
@@ -235,18 +294,66 @@ extension BexLaunchUITests {
         XCTAssertTrue(fast.exists && effort.exists)
     }
 
+    func testSimulatorModelDefaultsPersistAndApplyOnlyToNewConversations() throws {
+        let app = try connectedSimulatorApp()
+        app.buttons["tasks.new.project.simulator-project"].tap()
+        chooseFixtureModel(app)
+        chooseFixtureEffort(app, "medium")
+        let prompt = app.textFields["task.message"]
+        prompt.tap(); prompt.typeText("Keep this existing draft")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["tasks.menu"].tap()
+        app.buttons["tasks.settings"].tap()
+        let models = app.buttons["settings.models"]
+        XCTAssertTrue(models.waitForExistence(timeout: 10)); models.tap()
+        XCTAssertTrue(app.buttons["model.choice.automatic"].waitForExistence(timeout: 10))
+        let choice = app.buttons["model.choice.fixture-model"]
+        XCTAssertTrue(choice.waitForExistence(timeout: 15)); choice.tap()
+        XCTAssertFalse(app.descendants(matching: .any)["model.error"].exists)
+        let effort = app.buttons["model.sheet.effort"]
+        XCTAssertTrue(effort.waitForExistence(timeout: 10)); effort.tap()
+        app.buttons["high"].tap()
+        let speed = app.buttons["model.defaults.speed"]
+        XCTAssertTrue(speed.exists); speed.tap()
+        app.buttons["高速"].tap()
+        captureScreen(app, named: "Default model effort and speed for new conversations")
+        app.buttons["model.close"].tap()
+        app.buttons["tasks.new.project.simulator-project"].tap()
+        XCTAssertEqual(app.textFields["task.message"].value as? String, "Keep this existing draft")
+        XCTAssertEqual(app.buttons["model.effort"].value as? String, "medium")
+        XCTAssertEqual(app.buttons["model.fast"].value as? String, "オフ")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["tasks.new.chat"].tap()
+        XCTAssertEqual(app.buttons["model.effort"].value as? String, "high")
+        XCTAssertEqual(app.buttons["model.fast"].value as? String, "オン")
+        app.buttons["model.settings"].tap()
+        XCTAssertEqual(app.buttons["model.choice.fixture-model"].value as? String, "選択中")
+        XCTAssertFalse(app.descendants(matching: .any)["model.error"].exists)
+        app.buttons["model.close"].tap()
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.buttons["tasks.menu"].waitForExistence(timeout: 20))
+        app.buttons["tasks.menu"].tap()
+        app.buttons["tasks.settings"].tap()
+        app.buttons["settings.models"].tap()
+        XCTAssertEqual(app.buttons["model.choice.fixture-model"].value as? String, "選択中")
+        XCTAssertEqual(app.buttons["model.sheet.effort"].value as? String, "high")
+        XCTAssertEqual(app.buttons["model.defaults.speed"].value as? String, "高速")
+        app.buttons["model.choice.automatic"].tap()
+        XCTAssertEqual(app.buttons["model.choice.automatic"].value as? String, "選択中")
+    }
+
     private func switchFixtureAccount(_ app: XCUIApplication) {
         app.buttons["model.settings"].tap()
         openAccountManagement(app)
-        XCTAssertTrue(app.buttons["account.logout.desktop"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["account.actions.desktop"].waitForExistence(timeout: 10))
         app.buttons["model.account.add"].tap()
         XCTAssertTrue(app.staticTexts["model.login.code"].waitForExistence(timeout: 10))
         XCUIDevice.shared.press(.home)
         app.activate()
-        let second = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'account.logout.account-'"))
+        let second = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'model.account.account-'"))
             .firstMatch
         XCTAssertTrue(second.waitForExistence(timeout: 20))
-        let id = String(second.identifier.dropFirst("account.logout.".count))
+        let id = String(second.identifier.dropFirst("model.account.".count))
         XCTAssertTrue(app.buttons["model.account.desktop"].waitForExistence(timeout: 5))
         app.buttons["model.account.desktop"].tap()
         let choice = app.buttons["model.account." + id]

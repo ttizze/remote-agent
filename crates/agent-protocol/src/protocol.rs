@@ -16,14 +16,14 @@ pub enum Notification {
         active: bool,
         finished: bool,
     },
-    #[serde(rename = "process/outputDelta")]
+    #[serde(rename = "host/terminal/output")]
     Output {
         #[serde(rename = "processHandle")]
         handle: String,
         #[serde(rename = "deltaBase64", with = "bytes")]
         data: Vec<u8>,
     },
-    #[serde(rename = "process/exited")]
+    #[serde(rename = "host/terminal/exited")]
     Exited {
         #[serde(rename = "processHandle")]
         handle: String,

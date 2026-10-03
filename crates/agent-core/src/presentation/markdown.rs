@@ -134,6 +134,7 @@ pub fn markdown_blocks(source: String) -> Vec<MarkdownBlock> {
     let mut blocks = Vec::new();
     block(
         &root,
+        &source,
         &definitions(&root),
         MarkdownStyle::default(),
         &mut blocks,
@@ -184,6 +185,7 @@ fn inline(
 
 fn block(
     node: &Node,
+    source: &str,
     definitions: &HashMap<&str, &str>,
     mut style: MarkdownStyle,
     blocks: &mut Vec<MarkdownBlock>,
@@ -245,7 +247,7 @@ fn block(
                         "•".into()
                     },
                 );
-                block(child, definitions, item_style, blocks);
+                block(child, source, definitions, item_style, blocks);
             }
             return;
         }
@@ -274,9 +276,11 @@ fn block(
         }
         _ => {}
     }
-    if let Node::Paragraph(paragraph) = node
-        && let [Node::Text(text)] = paragraph.children.as_slice()
-        && let Some(path) = visualization_reference(&text.value)
+    // Read opaque JSON before Markdown unescapes Windows path separators.
+    if matches!(node, Node::Paragraph(_))
+        && let Some(position) = node.position()
+        && let Some(path) =
+            visualization_reference(&source[position.start.offset..position.end.offset])
     {
         blocks.push(MarkdownBlock::Visualization { path });
         return;
@@ -287,7 +291,7 @@ fn block(
         blocks.push(MarkdownBlock::Paragraph { runs, style });
     } else {
         for child in node.children().into_iter().flatten() {
-            block(child, definitions, style.clone(), blocks);
+            block(child, source, definitions, style.clone(), blocks);
             // A list marker belongs to the first paragraph, not every continuation.
             if matches!(node, Node::ListItem(_)) {
                 style.marker = None;
@@ -321,12 +325,31 @@ mod tests {
             "`visualize{\"path\":\"x.html\"}`",
             "```text\nvisualize{\"path\":\"x.html\"}\n```",
             "visualize{broken}",
+            "visualize{\"path\":\"\"}",
+            "visualize{\"path\":null}",
             "visualize{\"path\":\"x.html\"}",
         ] {
             assert!(matches!(
                 markdown_blocks(source.into())[0],
                 MarkdownBlock::Paragraph { .. }
             ));
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn visualization_paths_preserve_json_escapes(name in "[^\\x00\\r\\n]{1,32}") {
+            let path = format!("C:\\fixture\\{name}.html");
+            let source = format!(
+                "Before\n\nvisualize{}\n\nAfter",
+                serde_json::json!({"path": path}),
+            );
+            let blocks = markdown_blocks(source);
+            proptest::prop_assert_eq!(blocks.len(), 3);
+            proptest::prop_assert_eq!(
+                &blocks[1],
+                &MarkdownBlock::Visualization { path },
+            );
         }
     }
 
@@ -410,7 +433,7 @@ mod tests {
             ("No table | here".to_owned(), "No table | here".to_owned()),
             (
                 format!("```text\n{TABLE}```"),
-                TABLE.trim_end_matches('\n').to_owned(),
+                TABLE.trim_end_matches(['\r', '\n']).to_owned(),
             ),
             (
                 "| incomplete |\n| text".into(),

@@ -1,34 +1,36 @@
 use super::*;
+use agent_protocol::session::{ProviderKind, SessionRef};
 
 #[test]
-fn control_is_exclusive_and_stale_input_cannot_cross_handoffs() {
-    let mut page = Page {
-        active: "tab".into(),
-        ..Default::default()
-    };
-    let token = page.token.clone();
-    let click = BrowserAction::Click { x: 10.0, y: 10.0 };
-    assert!(authorize(&page, "phone", &token, "tab", &click).is_err());
-    assert!(authorize(&page, "phone", &token, "tab", &BrowserAction::TakeControl).is_ok());
-    page.owner = Some("phone".into());
-    page.token = "new".into();
-    assert!(authorize(&page, "phone", &token, "tab", &click).is_err());
-    assert!(authorize(&page, "other", "new", "tab", &BrowserAction::TakeControl).is_err());
-    assert!(authorize(&page, "other", "new", "tab", &click).is_err());
-    assert!(authorize(&page, "phone", "new", "old-tab", &click).is_err());
-    assert!(authorize(&page, "phone", "new", "tab", &click).is_ok());
-    page.owner = None;
-    page.token = "released".into();
-    assert!(authorize(&page, "phone", "new", "tab", &click).is_err());
+fn input_requires_the_displayed_tab_but_reads_and_selection_can_refresh_it() {
+    for action in [
+        BrowserAction::Click { x: 10.0, y: 10.0 },
+        BrowserAction::Type {
+            text: "input".into(),
+        },
+        BrowserAction::Navigate {
+            url: "https://example.test".into(),
+        },
+        BrowserAction::Back,
+        BrowserAction::Dialog {
+            accept: true,
+            text: String::new(),
+        },
+    ] {
+        assert!(validate_tab("tab", "tab", &action).is_ok());
+        assert!(validate_tab("tab", "old-tab", &action).is_err());
+    }
+    for action in [
+        BrowserAction::Read,
+        BrowserAction::SelectTab { id: "tab".into() },
+    ] {
+        assert!(validate_tab("tab", "old-tab", &action).is_ok());
+    }
 }
 
-fn request(thread: &str, frame: &BrowserFrame, action: BrowserAction) -> BrowserRequest {
+fn request(thread: &SessionRef, frame: &BrowserFrame, action: BrowserAction) -> BrowserRequest {
     BrowserRequest {
-        thread_id: agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
-            id: thread.into(),
-        },
-        control_token: frame.control_token.clone(),
+        thread_id: thread.clone(),
         tab_id: frame.tab_id.clone(),
         image_id: frame.image_id.clone(),
         action,
@@ -67,105 +69,86 @@ async fn shared_browser_live() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
     let browser = Browser::start(profile.clone()).await.unwrap();
-    let initial = browser
+    let thread_a = SessionRef::new(ProviderKind::Codex, "thread-a".into()).unwrap();
+    let thread_b = SessionRef::new(ProviderKind::Codex, "thread-b".into()).unwrap();
+    let scope_a = thread_a.to_string();
+    let scope_b = thread_b.to_string();
+    let mut initial = browser
         .agent(
-            "thread-a",
+            &scope_a,
             BrowserAction::Navigate {
                 url: format!("http://{address}/"),
             },
-            false,
         )
         .await
         .unwrap();
     assert!(initial.image.starts_with(&[0xff, 0xd8]));
-    let controlled = browser
-        .request(
-            "phone",
-            &request("thread-a", &initial, BrowserAction::TakeControl),
-        )
-        .await
-        .unwrap();
-    assert_eq!(controlled.control, BrowserControl::Yours);
-    assert!(
-        browser
-            .request(
-                "other",
-                &request("thread-a", &controlled, BrowserAction::TakeControl)
-            )
-            .await
-            .is_err()
-    );
-    let waiting = tokio::spawn({
-        let browser = browser.clone();
-        async move { browser.agent("thread-a", BrowserAction::Read, false).await }
-    });
-    let stale_input = tokio::spawn({
-        let browser = browser.clone();
-        async move {
-            browser
-                .agent(
-                    "thread-a",
-                    BrowserAction::Type {
-                        text: "stale input".into(),
-                    },
-                    false,
-                )
-                .await
+    for _ in 0..20 {
+        if initial.tabs.iter().any(|tab| tab.title == "Fixture") {
+            break;
         }
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    assert!(!stale_input.is_finished());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        initial = browser
+            .request(&request(&thread_a, &initial, BrowserAction::Read))
+            .await
+            .unwrap();
+    }
+    assert!(initial.tabs.iter().any(|tab| tab.title == "Fixture"));
+    browser
+        .request(&request(
+            &thread_a,
+            &initial,
+            BrowserAction::Click { x: 100.0, y: 40.0 },
+        ))
+        .await
+        .unwrap();
+    let phone_input = request(
+        &thread_a,
+        &initial,
+        BrowserAction::Type {
+            text: "日本語 input".into(),
+        },
+    );
+    let (agent, phone) = tokio::join!(
+        browser.agent(
+            &scope_a,
+            BrowserAction::Type {
+                text: "AI input".into()
+            }
+        ),
+        browser.request(&phone_input),
+    );
+    agent.unwrap();
+    phone.unwrap();
+    let typed = browser
+        .request(&request(&thread_a, &initial, BrowserAction::Read))
+        .await
+        .unwrap();
     assert!(
-        !waiting.is_finished(),
-        "agent cannot read or operate while human owns the browser"
+        typed.tabs.iter().any(|tab| matches!(
+            tab.title.as_str(),
+            "日本語 inputAI input" | "AI input日本語 input"
+        )),
+        "both overlapping phone and agent inputs must execute: {:?}",
+        typed.tabs
+    );
+    let observed = browser.agent(&scope_a, BrowserAction::Read).await.unwrap();
+    assert_eq!(
+        observed.tabs, typed.tabs,
+        "agent reads remain available after phone input"
     );
     browser
-        .request(
-            "phone",
-            &request(
-                "thread-a",
-                &controlled,
-                BrowserAction::Click { x: 100.0, y: 40.0 },
-            ),
-        )
-        .await
-        .unwrap();
-    browser
-        .request(
-            "phone",
-            &request(
-                "thread-a",
-                &controlled,
-                BrowserAction::Type {
-                    text: "日本語 input".into(),
-                },
-            ),
-        )
-        .await
-        .unwrap();
-    let typed = browser
-        .request(
-            "phone",
-            &request("thread-a", &controlled, BrowserAction::Read),
-        )
-        .await
-        .unwrap();
-    assert!(typed.tabs.iter().any(|tab| tab.title == "日本語 input"));
-    browser
-        .request(
-            "phone",
-            &request(
-                "thread-a",
-                &controlled,
-                BrowserAction::Click { x: 100.0, y: 110.0 },
-            ),
-        )
+        .request(&request(
+            &thread_a,
+            &initial,
+            BrowserAction::Click { x: 100.0, y: 110.0 },
+        ))
         .await
         .unwrap();
     let mut popup = typed;
     for _ in 0..20 {
         popup = browser
-            .request("phone", &request("thread-a", &popup, BrowserAction::Read))
+            .request(&request(&thread_a, &popup, BrowserAction::Read))
             .await
             .unwrap();
         if popup.tabs.len() == 2 {
@@ -174,28 +157,22 @@ async fn shared_browser_live() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     assert_eq!(popup.tabs.len(), 2);
-    assert_ne!(popup.tab_id, controlled.tab_id);
+    assert_ne!(popup.tab_id, initial.tab_id);
     assert!(
         browser
-            .request(
-                "phone",
-                &request(
-                    "thread-a",
-                    &controlled,
-                    BrowserAction::Click { x: 20.0, y: 20.0 }
-                )
-            )
+            .request(&request(
+                &thread_a,
+                &initial,
+                BrowserAction::Click { x: 20.0, y: 20.0 }
+            ))
             .await
             .is_err(),
         "stale tab input must fail"
     );
-    let other = browser
-        .agent("thread-b", BrowserAction::Read, false)
-        .await
-        .unwrap();
+    let other = browser.agent(&scope_b, BrowserAction::Read).await.unwrap();
     assert_eq!(other.tabs.len(), 1);
     let unchanged = browser
-        .request("phone", &request("thread-b", &other, BrowserAction::Read))
+        .request(&request(&thread_b, &other, BrowserAction::Read))
         .await
         .unwrap();
     assert!(
@@ -205,142 +182,29 @@ async fn shared_browser_live() {
     assert!(
         browser
             .agent(
-                "thread-b",
+                &scope_b,
                 BrowserAction::SelectTab {
                     id: popup.tab_id.clone()
                 },
-                false
             )
             .await
             .is_err()
     );
-    browser
-        .request(
-            "phone",
-            &request("thread-a", &popup, BrowserAction::ReleaseControl),
-        )
-        .await
-        .unwrap();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(3), waiting)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_ok()
-    );
-    assert!(
-        browser
-            .request(
-                "phone",
-                &request(
-                    "thread-a",
-                    &controlled,
-                    BrowserAction::Type {
-                        text: "late".into()
-                    }
-                )
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(3), stale_input)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_err(),
-        "a suspended input must require a fresh screenshot after handoff"
-    );
-    let waiting = tokio::spawn({
-        let browser = browser.clone();
-        async move { browser.agent("thread-a", BrowserAction::Read, true).await }
-    });
-    let mut frame = BrowserFrame::default();
-    for _ in 0..20 {
-        frame = browser
-            .request("phone", &request("thread-a", &frame, BrowserAction::Read))
-            .await
-            .unwrap();
-        if frame.control == BrowserControl::AwaitingHuman {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    assert_eq!(frame.control, BrowserControl::AwaitingHuman);
-    let frame = browser
-        .request(
-            "phone",
-            &request("thread-a", &frame, BrowserAction::TakeControl),
-        )
-        .await
-        .unwrap();
-    browser
-        .request(
-            "phone",
-            &request("thread-a", &frame, BrowserAction::ReleaseControl),
-        )
-        .await
-        .unwrap();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(3), waiting)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_ok()
-    );
-    let frame = browser
-        .request("phone", &request("thread-a", &frame, BrowserAction::Read))
-        .await
-        .unwrap();
-    browser
-        .request(
-            "phone",
-            &request("thread-a", &frame, BrowserAction::TakeControl),
-        )
-        .await
-        .unwrap();
-    browser.revoke_device("phone").await;
-    let frame = browser
-        .request(
-            "replacement",
-            &request("thread-a", &frame, BrowserAction::Read),
-        )
-        .await
-        .unwrap();
-    assert_eq!(frame.control, BrowserControl::AwaitingHuman);
-    let frame = browser
-        .request(
-            "replacement",
-            &request("thread-a", &frame, BrowserAction::TakeControl),
-        )
-        .await
-        .unwrap();
-    browser
-        .request(
-            "replacement",
-            &request("thread-a", &frame, BrowserAction::ReleaseControl),
-        )
-        .await
-        .unwrap();
     browser.shutdown().await;
     drop(browser);
     let browser = Browser::start(profile).await.unwrap();
     browser
         .agent(
-            "thread-a",
+            &scope_a,
             BrowserAction::Navigate {
                 url: format!("http://{address}/verify"),
             },
-            false,
         )
         .await
         .unwrap();
     let mut restored = BrowserFrame::default();
     for _ in 0..20 {
-        restored = browser
-            .agent("thread-a", BrowserAction::Read, false)
-            .await
-            .unwrap();
+        restored = browser.agent(&scope_a, BrowserAction::Read).await.unwrap();
         if restored
             .tabs
             .iter()

@@ -17,7 +17,7 @@ async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configur
     tokio::time::timeout(Duration::from_secs(10), async {
         let fixture = tempfile::tempdir().unwrap();
         let ambient = tempfile::tempdir().unwrap();
-        let root = fixture.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(fixture.path()).unwrap();
         let expected = root.clone();
         let program = Config {
             trace: true,
@@ -83,9 +83,9 @@ async fn codex_fixture_uses_its_own_directory_instead_of_inherited_user_configur
 async fn pairing_controls_restore_the_original_project_store_and_survive_rejected_host_requests() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let fixture = tempfile::tempdir().unwrap();
-        let root = fixture.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(fixture.path()).unwrap();
         let original = b"[]\n";
-        fs::write(root.join("projects.json"), original).unwrap();
+        fs::write(root.join("bex-projects.json"), original).unwrap();
         let host = HostFixture::start(
             &root,
             codex_fixture::config(&root),
@@ -140,7 +140,7 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
                 .status(),
             204
         );
-        assert_eq!(fs::read(root.join("projects.json")).unwrap(), original);
+        assert_eq!(fs::read(root.join("bex-projects.json")).unwrap(), original);
         assert!(!root.join("list-fixture.json").exists());
         assert!(!root.join("projects-before-list-fixture.json").exists());
         assert_eq!(

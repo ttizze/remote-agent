@@ -191,6 +191,7 @@ fn main() {
                                 {"value":"haiku","displayName":"Haiku","description":"Haiku 4.5 · Fastest for quick answers"},
                                 {"value":"custom","displayName":"Custom model"}
                             ])),
+                            "commands":[{"name":"fixture-skill","description":"Fixture skill"}],
                             "account":if config["unauthenticated"] == true {json!({})} else {json!({"subscriptionType":"Claude Max"})}
                         }}}),
                     );
@@ -250,7 +251,9 @@ fn main() {
                     .filter_map(|block| block["text"].as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
-                if config["resultError"] == true {
+                if text == "crash" {
+                    std::process::exit(17);
+                } else if config["resultError"] == true {
                     emit(
                         json!({"type":"result","session_id":session,"is_error":true,"errors":["fixture inference failed"]}),
                     );

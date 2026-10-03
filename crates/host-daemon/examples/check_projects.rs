@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let projects = ProjectStore::from_environment()?;
+    let registry = host_daemon::local_host::LocalHostRegistry::for_user()?;
+    let directory = registry.resolve(registry.directory())?.directory;
+    let projects = ProjectStore::new(directory.join("bex-worktrees.json"));
     let server = Arc::new(CodexAppServer::spawn(AppServerConfig::default()).await?);
     let service = HostRpcService::new(Ok(server.clone()), projects);
     let session = service.open_session();
@@ -24,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     println!(
-        "Codex native project catalog is readable: {} visible projects, {} visible conversations",
+        "Bex project catalog is readable: {} visible projects, {} visible conversations",
         list.projects.len(),
         list.data.len()
     );

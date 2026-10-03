@@ -115,7 +115,6 @@ struct SessionRef {
 #[uniffi::remote(Record)]
 struct BrowserRequest {
     pub thread_id: SessionRef,
-    pub control_token: String,
     pub tab_id: String,
     pub image_id: String,
     pub action: BrowserAction,
@@ -123,8 +122,6 @@ struct BrowserRequest {
 #[uniffi::remote(Enum)]
 enum BrowserAction {
     Read,
-    TakeControl,
-    ReleaseControl,
     Navigate {
         url: String,
     },
@@ -167,14 +164,6 @@ enum BrowserKey {
     ArrowRight,
     SelectAll,
 }
-#[uniffi::remote(Enum)]
-enum BrowserControl {
-    #[default]
-    Agent,
-    AwaitingHuman,
-    Yours,
-    Other,
-}
 #[uniffi::remote(Record)]
 struct BrowserTab {
     pub id: String,
@@ -190,8 +179,6 @@ struct BrowserDialog {
 struct BrowserFrame {
     pub tabs: Vec<BrowserTab>,
     pub tab_id: String,
-    pub control: BrowserControl,
-    pub control_token: String,
     pub width: u32,
     pub height: u32,
 
@@ -206,6 +193,7 @@ enum InvocationKind {
 }
 #[uniffi::remote(Record)]
 struct Invocation {
+    pub provider: ProviderKind,
     pub kind: InvocationKind,
     pub name: String,
     pub path: String,
@@ -312,8 +300,7 @@ struct UsageWindow {
 #[uniffi::remote(Record)]
 struct Accounts {
     pub accounts: Vec<Account>,
-    pub selected_id: Option<String>,
-    pub selected_claude_id: Option<String>,
+    pub selected: std::collections::HashMap<ProviderKind, String>,
     pub error: Option<String>,
 }
 #[uniffi::remote(Record)]
@@ -322,11 +309,13 @@ struct StartAccountLogin {
 }
 #[uniffi::remote(Record)]
 struct SubmitAccountLogin {
+    pub provider: ProviderKind,
     pub id: String,
     pub code: String,
 }
 #[uniffi::remote(Record)]
 struct AccountLogin {
+    pub provider: ProviderKind,
     pub login_id: String,
     pub requires_code_submission: bool,
     pub user_code: String,
@@ -545,14 +534,17 @@ struct RemoveWorktree {
 }
 #[uniffi::remote(Record)]
 struct SelectAccount {
+    pub provider: ProviderKind,
     pub id: String,
 }
 #[uniffi::remote(Record)]
 struct LogoutAccount {
+    pub provider: ProviderKind,
     pub id: String,
 }
 #[uniffi::remote(Record)]
 struct CancelAccountLogin {
+    pub provider: ProviderKind,
     pub id: String,
 }
 #[uniffi::remote(Record)]

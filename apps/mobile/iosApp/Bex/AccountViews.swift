@@ -15,19 +15,6 @@ struct AccountUsageView: View {
                 ForEach(Array(usage.windows.enumerated()), id: \.offset) { _, window in
                     UsageWindowView(window: window)
                 }
-                if usage.windows.contains(where: { $0.resetsAt != nil }) {
-                    DisclosureGroup("リセット時刻") {
-                        ForEach(Array(usage.windows.enumerated()), id: \.offset) { _, window in
-                            if let reset = window.resetsAt {
-                                let date = Date(timeIntervalSince1970: Double(reset))
-                                LabeledContent(
-                                    window.label,
-                                    value: date.formatted(date: .abbreviated, time: .shortened)
-                                )
-                            }
-                        }
-                    }.font(.caption)
-                }
                 if usage.error == nil {
                     let date = Date(timeIntervalSince1970: Double(usage.fetchedAt))
                     Text("\(date.formatted(date: .omitted, time: .shortened)) 更新")
@@ -49,13 +36,9 @@ struct WeeklyUsageView: View {
                 Text("残量未取得").font(.caption).foregroundStyle(.secondary)
             }
             ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
-                HStack(spacing: 12) {
-                    UsageBar(remainingPercent: window.remainingPercent)
-                    Text("\(window.remainingPercent)%").font(.caption).monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("週間残量 \(window.remainingPercent)%")
+                UsageWindowView(window: window)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("週間残量 \(window.remainingPercent)%")
             }
         }
     }
@@ -88,17 +71,14 @@ private struct UsageWindowView: View {
                 Spacer()
                 Text("残り \(window.remainingPercent)%").monospacedDigit()
             }.font(.caption)
-            UsageBar(remainingPercent: window.remainingPercent)
+            ProgressView(value: Double(window.remainingPercent), total: 100)
+                .tint(window.remainingPercent <= 20 ? .orange : .green)
+            if let reset = window.resetsAt {
+                let date = Date(timeIntervalSince1970: Double(reset))
+                Text("リセット: \(date.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
         }
-    }
-}
-
-private struct UsageBar: View {
-    let remainingPercent: UInt32
-
-    var body: some View {
-        ProgressView(value: Double(remainingPercent), total: 100)
-            .tint(remainingPercent <= 20 ? .orange : .green)
     }
 }
 

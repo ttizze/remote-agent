@@ -1,4 +1,4 @@
-//! Shared browser contract. The Host owns pages and control; clients render frames.
+//! Shared browser contract. The Host owns pages; clients render frames and send input.
 use serde::{Deserialize, Serialize};
 
 pub const WIDTH: u32 = 1024;
@@ -7,7 +7,6 @@ pub const HEIGHT: u32 = 768;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BrowserRequest {
     pub thread_id: crate::session::SessionRef,
-    pub control_token: String,
     pub tab_id: String,
     pub image_id: String,
     pub action: BrowserAction,
@@ -21,8 +20,6 @@ impl std::fmt::Debug for BrowserRequest {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum BrowserAction {
     Read,
-    TakeControl,
-    ReleaseControl,
     Navigate {
         url: String,
     },
@@ -104,15 +101,6 @@ pub enum BrowserKey {
     SelectAll,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub enum BrowserControl {
-    #[default]
-    Agent,
-    AwaitingHuman,
-    Yours,
-    Other,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BrowserTab {
     pub id: String,
@@ -130,8 +118,6 @@ pub struct BrowserDialog {
 pub struct BrowserFrame {
     pub tabs: Vec<BrowserTab>,
     pub tab_id: String,
-    pub control: BrowserControl,
-    pub control_token: String,
     pub width: u32,
     pub height: u32,
     #[serde(with = "crate::protocol::bytes")]
@@ -142,7 +128,6 @@ pub struct BrowserFrame {
 impl std::fmt::Debug for BrowserFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BrowserFrame")
-            .field("control", &self.control)
             .field("image_bytes", &self.image.len())
             .finish_non_exhaustive()
     }

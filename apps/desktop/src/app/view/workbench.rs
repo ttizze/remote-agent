@@ -380,7 +380,7 @@ impl Desktop {
                 .when(self.panel == Panel::SideChat, |bar| {
                     bar.child(self.icon_button(
                         "new-side-chat",
-                        IconName::Plus,
+                        new_chat_icon(),
                         "新しいサイドチャット",
                         cx,
                         |s, window, cx| {

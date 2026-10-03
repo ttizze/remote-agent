@@ -129,12 +129,12 @@ fn claude_settings(config: &Value, version: String) -> PermissionSettings {
     }
 }
 
-pub(super) fn read_claude_permissions(home: &Path) -> Result<PermissionSettings, Failure> {
+pub(crate) fn read_claude_permissions(home: &Path) -> Result<PermissionSettings, Failure> {
     let (config, version) = read_claude_file(&home.join("settings.json"))?;
     Ok(claude_settings(&config, version))
 }
 
-pub(super) fn update_claude_permissions(
+pub(crate) fn update_claude_permissions(
     home: &Path,
     mode: PermissionMode,
     version: &str,
@@ -142,8 +142,7 @@ pub(super) fn update_claude_permissions(
     let settings_path = home.join("settings.json");
     // Preserve a native config symlink instead of replacing it with a BEX file.
     let path = if settings_path.symlink_metadata().is_ok() {
-        settings_path
-            .canonicalize()
+        dunce::canonicalize(&settings_path)
             .map_err(|_| failure("Claude の設定の参照先を開けませんでした。"))?
     } else {
         settings_path

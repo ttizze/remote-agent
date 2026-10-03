@@ -1,7 +1,7 @@
 //! Device storage is an explicit subset of runtime state. Host results and
 //! connection authority are fetched again, never restored from this format.
 use crate::state::{
-    Activity, Draft, FileDraft, Navigation, PendingSubmission, ScopedData, Snapshot,
+    Activity, Draft, FileDraft, ModelDefaults, Navigation, PendingSubmission, ScopedData, Snapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
@@ -10,6 +10,8 @@ use std::{collections::BTreeMap, sync::Arc};
 /// an empty draft. Runtime Snapshot fields cannot change the storage contract.
 #[derive(Serialize, Deserialize)]
 pub struct PersistedState {
+    #[serde(default)]
+    model_defaults: ModelDefaults,
     storage_scope: String,
     archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(with = "entries")]
@@ -23,6 +25,7 @@ pub struct PersistedState {
 impl PersistedState {
     pub fn capture(snapshot: &Snapshot) -> Self {
         Self {
+            model_defaults: snapshot.model_defaults.clone(),
             storage_scope: snapshot.storage_scope.clone(),
             archived_scopes: snapshot.archived_scopes.clone(),
             drafts: snapshot.drafts.clone(),
@@ -38,12 +41,31 @@ pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&PersistedState::capture(snapshot))
 }
 
+/// Apply device-wide preferences without changing a Host's saved user work.
+pub fn apply_model_defaults(
+    persisted: &[u8],
+    defaults: &[u8],
+) -> Result<Vec<u8>, serde_json::Error> {
+    let mut saved = if persisted.is_empty() {
+        PersistedState::capture(&Snapshot::default())
+    } else {
+        serde_json::from_slice::<PersistedState>(persisted)?
+    };
+    saved.model_defaults = if defaults.is_empty() {
+        ModelDefaults::default()
+    } else {
+        serde_json::from_slice(defaults)?
+    };
+    serde_json::to_vec(&saved)
+}
+
 pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     if bytes.is_empty() {
         return Ok(Snapshot::default());
     }
     let saved: PersistedState = serde_json::from_slice(bytes)?;
     Ok(Snapshot {
+        model_defaults: saved.model_defaults,
         storage_scope: saved.storage_scope,
         archived_scopes: saved.archived_scopes,
         drafts: saved.drafts,

@@ -25,8 +25,8 @@ pub use agent_protocol::operations::ListSessions;
 
 impl Operation for ListSessions {
     rpc_operation!();
-    fn invalidates(&self, snapshot: &Snapshot) -> bool {
-        self.query != *snapshot.list_query
+    fn list_query(&self) -> Option<&crate::models::ListQuery> {
+        Some(&self.query)
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         snapshot.error = None;
@@ -205,20 +205,16 @@ impl ReadThread {
             limit: 5,
         }
     }
-    pub(super) fn with_history(mut self, thread: Option<&Thread>) -> Self {
-        if let Some(thread) = thread {
-            let requested = thread.history_limit.unwrap_or(5);
-            self.limit = self
-                .limit
-                .max(u32::try_from(requested).unwrap_or(u32::MAX))
-                .max(
-                    thread
-                        .turns
-                        .as_ref()
-                        .map_or(0, |turns| u32::try_from(turns.len()).unwrap_or(u32::MAX)),
-                );
-        }
-        self.limit = self.limit.max(5);
+    pub(in crate::state) fn with_history(
+        mut self,
+        history_limit: Option<u64>,
+        loaded_turns: usize,
+    ) -> Self {
+        self.limit = self
+            .limit
+            .max(u32::try_from(history_limit.unwrap_or(5)).unwrap_or(u32::MAX))
+            .max(u32::try_from(loaded_turns).unwrap_or(u32::MAX))
+            .max(5);
         self
     }
     pub fn open(thread_id: crate::session::SessionRef) -> Self {
@@ -255,9 +251,13 @@ impl Operation for ReadThread {
         self.open
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
-        *self = self
-            .clone()
-            .with_history(snapshot.conversations.get(&self.thread_id).map(Arc::as_ref));
+        let cached = snapshot.conversations.get(&self.thread_id);
+        *self = self.clone().with_history(
+            cached.and_then(|thread| thread.history_limit),
+            cached
+                .and_then(|thread| thread.turns.as_ref())
+                .map_or(0, Vec::len),
+        );
         if self.open {
             let cwd = snapshot
                 .conversations
@@ -353,6 +353,34 @@ impl Operation for ReadThread {
 }
 
 fn select_thread(snapshot: &mut Snapshot, id: crate::session::SessionRef, cwd: String) {
+    let key: DraftKey = id.clone().into();
+    let previous = snapshot.drafts.get(&key).cloned().unwrap_or_default();
+    let mut draft = previous.clone();
+    if !snapshot.models.is_empty() {
+        let settings = supported_settings(
+            previous.model.as_ref(),
+            previous.effort.as_deref(),
+            previous.service_tier.as_deref(),
+            Some(id.provider),
+            &snapshot.models,
+            !snapshot.model_errors.is_empty(),
+        );
+        if settings
+            != (
+                previous.model.as_ref(),
+                previous.effort.as_deref(),
+                previous.service_tier.as_deref(),
+            )
+        {
+            let draft = Arc::make_mut(&mut draft);
+            draft.model = settings.0.cloned();
+            draft.effort = settings.1.map(str::to_owned);
+            draft.service_tier = settings.2.map(str::to_owned);
+        }
+    }
+    if !snapshot.drafts.contains_key(&key) || !Arc::ptr_eq(&draft, &previous) {
+        Arc::make_mut(&mut snapshot.drafts).insert(key, draft);
+    }
     if snapshot.navigation.cwd != cwd {
         clear_workspace_location(Arc::make_mut(&mut snapshot.workspace));
     }
@@ -469,7 +497,18 @@ impl Operation for LoadModels {
             .unwrap_or_default();
         let drafts = snapshot.drafts.clone();
         for (id, previous_draft) in drafts.iter() {
-            let settings = supported_settings(previous_draft, &models, &errors);
+            let provider = match id {
+                DraftKey::Session { session } => Some(session.provider),
+                DraftKey::Local { .. } => None,
+            };
+            let settings = supported_settings(
+                previous_draft.model.as_ref(),
+                previous_draft.effort.as_deref(),
+                previous_draft.service_tier.as_deref(),
+                provider,
+                &models,
+                !errors.is_empty(),
+            );
             if settings
                 != (
                     previous_draft.model.as_ref(),
@@ -494,10 +533,14 @@ pub use agent_protocol::operations::OpenRequest;
 impl Operation for OpenRequest {
     type Output = crate::session::OpenedSession;
     async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        let session = context.client.call(self).await?;
-        let id = session.clone();
-        let open = ReadThread::new(id.clone())
-            .with_history(context.snapshot.conversations.get(&id).map(Arc::as_ref));
+        let id = context.client.call(self).await?;
+        let cached = context.snapshot.conversations.get(&id);
+        let open = ReadThread::new(id).with_history(
+            cached.and_then(|thread| thread.history_limit),
+            cached
+                .and_then(|thread| thread.turns.as_ref())
+                .map_or(0, Vec::len),
+        );
         context.call(&open).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
@@ -505,6 +548,93 @@ impl Operation for OpenRequest {
     }
     fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         ReadThread::new(output.session.clone()).stale(snapshot, output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{ProviderKind, SessionRef};
+
+    #[rstest::rstest]
+    #[case::new_draft(false, false)]
+    #[case::existing_empty_draft(true, false)]
+    #[case::saved_settings(true, true)]
+    fn opening_without_model_metadata_uses_the_provider_catalog(
+        #[values(true, false)] catalog_first: bool,
+        #[values(ProviderKind::Codex, ProviderKind::Claude)] provider: ProviderKind,
+        #[case] existing_draft: bool,
+        #[case] saved_choice: bool,
+    ) {
+        let models: Vec<Model> = serde_json::from_value(serde_json::json!([
+            {"id":"codex-default","model":{"provider":"codex","id":"default"},"displayName":"Codex default",
+             "isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"}]},
+            {"id":"claude-default","model":{"provider":"claude","id":"default"},"displayName":"Claude default",
+             "isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]},
+            {"id":"codex-saved","model":{"provider":"codex","id":"saved"},"displayName":"Codex saved",
+             "defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"}]},
+            {"id":"claude-saved","model":{"provider":"claude","id":"saved"},"displayName":"Claude saved",
+             "defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"high"}]}
+        ])).unwrap();
+        let session = SessionRef::new(provider, "external".into()).unwrap();
+        let key: DraftKey = session.clone().into();
+        let mut snapshot = Snapshot::default();
+        let catalog = || agent_protocol::operations::ModelPage {
+            data: models.clone(),
+            next_cursor: None,
+            provider_errors: None,
+        };
+        if catalog_first {
+            LoadModels {}.apply(&mut snapshot, catalog());
+        }
+        if existing_draft {
+            Arc::make_mut(&mut snapshot.drafts).insert(
+                key.clone(),
+                Arc::new(Draft {
+                    text: "Unsent input".into(),
+                    model: saved_choice.then(|| crate::models::ModelRef {
+                        provider,
+                        id: "saved".into(),
+                    }),
+                    effort: saved_choice.then(|| "low".into()),
+                    ..Default::default()
+                }),
+            );
+        }
+        ReadThread::open(session.clone())
+            .prepare(&mut snapshot)
+            .unwrap();
+        open_thread(
+            &mut snapshot,
+            Thread {
+                id: Some(session),
+                ..Default::default()
+            },
+            None,
+        );
+        if !catalog_first {
+            LoadModels {}.apply(&mut snapshot, catalog());
+        }
+        let draft = &snapshot.drafts[&key];
+        assert_eq!(draft.text, if existing_draft { "Unsent input" } else { "" });
+        assert_eq!(
+            draft.model,
+            Some(crate::models::ModelRef {
+                provider,
+                id: if saved_choice { "saved" } else { "default" }.into(),
+            })
+        );
+        let effort = if saved_choice {
+            "low"
+        } else if provider == ProviderKind::Codex {
+            "medium"
+        } else {
+            "high"
+        };
+        // The composer and the next submission must use the same settings.
+        assert_eq!(draft.effort.as_deref(), Some(effort));
+        assert_eq!(draft.service_tier.as_deref(), Some("default"));
+        assert_eq!(snapshot.model_quick_controls(key).effort, effort);
     }
 }
 

@@ -12,26 +12,9 @@ pub(crate) struct Snapshot {
     pub(super) chat_directory: Option<PathBuf>,
 }
 impl Snapshot {
-    pub(crate) fn has_root(&self, path: &Path) -> bool {
-        self.projects.iter().any(|project| {
-            project.roots.iter().any(|root| {
-                self.resolved_roots
-                    .get(&root.path)
-                    .map_or_else(|| Path::new(&root.path), PathBuf::as_path)
-                    == path
-            })
-        })
-    }
-    pub(crate) fn project_membership(
-        &self,
-        cwd: Option<&str>,
-        assigned: &ProjectMembership,
-    ) -> ProjectMembership {
-        if matches!(assigned, ProjectMembership::Assigned(_)) {
-            return assigned.clone();
-        }
+    pub(crate) fn project_membership(&self, cwd: Option<&str>) -> ProjectMembership {
         let Some(cwd) = cwd else {
-            return assigned.clone();
+            return ProjectMembership::Unknown {};
         };
         if self
             .chat_directory
@@ -42,7 +25,7 @@ impl Snapshot {
         } else {
             self.project_for_workspace(cwd)
                 .map(|id| ProjectMembership::Assigned(id.to_owned()))
-                .unwrap_or_else(|| assigned.clone())
+                .unwrap_or(ProjectMembership::Unassigned {})
         }
     }
     pub(crate) fn project_for_workspace(&self, workspace: &str) -> Option<&str> {
@@ -96,12 +79,21 @@ impl Snapshot {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn fixture_path(path: &str) -> String {
+        if cfg!(windows) && path.starts_with('/') {
+            format!("C:{path}")
+        } else {
+            path.to_owned()
+        }
+    }
+
     fn snapshot() -> Snapshot {
         Snapshot {
             projects: serde_json::from_value(json!([
-                {"id":"a","name":"A","roots":[{"path":"/work/a"},{"path":"/work/a-two"}]},
-                {"id":"b","name":"B","roots":[{"path":"/work/b"}]},
-                {"id":"nested","name":"Nested","roots":[{"path":"/work/a/packages/app"}]}
+                {"id":"a","name":"A","roots":[{"path":fixture_path("/work/a")},{"path":fixture_path("/work/a-two")}]},
+                {"id":"b","name":"B","roots":[{"path":fixture_path("/work/b")}]},
+                {"id":"nested","name":"Nested","roots":[{"path":fixture_path("/work/a/packages/app")}]}
             ]))
             .unwrap(),
             ..Default::default()
@@ -112,7 +104,7 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot
             .worktree_roots
-            .insert("/checkout".into(), "/work/a".into());
+            .insert(fixture_path("/checkout"), fixture_path("/work/a"));
         for (cwd, expected) in [
             ("/work/a/src", Some("a")),
             ("/work/a-two", Some("a")),
@@ -121,47 +113,44 @@ mod tests {
             ("/checkout", Some("a")),
             ("/checkout/packages/app", Some("nested")),
         ] {
-            assert_eq!(snapshot.project_for_workspace(cwd), expected);
+            assert_eq!(snapshot.project_for_workspace(&fixture_path(cwd)), expected);
         }
         let mut duplicate = snapshot.projects[0].clone();
         duplicate.id = "duplicate".into();
         snapshot.projects.push(duplicate);
-        assert_eq!(snapshot.project_for_workspace("/work/a"), None);
         assert_eq!(
-            snapshot.project_for_workspace("/work/a/packages/app"),
+            snapshot.project_for_workspace(&fixture_path("/work/a")),
+            None
+        );
+        assert_eq!(
+            snapshot.project_for_workspace(&fixture_path("/work/a/packages/app")),
             Some("nested")
         );
     }
     #[test]
-    fn null_membership_uses_workspace_without_overriding_native_assignments() {
+    fn membership_uses_host_roots_and_keeps_standalone_chats_unassigned() {
         let mut snapshot = snapshot();
         snapshot
             .worktree_roots
-            .insert("/checkout".into(), "/work/a".into());
-        snapshot.chat_directory = Some("/work/a/chats".into());
-        for assigned in [
-            ProjectMembership::Unknown {},
-            ProjectMembership::Unassigned {},
+            .insert(fixture_path("/checkout"), fixture_path("/work/a"));
+        snapshot.chat_directory = Some(fixture_path("/work/a/chats").into());
+        for (cwd, expected) in [
+            ("/work/a/src", ProjectMembership::Assigned("a".into())),
+            (
+                "/checkout/packages/app",
+                ProjectMembership::Assigned("nested".into()),
+            ),
+            ("/work/a/chats", ProjectMembership::Unassigned {}),
+            ("/outside", ProjectMembership::Unassigned {}),
         ] {
-            for (cwd, expected) in [("/work/a/src", "a"), ("/checkout/packages/app", "nested")] {
-                assert_eq!(
-                    snapshot.project_membership(Some(cwd), &assigned),
-                    ProjectMembership::Assigned(expected.into())
-                );
-            }
             assert_eq!(
-                snapshot.project_membership(Some("/work/a/chats"), &assigned),
-                ProjectMembership::Unassigned {}
+                snapshot.project_membership(Some(&fixture_path(cwd))),
+                expected
             );
-            assert_eq!(
-                snapshot.project_membership(Some("/outside"), &assigned),
-                assigned
-            );
-            assert_eq!(snapshot.project_membership(None, &assigned), assigned);
         }
         assert_eq!(
-            snapshot.project_membership(Some("/work/a"), &ProjectMembership::Assigned("b".into())),
-            ProjectMembership::Assigned("b".into())
+            snapshot.project_membership(None),
+            ProjectMembership::Unknown {}
         );
     }
 
@@ -174,7 +163,10 @@ mod tests {
         .unwrap();
         snapshot
             .resolved_roots
-            .insert(".".into(), "/host/cwd".into());
-        assert_eq!(snapshot.project_for_workspace("/host/cwd"), None);
+            .insert(".".into(), fixture_path("/host/cwd").into());
+        assert_eq!(
+            snapshot.project_for_workspace(&fixture_path("/host/cwd")),
+            None
+        );
     }
 }

@@ -5,6 +5,7 @@ use crate::{
     presentation::conversation::{
         ItemPresentation, RenderedConversation, RenderedItem, RenderedTurn,
     },
+    session::ProviderKind,
     state::{Draft, FileDraft, Navigation, Snapshot},
 };
 use agent_protocol::operations::{AccountLogin, Accounts};
@@ -63,6 +64,9 @@ impl Snapshot {
     pub fn serialize_local_state(&self) -> Result<Vec<u8>, AgentError> {
         crate::persistence::encode(self).map_err(error)
     }
+    pub fn serialize_model_defaults(&self) -> Result<Vec<u8>, AgentError> {
+        serde_json::to_vec(&self.model_defaults).map_err(error)
+    }
     pub fn connected(&self) -> bool {
         self.connected
     }
@@ -115,12 +119,12 @@ impl Snapshot {
     pub fn accounts(&self) -> Option<Accounts> {
         self.account.accounts.as_deref().cloned()
     }
-    pub fn account_is_selected(&self, id: String) -> bool {
+    pub fn account_is_selected(&self, provider: ProviderKind, id: String) -> bool {
         self.account.accounts.as_ref().is_some_and(|accounts| {
             accounts
                 .accounts
                 .iter()
-                .find(|account| account.id == id)
+                .find(|account| account.provider == provider && account.id == id)
                 .is_some_and(|account| accounts.is_selected(account))
         })
     }

@@ -1,24 +1,198 @@
 use super::*;
 use agent_protocol::session::ProviderKind;
 
+fn provider_icon(provider: ProviderKind) -> Icon {
+    Icon::default().path(match provider {
+        ProviderKind::Codex => "bex/openai.svg",
+        ProviderKind::Claude => "bex/anthropic.svg",
+    })
+}
+
 fn account_identity(provider: Option<ProviderKind>, identity: &str) -> Div {
     h_flex()
         .min_w_0()
         .gap_1()
         .when_some(provider, |row, provider| {
-            row.child(
-                Icon::default()
-                    .path(match provider {
-                        ProviderKind::Codex => "bex/openai.svg",
-                        ProviderKind::Claude => "bex/anthropic.svg",
-                    })
-                    .size(px(12.)),
-            )
+            row.child(provider_icon(provider).size(px(12.)))
         })
         .child(div().min_w_0().text_ellipsis().child(identity.to_owned()))
 }
 
 impl Desktop {
+    pub(super) fn default_model_settings(&self, cx: &Context<Self>) -> AnyElement {
+        let defaults = self.snapshot.model_defaults();
+        let model = self.snapshot.default_model();
+        let label = defaults
+            .model
+            .as_ref()
+            .and(model.as_ref())
+            .map(|model| model.display_name.clone())
+            .or_else(|| defaults.model.as_ref().map(|model| model.id.clone()))
+            .unwrap_or_else(|| "自動".into());
+        let selected = defaults.model.clone();
+        let models = self.snapshot.models.clone();
+        let entity = cx.entity().downgrade();
+        let model_picker = Button::new("default-model")
+            .disabled(self.session.is_none())
+            .label(label)
+            .accessibility_label("新しい会話のモデル")
+            .debug_selector(|| "default-model".into())
+            .ghost()
+            .when_some(model.as_ref(), |button, model| {
+                button.icon(provider_icon(model.model.provider))
+            })
+            .child(Icon::new(IconName::ChevronDown).size(px(14.)))
+            .dropdown_menu(move |mut menu, _, _| {
+                let automatic = entity.clone();
+                menu = menu.item(
+                    PopupMenuItem::new("自動")
+                        .checked(selected.is_none())
+                        .on_click(move |_, _, cx| {
+                            let _ = automatic.update(cx, |s, cx| {
+                                s.dispatch(Intent::SelectDefaultModel { model: None });
+                                cx.notify();
+                            });
+                        }),
+                );
+                for model in models.iter() {
+                    let value = model.model.clone();
+                    let entity = entity.clone();
+                    let provider = match model.model.provider {
+                        ProviderKind::Codex => "Codex",
+                        ProviderKind::Claude => "Claude",
+                    };
+                    menu = menu.item(
+                        PopupMenuItem::new(format!("{provider} · {}", model.display_name))
+                            .checked(selected.as_ref() == Some(&model.model))
+                            .on_click(move |_, _, cx| {
+                                let _ = entity.update(cx, |s, cx| {
+                                    s.dispatch(Intent::SelectDefaultModel {
+                                        model: Some(value.clone()),
+                                    });
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
+        let mut controls = h_flex().gap_2().child(model_picker);
+        let quick = self.snapshot.default_model_controls();
+        if !quick.efforts.is_empty() {
+            let efforts = quick.efforts.clone();
+            let entity = cx.entity().downgrade();
+            let effort = defaults.effort.clone();
+            controls = controls.child(
+                Button::new("default-model-effort")
+                    .disabled(self.session.is_none())
+                    .label(effort.clone().unwrap_or_else(|| "自動".into()))
+                    .accessibility_label("新しい会話の推論強度")
+                    .debug_selector(|| "default-model-effort".into())
+                    .ghost()
+                    .child(Icon::new(IconName::ChevronDown).size(px(14.)))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for value in std::iter::once(None).chain(efforts.iter().cloned().map(Some))
+                        {
+                            let entity = entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(value.clone().unwrap_or_else(|| "自動".into()))
+                                    .checked(value == effort)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = entity.update(cx, |s, cx| {
+                                            s.dispatch(Intent::SelectDefaultEffort {
+                                                effort: value.clone(),
+                                            });
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            );
+        }
+        if let Some(fast_tier) = quick.fast_service_tier {
+            let entity = cx.entity().downgrade();
+            let selected = defaults.service_tier.clone();
+            controls = controls.child(
+                Button::new("default-model-speed")
+                    .disabled(self.session.is_none())
+                    .label(if quick.fast { "高速" } else { "通常" })
+                    .icon(Icon::default().path("bex/bolt.svg"))
+                    .accessibility_label("新しい会話の速度")
+                    .debug_selector(|| "default-model-speed".into())
+                    .ghost()
+                    .child(Icon::new(IconName::ChevronDown).size(px(14.)))
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for (label, value) in [
+                            ("自動", None),
+                            ("通常", Some("default".to_owned())),
+                            ("高速", Some(fast_tier.clone())),
+                        ] {
+                            let entity = entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(label)
+                                    .checked(value == selected)
+                                    .on_click(move |_, _, cx| {
+                                        let _ = entity.update(cx, |s, cx| {
+                                            s.dispatch(Intent::SelectDefaultServiceTier {
+                                                service_tier: value.clone(),
+                                            });
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            );
+        }
+        v_flex()
+            .gap_4()
+            .child(div().text_lg().font_semibold().child("新しい会話"))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_5()
+                    .p_4()
+                    .rounded(px(14.))
+                    .border_1()
+                    .border_color(rgb(0x2b2f35))
+                    .child(
+                        v_flex().flex_1().min_w_0().gap_1().child("モデル").child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x949ca8))
+                                .child("新しい会話で使うモデル・推論強度・速度の初期値です。"),
+                        ),
+                    )
+                    .child(controls),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x949ca8))
+                    .child("変更はこの端末に自動保存されます。会話ごとに変更できます。"),
+            )
+            .children(
+                self.snapshot
+                    .model_error_messages(defaults.model.as_ref().map(|model| model.provider))
+                    .into_iter()
+                    .map(|error| {
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xff8e86))
+                            .child(error_message(&error))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn refresh_accounts_and_models(&self) {
+        self.dispatch(Intent::ListAccounts(op::ListAccounts {}));
+        self.dispatch(Intent::LoadModels(op::LoadModels {}));
+    }
+
     pub(super) fn model_menu(&self, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
         let opening = entity.clone();
@@ -58,8 +232,7 @@ impl Desktop {
                         view.model_search
                             .update(cx, |input, cx| input.set_value("", window, cx));
                         view.account_sign_out = None;
-                        view.dispatch(Intent::ListAccounts(op::ListAccounts {}));
-                        view.dispatch(Intent::LoadModels(op::LoadModels {}));
+                        view.refresh_accounts_and_models();
                     });
                 }
             })
@@ -76,16 +249,16 @@ impl Desktop {
             .into_any_element()
     }
     pub(super) fn account_controls(&self, manage: bool, cx: &Context<Self>) -> AnyElement {
+        let in_settings = self.tab == Tab::Settings;
         let accounts = self.snapshot.account.accounts.as_ref();
-        let provider = self.model_provider.unwrap_or_else(|| {
-            self.snapshot
-                .model_provider_for_draft(self.draft_key().clone())
-        });
+        let provider = self.account_provider();
         let disabled = self.account_busy
             || self.busy > 0
             || self.snapshot.account.login.is_some()
             || !self.snapshot.connected;
-        let mut services = h_flex().gap_1();
+        let mut services = h_flex()
+            .gap_1()
+            .when(in_settings, |row| row.max_w(px(320.)));
         for (value, label) in [
             (ProviderKind::Codex, "Codex"),
             (ProviderKind::Claude, "Claude"),
@@ -102,6 +275,9 @@ impl Desktop {
                 )
                 .debug_selector(move || format!("model-provider-{label}"))
                 .selected(provider == value)
+                .when(in_settings, |button| {
+                    button.small().ghost().icon(provider_icon(value))
+                })
                 .disabled(disabled)
                 .flex_1(),
             );
@@ -109,9 +285,10 @@ impl Desktop {
         let mut body = v_flex()
             .id("model-account-controls")
             .gap_3()
+            .when(in_settings, |body| body.gap_5())
             .when(manage, |body| body.child(services));
         if self.snapshot.account.login.is_some() {
-            body = body.child(self.account_login_controls(cx));
+            body = body.child(self.account_login_controls(None, cx));
         } else {
             if let Some(accounts) = accounts {
                 let mut found = false;
@@ -123,13 +300,17 @@ impl Desktop {
                 {
                     found = true;
                     let id = account.id.clone();
+                    let provider = account.provider;
                     let logout_id = id.clone();
                     let identity = account.email.as_deref().unwrap_or(&account.id);
                     let mut row = v_flex()
                         .gap_2()
                         .p_3()
                         .rounded(px(10.))
-                        .bg(rgb(0x333333))
+                        .when(!in_settings, |row| row.bg(rgb(0x333333)))
+                        .when(in_settings, |row| {
+                            row.p_4().border_1().border_color(rgb(0x2b2f35))
+                        })
                         .child(
                             Button::new(format!("account-choice-{index}"))
                                 .accessibility_label(identity.to_owned())
@@ -139,6 +320,7 @@ impl Desktop {
                                 .on_click(cx.listener(move |s, _, _, cx| {
                                     s.account_operation(Intent::SelectAccountForDraft(
                                         op::SelectAccountForDraft {
+                                            provider,
                                             id: id.clone(),
                                             thread_id: s.draft_key().clone(),
                                         },
@@ -164,7 +346,8 @@ impl Desktop {
                             account_usage_view(account.usage.as_ref())
                         } else {
                             weekly_usage_view(
-                                self.snapshot.account_weekly_usage(account.id.clone()),
+                                self.snapshot
+                                    .account_weekly_usage(account.provider, account.id.clone()),
                             )
                         });
                     if manage && self.account_sign_out.as_deref() == Some(account.id.as_str()) {
@@ -184,6 +367,7 @@ impl Desktop {
                                                 s.account_sign_out = None;
                                                 s.account_operation(Intent::LogoutAccount(
                                                     op::LogoutAccount {
+                                                        provider,
                                                         id: logout_id.clone(),
                                                     },
                                                 ));
@@ -204,16 +388,20 @@ impl Desktop {
                                     ),
                             );
                     } else if manage {
-                        row = row.child(
-                            self.button(
+                        let logout = self
+                            .button(
                                 format!("account-logout-{index}"),
                                 "サインアウト",
                                 cx,
                                 move |s, _, _| s.account_sign_out = Some(logout_id.clone()),
                             )
                             .debug_selector(move || format!("account-logout-{index}"))
-                            .disabled(disabled),
-                        );
+                            .disabled(disabled);
+                        row = if in_settings {
+                            row.child(h_flex().justify_end().child(logout))
+                        } else {
+                            row.child(logout)
+                        };
                     }
                     body = body.child(row);
                 }
@@ -233,9 +421,7 @@ impl Desktop {
                                 "account-start-login",
                                 "アカウントを追加",
                                 cx,
-                                move |s, window, cx| {
-                                    s.account_code
-                                        .update(cx, |input, cx| input.set_value("", window, cx));
+                                move |s, _, _| {
                                     s.account_operation(Intent::StartAccountLogin(
                                         op::StartAccountLogin { provider },
                                     ));
@@ -246,8 +432,7 @@ impl Desktop {
                         )
                         .child(
                             self.button("accounts-refresh", "更新", cx, |s, _, _| {
-                                s.dispatch(Intent::ListAccounts(op::ListAccounts {}));
-                                s.dispatch(Intent::LoadModels(op::LoadModels {}));
+                                s.refresh_accounts_and_models();
                             })
                             .tooltip("モデルと使用量を更新")
                             .disabled(disabled),
@@ -292,7 +477,7 @@ impl Desktop {
             )
             .children(
                 self.snapshot
-                    .model_error_messages()
+                    .model_error_messages(Some(provider))
                     .into_iter()
                     .map(|error| {
                         div()
@@ -314,89 +499,172 @@ impl Desktop {
 }
 
 impl Desktop {
+    pub(super) fn account_provider(&self) -> ProviderKind {
+        self.model_provider.unwrap_or_else(|| {
+            self.snapshot
+                .model_provider_for_draft(self.draft_key().clone())
+        })
+    }
+
     pub(in crate::app) fn account_operation(&mut self, intent: Intent) {
         if self.account_busy || self.session.is_none() || !self.snapshot.connected {
             return;
         }
-        if matches!(intent, Intent::StartAccountLogin(_)) {
+        if let Intent::StartAccountLogin(start) = &intent {
+            self.model_provider = Some(start.provider);
             self.account_login_draft = Some(self.draft_key().clone());
         }
         self.account_busy = true;
         self.perform(intent, OperationCompletion::Account);
     }
 
-    fn account_login_controls(&self, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn account_login_controls(
+        &self,
+        title: Option<&str>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let Some(login) = &self.snapshot.account.login else {
+            return div().into_any_element();
+        };
         let disabled = !self.snapshot.connected || self.account_busy || self.busy > 0;
-        let mut body = v_flex().gap_3();
-        if let Some(login) = &self.snapshot.account.login {
-            let code = login.user_code.clone();
-            let url = login.verification_url.clone();
-            let cancel_id = login.login_id.clone();
-            if login.requires_code_submission {
-                let submit_id = login.login_id.clone();
-                body = body.child("ブラウザで Claude にログインし、表示された認証コードを貼り付けてください。")
-                    .child(Input::new(&self.account_code))
-                    .child(self.button("account-submit-code", "認証コードを送信", cx, move |s, window, cx| {
-                        let code = s.account_code.read(cx).value().to_string();
-                        if code.trim().is_empty() { return; }
-                        s.account_operation(Intent::SubmitAccountLogin(op::SubmitAccountLogin { id: submit_id.clone(), code }));
-                        s.account_code.update(cx, |input, cx| input.set_value("", window, cx));
-                    }).disabled(disabled));
-            }
-            body = body
-                .when(!login.requires_code_submission, |body| {
-                    body.child("ブラウザでログインし、次のコードを入力してください。")
-                })
-                .child(div().text_xl().child(login.user_code.clone()))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .flex_wrap()
-                        .when(!login.requires_code_submission, |row| {
-                            row.child(self.button(
-                                "account-copy-code",
-                                "コードをコピー",
-                                cx,
-                                move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                                },
-                            ))
-                        })
-                        .child(self.button(
-                            "account-open-login",
-                            "ブラウザでログイン",
-                            cx,
-                            move |_, _, cx| cx.open_url(&url),
-                        ))
-                        .child(
-                            self.button(
-                                "account-cancel-login",
-                                "キャンセル",
-                                cx,
-                                move |s, _, _| {
-                                    s.account_operation(Intent::CancelAccountLogin(
-                                        op::CancelAccountLogin {
-                                            id: cancel_id.clone(),
-                                        },
-                                    ));
-                                },
-                            )
-                            .disabled(disabled),
-                        ),
+        let url = login.verification_url.clone();
+        let cancel_id = login.login_id.clone();
+        let provider = login.provider;
+        let cancel = self
+            .button(
+                "account-cancel-login",
+                "キャンセル",
+                cx,
+                move |s, _, _| {
+                    s.account_operation(Intent::CancelAccountLogin(op::CancelAccountLogin {
+                        provider,
+                        id: cancel_id.clone(),
+                    }));
+                },
+            )
+            .debug_selector(|| "account-cancel-login".into())
+            .small()
+            .ghost()
+            .disabled(disabled);
+        let mut form = v_flex()
+            .gap_3()
+            .text_sm()
+            .child(if login.requires_code_submission {
+                "ブラウザでログインし、認証コードを貼り付けてください。"
+            } else {
+                "ブラウザでログインし、次のコードを入力してください。"
+            })
+            .child(
+                self.button(
+                    "account-open-login",
+                    "ブラウザでログイン",
+                    cx,
+                    move |_, _, cx| {
+                        cx.open_url(&url);
+                    },
                 )
-                .child(
+                .debug_selector(|| "account-open-login".into())
+                .small(),
+            );
+        if login.requires_code_submission {
+            let submit_id = login.login_id.clone();
+            form = form.child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&self.account_code)),
+                    )
+                    .child(
+                        self.button("account-submit-code", "接続", cx, move |s, window, cx| {
+                            let code = s.account_code.read(cx).value().to_string();
+                            if code.trim().is_empty() {
+                                return;
+                            }
+                            s.account_operation(Intent::SubmitAccountLogin(
+                                op::SubmitAccountLogin {
+                                    provider,
+                                    id: submit_id.clone(),
+                                    code,
+                                },
+                            ));
+                            s.account_code
+                                .update(cx, |input, cx| input.set_value("", window, cx));
+                        })
+                        .debug_selector(|| "account-submit-code".into())
+                        .disabled(disabled || self.account_code.read(cx).value().trim().is_empty()),
+                    ),
+            );
+        } else {
+            let code = login.user_code.clone();
+            form = form.child(
+                h_flex()
+                    .gap_3()
+                    .child(div().text_xl().child(login.user_code.clone()))
+                    .child(
+                        self.button(
+                            "account-copy-code",
+                            "コードをコピー",
+                            cx,
+                            move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                            },
+                        )
+                        .small()
+                        .ghost(),
+                    ),
+            );
+        }
+        form = form
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x949494))
+                    .child("ログインが完了すると、自動で接続されます。"),
+            )
+            .when(!self.account_polling && !self.account_busy, |form| {
+                form.child(
                     self.button(
-                        "account-check-login",
-                        "ログイン状態を確認",
+                        "account-retry-login",
+                        "接続状態を再確認",
                         cx,
                         |s, _, _| {
                             s.account_polling = true;
                         },
                     )
+                    .small()
+                    .ghost()
                     .disabled(disabled),
-                );
+                )
+            });
+        match title {
+            Some(title) => v_flex()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .py_1()
+                        .child(div().flex_1().child(title.to_owned()))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0x949494))
+                                .child("ログイン中"),
+                        )
+                        .child(cancel),
+                )
+                .child(
+                    form.p_3()
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(rgb(0x303030))
+                        .bg(rgb(0x191919)),
+                )
+                .into_any_element(),
+            None => form.child(cancel).into_any_element(),
         }
-        body.into_any_element()
     }
 }
 
@@ -612,7 +880,9 @@ impl Desktop {
                         )
                         .child(weekly_usage_view(
                             account
-                                .map(|a| self.snapshot.account_weekly_usage(a.id.clone()))
+                                .map(|a| {
+                                    self.snapshot.account_weekly_usage(a.provider, a.id.clone())
+                                })
                                 .unwrap_or_default(),
                         )),
                 ),
@@ -627,9 +897,10 @@ impl Desktop {
                     .large()
                     .aria_label("モデルを検索"),
             );
-        let models = self
-            .snapshot
-            .provider_models_matching(provider, self.model_search.read(cx).value().to_string());
+        let models = self.snapshot.models_matching(
+            Some(provider),
+            self.model_search.read(cx).value().to_string(),
+        );
         let mut list = v_flex()
             .id("model-catalog")
             .max_h(px(240.))
@@ -686,7 +957,7 @@ impl Desktop {
         body.child(list)
             .children(
                 self.snapshot
-                    .model_error_messages()
+                    .model_error_messages(Some(provider))
                     .into_iter()
                     .map(|error| {
                         div()
@@ -917,7 +1188,7 @@ mod tests {
                 snapshot.connected = true;
                 Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(serde_json::json!({
                     "accounts":[{"provider":"codex","id":"first","email":"first@example.invalid","usage":{"windows":[{"label":"週間枠","remainingPercent":42}],"fetchedAt":1}},
-                    {"provider":"claude","id":"claude:second"}],"selectedId":"first","selectedClaudeId":"claude:second"
+                    {"provider":"claude","id":"claude:second"}],"selected":{"codex":"first","claude":"claude:second"}
                 })).unwrap()));
                 snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
                     {"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"priority"}]},
@@ -988,5 +1259,74 @@ mod tests {
         let claude = window.debug_bounds("model-provider-Claude").unwrap();
         window.simulate_click(claude.center(), Modifiers::default());
         window.update(|_, cx| assert!(view.read(cx).0.read(cx).model_provider.is_none()));
+    }
+    struct DefaultsView(Entity<Desktop>);
+    impl Render for DefaultsView {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.update(cx, |view, cx| {
+                h_flex()
+                    .size_full()
+                    .child(view.settings_sidebar(cx))
+                    .child(view.settings(cx))
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn default_model_settings_keep_speed_beside_effort_and_worktrees_separate(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(crate::Runtime {
+                handle: runtime.handle().clone(),
+                connections: Arc::new(crate::platform::Connections::default()),
+                closing: tokio_util::task::TaskTracker::new(),
+                logging_error: None,
+            });
+        });
+        let (view, window) = cx.add_window_view(|window, cx| {
+            let desktop = cx.new(|cx| Desktop::new(Mode::SideChat {
+                remote: Some(RemoteHost { id: "fixture".into(), name: "fixture".into(), ticket: "invalid-fixture-ticket".into() }),
+                cwd: "/fixture".into(),
+            }, window, cx));
+            desktop.update(cx, |view, _| {
+                view.tab = super::Tab::Settings;
+                view.settings_page = super::SettingsPage::Models;
+                let snapshot = Arc::make_mut(&mut view.snapshot);
+                snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
+                    {"id":"gpt","model":{"provider":"codex","id":"gpt"},"displayName":"GPT-6-Astra",
+                     "isDefault":true,"defaultReasoningEffort":"medium",
+                     "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
+                     "serviceTiers":[{"id":"priority"}]}
+                ])).unwrap());
+            });
+            cx.observe(&desktop, |_, _, cx| cx.notify()).detach();
+            DefaultsView(desktop)
+        });
+        for width in [1000., 1280.] {
+            window.simulate_resize(gpui_kit::size(px(width), px(720.)));
+            window.run_until_parked();
+            let model = window.debug_bounds("default-model").unwrap();
+            let effort = window.debug_bounds("default-model-effort").unwrap();
+            let speed = window.debug_bounds("default-model-speed").unwrap();
+            assert!(model.right() <= effort.left());
+            assert!(effort.right() <= speed.left());
+            assert_eq!(model.top(), speed.top());
+            assert!(speed.right() < px(width));
+            assert!(window.debug_bounds("worktree-create").is_none());
+        }
+        window.update(|_, cx| {
+            view.read(cx).0.clone().update(cx, |view, cx| {
+                view.settings_page = super::SettingsPage::Worktrees;
+                cx.notify();
+            });
+        });
+        window.run_until_parked();
+        assert!(window.debug_bounds("default-model").is_none());
     }
 }

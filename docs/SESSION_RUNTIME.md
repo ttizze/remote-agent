@@ -18,6 +18,11 @@ Codex and Claude Code are the supported providers.
   transport carries the response before subsequent updates. There are no history
   hydration revisions, cached snapshots, replay logs or gap-repair protocol.
   Obsolete subscription UUIDs are ignored; queue overflow closes that connection.
+- Turn lifecycle notifications upsert their items without removing independently
+  streamed items, including when the native notification labels its view `full`.
+  Explicit item removals delete items; a fresh history response replaces the view.
+  An inapplicable update reopens the current history window and subscription;
+  only a failed recovery read becomes a client error.
 - Unresolved requests belong to the execution. Provider/session/turn/native request
   identity is shared by every client, with no per-device alias map. The first valid
   answer is claimed after checking connection, execution and content. Delivery can
@@ -39,6 +44,11 @@ Codex retains one shared app-server process. Native pagination, cursor use,
 item hydration, repeated turn IDs, details and response/event ordering belong
 to `host_rpc/codex.rs`. Clients request a larger window rather than merging
 native cursor pages. Accounts share this process and existing switch guards.
+The Codex adapter also owns native execution RPCs, input/reply conversion and
+browser MCP configuration encoding. The Host chooses the submission route,
+owns worktree preparation, browser scopes and delivery evidence, and passes
+the required values to the adapter. Execution RPC names and payloads stay inside
+the adapter.
 
 Claude reads native project JSONL without launching the CLI. It resolves exact
 UUIDs across actual configured project directories, checks native identities,

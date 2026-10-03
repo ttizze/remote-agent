@@ -131,14 +131,17 @@ extension ThreadScreen {
                         .accessibilityIdentifier("model.fast")
                         .disabled(!model.isConnected || model.sending)
                     }
+                    let modelName = model.currentModel?.displayName ?? "モデル"
                     Button { composerFocused = false; showingModelSettings = true } label: {
-                        Text(model.currentModel?
-                            .displayName ?? (model.selectedModel?.id ?? "モデル"))
+                        Text(modelName)
+                            .foregroundStyle(.primary)
                             .font(.subheadline).lineLimit(1).truncationMode(.middle)
                             .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                     }
                     .layoutPriority(1)
                     .accessibilityLabel("モデル設定")
+                    .accessibilityValue(modelName)
                     .accessibilityIdentifier("model.settings")
                     if !controls.efforts.isEmpty {
                         Menu {

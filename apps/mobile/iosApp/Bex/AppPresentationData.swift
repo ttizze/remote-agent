@@ -2,7 +2,7 @@ import AgentCore
 import Foundation
 
 // These values contain rendered rows, never mutable conversation state.
-enum AppScreen { case pairing, profiles, threads, thread }
+enum AppScreen: Hashable { case pairing, profiles, threads, thread }
 enum LoadState { case idle, loading, ready, failed }
 struct HostProfile: Codable, Identifiable {
     let id: String
@@ -33,6 +33,7 @@ final class ConversationItem: Sendable {
     init(_ source: RenderedItem) {
         self.source = source
         data = source.presentation()
-        markdown = data.kind != "user" && !data.collapsible ? ConversationMarkdownContent.parse(data.body) : []
+        markdown = data.kind != "user" && !data.collapsible ? data.body
+            .map(ConversationMarkdownContent.parse) ?? [] : []
     }
 }

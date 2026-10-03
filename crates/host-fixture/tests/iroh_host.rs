@@ -464,9 +464,7 @@ async fn binary_transfers_use_the_issuing_iroh_session_and_preserve_bytes() {
         );
         assert!(
             uploaded.starts_with(
-                directory
-                    .path()
-                    .canonicalize()
+                dunce::canonicalize(directory.path())
                     .unwrap()
                     .join("bex-attachments")
             )
@@ -758,7 +756,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
             for project in [false, true] {
                 for photo in [true, false] {
                     let directory = tempfile::tempdir().unwrap();
-                    let root = directory.path().canonicalize().unwrap();
+                    let root = dunce::canonicalize(directory.path()).unwrap();
                     assert!(std::process::Command::new("git").args(["init", "--quiet"]).current_dir(&root).status().unwrap().success());
                     let workspace = root.join("project");
                     std::fs::create_dir(&workspace).unwrap();
@@ -777,7 +775,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                     std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({
                         "settings":{"createOnNewSession":automatic,"worktreeDirectory":destination}
                     })).unwrap()).unwrap();
-                    std::fs::write(root.join("projects.json"), serde_json::to_vec(&json!([{"id":"default","name":"Default checkout","roots":[{"path":root}]}])).unwrap()).unwrap();
+                    std::fs::write(root.join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"default","name":"Default checkout","roots":[{"path":root}]}])).unwrap()).unwrap();
                     let source = root.join("photo.png");
                     let bytes = include_bytes!("../../../apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png");
                     std::fs::write(&source, bytes).unwrap();
@@ -1014,7 +1012,7 @@ async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
     use agent_core::store::Store;
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&json!([
             {"id":"selected","name":"Selected task","cwd":root,"historyMode":"paginated","createdAt":1,"updatedAt":1}
         ])).unwrap()).unwrap();
@@ -1214,9 +1212,12 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
             })).collect::<Vec<_>>()
         })).collect::<Vec<_>>();
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([{
-            "id":"history","name":"History pagination","cwd":directory.path(),"historyMode":"paginated","turns":turns
+            "id":"history","name":"History pagination","cwd":directory.path(),"historyMode":"paginated","turns":turns,"fixtureTimelinePageLimit":100
         }])).unwrap()).unwrap();
-        let fixture = start_host(directory.path()).await;
+        let program = host_fixture::fixture::Config { trace: true, ..Default::default() }
+            .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), directory.path()).unwrap();
+        let fixture = HostFixture::start(directory.path(), AppServerConfig { program, ..Default::default() },
+            Arc::new(Memory::default()), "isolated Host", false, None).await.unwrap();
         let local = fixture.local().await.unwrap();
         let previous: models::Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"history"},"historyCursor":null,
             "turns":[{"id":"turn-0","status":"completed","items":[{"id":"item-0-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 0/0","phase":"unknown"}}}}}]}, {"id":"turn-11","status":"completed","items":[{"id":"item-11-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 11/0","phase":"unknown"}}}}}],
@@ -1233,9 +1234,16 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         assert_eq!(thread.turns.as_ref().unwrap().len(), 5, "refresh must not attach disconnected cached turns");
         assert_eq!(thread.history_has_more, Some(true));
         let latest = thread.turns.as_ref().unwrap().last().unwrap();
-        assert_eq!(latest.items.as_ref().unwrap().len(), 500);
+        assert_eq!(latest.items.as_ref().unwrap().len(), 99);
         assert_eq!(latest.items_has_more, Some(true));
-        assert_eq!(latest.items.as_ref().unwrap()[0].id, "item-11-120".into());
+        assert_eq!(latest.items.as_ref().unwrap()[0].id, "item-11-521".into());
+        let trace = std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap();
+        let reads: Vec<Value> = trace.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(reads.iter().filter(|entry| entry["method"] == "thread/timeline/list").count(), 1,
+            "initial loading must return the provider's smaller page without filling it");
+        assert!(reads.iter().filter(|entry| entry["method"] == "thread/items/list")
+            .all(|entry| entry["sortDirection"] == "asc" && entry["limit"] == 2),
+            "turn bodies must load through the timeline; only an opening question needs an item read");
         for _ in 0..20 {
             let snapshot = store.snapshot();
             if snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }].history_has_more != Some(true) { break; }
@@ -1267,6 +1275,44 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn timeline_history_rejects_repeated_cursors_and_oversized_pages() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let cases = [
+            ("oversized", 5, json!({"data":(0..501).map(|position| json!({"type":"realtime","position":position})).collect::<Vec<_>>(),"nextCursor":null}), "timeline page exceeds requested size"),
+            ("loop", 10, json!({"data":[],"nextCursor":"opaque-loop"}), "timeline cursor repeated"),
+            ("ambiguous", 5, json!({"data":[{"type":"realtime","position":1},{"type":"realtime","position":1}],"nextCursor":null}), "timeline position repeated"),
+            ("missing-turn", 5, json!({"data":[{"type":"item","position":1,"turnId":"","item":{"id":"item","type":"agentMessage","text":"answer"}}],"nextCursor":null}), "timeline item identity is missing"),
+            ("missing-item", 5, json!({"data":[{"type":"item","position":1,"turnId":"turn","item":{"id":"","type":"agentMessage","text":"answer"}}],"nextCursor":null}), "timeline item identity is missing"),
+        ];
+        let threads: Vec<_> = cases.iter().map(|(id, _, response, _)| json!({
+            "id":id,"cwd":directory.path(),"historyMode":"paginated","fixtureTimelineResponse":response,
+            "turns":[{"id":"turn","status":"completed","items":[{"id":"answer","type":"agentMessage","text":"saved answer"}]}]
+        })).collect();
+        std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
+        let fixture = start_host(directory.path()).await;
+        let local = fixture.local().await.unwrap();
+        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
+        for (id, limit, _, message) in cases {
+            let result = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
+                &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
+                    session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, id.into()).unwrap(), limit,
+                })
+            ).await;
+            let error = match result {
+                Err(agent_protocol::error::PeerError::Remote { error, .. }) => error,
+                _ => panic!("invalid timeline was accepted: {id}"),
+            };
+            let failure: agent_protocol::error::RpcFailure = serde_json::from_str(&error).unwrap();
+            assert_eq!(failure.code, "session_open_failed");
+            assert_eq!(failure.message, message);
+        }
+        local.close().await;
+        fixture.close().await.unwrap();
+    }).await.expect("timeline validation exceeded its deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_small_command_outputs_do_not_delay_opening_history() {
     tokio::time::timeout(Duration::from_secs(45), async {
         let directory = tempfile::tempdir().unwrap();
@@ -1293,15 +1339,15 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
         assert!(bytes < 100 * 1024, "collapsed command bodies delayed history: {bytes} bytes");
         let turn = &opened.response.thread.turns.as_ref().unwrap()[0];
         let loaded = turn.items.as_ref().unwrap();
-        assert_eq!(loaded.len(), 500);
-        assert!(matches!(loaded[0].body(), agent_protocol::items::ItemBody::UserMessage {content, ..} if content == &vec![agent_protocol::items::MessagePart::Text {text: "Inspect the build".into()}]));
-        assert_eq!(item_text(&(loaded[499])), Some("The build passed"));
+        assert_eq!(loaded.len(), 499);
+        assert!(matches!(turn.opening_user_message.as_ref().unwrap().body(), agent_protocol::items::ItemBody::UserMessage {content, ..} if content == &vec![agent_protocol::items::MessagePart::Text {text: "Inspect the build".into()}]));
+        assert_eq!(item_text(&(loaded[498])), Some("The build passed"));
         assert_eq!(loaded.iter().filter(|item| item.is_deferred()).count(), 498);
-        for index in [1, 249, 498] {
+        for index in [0, 249, 497] {
             let detail = local.peer.call(&rpc::ReadItem {
                 thread_id: agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "command-history".into() }, turn_id: "turn".into(), item_id: loaded[index].id.clone(),
             }).await.unwrap();
-            assert!(matches!(detail.item.body(), agent_protocol::items::ItemBody::CommandExecution {output, ..} if output == items[index]["aggregatedOutput"].as_str().unwrap())); assert!(!detail.item.is_deferred());
+            assert!(matches!(detail.item.body(), agent_protocol::items::ItemBody::CommandExecution {output, ..} if output == items[index + 1]["aggregatedOutput"].as_str().unwrap())); assert!(!detail.item.is_deferred());
         }
         local.close().await;
         fixture.close().await.unwrap();
@@ -1312,7 +1358,7 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
 async fn large_history_loads_conversation_before_lossless_item_details() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&json!([{"id":"workspace", "name":"Workspace", "roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
+        std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"workspace", "name":"Workspace", "roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let mobile = fixture.local().await.unwrap();
 
@@ -1352,7 +1398,14 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>(json!({"useStateDbOnly":true})).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         let mut page = open_session(&mobile.peer, &json!({"provider":"codex","id":"fixture-long-history"}), 5).await.0["response"].clone();
         assert_eq!(page["thread"]["turns"].as_array().unwrap().len(), 5);
-        assert_eq!(page["thread"]["turns"].as_array().unwrap().iter().map(|t| t["items"].as_array().unwrap().len()).sum::<usize>(), 500);
+        assert_eq!(page["thread"]["turns"].as_array().unwrap().iter().map(|t| t["items"].as_array().unwrap().len()).sum::<usize>(), 497);
+        for turn in &page["thread"]["turns"].as_array().unwrap()[..3] {
+            assert!(turn["items"].as_array().unwrap().is_empty());
+            assert_eq!(turn["itemsHasMore"], true);
+        }
+        assert_eq!(page["thread"]["turns"][3]["itemsHasMore"], true);
+        assert!(!page["thread"]["turns"][3]["items"].as_array().unwrap().is_empty());
+        assert_eq!(page["thread"]["turns"][4]["itemsHasMore"], false);
         assert_eq!(page["thread"]["turns"][4]["items"][153]["id"], "long-latest-message");
         for limit in (10..=100).step_by(5) {
             if page["thread"]["historyHasMore"] != true { break; }
@@ -1408,9 +1461,9 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
             threads.push(json!({"id":format!("chat-{index}"),"cwd":directory.path().join("unassigned"),"name":format!("Chat {index:02}"),"updatedAt":index}));
         }
         threads.extend([
-            json!({"id":"explicit","projectId":"project-3","cwd":directory.path().join("unassigned"),"name":"Explicit assignment","updatedAt":90000}),
+            json!({"id":"explicit","projectId":"native-project-other","cwd":directory.path().join("project-3"),"name":"Explicit assignment","updatedAt":90000}),
             json!({"id":"projectless","projectId":null,"cwd":directory.path().join("bex-chats"),"name":"Explicit chat","updatedAt":90001}),
-            json!({"id":"worktree","projectId":"project-5","cwd":directory.path().join("worktree"),"name":"Worktree conversation","updatedAt":90002}),
+            json!({"id":"worktree","projectId":"native-project-other","cwd":directory.path().join("worktree"),"name":"Worktree conversation","updatedAt":90002}),
         ]);
         let rollout = directory.path().join("external-rollout.jsonl");
         std::fs::write(&rollout, "initial\n").unwrap();
@@ -1419,7 +1472,9 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         external["status"] = json!({"type":"notLoaded"});
         external["path"] = json!(rollout);
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
-        std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&projects).unwrap()).unwrap();
+        std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&projects).unwrap()).unwrap();
+        let checkout = directory.path().join("worktree");
+        std::fs::write(directory.path().join("bex-worktrees.json"), json!({"workspaceRoots":{checkout.to_str().unwrap():directory.path().join("project-5")}}).to_string()).unwrap();
         let fixture = start_host(directory.path()).await;
         let mobile = fixture.local().await.unwrap();
 
@@ -1471,7 +1526,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
 async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_membership() {
     tokio::time::timeout(Duration::from_secs(40), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let workspace = root.join("project");
         std::fs::create_dir(&workspace).unwrap();
         let git = |args: &[&str]| {
@@ -1483,7 +1538,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         git(&["add", "tracked.txt"]);
         git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
         std::fs::write(workspace.join(".env"), "FIXTURE_VALUE=isolated\n").unwrap();
-        let project_state = root.join("projects.json");
+        let project_state = root.join("bex-projects.json");
         std::fs::write(&project_state, serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":workspace}]}])).unwrap()).unwrap();
         let server = Arc::new(CodexAppServer::spawn(codex_fixture::config(&root)).await.unwrap());
         let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")));
@@ -1616,7 +1671,7 @@ async fn file_edits_preserve_encoding_and_reject_stale_revisions() {
 async fn daemon_exposes_project_roots_and_structured_tool_results() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("projects.json"), serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
+        std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
         let started = local.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path()})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
@@ -1735,7 +1790,12 @@ async fn expired_invitation_is_rejected_by_daemon_and_remains_unconsumed() {
         let saved_keys = fixture.memory.clone();
         local.close().await;
         fixture.close().await.unwrap();
-        std::fs::remove_file(directory.path().join("bex-codex-fixture")).unwrap();
+        std::fs::remove_file(
+            directory
+                .path()
+                .join(format!("bex-codex-fixture{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .unwrap();
         let path = directory.path().join("state/trust.json");
         let mut trust: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         trust["trust"]["invitations"][invitation.invitation.to_string()] = json!(0);
@@ -1896,7 +1956,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
     }
     tokio::time::timeout(Duration::from_secs(40), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let mobile_state = root.join("mobile-host");
         let desktop_state = root.join("desktop");
         let registry = LocalHostRegistry::new(desktop_state.clone());
@@ -2152,7 +2212,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
         for automatic in [false, true] {
             for scoped in [false, true] {
                 let directory = tempfile::tempdir().unwrap();
-                let root = directory.path().canonicalize().unwrap();
+                let root = dunce::canonicalize(directory.path()).unwrap();
                 let project = root.join("project");
                 std::fs::create_dir(&project).unwrap();
                 let git = |args: &[&str]| {
@@ -2166,7 +2226,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 std::os::unix::fs::symlink(&project, &configured_project).unwrap();
                 #[cfg(not(unix))]
                 let configured_project = project.clone();
-                std::fs::write(root.join("projects.json"), serde_json::to_vec(&json!([{"id":"project","name":"Project","roots":[{"path":configured_project}]}])).unwrap()).unwrap();
+                std::fs::write(root.join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"project","name":"Project","roots":[{"path":configured_project}]}])).unwrap()).unwrap();
                 std::fs::write(root.join("bex-worktrees.json"), serde_json::to_vec(&json!({"settings":{"createOnNewSession":automatic}})).unwrap()).unwrap();
                 let program = host_fixture::fixture::Config { deferred_thread_metadata: true, stream_delay_ms: 10, ..Default::default() }
                     .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), &root).unwrap();
@@ -2219,7 +2279,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
     use agent_core::store::Store;
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let project = root.join("project");
         std::fs::create_dir(&project).unwrap();
         let git = |args: &[&str]| {
@@ -2473,7 +2533,7 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
     }
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let repo = root.join("repo");
         let checkout = root.join("checkout");
         std::fs::create_dir(&repo).unwrap();
@@ -2794,7 +2854,7 @@ async fn adding_a_chat_folder_registers_a_project_before_submission() {
     use agent_core::store::Store;
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
         let folder = root.join("new-project");
         std::fs::create_dir(&folder).unwrap();
         let fixture = start_host(&root).await;
@@ -2854,7 +2914,7 @@ async fn adding_a_chat_folder_registers_a_project_before_submission() {
             created.thread.project_id.as_deref(),
             Some(project_id.as_str())
         );
-        assert!(!root.join("bex-projects.json").exists());
+        assert!(root.join("bex-projects.json").exists());
         assert!(!root.join(".codex-global-state.json").exists());
         store.close().await.unwrap();
         local.endpoint.close().await;

@@ -221,7 +221,7 @@ pub(super) async fn run(
         )?;
         context.stream_item(&thread_id, &turn, json!({"id":format!("fixture-next-command-{suffix}"),"type":"commandExecution",
             "command":"pwd","aggregatedOutput":"GROUP_DETAIL_OUTPUT","status":"completed","exitCode":0}))?;
-        if interrupted(&stop, context.config.delay()).await {
+        if !wait_for_release(&context.home, &stop).await {
             return context.finish(&thread, &turn, "interrupted", None);
         }
     }

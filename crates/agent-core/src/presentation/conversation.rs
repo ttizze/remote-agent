@@ -120,7 +120,7 @@ impl RenderedTurn {
     pub fn progress_label(&self, include_action: bool, now_seconds: f64) -> String {
         let action = self.rows.iter().rev().find_map(|row| match &row.content {
             ConversationRowContent::Activity { item, .. } if include_action => {
-                Some(item.data.title.as_str())
+                item.data.title.as_deref()
             }
             _ => None,
         });
@@ -163,7 +163,7 @@ impl RenderedItem {
     pub fn expanded_body(&self) -> String {
         match &self.source {
             ItemSource::Native(item) => body::expanded_body(item),
-            ItemSource::Pending(..) => self.data.body.clone(),
+            ItemSource::Pending(..) => self.data.body.clone().expect("pending input has text"),
         }
     }
 }
@@ -186,7 +186,7 @@ impl RenderedItem {
             return previous.clone();
         }
         let presentation = item_presentation(item, provider);
-        let body = body::item_body(item, &presentation);
+        let body = body::item_body(item);
         let image_placeholder = presentation.kind == "imageGeneration"
             && item.status == models::ItemStatus::Running
             && body.images.is_empty();
@@ -202,7 +202,6 @@ impl RenderedItem {
                 kind: presentation.kind.into(),
                 title: presentation.title,
                 collapsible: presentation.collapsible,
-                visible: presentation.visible,
                 body: body.text,
                 image_sources: body.images,
                 image_placeholder,
@@ -225,9 +224,8 @@ impl RenderedItem {
                 id: id.into(),
                 native_id: None,
                 kind: "user".into(),
-                title: pending.delivery_label().into(),
+                title: Some(pending.delivery_label().into()),
                 collapsible: false,
-                visible: true,
                 body: body.text,
                 image_sources: body.images,
                 image_placeholder: false,
@@ -703,7 +701,7 @@ fn turn_error(error: &models::ExecutionError) -> TurnErrorPresentation {
             Sandbox => "サンドボックスエラー",
             InputUnavailable => "この作業中はメッセージを追加できません",
             Network => "接続エラー",
-            Other => "エラー",
+            Other | Provider(_) => "エラー",
         }
     };
     TurnErrorPresentation {
@@ -720,14 +718,13 @@ pub type PendingItems = Vec<(agent_protocol::ids::ClientInputId, Arc<PendingSubm
 pub struct ItemPresentation {
     pub id: String,
     pub native_id: Option<agent_protocol::ids::ItemId>,
-    pub body: String,
+    pub body: Option<String>,
     pub image_sources: Vec<String>,
     pub image_placeholder: bool,
     pub deferred: bool,
     pub kind: String,
-    pub title: String,
+    pub title: Option<String>,
     pub collapsible: bool,
-    pub visible: bool,
 }
 #[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -832,15 +829,15 @@ mod tests {
 
     #[test]
     fn generated_image_placeholder_yields_to_result_and_stops_on_failure() {
-        for (status, saved_path, result, placeholder, sources, title) in [
-            ("running", "", "", true, vec![], ""),
+        for (status, saved_path, result, placeholder, sources, error) in [
+            ("running", "", "", true, vec![], None),
             (
                 "running",
                 "/preview.png",
                 "",
                 false,
                 vec!["/preview.png"],
-                "",
+                None,
             ),
             (
                 "completed",
@@ -848,7 +845,7 @@ mod tests {
                 "",
                 false,
                 vec!["/generated.png"],
-                "生成画像",
+                None,
             ),
             (
                 "completed",
@@ -856,31 +853,42 @@ mod tests {
                 "png-data",
                 false,
                 vec!["data:image/png;base64,png-data"],
-                "生成画像",
+                None,
             ),
+            ("completed", "", "", false, vec![], None),
             (
                 "failed",
                 "",
                 "",
                 false,
                 vec![],
-                "画像を生成できませんでした",
+                Some("画像を生成できませんでした"),
             ),
         ] {
             let item = Arc::new(
                 serde_json::from_value(json!({"id":"image","status":status,"clientInputId":null,"body":{"inline":{"body":{"imageGeneration":{"savedPath":saved_path,"data":result,"revisedPrompt":null}}}}}))
                 .unwrap(),
             );
-            let projected = RenderedItem::native(
-                &item,
+            let projected = render_turn(
                 Some(crate::session::ProviderKind::Codex),
                 false,
+                Arc::new(models::Turn {
+                    id: "turn".into(),
+                    status: models::TurnStatus::Completed,
+                    items: Some(vec![item, Arc::new(serde_json::from_value(json!({"id":"answer","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"Here is the image","phase":"final"}}}}})).unwrap())]),
+                    ..Default::default()
+                }),
+                vec![],
+                vec![],
                 None,
             );
-            assert_eq!(projected.data.image_placeholder, placeholder);
-            assert_eq!(projected.data.image_sources, sources);
-            assert_eq!(projected.data.title, title);
-            assert_eq!(projected.data.body, title);
+            let items: Vec<_> = projected.items().collect();
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0].data.image_placeholder, placeholder);
+            assert_eq!(items[0].data.image_sources, sources);
+            assert_eq!(items[0].data.title, None);
+            assert_eq!(items[0].data.body.as_deref(), error);
+            assert_eq!(items[1].data.body.as_deref(), Some("Here is the image"));
         }
     }
 
@@ -988,7 +996,7 @@ mod tests {
             .iter()
             .filter_map(|row| match &row.content {
                 ConversationRowContent::Activity { item, .. }
-                | ConversationRowContent::Response { item, .. } => Some(item.data.body.as_str()),
+                | ConversationRowContent::Response { item, .. } => item.data.body.as_deref(),
                 _ => None,
             })
             .collect();
@@ -1066,7 +1074,7 @@ mod tests {
                     .iter()
                     .flat_map(|turn| turn.items())
                     .chain(rendered.queued.iter())
-                    .map(|item| item.data.body.clone())
+                    .filter_map(|item| item.data.body.clone())
                     .collect::<Vec<_>>()
             };
             assert_eq!(texts(&first), ["before", "z-first", "a-second", "m-third"]);
@@ -1196,7 +1204,7 @@ mod tests {
         assert_eq!(
             items
                 .iter()
-                .map(|item| item.data.body.as_str())
+                .filter_map(|item| item.data.body.as_deref())
                 .collect::<Vec<_>>(),
             ["native b", "pending a 2", "pending c 3"]
         );
@@ -1233,7 +1241,10 @@ mod tests {
         );
         let first = project_snapshot(snapshot.clone(), None);
         assert_eq!(first.queued.len(), 1);
-        assert_eq!(first.queued[0].data.body, "waiting for history");
+        assert_eq!(
+            first.queued[0].data.body.as_deref(),
+            Some("waiting for history")
+        );
         let thread = Arc::make_mut(
             Arc::make_mut(&mut snapshot.conversations)
                 .get_mut(&agent_protocol::session::SessionRef {
@@ -1287,10 +1298,13 @@ mod tests {
                 second.turns[1].items().nth(index).unwrap()
             ));
         }
-        assert_eq!(first.turns[1].items().nth(2).unwrap().data.body, "hello");
         assert_eq!(
-            second.turns[1].items().nth(2).unwrap().data.body,
-            "hello world"
+            first.turns[1].items().nth(2).unwrap().data.body.as_deref(),
+            Some("hello")
+        );
+        assert_eq!(
+            second.turns[1].items().nth(2).unwrap().data.body.as_deref(),
+            Some("hello world")
         );
         let mut deferred = updated;
         let thread = Arc::make_mut(
@@ -1411,7 +1425,7 @@ mod tests {
             1
         );
         assert_eq!(rendered.queued.len(), 1);
-        assert_eq!(rendered.queued[0].data.body, "queued text");
+        assert_eq!(rendered.queued[0].data.body.as_deref(), Some("queued text"));
     }
     #[test]
     fn retry_error_titles_use_host_evidence_without_reinterpreting_native_codes() {
