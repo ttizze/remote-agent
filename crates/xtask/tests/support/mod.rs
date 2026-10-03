@@ -78,7 +78,7 @@ fn main() {
    while SIGNAL.load(Ordering::SeqCst)==0 { std::thread::sleep(Duration::from_millis(10)); }
    std::fs::write(root.join("stopped"), "").unwrap();
   }
-  Some("parent") => { Command::new(&args[0]).args(["provider", &args[2]]).status().unwrap(); }
+  Some("parent") => { unsafe { signal(15, record); } assert!(Command::new(&args[0]).args(["provider", &args[2]]).status().unwrap().success()); }
   Some("slow") | Some("controller") => {
    use std::os::unix::process::CommandExt;
    unsafe { signal(15, record); } let root=std::path::Path::new(&args[2]);
