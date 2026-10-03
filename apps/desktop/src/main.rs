@@ -45,6 +45,7 @@ impl DesktopAssets {
         ),
         ("bex/branch.svg", include_bytes!("../assets/branch.svg")),
         ("bex/merge.svg", include_bytes!("../assets/merge.svg")),
+        ("bex/diff.svg", include_bytes!("../assets/diff.svg")),
         ("bex/monitor.svg", include_bytes!("../assets/monitor.svg")),
         ("bex/qr-code.svg", include_bytes!("../assets/qr-code.svg")),
     ];

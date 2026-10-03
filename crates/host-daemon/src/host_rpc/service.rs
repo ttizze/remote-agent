@@ -1181,7 +1181,7 @@ impl HostRpcService {
             }
         }
         let mut page = titles.finish();
-        let merged = crate::worktrees::merged_directories(
+        let statuses = crate::worktrees::directory_statuses(
             page.data
                 .iter()
                 .filter_map(|thread| thread.cwd.clone())
@@ -1190,8 +1190,11 @@ impl HostRpcService {
         .await
         .map_err(|error| Failure::new("worktree_status_failed", error))?;
         for thread in &mut page.data {
-            thread.worktree_merged =
-                Some(thread.cwd.as_ref().is_some_and(|cwd| merged.contains(cwd)));
+            thread.worktree_status = thread
+                .cwd
+                .as_ref()
+                .and_then(|cwd| statuses.get(cwd))
+                .copied();
         }
         if !provider_errors.is_empty() {
             page.provider_errors = Some(provider_errors);
