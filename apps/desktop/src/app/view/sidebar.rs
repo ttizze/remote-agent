@@ -306,8 +306,8 @@ impl Desktop {
                     .when_some(worktree.clone(), |row, (path, color, label, id)| {
                         row.child(
                             div()
-                                .id(id.clone())
-                                .debug_selector(move || id.clone())
+                                .id(id)
+                                .debug_selector(move || path.into())
                                 .role(Role::Image)
                                 .child(Icon::default().path(path).size_4())
                                 .text_color(rgb(color))
@@ -504,17 +504,8 @@ mod tests {
         });
         window.run_until_parked();
         // Leave the Tokio executor parked so both task reads remain pending.
-        for (id, status) in [("first", "unmerged"), ("second", "merged")] {
-            let session = agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
-                id: id.into(),
-            };
-            assert!(
-                window
-                    .debug_bounds(&format!("thread-{status}-{session}"))
-                    .is_some()
-            );
-        }
+        assert!(window.debug_bounds("bex/diff.svg").is_some());
+        assert!(window.debug_bounds("bex/merge.svg").is_some());
         for (id, selector) in [("first", "task-0"), ("second", "task-1")] {
             let button = window.debug_bounds(selector).unwrap().center();
             window.simulate_click(button, Modifiers::default());
