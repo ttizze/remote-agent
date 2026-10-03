@@ -606,6 +606,7 @@ fn publish_locked(
     // No `..`: adding a Snapshot field must update the publication contract.
     let Snapshot {
         model_defaults,
+        scoped_model_defaults,
         permission_settings,
         composer_catalog,
         host_name,
@@ -636,6 +637,7 @@ fn publish_locked(
         _ => false,
     };
     if current.model_defaults == *model_defaults
+        && Arc::ptr_eq(&current.scoped_model_defaults, scoped_model_defaults)
         && current.host_name == *host_name
         && current.permission_settings == *permission_settings
         && current.composer_catalog == *composer_catalog

@@ -23,6 +23,6 @@ clients send `host/session/submit` intents and reconcile subscribed evidence wit
 local drafts. The deterministic routing decision and delivery records live in
 `agent-protocol`; client caches never choose start, steer, queue, or resume.
 
-`python3 -B -m unittest discover -s scripts/tests` checks these production
+`nix develop . --command cargo test --locked -p xtask --test crate_boundaries` checks these production
 crate boundaries, including indirect local dependencies. Rust CI and quality
 checks run the protocol and transport tests as well as the client tests.

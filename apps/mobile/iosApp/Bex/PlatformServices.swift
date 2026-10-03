@@ -27,17 +27,17 @@ enum SnapshotFiles {
             let url = try location(host)
             return FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : Data()
         }.value
-        return try withModelDefaults(bytes)
+        return try withModelPreferences(bytes)
     }
 
-    static func withModelDefaults(_ persisted: Data) throws -> Data {
-        try applyModelDefaults(persisted: persisted,
-                               defaults: UserDefaults.standard.data(forKey: "bex.model-defaults") ?? Data())
+    static func withModelPreferences(_ persisted: Data) throws -> Data {
+        try applyModelPreferences(persisted: persisted,
+                                  defaults: UserDefaults.standard.data(forKey: "bex.model-defaults") ?? Data())
     }
 
     static func save(_ host: String, snapshot: AgentCore.Snapshot) async throws {
         try await Task.detached(priority: .utility) {
-            try UserDefaults.standard.set(snapshot.serializeModelDefaults(), forKey: "bex.model-defaults")
+            try UserDefaults.standard.set(snapshot.serializeModelPreferences(), forKey: "bex.model-defaults")
             try snapshot.serializeLocalState().write(to: location(host), options: .atomic)
         }.value
     }

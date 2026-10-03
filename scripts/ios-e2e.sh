@@ -32,6 +32,7 @@ if [[ $# == 0 ]]; then
         testSimulatorStartsOnListAndPreservesDetailOnForeground \
         testSimulatorOpensAccountManagementFromSettingsAndModelPicker \
         testSimulatorModelDefaultsPersistAndApplyOnlyToNewConversations \
+        testSimulatorSelectsModelScopeAndShowsUsageBeforeManagingAccounts \
         testSimulatorSignsInDirectlyFromModelSettings \
         testSimulatorGoesBackFromAccountLoginAndCanStartAgain \
         testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone \
@@ -77,4 +78,4 @@ fi
 for test in "$@"; do
     [[ $test == testSimulator* ]] || { echo 'Only isolated Simulator tests are allowed' >&2; exit 2; }
 done
-exec python3 scripts/ios-e2e.py "${options[@]}" "$@"
+exec cargo xtask ios-e2e "${options[@]}" "$@"

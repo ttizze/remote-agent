@@ -189,7 +189,7 @@ final class BexAppViewModel: ObservableObject {
             connection = Task { [weak self] in
                 do {
                     await self?.persistenceWrite?.value
-                    let persisted = try SnapshotFiles.withModelDefaults(Data())
+                    let persisted = try SnapshotFiles.withModelPreferences(Data())
                     let owner = try await AgentStore.connect(connection: Connection(
                         ticket: invitation.endpoint,
                         identity: DeviceIdentity.loadOrGenerate(id),

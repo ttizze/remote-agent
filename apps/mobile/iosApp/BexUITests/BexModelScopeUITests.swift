@@ -1,0 +1,56 @@
+import XCTest
+
+extension BexLaunchUITests {
+    func testSimulatorSelectsModelScopeAndShowsUsageBeforeManagingAccounts() throws {
+        let app = try connectedSimulatorApp()
+        app.buttons["tasks.menu"].tap(); app.buttons["tasks.settings"].tap()
+        app.buttons["settings.models"].tap()
+        let choice = app.buttons["model.choice.fixture-model"]
+        XCTAssertTrue(choice.waitForExistence(timeout: 15)); choice.tap()
+        app.buttons["model.sheet.effort"].tap(); app.buttons["medium"].tap()
+        app.buttons["settings.scope.environment"].tap()
+        app.buttons["settings.scope.environment.current"].tap()
+        app.buttons["model.sheet.effort"].tap(); app.buttons["high"].tap()
+        app.buttons["model.defaults.speed"].tap(); app.buttons["高速"].tap()
+        app.buttons["settings.scope.projects"].tap()
+        app.buttons["settings.scope.projects.simulator-project"].tap()
+        XCTAssertEqual(app.buttons["model.sheet.effort"].value as? String, "high")
+        app.buttons["model.sheet.effort"].tap(); app.buttons["medium"].tap()
+        XCTAssertTrue(app.buttons["model.defaults.inherit"].exists)
+        captureScreen(app, named: "Project model defaults with environment inheritance")
+        app.buttons["model.defaults.inherit"].tap()
+        XCTAssertEqual(app.buttons["model.sheet.effort"].value as? String, "high")
+        XCTAssertFalse(app.buttons["model.defaults.inherit"].exists)
+        app.buttons["model.close"].tap(); app.buttons["tasks.new.project.simulator-project"].tap()
+        XCTAssertEqual(app.buttons["model.effort"].value as? String, "high")
+        XCTAssertEqual(app.buttons["model.fast"].value as? String, "オン")
+        app.buttons["model.settings"].tap()
+        XCTAssertFalse(app.buttons["settings.scope.projects"].exists || app.buttons["settings.scope.environment"]
+            .exists)
+        let weekly = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "週間残量 86%"))
+            .firstMatch
+        XCTAssertTrue(weekly.waitForExistence(timeout: 15)); XCTAssertTrue(weekly.isHittable)
+        XCTAssertFalse(app.staticTexts["5時間枠"].exists || app.staticTexts["72%"].exists)
+        XCTAssertLessThan(app.buttons["model.provider"].frame.maxY, app.buttons["model.accounts.manage"].frame.minY)
+        XCTAssertLessThan(weekly.frame.maxY, app.textFields["model.search"].frame.minY)
+        XCTAssertLessThan(app.buttons["model.choice.fixture-model"].frame.maxY,
+                          app.buttons["model.sheet.effort"].frame.minY)
+        XCTAssertLessThan(app.buttons["model.sheet.effort"].frame.maxY, app.buttons["model.sheet.fast"].frame.minY)
+        captureScreen(app, named: "Agent account weekly quota models then effort and speed")
+        app.buttons["model.close"].tap(); app.buttons["BackButton"].tap()
+        app.buttons["tasks.menu"].tap(); app.buttons["tasks.settings"].tap()
+        app.buttons["settings.models"].tap()
+        app.buttons["settings.scope.projects"].tap()
+        app.buttons["settings.scope.projects.simulator-project"].tap()
+        app.buttons["model.sheet.effort"].tap(); app.buttons["medium"].tap()
+        app.buttons["model.close"].tap(); app.buttons["tasks.new.project.simulator-project"].tap()
+        app.buttons["model.settings"].tap(); XCTAssertEqual(app.buttons["model.sheet.effort"].value as? String, "high")
+        app.terminate(); app.launch()
+        XCTAssertTrue(app.buttons["tasks.menu"].waitForExistence(timeout: 20))
+        app.buttons["tasks.menu"].tap(); app.buttons["tasks.settings"].tap()
+        app.buttons["settings.models"].tap()
+        app.buttons["settings.scope.projects"].tap()
+        app.buttons["settings.scope.projects.simulator-project"].tap()
+        XCTAssertEqual(app.buttons["model.sheet.effort"].value as? String, "medium")
+    }
+}

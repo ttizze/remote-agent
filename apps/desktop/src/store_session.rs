@@ -72,6 +72,8 @@ impl StoreSession {
         failure: impl Fn(String) -> E + Send + 'static,
     ) {
         let (send, mut receive) = watch::channel(self.store.snapshot());
+        let mut preferences =
+            agent_core::persistence::ModelPreferences::capture(&self.store.snapshot());
         self.persistence = Some(send);
         self.persistence_task = Some(self.runtime.closing.spawn_on(
             async move {
@@ -79,7 +81,17 @@ impl StoreSession {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     let snapshot = receive.borrow_and_update().clone();
                     let path = path.clone();
+                    let next_preferences =
+                        agent_core::persistence::ModelPreferences::capture(&snapshot);
+                    let preferences_changed = preferences != next_preferences;
+                    let saved_preferences = next_preferences.clone();
                     let result = tokio::task::spawn_blocking(move || {
+                        if preferences_changed {
+                            host_daemon::platform::save_private_json(
+                                &path.with_file_name("model-preferences.json"),
+                                &saved_preferences,
+                            )?;
+                        }
                         host_daemon::platform::save_private_json(
                             &path,
                             &agent_core::persistence::PersistedState::capture(&snapshot),
@@ -88,6 +100,9 @@ impl StoreSession {
                     .await
                     .map_err(anyhow::Error::from)
                     .and_then(|result| result);
+                    if result.is_ok() {
+                        preferences = next_preferences;
+                    }
                     if let Err(error) = result {
                         let _ = updates.send(failure(format!("{error:#}"))).await;
                     }
@@ -170,6 +185,13 @@ mod tests {
             };
             session.persist(path.clone(), updates, |_| Update::Error);
             store
+                .dispatch(Intent::SelectDefaultEffort {
+                    scope: agent_core::state::ModelDefaultsScope::Environment { id: "vm".into() },
+                    effort: Some("high".into()),
+                })
+                .await
+                .unwrap();
+            store
                 .dispatch(Intent::SetDraftText {
                     thread_id: "draft".into(),
                     text: "last edit before close".into(),
@@ -188,6 +210,14 @@ mod tests {
                 "last edit before close"
             );
             assert!(store.dispatch(Intent::ShowThreadList).await.is_err());
+            let preferences =
+                std::fs::read(directory.path().join("model-preferences.json")).unwrap();
+            let other = agent_core::persistence::decode(
+                &agent_core::persistence::apply_model_preferences(&[], &preferences).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(other.scoped_model_defaults, restored.scoped_model_defaults);
+            assert!(other.drafts.is_empty());
         })
         .await
         .expect("session close stalled");

@@ -10,7 +10,7 @@ struct SettingsSheet: View {
             List {
                 Section {
                     NavigationLink {
-                        ModelSettingsScreen(model: model, defaults: true, close: { dismiss() })
+                        ModelSettingsScreen(model: model, scope: .global, close: { dismiss() })
                     } label: { Label("モデル", systemImage: "slider.horizontal.3") }
                         .accessibilityIdentifier("settings.models")
                     NavigationLink {
@@ -31,15 +31,16 @@ struct SettingsSheet: View {
                     }
                     .accessibilityIdentifier("settings.connections")
                     NavigationLink {
-                        WorktreeSettingsScreen(connected: model.isConnected, request: model.requestSnapshot,
-                                               environmentName: model.selectedProfileName ?? "作業環境")
+                        WorktreeSettingsScreen(model: model).id(model.selectedProfileId)
                     } label: { Label("ワークツリー", systemImage: "arrow.triangle.branch") }
                         .accessibilityIdentifier("settings.worktrees")
                         .disabled(!model.isConnected)
                 }
             }
             .safeAreaInset(edge: .top, spacing: 0) {
-                SettingsScopeBar(projects: "すべてのプロジェクト", environment: model.selectedProfileName ?? "未選択")
+                SettingsScopeBar { Text("すべてのプロジェクト") } environment: {
+                    EnvironmentScopeMenu(model: model)
+                }
             }
             .navigationTitle("設定")
             .navigationBarTitleDisplayMode(.inline)
@@ -53,9 +54,7 @@ struct SettingsSheet: View {
 }
 
 struct WorktreeSettingsScreen: View {
-    let connected: Bool
-    let request: SnapshotRequest
-    let environmentName: String
+    @ObservedObject var model: BexAppViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var createOnNewSession = false
     @State private var copyOnCreate = false
@@ -80,7 +79,7 @@ struct WorktreeSettingsScreen: View {
                     .accessibilityIdentifier("worktree.directory")
             } header: { Text("作成と保存先") }
                 footer: { Text("保存先に「セッション名/リポジトリ名」の構成で作ります。空欄なら元のリポジトリ内の .worktree に保存します。既存のワークツリーは移動しません。") }
-                .disabled(!loaded || busy || !connected)
+                .disabled(!loaded || busy || !model.isConnected)
             Section {
                 Toggle("作成時にファイルをコピー", isOn: $copyOnCreate)
                     .accessibilityIdentifier("worktree.copy")
@@ -91,24 +90,26 @@ struct WorktreeSettingsScreen: View {
                     .accessibilityIdentifier("worktree.paths")
             } header: { Text("コピー対象") }
                 footer: { Text("リポジトリからの相対パスを1行に1つ指定します（例: .env、config/local）。存在しないパスはスキップします。") }
-                .disabled(!loaded || busy || !connected)
+                .disabled(!loaded || busy || !model.isConnected)
             if busy {
                 ProgressView().accessibilityLabel("設定を通信中")
             }
-            if !connected {
+            if !model.isConnected {
                 Text("作業環境との接続を確認してください。")
             }
             if let error {
                 Section {
                     Text(error).foregroundColor(.red).accessibilityIdentifier("worktree.error")
                     if !loaded {
-                        Button("再読み込み", action: load).disabled(busy || !connected)
+                        Button("再読み込み", action: load).disabled(busy || !model.isConnected)
                     }
                 }
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            SettingsScopeBar(projects: "すべてのプロジェクト", environment: environmentName)
+            SettingsScopeBar { Text("すべてのプロジェクト") } environment: {
+                EnvironmentScopeMenu(model: model).disabled(busy)
+            }
         }
         .navigationTitle("ワークツリー")
         .navigationBarTitleDisplayMode(.inline)
@@ -119,17 +120,23 @@ struct WorktreeSettingsScreen: View {
                     .accessibilityIdentifier("worktree.cancel")
             }
             ToolbarItem(placement: .confirmationAction) {
-                Button("保存", action: save).disabled(!loaded || busy || !connected)
+                Button("保存", action: save).disabled(!loaded || busy || !model.isConnected)
                     .accessibilityIdentifier("worktree.save")
             }
         }
         .interactiveDismissDisabled(busy)
         .onAppear(perform: load)
+        .onChange(of: model.isConnected) { connected in
+            if connected {
+                load()
+            }
+        }
     }
 
     private func load() {
+        guard model.isConnected else { return }
         busy = true; error = nil
-        request(.readWorktreeSettings(ReadWorktreeSettings())) { snapshot, result in
+        model.requestSnapshot(.readWorktreeSettings(ReadWorktreeSettings())) { snapshot, result in
             busy = false
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
@@ -147,7 +154,7 @@ struct WorktreeSettingsScreen: View {
         busy = true; error = nil
         let paths = copyPaths.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        request(.updateWorktreeSettings(UpdateWorktreeSettings(settings: WorktreeSettings(
+        model.requestSnapshot(.updateWorktreeSettings(UpdateWorktreeSettings(settings: WorktreeSettings(
             createOnNewSession: createOnNewSession, copyOnCreate: copyOnCreate,
             copyPaths: paths, worktreeDirectory: directory.trimmingCharacters(in: .whitespacesAndNewlines)
         )))) { snapshot, result in
@@ -161,20 +168,45 @@ struct WorktreeSettingsScreen: View {
     }
 }
 
-struct SettingsScopeBar: View {
-    let projects: String
-    let environment: String
+struct SettingsScopeBar<Projects: View, Environment: View>: View {
+    @ViewBuilder let projects: () -> Projects
+    @ViewBuilder let environment: () -> Environment
 
     var body: some View {
         HStack(spacing: 8) {
             Text("設定の適用先").foregroundStyle(.secondary)
-            Text("\(projects) ／ \(environment)")
+            environment()
+            Text("／").foregroundStyle(.secondary)
+            projects()
         }
         .font(.caption)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 20).padding(.vertical, 12)
         .background(Color(UIColor.secondarySystemGroupedBackground))
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("settings.scope")
+    }
+}
+
+struct EnvironmentScopeMenu: View {
+    @ObservedObject var model: BexAppViewModel
+
+    var body: some View {
+        Menu {
+            ForEach(model.profiles) { profile in
+                Button { model.selectProfile(profile.id) } label: {
+                    if profile.id == model.selectedProfileId {
+                        Label(profile.name, systemImage: "checkmark")
+                    } else {
+                        Text(profile.name)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(model.selectedProfileName ?? "環境を選択").lineLimit(1)
+                Image(systemName: "chevron.down")
+            }
+        }
+        .accessibilityIdentifier("settings.scope.environment")
+        .disabled(model.snapshot.accountLogin() != nil)
     }
 }

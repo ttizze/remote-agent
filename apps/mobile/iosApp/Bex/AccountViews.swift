@@ -29,6 +29,7 @@ struct AccountUsageView: View {
 
 struct WeeklyUsageView: View {
     let windows: [UsageWindow]
+    var compact = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -36,7 +37,7 @@ struct WeeklyUsageView: View {
                 Text("残量未取得").font(.caption).foregroundStyle(.secondary)
             }
             ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
-                UsageWindowView(window: window)
+                UsageWindowView(window: window, compact: compact)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("週間残量 \(window.remainingPercent)%")
             }
@@ -63,20 +64,32 @@ struct ReasoningStrengthIcon: View {
 
 private struct UsageWindowView: View {
     let window: UsageWindow
+    var compact = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Text(window.label)
-                Spacer()
-                Text("残り \(window.remainingPercent)%").monospacedDigit()
-            }.font(.caption)
-            ProgressView(value: Double(window.remainingPercent), total: 100)
-                .tint(window.remainingPercent <= 20 ? .orange : .green)
-            if let reset = window.resetsAt {
-                let date = Date(timeIntervalSince1970: Double(reset))
-                Text("リセット: \(date.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.caption2).foregroundStyle(.secondary)
+        let tint: Color = window.remainingPercent <= 20 ? .orange
+            : compact ? Color(red: 0.54, green: 0.81, blue: 0.67) : .green
+        if compact {
+            HStack(spacing: 12) {
+                ProgressView(value: Double(window.remainingPercent), total: 100)
+                    .tint(tint)
+                Text("週間残量 \(window.remainingPercent)%").monospacedDigit()
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text(window.label)
+                    Spacer()
+                    Text("残り \(window.remainingPercent)%").monospacedDigit()
+                }.font(.caption)
+                ProgressView(value: Double(window.remainingPercent), total: 100)
+                    .tint(tint)
+                if let reset = window.resetsAt {
+                    let date = Date(timeIntervalSince1970: Double(reset))
+                    Text("リセット: \(date.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
             }
         }
     }

@@ -15,7 +15,17 @@ fn device_model_defaults_apply_across_hosts_without_replacing_their_user_work() 
         effort: Some("high".into()),
         service_tier: Some("fast".into()),
     };
-    let preferences = serde_json::to_vec(&defaults).unwrap();
+    let scoped = [(
+        agent_core::state::ModelDefaultsScope::Environment { id: "first".into() },
+        defaults.clone(),
+    )]
+    .into();
+    let preferences = persistence::encode_model_preferences(&Snapshot {
+        model_defaults: defaults.clone(),
+        scoped_model_defaults: Arc::new(scoped),
+        ..Default::default()
+    })
+    .unwrap();
     for host in ["first", "second"] {
         let mut snapshot = Snapshot {
             storage_scope: host.into(),
@@ -30,29 +40,38 @@ fn device_model_defaults_apply_across_hosts_without_replacing_their_user_work() 
             }),
         );
         let saved = persistence::encode(&snapshot).unwrap();
-        let restored =
-            persistence::decode(&persistence::apply_model_defaults(&saved, &preferences).unwrap())
-                .unwrap();
+        let restored = persistence::decode(
+            &persistence::apply_model_preferences(&saved, &preferences).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             restored,
             Snapshot {
                 model_defaults: defaults.clone(),
+                scoped_model_defaults: Arc::new(
+                    [(
+                        agent_core::state::ModelDefaultsScope::Environment { id: "first".into() },
+                        defaults.clone()
+                    )]
+                    .into()
+                ),
                 ..snapshot.clone()
             }
         );
         assert_eq!(
-            persistence::decode(&persistence::apply_model_defaults(&saved, &[]).unwrap()).unwrap(),
+            persistence::decode(&persistence::apply_model_preferences(&saved, &[]).unwrap())
+                .unwrap(),
             snapshot
         );
     }
     assert_eq!(
-        persistence::decode(&persistence::apply_model_defaults(&[], &preferences).unwrap())
+        persistence::decode(&persistence::apply_model_preferences(&[], &preferences).unwrap())
             .unwrap()
             .model_defaults,
         defaults
     );
-    assert!(persistence::apply_model_defaults(b"{}", &preferences).is_err());
-    assert!(persistence::apply_model_defaults(&[], b"invalid").is_err());
+    assert!(persistence::apply_model_preferences(b"{}", &preferences).is_err());
+    assert!(persistence::apply_model_preferences(&[], b"invalid").is_err());
 }
 
 #[test]
