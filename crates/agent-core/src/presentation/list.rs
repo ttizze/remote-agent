@@ -8,7 +8,7 @@ pub struct ThreadSummary {
     pub project_id: Option<String>,
     pub active: bool,
     pub unread: bool,
-    pub worktree_merged: bool,
+    pub worktree_status: Option<crate::models::WorktreeStatus>,
 }
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadList {
@@ -93,7 +93,7 @@ impl Snapshot {
                             .cloned(),
                         active,
                         unread,
-                        worktree_merged: thread.worktree_merged.unwrap_or(false),
+                        worktree_status: thread.worktree_status,
                     })
                 })
                 .collect(),
@@ -104,11 +104,6 @@ impl Snapshot {
         })
     }
 }
-
-/// A newly created branch shares main's history without having merged any work.
-/// Missing creation history cannot establish that work has been integrated.
-#[cfg(test)]
-use agent_protocol::models::worktree_branch_merged;
 
 #[cfg(test)]
 mod tests {
@@ -192,19 +187,16 @@ mod tests {
         );
         assert!(snapshot.error.is_none());
     }
-    #[test]
-    fn merged_work_requires_a_changed_tip_contained_in_main() {
-        assert!(!worktree_branch_merged("base", Some("base"), true));
-        assert!(!worktree_branch_merged("work", Some("base"), false));
-        assert!(worktree_branch_merged("work", Some("base"), true));
-        assert!(!worktree_branch_merged("work", None, true));
-    }
-
     #[rstest::rstest]
-    fn list_preserves_merge_status_alongside_activity_after_serialization_and_refresh(
+    fn list_preserves_worktree_status_alongside_activity_after_serialization_and_refresh(
         #[values(false, true)] active: bool,
         #[values(false, true)] unread: bool,
-        #[values(None, Some(false), Some(true))] merged: Option<bool>,
+        #[values(
+            None,
+            Some(models::WorktreeStatus::Unmerged),
+            Some(models::WorktreeStatus::Merged)
+        )]
+        status: Option<models::WorktreeStatus>,
     ) {
         let mut snapshot = Snapshot::default();
         std::sync::Arc::make_mut(&mut snapshot.activity)
@@ -226,8 +218,8 @@ mod tests {
         }
         let mut thread = json!({"id":{"provider":"codex","id":"task"},"name":"Worktree task",
             "status":if active {"running"} else {"idle"}});
-        if let Some(merged) = merged {
-            thread["worktreeMerged"] = json!(merged);
+        if let Some(status) = status {
+            thread["worktreeStatus"] = json!(status);
         }
         let page: models::ThreadList = serde_json::from_value(json!({
             "data":[thread], "projects":[], "moreProjectIds":[],
@@ -238,7 +230,7 @@ mod tests {
         let restored: Snapshot =
             serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
         let rows = restored.thread_list().unwrap();
-        assert_eq!(rows.threads[0].worktree_merged, merged.unwrap_or(false));
+        assert_eq!(rows.threads[0].worktree_status, status);
         assert_eq!(rows.threads[0].active, active);
         assert_eq!(rows.threads[0].unread, unread);
     }

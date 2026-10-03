@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Xcode signing and Swift compilation use the installed Apple toolchain.
+# Signing uses the installed Apple toolchain.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [[ $(uname -s) == Darwin ]] || { echo 'Mac builds require macOS' >&2; exit 2; }
@@ -58,12 +58,7 @@ cp apps/desktop/assets/icon.icns "$resources/Bex.icns"
 cp "$target/release/bex-desktop" "$executables/Bex"
 cp "$target/release/host-daemon" "$executables/host-daemon"
 cp "$target/release/bex-provider-supervisor" "$executables/bex-provider-supervisor"
-dictation="$resources/Bex Dictation.app"
-mkdir -p "$dictation/Contents/MacOS"
-xcrun swiftc -target arm64-apple-macosx26.0 -O apps/desktop/macos/Dictation.swift -o "$dictation/Contents/MacOS/Dictation"
-cp apps/desktop/macos/Dictation-Info.plist "$dictation/Contents/Info.plist"
 cp apps/desktop/macos/Info.plist "$bundle/Contents/Info.plist"
-sign "$dictation"
 sign "$executables/Bex"
 sign --identifier app.bex.provider-supervisor "$executables/bex-provider-supervisor"
 sign --identifier app.bex.host "$executables/host-daemon"

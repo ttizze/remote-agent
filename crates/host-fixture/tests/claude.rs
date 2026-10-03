@@ -762,7 +762,11 @@ async fn unconfigured_claude_keeps_codex_usable_without_model_errors() {
                 saved
             );
             assert!(!store.snapshot().models.is_empty());
-            assert!(store.snapshot().model_errors.is_empty());
+            assert!(
+                store.snapshot().model_errors.is_empty(),
+                "installed={installed}: {:?}",
+                store.snapshot().model_errors
+            );
             assert!(
                 store
                     .snapshot()
@@ -854,7 +858,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                         assert!(listed["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "tracked.txt"));
                         let read = management.peer.request::<models::FileContent>(&agent_protocol::protocol::Call::ReadFile(serde_json::from_value::<op::ListFiles>(json!({"path":path})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
                         let contents = format!("workspace edit {index}\n");
-                        let saved_file = management.peer.call(&serde_json::from_value::<rpc::WriteFile>(json!({"path":path,"revision":read["revision"],"text":contents})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+                        let saved_file = management.peer.call(&serde_json::from_value::<rpc::WriteFile>(json!({"path":path,"revision":read["revision"],"text":contents})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap_or_else(|error| panic!("automatic={automatic}, selected={selected}, index={index}, readonly={}: {error:?}", std::fs::metadata(&path).unwrap().permissions().readonly()));
                         assert_eq!(saved_file["text"], contents);
                         assert_eq!(std::fs::read_to_string(&path).unwrap(), contents);
                         let review = management.peer.call(&serde_json::from_value::<rpc::ReviewWorkspace>(json!({"cwd":current})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();

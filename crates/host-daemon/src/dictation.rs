@@ -280,11 +280,13 @@ where
                 match event["type"].as_str() {
                     Some("session.started") if !started => {
                         started = true;
-                        // The caller has validated this as base64 ASCII. Send
-                        // small frames, as the desktop's streaming capture does.
+                        // Keep the provider's sample-aligned frames, but batch
+                        // writes: this recording is already complete, so flushing
+                        // each 100ms frame only adds upload overhead. Sink
+                        // backpressure still bounds the WebSocket write buffer.
                         for start in (0..audio.len()).step_by(AUDIO_CHUNK_BASE64_BYTES) {
                             let audio = &audio[start..(start + AUDIO_CHUNK_BASE64_BYTES).min(audio.len())];
-                            socket.send(Message::Text(serde_json::to_string(&AudioAppend { kind: "audio.append", audio })
+                            socket.feed(Message::Text(serde_json::to_string(&AudioAppend { kind: "audio.append", audio })
                                 .map_err(|_| "録音データを送信できませんでした。")?.into())).await
                                 .map_err(|_| "録音データを送信できませんでした。")?;
                         }
@@ -346,7 +348,49 @@ fn transcript_text(transcripts: Vec<(String, u64, String)>) -> String {
 mod tests {
     use super::*;
     use async_tungstenite::tungstenite::protocol::{CloseFrame, Role, frame::coding::CloseCode};
+    use std::{
+        cell::Cell,
+        pin::Pin,
+        task::{Context, Poll},
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct CountFlushes<'a> {
+        stream: tokio::io::DuplexStream,
+        count: &'a Cell<usize>,
+    }
+
+    impl tokio::io::AsyncRead for CountFlushes<'_> {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.stream).poll_read(cx, buffer)
+        }
+    }
+
+    impl tokio::io::AsyncWrite for CountFlushes<'_> {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.stream).poll_write(cx, buffer)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            self.count.set(self.count.get() + 1);
+            Pin::new(&mut self.stream).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.stream).poll_shutdown(cx)
+        }
+    }
 
     // The provider is the only test double. Both sides exercise the real
     // WebSocket implementation and dictation protocol, without account access.
@@ -357,6 +401,11 @@ mod tests {
     ) -> Result<String, String> {
         tokio::time::timeout(Duration::from_secs(3), async {
             let (client, server) = tokio::io::duplex(4096);
+            let flushes = Cell::new(0);
+            let client = CountFlushes {
+                stream: client,
+                count: &flushes,
+            };
             let client = WebSocketStream::from_raw_socket(
                 async_tungstenite::tokio::TokioAdapter::new(client),
                 Role::Client,
@@ -424,6 +473,11 @@ mod tests {
                     .unwrap();
             };
             let (result, ()) = tokio::join!(transcribe_socket(client, audio), provider);
+            let flushes = flushes.get();
+            assert!(
+                flushes <= 4 + audio.len() / AUDIO_CHUNK_BASE64_BYTES / 4,
+                "upload must batch frames while allowing backpressure flushes: {flushes}"
+            );
             result
         })
         .await
@@ -498,7 +552,9 @@ mod tests {
 
     #[tokio::test]
     async fn sends_a_full_recording_in_lossless_sample_aligned_chunks() {
-        let pcm: Vec<u8> = (0..(AUDIO_CHUNK_BASE64_BYTES / 4 * 3 * 2 + 2))
+        // More than the WebSocket write buffer and transport capacity, including
+        // a partial last frame: batching must still drain under backpressure.
+        let pcm: Vec<u8> = (0..(24_000 * 2 * 31 + 2))
             .map(|index| index as u8)
             .collect();
         let text = recording_result(&STANDARD.encode(pcm), vec![

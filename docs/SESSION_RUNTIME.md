@@ -116,7 +116,9 @@ a subscription or close the connection.
 ## Local data
 
 Client persistence is scoped by Host public identity and a digest of configured
-provider storage locations, including canonical existing ancestors. Switching
+provider storage locations, including canonical existing ancestors. The digest
+serializes the provider names and normalized paths directly from a sorted map,
+so input order and JSON object-ordering features cannot change the identity. Switching
 storage archives the old client scope in the same persisted snapshot; returning
 to that configured area restores its drafts and unsaved file edits. The task
 list explains this recovery path. Only drafts (including attachments and model

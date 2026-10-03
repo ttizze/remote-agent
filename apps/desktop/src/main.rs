@@ -45,6 +45,7 @@ impl DesktopAssets {
         ),
         ("bex/branch.svg", include_bytes!("../assets/branch.svg")),
         ("bex/merge.svg", include_bytes!("../assets/merge.svg")),
+        ("bex/diff.svg", include_bytes!("../assets/diff.svg")),
         ("bex/monitor.svg", include_bytes!("../assets/monitor.svg")),
         ("bex/qr-code.svg", include_bytes!("../assets/qr-code.svg")),
     ];
@@ -70,6 +71,10 @@ impl AssetSource for DesktopAssets {
     }
 }
 fn main() {
+    #[cfg(target_os = "macos")]
+    let _ = std::thread::Builder::new()
+        .name("microphone-prepare".into())
+        .spawn(platform::prepare_microphone);
     let logging_error = platform::state_dir()
         .and_then(|directory| {
             agent_transport::diagnostics::initialize(

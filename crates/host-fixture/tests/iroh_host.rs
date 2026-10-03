@@ -1212,9 +1212,12 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
             })).collect::<Vec<_>>()
         })).collect::<Vec<_>>();
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([{
-            "id":"history","name":"History pagination","cwd":directory.path(),"historyMode":"paginated","turns":turns
+            "id":"history","name":"History pagination","cwd":directory.path(),"historyMode":"paginated","turns":turns,"fixtureTimelinePageLimit":100
         }])).unwrap()).unwrap();
-        let fixture = start_host(directory.path()).await;
+        let program = host_fixture::fixture::Config { trace: true, ..Default::default() }
+            .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), directory.path()).unwrap();
+        let fixture = HostFixture::start(directory.path(), AppServerConfig { program, ..Default::default() },
+            Arc::new(Memory::default()), "isolated Host", false, None).await.unwrap();
         let local = fixture.local().await.unwrap();
         let previous: models::Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"history"},"historyCursor":null,
             "turns":[{"id":"turn-0","status":"completed","items":[{"id":"item-0-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 0/0","phase":"unknown"}}}}}]}, {"id":"turn-11","status":"completed","items":[{"id":"item-11-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 11/0","phase":"unknown"}}}}}],
@@ -1231,9 +1234,16 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         assert_eq!(thread.turns.as_ref().unwrap().len(), 5, "refresh must not attach disconnected cached turns");
         assert_eq!(thread.history_has_more, Some(true));
         let latest = thread.turns.as_ref().unwrap().last().unwrap();
-        assert_eq!(latest.items.as_ref().unwrap().len(), 500);
+        assert_eq!(latest.items.as_ref().unwrap().len(), 99);
         assert_eq!(latest.items_has_more, Some(true));
-        assert_eq!(latest.items.as_ref().unwrap()[0].id, "item-11-120".into());
+        assert_eq!(latest.items.as_ref().unwrap()[0].id, "item-11-521".into());
+        let trace = std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap();
+        let reads: Vec<Value> = trace.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(reads.iter().filter(|entry| entry["method"] == "thread/timeline/list").count(), 1,
+            "initial loading must return the provider's smaller page without filling it");
+        assert!(reads.iter().filter(|entry| entry["method"] == "thread/items/list")
+            .all(|entry| entry["sortDirection"] == "asc" && entry["limit"] == 2),
+            "turn bodies must load through the timeline; only an opening question needs an item read");
         for _ in 0..20 {
             let snapshot = store.snapshot();
             if snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }].history_has_more != Some(true) { break; }
@@ -1265,6 +1275,44 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn timeline_history_rejects_repeated_cursors_and_oversized_pages() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let directory = tempfile::tempdir().unwrap();
+        let cases = [
+            ("oversized", 5, json!({"data":(0..501).map(|position| json!({"type":"realtime","position":position})).collect::<Vec<_>>(),"nextCursor":null}), "timeline page exceeds requested size"),
+            ("loop", 10, json!({"data":[],"nextCursor":"opaque-loop"}), "timeline cursor repeated"),
+            ("ambiguous", 5, json!({"data":[{"type":"realtime","position":1},{"type":"realtime","position":1}],"nextCursor":null}), "timeline position repeated"),
+            ("missing-turn", 5, json!({"data":[{"type":"item","position":1,"turnId":"","item":{"id":"item","type":"agentMessage","text":"answer"}}],"nextCursor":null}), "timeline item identity is missing"),
+            ("missing-item", 5, json!({"data":[{"type":"item","position":1,"turnId":"turn","item":{"id":"","type":"agentMessage","text":"answer"}}],"nextCursor":null}), "timeline item identity is missing"),
+        ];
+        let threads: Vec<_> = cases.iter().map(|(id, _, response, _)| json!({
+            "id":id,"cwd":directory.path(),"historyMode":"paginated","fixtureTimelineResponse":response,
+            "turns":[{"id":"turn","status":"completed","items":[{"id":"answer","type":"agentMessage","text":"saved answer"}]}]
+        })).collect();
+        std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
+        let fixture = start_host(directory.path()).await;
+        let local = fixture.local().await.unwrap();
+        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
+        for (id, limit, _, message) in cases {
+            let result = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
+                &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
+                    session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, id.into()).unwrap(), limit,
+                })
+            ).await;
+            let error = match result {
+                Err(agent_protocol::error::PeerError::Remote { error, .. }) => error,
+                _ => panic!("invalid timeline was accepted: {id}"),
+            };
+            let failure: agent_protocol::error::RpcFailure = serde_json::from_str(&error).unwrap();
+            assert_eq!(failure.code, "session_open_failed");
+            assert_eq!(failure.message, message);
+        }
+        local.close().await;
+        fixture.close().await.unwrap();
+    }).await.expect("timeline validation exceeded its deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn many_small_command_outputs_do_not_delay_opening_history() {
     tokio::time::timeout(Duration::from_secs(45), async {
         let directory = tempfile::tempdir().unwrap();
@@ -1291,15 +1339,15 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
         assert!(bytes < 100 * 1024, "collapsed command bodies delayed history: {bytes} bytes");
         let turn = &opened.response.thread.turns.as_ref().unwrap()[0];
         let loaded = turn.items.as_ref().unwrap();
-        assert_eq!(loaded.len(), 500);
-        assert!(matches!(loaded[0].body(), agent_protocol::items::ItemBody::UserMessage {content, ..} if content == &vec![agent_protocol::items::MessagePart::Text {text: "Inspect the build".into()}]));
-        assert_eq!(item_text(&(loaded[499])), Some("The build passed"));
+        assert_eq!(loaded.len(), 499);
+        assert!(matches!(turn.opening_user_message.as_ref().unwrap().body(), agent_protocol::items::ItemBody::UserMessage {content, ..} if content == &vec![agent_protocol::items::MessagePart::Text {text: "Inspect the build".into()}]));
+        assert_eq!(item_text(&(loaded[498])), Some("The build passed"));
         assert_eq!(loaded.iter().filter(|item| item.is_deferred()).count(), 498);
-        for index in [1, 249, 498] {
+        for index in [0, 249, 497] {
             let detail = local.peer.call(&rpc::ReadItem {
                 thread_id: agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "command-history".into() }, turn_id: "turn".into(), item_id: loaded[index].id.clone(),
             }).await.unwrap();
-            assert!(matches!(detail.item.body(), agent_protocol::items::ItemBody::CommandExecution {output, ..} if output == items[index]["aggregatedOutput"].as_str().unwrap())); assert!(!detail.item.is_deferred());
+            assert!(matches!(detail.item.body(), agent_protocol::items::ItemBody::CommandExecution {output, ..} if output == items[index + 1]["aggregatedOutput"].as_str().unwrap())); assert!(!detail.item.is_deferred());
         }
         local.close().await;
         fixture.close().await.unwrap();
@@ -1350,7 +1398,14 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>(json!({"useStateDbOnly":true})).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         let mut page = open_session(&mobile.peer, &json!({"provider":"codex","id":"fixture-long-history"}), 5).await.0["response"].clone();
         assert_eq!(page["thread"]["turns"].as_array().unwrap().len(), 5);
-        assert_eq!(page["thread"]["turns"].as_array().unwrap().iter().map(|t| t["items"].as_array().unwrap().len()).sum::<usize>(), 500);
+        assert_eq!(page["thread"]["turns"].as_array().unwrap().iter().map(|t| t["items"].as_array().unwrap().len()).sum::<usize>(), 497);
+        for turn in &page["thread"]["turns"].as_array().unwrap()[..3] {
+            assert!(turn["items"].as_array().unwrap().is_empty());
+            assert_eq!(turn["itemsHasMore"], true);
+        }
+        assert_eq!(page["thread"]["turns"][3]["itemsHasMore"], true);
+        assert!(!page["thread"]["turns"][3]["items"].as_array().unwrap().is_empty());
+        assert_eq!(page["thread"]["turns"][4]["itemsHasMore"], false);
         assert_eq!(page["thread"]["turns"][4]["items"][153]["id"], "long-latest-message");
         for limit in (10..=100).step_by(5) {
             if page["thread"]["historyHasMore"] != true { break; }
@@ -2447,10 +2502,11 @@ async fn visualization_reaches_store_and_reopens_after_source_removal() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
+async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_store() {
     use agent_core::state::Intent;
     use agent_core::state::Snapshot;
     use agent_core::store::Store;
+    use agent_protocol::models::WorktreeStatus::{Merged, Unmerged};
     fn git(cwd: &Path, args: &[&str]) -> String {
         let result = std::process::Command::new("git")
             .current_dir(cwd)
@@ -2513,12 +2569,24 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
         }
         let store = Store::new((local.peer, local.events), Snapshot::default());
         for (step, expected) in [
-            ("fresh", false),
-            ("commit", false),
-            ("merge", true),
-            ("new-work", false),
+            ("fresh", None),
+            ("untracked", Some(Unmerged)),
+            ("staged", Some(Unmerged)),
+            ("commit", Some(Unmerged)),
+            ("merge", Some(Merged)),
+            ("edited", Some(Unmerged)),
+            ("reverted", Some(Merged)),
+            ("new-work", Some(Unmerged)),
         ] {
             match step {
+                "untracked" => std::fs::write(checkout.join("work.txt"), "work\n").unwrap(),
+                "staged" => {
+                    git(&checkout, &["add", "work.txt"]);
+                }
+                "edited" => std::fs::write(checkout.join("work.txt"), "changed\n").unwrap(),
+                "reverted" => {
+                    git(&checkout, &["restore", "work.txt"]);
+                }
                 "commit" | "new-work" => {
                     git(&checkout, &["commit", "--allow-empty", "-m", step]);
                 }
@@ -2538,8 +2606,8 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
             for (index, id) in ids.iter().enumerate() {
                 let row = list.threads.iter().find(|row| &row.id == id).unwrap();
                 assert_eq!(
-                    row.worktree_merged,
-                    index < 2 && expected,
+                    row.worktree_status,
+                    if index < 2 { expected } else { None },
                     "{step}: {index}"
                 );
             }
@@ -2552,7 +2620,7 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
             )))
             .await
             .unwrap();
-        assert!(
+        assert_eq!(
             store
                 .snapshot()
                 .thread_list()
@@ -2561,7 +2629,8 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
                 .iter()
                 .find(|row| row.id == ids[0])
                 .unwrap()
-                .worktree_merged
+                .worktree_status,
+            Some(Merged)
         );
         git(&checkout, &["checkout", "--detach"]);
         store
@@ -2570,8 +2639,8 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
             )))
             .await
             .unwrap();
-        assert!(
-            !store
+        assert_eq!(
+            store
                 .snapshot()
                 .thread_list()
                 .unwrap()
@@ -2579,7 +2648,8 @@ async fn session_list_tracks_real_worktree_merges_through_host_and_store() {
                 .iter()
                 .find(|row| row.id == ids[0])
                 .unwrap()
-                .worktree_merged
+                .worktree_status,
+            None
         );
         store.close().await.unwrap();
         local.endpoint.close().await;

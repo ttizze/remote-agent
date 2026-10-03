@@ -19,7 +19,7 @@ if [[ $language == kotlin ]]; then
     just android-e2e || failed=1
 fi
 if [[ $language == apple || $language == swift ]]; then
-    swiftformat --lint apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests apps/desktop/macos || failed=1
+    swiftformat --lint apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests || failed=1
     swiftlint lint --strict || failed=1
     just ios-markdown || failed=1
     just conversation-ui || failed=1

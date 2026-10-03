@@ -289,8 +289,39 @@ async fn scenarios(provider: ProviderKind) {
             if provider == ProviderKind::Codex {
                 std::fs::write(root.join("release-inputs"), "").unwrap();
             }
-            let turn = finished(&mut events).await;
-            assert_eq!(turn.status, TurnStatus::Completed);
+            // Native completion and a deferred input echo may arrive independently.
+            // Both must be observed before checking the persisted conversation.
+            let mut completed = None;
+            let mut echoed = false;
+            while completed.is_none() || !echoed {
+                let items = match change(&mut events).await {
+                    SessionChange::Turn {
+                        turn,
+                        completed: done,
+                    } => {
+                        if done {
+                            assert_eq!(turn.status, TurnStatus::Completed);
+                            completed = Some(turn.id);
+                        }
+                        turn.items.unwrap_or_default()
+                    }
+                    SessionChange::Item { item, .. } => vec![item],
+                    _ => Vec::new(),
+                };
+                echoed |= items.iter().any(|item| {
+                    item.client_input_id.as_ref() == Some(&additional.client_user_message_id)
+                });
+            }
+            let turn_id = completed.unwrap();
+            let (history, _) = open(&local.peer, &session).await;
+            let turn = history
+                .response
+                .thread
+                .turns
+                .iter()
+                .flatten()
+                .find(|saved| saved.id == turn_id)
+                .unwrap();
             assert_eq!(
                 turn.items
                     .iter()

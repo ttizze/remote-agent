@@ -738,18 +738,18 @@ impl HostRpcService {
                     .as_deref()
                     .map(serde_json::from_str)
                     .transpose()?
-                    .unwrap_or_else(|| self.agents().into_iter().map(|(p, _)| (p, None)).collect());
+                    .unwrap_or_else(|| {
+                        self.agents()
+                            .into_iter()
+                            .map(|(provider, _)| provider)
+                            .chain(self.inner.startup_errors.read().unwrap().keys().copied())
+                            .map(|provider| (provider, None))
+                            .collect()
+                    });
                 let mut page = op::ModelPage {
                     data: Vec::new(),
                     next_cursor: None,
-                    provider_errors: if params.cursor.is_none() {
-                        self.provider_errors()
-                            .as_object()
-                            .filter(|errors| !errors.is_empty())
-                            .cloned()
-                    } else {
-                        None
-                    },
+                    provider_errors: None,
                 };
                 let mut next = std::collections::BTreeMap::new();
                 for (provider, cursor) in cursors {
@@ -801,24 +801,11 @@ impl HostRpcService {
             .into(),
             Call::SessionScope(_) => {
                 let started = std::time::Instant::now();
-                let areas: std::collections::BTreeMap<_, _> = self
-                    .agents()
-                    .into_iter()
-                    .map(|(p, a)| {
-                        (
-                            provider_key(p),
-                            canonical_storage_path(a.storage_directory()),
-                        )
-                    })
-                    .collect();
-                let areas = serde_json::to_value(areas)?;
-                let digest =
-                    ring::digest::digest(&ring::digest::SHA256, areas.to_string().as_bytes());
-                let scope: String = digest
-                    .as_ref()
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect();
+                let scope = provider_storage_scope(
+                    self.agents()
+                        .into_iter()
+                        .map(|(p, a)| (p, canonical_storage_path(a.storage_directory()))),
+                )?;
                 tracing::info!(target: "bex", operation = "host.connection.scope",
                     message = %format_args!("elapsed_ms={}", started.elapsed().as_millis()));
                 scope.into()
@@ -1181,7 +1168,7 @@ impl HostRpcService {
             }
         }
         let mut page = titles.finish();
-        let merged = crate::worktrees::merged_directories(
+        let statuses = crate::worktrees::directory_statuses(
             page.data
                 .iter()
                 .filter_map(|thread| thread.cwd.clone())
@@ -1190,8 +1177,11 @@ impl HostRpcService {
         .await
         .map_err(|error| Failure::new("worktree_status_failed", error))?;
         for thread in &mut page.data {
-            thread.worktree_merged =
-                Some(thread.cwd.as_ref().is_some_and(|cwd| merged.contains(cwd)));
+            thread.worktree_status = thread
+                .cwd
+                .as_ref()
+                .and_then(|cwd| statuses.get(cwd))
+                .copied();
         }
         if !provider_errors.is_empty() {
             page.provider_errors = Some(provider_errors);
@@ -1296,6 +1286,24 @@ fn invalid_message(error: impl std::fmt::Display) -> String {
     format!("invalid request: {error}")
 }
 
+// Serialize the sorted map directly: a JSON Value's object ordering can vary
+// with serde_json features unified by unrelated client dependencies.
+fn provider_storage_scope(
+    areas: impl IntoIterator<Item = (ProviderKind, std::path::PathBuf)>,
+) -> Result<String, serde_json::Error> {
+    let areas: std::collections::BTreeMap<_, _> = areas
+        .into_iter()
+        .map(|(provider, path)| (provider_key(provider), path))
+        .collect();
+    let bytes = serde_json::to_vec(&areas)?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
+    Ok(digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
 // Resolve existing ancestors too: a newly created native directory must not
 // change a scope merely because /var is a symlink to /private/var on macOS.
 fn canonical_storage_path(path: &std::path::Path) -> std::path::PathBuf {
@@ -1342,6 +1350,7 @@ fn describe_thread(
 
 #[cfg(test)]
 mod tests {
+    use agent_protocol::session::ProviderKind;
     #[tokio::test]
     async fn successful_configuration_clears_the_provider_startup_error() {
         use super::*;
@@ -1771,11 +1780,72 @@ mod tests {
     }
 
     #[test]
+    fn storage_scope_has_a_fixed_encoding() {
+        let areas = [
+            (ProviderKind::Codex, "/fixtures/codex".into()),
+            (ProviderKind::Claude, "/fixtures/claude".into()),
+        ];
+        assert_eq!(
+            super::provider_storage_scope(areas).unwrap(),
+            "8170d6192a00957e1b3b4a3da16963137015f8d36f1efaa8b8b347090f78476b",
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn storage_scope_ignores_input_order_but_tracks_provider_paths(
+            codex in "[a-zA-Z0-9/_ .あ界é-]{1,64}",
+            claude in "[a-zA-Z0-9/_ .あ界é-]{1,64}",
+        ) {
+            let codex = std::path::PathBuf::from(codex);
+            let claude = std::path::PathBuf::from(claude);
+            let original = super::provider_storage_scope([
+                (ProviderKind::Codex, codex.clone()),
+                (ProviderKind::Claude, claude.clone()),
+            ]).unwrap();
+            proptest::prop_assert_eq!(&original, &super::provider_storage_scope([
+                (ProviderKind::Claude, claude.clone()),
+                (ProviderKind::Codex, codex.clone()),
+            ]).unwrap());
+            for areas in [
+                [(ProviderKind::Codex, codex.join("different")), (ProviderKind::Claude, claude.clone())],
+                [(ProviderKind::Codex, codex.clone()), (ProviderKind::Claude, claude.join("different"))],
+            ] {
+                proptest::prop_assert_ne!(&original, &super::provider_storage_scope(areas).unwrap());
+            }
+            proptest::prop_assert_ne!(&original, &super::provider_storage_scope([
+                (ProviderKind::Codex, codex),
+            ]).unwrap());
+        }
+    }
+
+    #[test]
     fn creating_native_storage_does_not_change_its_identity() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("native").join("projects");
         let before = super::canonical_storage_path(&path);
         std::fs::create_dir_all(&path).unwrap();
-        assert_eq!(before, super::canonical_storage_path(&path));
+        let scope = super::provider_storage_scope([(ProviderKind::Codex, before)]).unwrap();
+        assert_eq!(
+            scope,
+            super::provider_storage_scope([(
+                ProviderKind::Codex,
+                super::canonical_storage_path(&path)
+            ),])
+            .unwrap()
+        );
+        #[cfg(unix)]
+        {
+            let alias = root.path().join("alias");
+            std::os::unix::fs::symlink(root.path(), &alias).unwrap();
+            assert_eq!(
+                scope,
+                super::provider_storage_scope([(
+                    ProviderKind::Codex,
+                    super::canonical_storage_path(&alias.join("native/projects"))
+                ),])
+                .unwrap()
+            );
+        }
     }
 }
