@@ -8,6 +8,18 @@ use std::{
 };
 
 fn native(mut value: Value) {
+    if value["type"] == "system" && value["subtype"] == "task_notification" {
+        let Some(tool) = value["tool_use_id"].as_str() else {
+            return;
+        };
+        let prompt = format!(
+            "<task-notification><task-id>{}</task-id><tool-use-id>{tool}</tool-use-id><status>{}</status><summary>{}</summary></task-notification>",
+            value["task_id"].as_str().unwrap(),
+            value["status"].as_str().unwrap(),
+            value["summary"].as_str().unwrap()
+        );
+        value = json!({"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":prompt}});
+    }
     if !matches!(
         value["type"].as_str(),
         Some("assistant" | "user" | "attachment")
@@ -17,6 +29,9 @@ fn native(mut value: Value) {
     let Some(home) = std::env::var_os("CLAUDE_CONFIG_DIR") else {
         return;
     };
+    if let Some(result) = value.as_object_mut().unwrap().remove("tool_use_result") {
+        value["toolUseResult"] = result;
+    }
     let args: Vec<_> = std::env::args().collect();
     let session = args
         .windows(2)
@@ -245,7 +260,7 @@ fn main() {
                         json!({"type":"result","session_id":session,"is_error":false,"result":"finished waiting"}),
                     );
                     native(json!({"type":"attachment","attachment":{
-                        "type":"queued_command","source_uuid":value["uuid"],
+                        "type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"source_uuid":value["uuid"],
                         "prompt":value["message"]["content"]
                     }}));
                     output(value.clone());
@@ -332,7 +347,7 @@ fn main() {
                         json!({"command":"printf approved > approved.txt"})
                     };
                     emit(
-                        json!({"type":"assistant","uuid":"tool-message","message":{"id":"tool-message","role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":tool,"input":input}]}}),
+                        json!({"type":"assistant","uuid":format!("tool-message-{}", inputs.len()),"message":{"id":"tool-message","role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":tool,"input":input}]}}),
                     );
                     emit(
                         json!({"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":tool,"tool_use_id":"tool-1","input":input}}),
@@ -390,11 +405,14 @@ fn main() {
                     "denied".into()
                 };
                 emit(
-                    json!({"type":"user","uuid":"tool-result","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":text,"is_error":!allowed}]}}),
+                    json!({"type":"user","uuid":format!("tool-result-{}", inputs.len()),
+                        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":text,"is_error":!allowed}]},
+                        "tool_use_result":if allowed && waiting == Some("background") { json!({"backgroundTaskId":"background-1"}) }
+                            else if allowed && waiting != Some("question") { json!({"exitCode":0}) } else { json!({}) }}),
                 );
                 if waiting == Some("background") {
                     emit(
-                        json!({"type":"system","subtype":"task_notification","task_id":"background-1","status":"completed","summary":"background done","session_id":session}),
+                        json!({"type":"system","subtype":"task_notification","task_id":"background-1","tool_use_id":"tool-1","status":"completed","summary":"background done","session_id":session}),
                     );
                 }
                 reply(

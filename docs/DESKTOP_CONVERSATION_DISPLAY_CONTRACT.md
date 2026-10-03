@@ -11,6 +11,17 @@ contracts through the Host adapter. Streamed and completed blocks replace by
 stable block ID, so thinking cannot overwrite text and final text is not
 duplicated. Approvals and questions remain actionable after reconnect. Failed
 submission retains the draft; retry clears the previous submission notice.
+Claude live events and native history use one content translation boundary.
+Only human-origin, non-meta prompt-mode queued commands become user messages. Task notifications update
+the originating tool's outcome; unmatched notifications remain inspectable
+activity in the same turn. Text and image input echoes do not add
+activity items. Native tool results preserve exit codes, applied diffs and
+subagent handles, MCP calls use the shared MCP presentation, and child-agent
+messages stay with their subagent instead of entering the parent answer.
+Acceptance: `queued_task_notifications_stay_in_activity_without_splitting_the_turn`,
+`late_task_notification_updates_its_original_turn`,
+`late_blocks_and_api_retry_preserve_only_valid_stream_items`, and
+`commands_and_responses_use_the_same_conversation_projection_as_codex`.
 Switching between Claude and Codex requires a new conversation. Claude does not
 yet support active-turn steering or fork-based side chats; those requests fail
 explicitly instead of creating a Codex conversation or dropping the draft.

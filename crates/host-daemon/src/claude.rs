@@ -3,6 +3,7 @@
 use agent_protocol::{execution::*, items::*};
 mod accounts;
 mod history;
+mod native;
 mod process;
 
 use anyhow::Context;
@@ -534,7 +535,11 @@ impl Claude {
             let content =
                 Value::String(String::from_utf8(bytes).map_err(|error| error.to_string())?);
             item.body = ItemContent::Inline {
-                body: Box::new(tool_result_body(item.body(), &content, &Value::Null)),
+                body: Box::new(native::tool_result_body(
+                    item.body(),
+                    &content,
+                    &Value::Null,
+                )),
             };
         }
         if let ItemBody::Subagent {
@@ -802,7 +807,7 @@ impl Claude {
             turn_id: turn_id.clone(),
             input,
             stop: self.stop.child_token(),
-            stream: HashMap::new(),
+            stream: None,
             interrupt,
             model,
             effort: effort.map(str::to_owned),
@@ -828,7 +833,7 @@ struct Worker {
     turn_id: agent_protocol::ids::TurnId,
     input: mpsc::Sender<Command>,
     stop: CancellationToken,
-    stream: HashMap<String, String>,
+    stream: Option<String>,
     interrupt: watch::Sender<Option<Result<(), String>>>,
     model: String,
     effort: Option<String>,
@@ -1034,7 +1039,7 @@ impl Worker {
         let retained = record.idle.is_some();
         drop(record);
         self.live = Thread::default();
-        self.stream.clear();
+        self.stream = None;
         if retained {
             tokio::select! {
                 _ = released.cancelled() => return,
@@ -1086,9 +1091,13 @@ impl Worker {
     }
 
     async fn message(&mut self, message: Value) -> Result<(), String> {
-        let scope = message["parent_tool_use_id"].as_str().unwrap_or_default();
+        // Child messages belong to the subagent's native transcript, surfaced
+        // through its tool result and related history rather than the parent answer.
+        if message["parent_tool_use_id"].is_string() {
+            return Ok(());
+        }
         if message["type"] == "stream_event" {
-            return self.stream_event(&message["event"], scope).await;
+            return self.stream_event(&message["event"]).await;
         }
         if message["type"] == "rate_limit_event" {
             if let Some(error) = usage_limit_error(&message["rate_limit_info"]) {
@@ -1101,7 +1110,7 @@ impl Worker {
             return Ok(());
         }
         if message["type"] == "system" && message["subtype"] == "api_retry" {
-            if let Some(id) = self.stream.remove(scope)
+            if let Some(id) = self.stream.take()
                 && let Some(turn) = self.current_turn()
             {
                 let prefix = format!("{id}:");
@@ -1135,6 +1144,59 @@ impl Worker {
             return Ok(());
         }
         let kind = message["type"].as_str().unwrap_or_default();
+        let outcome = if kind == "system"
+            && message["subtype"] == "task_notification"
+            && message["skip_transcript"] != true
+            && message["ambient"] != true
+        {
+            native::task_outcome(
+                message["tool_use_id"].as_str(),
+                message["status"].as_str(),
+                message["summary"].as_str(),
+            )
+        } else if kind == "attachment" && message["attachment"]["type"] == "queued_command" {
+            native::queued_task_outcome(
+                message["attachment"]["commandMode"].as_str(),
+                &message["attachment"]["prompt"],
+            )
+        } else {
+            None
+        };
+        if let Some(outcome) = outcome
+            && let Some(item) = self
+                .current_turn()
+                .and_then(|turn| turn.items.as_ref())
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|item| item.id.as_str() == outcome.tool_id)
+                })
+            && let Some(item) = outcome.item(item.id.clone(), item.body())
+        {
+            self.change(SessionChange::Item {
+                turn_id: self.turn_id.clone(),
+                item: Arc::new(item),
+            })
+            .await?;
+            return Ok(());
+        }
+        if kind == "attachment" {
+            if let Some(item) = native::attachment_item(
+                message["uuid"]
+                    .as_str()
+                    .ok_or("Claude attachment ID is missing")?,
+                &message["attachment"],
+            )
+            .map_err(|error| error.to_string())?
+            {
+                self.change(SessionChange::Item {
+                    turn_id: self.turn_id.clone(),
+                    item: Arc::new(item),
+                })
+                .await?;
+            }
+            return Ok(());
+        }
         if kind == "system" && message["subtype"] == "init" {
             let mut record = self.record.lock().await;
             if message["session_id"].as_str() != Some(record.session_id.to_string().as_str()) {
@@ -1153,8 +1215,7 @@ impl Worker {
             })
             .await?;
         }
-        let blocks = message["message"]["content"]
-            .as_array()
+        let blocks = native::message_blocks(&message["message"]["content"])
             .ok_or("Claude message content is missing")?;
         let message_id = message["message"]["id"].as_str();
         let cwd = self.record.lock().await.cwd.clone();
@@ -1167,26 +1228,19 @@ impl Worker {
                 .unwrap_or_default();
             let item = match block["type"].as_str() {
                 Some("tool_result") => {
-                    let mut item = items
+                    let item = items
                         .iter()
                         .find(|item| Some(item.id.as_str()) == block["tool_use_id"].as_str())
-                        .map(|item| (**item).clone())
                         .ok_or("Claude tool result has no matching tool call")?;
-                    item.status = if block["is_error"] == true {
-                        ItemStatus::Failed
-                    } else {
-                        ItemStatus::Completed
-                    };
-                    item.body = ItemContent::Inline {
-                        body: Box::new(tool_result_body(
-                            item.body(),
-                            &block["content"],
-                            &message["toolUseResult"],
-                        )),
-                    };
-                    item
+                    native::tool_result_item(
+                        item.id.clone(),
+                        item.body(),
+                        &block["content"],
+                        &message["tool_use_result"],
+                        block["is_error"] == true,
+                    )
                 }
-                Some("text") if kind != "assistant" => continue,
+                Some("text" | "image") if kind == "user" => continue,
                 _ => {
                     // Claude emits one assistant envelope per completed block,
                     // often with the same message ID. Preserve the stream index.
@@ -1199,7 +1253,7 @@ impl Worker {
                         blocks.len(),
                         block,
                     );
-                    content_item(
+                    native::content_item(
                         &self.session,
                         id,
                         block,
@@ -1218,11 +1272,10 @@ impl Worker {
         Ok(())
     }
 
-    async fn stream_event(&mut self, event: &Value, scope: &str) -> Result<(), String> {
+    async fn stream_event(&mut self, event: &Value) -> Result<(), String> {
         match event["type"].as_str() {
             Some("message_start") => {
-                self.stream.insert(
-                    scope.into(),
+                self.stream = Some(
                     event["message"]["id"]
                         .as_str()
                         .ok_or("Claude stream message ID is missing")?
@@ -1232,28 +1285,26 @@ impl Worker {
             Some("content_block_start") => {
                 let message = self
                     .stream
-                    .get(scope)
+                    .as_ref()
                     .ok_or("Claude stream started a block without a message")?;
                 let index = event["index"]
                     .as_u64()
                     .ok_or("Claude block index is missing")? as usize;
-                let body = match event["content_block"]["type"].as_str() {
-                    Some("text") => ItemBody::AssistantText {
-                        citation: None,
-                        text: String::new(),
-                        phase: AssistantPhase::Unknown,
-                    },
-                    Some("thinking") => ItemBody::Reasoning {
-                        content: vec![String::new()],
-                        summary: vec![],
-                    },
-                    _ => return Ok(()),
-                };
-                let item = Item::new(
-                    format!("{message}:{index}").into(),
+                if !matches!(
+                    event["content_block"]["type"].as_str(),
+                    Some("text" | "thinking")
+                ) {
+                    return Ok(());
+                }
+                let mut item = native::content_item(
+                    &self.session,
+                    format!("{message}:{index}"),
+                    &event["content_block"],
+                    None,
                     ItemStatus::Running,
-                    body,
-                );
+                )
+                .map_err(|error| error.to_string())?;
+                item.status = ItemStatus::Running;
                 self.change(SessionChange::Item {
                     turn_id: self.turn_id.clone(),
                     item: item.into(),
@@ -1270,7 +1321,7 @@ impl Worker {
                 };
                 let message = self
                     .stream
-                    .get(scope)
+                    .as_ref()
                     .ok_or("Claude stream delta has no message")?;
                 let index = event["index"]
                     .as_u64()
@@ -1420,204 +1471,6 @@ fn execution_error(message: &Value, retrying: bool) -> ExecutionError {
         retry_delay_ms: message["retry_delay_ms"].as_u64(),
         ..Default::default()
     }
-}
-
-fn content_item(
-    session: &SessionRef,
-    id: String,
-    block: &Value,
-    cwd: Option<&str>,
-    tool_status: ItemStatus,
-) -> Result<Item, serde_json::Error> {
-    let text = |key: &str| block[key].as_str().unwrap_or_default().to_owned();
-    let mut id = id.into();
-    let mut status = ItemStatus::Completed;
-    let body = match block["type"].as_str() {
-        Some("text") => ItemBody::AssistantText {
-            citation: None,
-            text: text("text"),
-            phase: AssistantPhase::Unknown,
-        },
-        Some("thinking") => ItemBody::Reasoning {
-            content: vec![text("thinking")],
-            summary: vec![],
-        },
-        Some("tool_use") => {
-            id = serde_json::from_value(block["id"].clone())?;
-            status = tool_status;
-            let input = &block["input"];
-            let string = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
-            match block["name"].as_str() {
-                Some("Bash") => ItemBody::CommandExecution {
-                    actions: vec![],
-                    source: agent_protocol::items::CommandSource::Unknown,
-                    process_id: None,
-                    command: string("command"),
-                    cwd: cwd.map(str::to_owned),
-                    output: String::new(),
-                    exit_code: None,
-                    duration_ms: None,
-                },
-                Some("Write" | "Edit" | "NotebookEdit") => {
-                    let proposal = match block["name"].as_str() {
-                        Some("Write") => FileProposal::Write {
-                            content: string("content"),
-                        },
-                        Some("Edit") => FileProposal::Edit {
-                            old_text: string("old_string"),
-                            new_text: string("new_string"),
-                            replace_all: input["replace_all"] == true,
-                        },
-                        _ => FileProposal::Notebook {
-                            cell_id: input["cell_id"].as_str().map(str::to_owned),
-                            source: string("new_source"),
-                            mode: input["edit_mode"].as_str().map(str::to_owned),
-                        },
-                    };
-                    ItemBody::FileChange {
-                        changes: vec![FileChange {
-                            path: string(if block["name"] == "NotebookEdit" {
-                                "notebook_path"
-                            } else {
-                                "file_path"
-                            }),
-                            kind: FileChangeKind::Unknown,
-                            diff: None,
-                            proposal: Some(proposal),
-                        }],
-                        output: String::new(),
-                    }
-                }
-                Some("Agent" | "Task") => ItemBody::Subagent {
-                    tool: text("name"),
-                    prompt: input["prompt"].as_str().map(str::to_owned),
-                    model: input["model"].as_str().map(str::to_owned),
-                    effort: None,
-                    sender: Some(session.clone()),
-                    receivers: vec![],
-                    states: vec![],
-                    agent_id: None,
-                    result: None,
-                },
-                _ => ItemBody::ToolCall {
-                    resource_uri: None,
-                    plugin_id: None,
-                    kind: ToolKind::Local,
-                    tool: text("name"),
-                    server: Some("Claude Code".into()),
-                    namespace: None,
-                    arguments: input.clone(),
-                    result: None,
-                    error: None,
-                    content: vec![],
-                    success: None,
-                    duration_ms: None,
-                },
-            }
-        }
-        _ => {
-            status = ItemStatus::Unknown;
-            ItemBody::Custom {
-                provider: ProviderKind::Claude,
-                kind: text("type"),
-                value: block.clone(),
-            }
-        }
-    };
-    Ok(Item::new(id, status, body))
-}
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NativePatchHunk {
-    old_start: u64,
-    old_lines: u64,
-    new_start: u64,
-    new_lines: u64,
-    lines: Vec<String>,
-}
-fn structured_patch(value: &Value) -> Option<String> {
-    use std::fmt::Write as _;
-    let hunks: Vec<NativePatchHunk> = serde_json::from_value(value.clone()).ok()?;
-    if hunks.is_empty() {
-        return None;
-    }
-    let mut diff = String::new();
-    for hunk in hunks {
-        if !hunk
-            .lines
-            .iter()
-            .all(|line| line.starts_with([' ', '+', '-', '\\']))
-        {
-            return None;
-        }
-        writeln!(
-            diff,
-            "@@ -{},{} +{},{} @@",
-            hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
-        )
-        .ok()?;
-        for line in hunk.lines {
-            writeln!(diff, "{line}").ok()?;
-        }
-    }
-    Some(diff)
-}
-fn tool_result_body(body: &ItemBody, content: &Value, metadata: &Value) -> ItemBody {
-    let mut body = body.clone();
-    let output = || {
-        content.as_str().map(str::to_owned).unwrap_or_else(|| {
-            content
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|part| part["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-    };
-    match &mut body {
-        ItemBody::CommandExecution {
-            output: result,
-            exit_code,
-            ..
-        } => {
-            *result = output();
-            if let Some(code) = metadata["exitCode"]
-                .as_i64()
-                .and_then(|code| code.try_into().ok())
-            {
-                *exit_code = Some(code);
-            }
-        }
-        ItemBody::FileChange {
-            changes,
-            output: result,
-        } => {
-            *result = output();
-            if changes.len() == 1 {
-                let change = &mut changes[0];
-                if let Some(diff) = structured_patch(&metadata["structuredPatch"]) {
-                    change.diff = Some(diff);
-                }
-                match metadata["type"].as_str() {
-                    Some("create") => change.kind = FileChangeKind::Add,
-                    Some("update") => change.kind = FileChangeKind::Update { move_path: None },
-                    _ => {}
-                }
-            }
-        }
-        ItemBody::Subagent {
-            agent_id, result, ..
-        } => {
-            if let Some(id) = metadata["agentId"].as_str() {
-                *agent_id = Some(id.into());
-            }
-            *result = Some(content.clone());
-        }
-        ItemBody::ToolCall { result, .. } => *result = Some(content.clone()),
-        _ => {}
-    }
-    body
 }
 
 fn skill_invocation(name: &str, path: &str) -> agent_protocol::composer::Invocation {
@@ -2276,21 +2129,53 @@ mod execution_tests {
             turn_id: "turn".into(),
             input,
             stop: CancellationToken::new(),
-            stream: HashMap::new(),
+            stream: None,
             interrupt,
             model: "default".into(),
             effort: None,
         };
+        for child in [
+            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"child"}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}),
+            json!({"type":"assistant","error":"authentication_failed","message":{"id":"child","content":[{"type":"text","text":"child answer"}]}}),
+        ] {
+            let mut child = child;
+            child["parent_tool_use_id"] = "subagent-tool".into();
+            worker.message(child).await.unwrap();
+        }
+        assert!(worker.stream.is_none());
+        assert!(worker.current_turn().unwrap().error.is_none());
+        for content in [
+            json!("echoed input"),
+            json!([
+                {"type":"text","text":"echoed input"},
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"aW1hZ2U="}}
+            ]),
+        ] {
+            worker
+                .message(json!({"type":"user","uuid":"user-echo","message":{"content":content}}))
+                .await
+                .unwrap();
+        }
+        assert!(
+            worker
+                .current_turn()
+                .unwrap()
+                .items
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+        );
         for event in [
             json!({"type":"message_start","message":{"id":"message"}}),
             json!({"type":"content_block_start","index":0,"content_block":{"type":"text"}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}),
             json!({"type":"content_block_start","index":1,"content_block":{"type":"thinking"}}),
         ] {
-            worker.stream_event(&event, "").await.unwrap();
+            worker.stream_event(&event).await.unwrap();
         }
         worker.message(json!({"type":"assistant","uuid":"envelope","message":{"id":"message","content":[{"type":"text","text":"answer"}]}})).await.unwrap();
-        worker.stream_event(&json!({"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"abandoned"}}),"").await.unwrap();
+        worker.stream_event(&json!({"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"abandoned"}})).await.unwrap();
         let turn = router.current_turn(&session, "turn").unwrap();
         let items = turn.items.unwrap();
         assert_eq!(items.len(), 2);
@@ -2310,7 +2195,118 @@ mod execution_tests {
             .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id.as_str(), "message:0");
-        assert!(worker.stream.is_empty());
+        assert!(worker.stream.is_none());
+        let attachments = [
+            json!({"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification><status>failed</status></task-notification>"}),
+            json!({"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"source_uuid":"queued-input","prompt":"additional input"}),
+            json!({"type":"hook_success","stdout":"hook output"}),
+            json!({"type":"environment","snapshot":{"cwd":"/work"}}),
+        ];
+        let mut rows = vec![
+            json!({"type":"assistant","uuid":"answer","parentUuid":null,"cwd":"/work",
+            "message":{"id":"message","content":[{"type":"text","text":"answer"}]}}),
+        ];
+        let mut parent = "answer".to_owned();
+        for (index, attachment) in attachments.iter().enumerate() {
+            let id = format!("attachment-{index}");
+            worker
+                .message(json!({"type":"attachment","uuid":id,"attachment":attachment}))
+                .await
+                .unwrap();
+            rows.push(
+                json!({"type":"attachment","uuid":id,"parentUuid":parent,"attachment":attachment}),
+            );
+            parent = id;
+        }
+        let call = json!({"type":"assistant","uuid":"tool-call","parentUuid":parent,
+            "message":{"id":"tool-message","content":[{"type":"tool_use","id":"command","name":"Bash","input":{"command":"false"}}]}});
+        let result = json!({"type":"user","uuid":"tool-result","parentUuid":"tool-call",
+            "message":{"content":[{"type":"tool_result","tool_use_id":"command","content":"failed","is_error":true}]},
+            "tool_use_result":{"exitCode":7}});
+        worker.message(call.clone()).await.unwrap();
+        worker.message(result.clone()).await.unwrap();
+        rows.push(call);
+        let mut saved_result = result;
+        saved_result["toolUseResult"] = saved_result
+            .as_object_mut()
+            .unwrap()
+            .remove("tool_use_result")
+            .unwrap();
+        rows.push(saved_result);
+        let mut parent = "tool-result".to_owned();
+        for (index, status) in ["completed", "failed", "stopped"].iter().enumerate() {
+            let id = format!("background-{index}");
+            let call = json!({"type":"assistant","uuid":format!("call-{id}"),"parentUuid":parent,
+                "message":{"id":format!("message-{id}"),"content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":"work"}}]}});
+            let result = json!({"type":"user","uuid":format!("result-{id}"),"parentUuid":format!("call-{id}"),
+                "message":{"content":[{"type":"tool_result","tool_use_id":id,"content":"launched"}]},
+                "tool_use_result":{"backgroundTaskId":id}});
+            worker.message(call.clone()).await.unwrap();
+            worker.message(result.clone()).await.unwrap();
+            let notice = json!({"type":"system","subtype":"task_notification","tool_use_id":id,"status":status,"summary":"work & result <details>"});
+            for flag in ["skip_transcript", "ambient"] {
+                let mut ambient = notice.clone();
+                ambient[flag] = true.into();
+                worker.message(ambient).await.unwrap();
+                assert_eq!(
+                    worker
+                        .current_turn()
+                        .unwrap()
+                        .items
+                        .as_ref()
+                        .unwrap()
+                        .last()
+                        .unwrap()
+                        .status,
+                    ItemStatus::Running
+                );
+            }
+            worker.message(notice.clone()).await.unwrap();
+            worker.message(notice).await.unwrap();
+            rows.push(call);
+            let mut saved_result = result;
+            saved_result["toolUseResult"] = saved_result
+                .as_object_mut()
+                .unwrap()
+                .remove("tool_use_result")
+                .unwrap();
+            rows.push(saved_result);
+            parent = format!("notice-{id}");
+            rows.push(json!({"type":"attachment","uuid":parent,"parentUuid":format!("result-{id}"),
+                "attachment":{"type":"queued_command","commandMode":"task-notification",
+                    "prompt":format!("<task-notification><tool-use-id>{id}</tool-use-id><status>{status}</status><summary>work & result <details></summary></task-notification>")}}));
+        }
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(format!("{uuid}.jsonl"));
+        std::fs::write(
+            &path,
+            rows.iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let history = history::read(&path, 10).unwrap();
+        let saved = history.thread.turns.unwrap();
+        let live = router.current_turn(&session, "turn").unwrap();
+        assert_eq!(live.items, saved[0].items);
+        let items = live.items.as_ref().unwrap();
+        assert_eq!(items.len(), 8);
+        assert_eq!(items[4].status, ItemStatus::Failed);
+        assert!(
+            matches!(items[4].body(), ItemBody::CommandExecution {output, exit_code: Some(7), ..} if output == "failed")
+        );
+        for (item, status) in items[5..].iter().zip([
+            ItemStatus::Completed,
+            ItemStatus::Failed,
+            ItemStatus::Interrupted,
+        ]) {
+            assert_eq!(item.status, status);
+            assert!(
+                matches!(item.body(), ItemBody::CommandExecution {output, exit_code:None, ..} if output == "work & result <details>")
+            );
+        }
     }
     #[test]
     fn native_error_evidence_distinguishes_quota_retry_auth_and_warning() {
@@ -2365,50 +2361,6 @@ mod execution_tests {
         assert_eq!(
             execution_error(&json!({"error":"future_failure"}), false).category,
             ErrorCategory::Provider(future)
-        );
-    }
-    #[test]
-    fn native_tools_preserve_observations_without_inventing_exit_codes_or_diffs() {
-        let session = SessionRef::new(ProviderKind::Claude, "session".into()).unwrap();
-        let command = content_item(
-            &session,
-            "stream".into(),
-            &json!({"type":"tool_use","id":"bash","name":"Bash","input":{"command":"false"}}),
-            Some("/work"),
-            ItemStatus::Running,
-        )
-        .unwrap();
-        let unknown = tool_result_body(command.body(), &json!("done"), &Value::Null);
-        assert!(matches!(
-            unknown,
-            ItemBody::CommandExecution {
-                exit_code: None,
-                ..
-            }
-        ));
-        let known = tool_result_body(command.body(), &json!("failed"), &json!({"exitCode":7}));
-        assert!(matches!(
-            tool_result_body(&known, &json!("expanded"), &Value::Null),
-            ItemBody::CommandExecution {
-                exit_code: Some(7),
-                ..
-            }
-        ));
-        let edit = content_item(&session,"stream".into(),&json!({"type":"tool_use","id":"edit","name":"Edit","input":{"file_path":"/work/a","old_string":"old","new_string":"new"}}),Some("/work"),ItemStatus::Running).unwrap();
-        assert!(
-            matches!(edit.body(),ItemBody::FileChange {changes,..} if changes[0].diff.is_none() && changes[0].proposal.is_some())
-        );
-        let applied = tool_result_body(
-            edit.body(),
-            &json!("edited"),
-            &json!({"type":"update","structuredPatch":[{"oldStart":5,"oldLines":1,"newStart":5,"newLines":1,"lines":["-actual old","+actual new"]}]}),
-        );
-        assert!(
-            matches!(applied,ItemBody::FileChange {changes,..} if changes[0].diff.as_deref() == Some("@@ -5,1 +5,1 @@\n-actual old\n+actual new\n"))
-        );
-        let future = json!({"type":"future_block","nested":{"a":[1,2]}});
-        assert!(
-            matches!(content_item(&session,"unknown".into(),&future,None,ItemStatus::Unknown).unwrap().body(),ItemBody::Custom {provider:ProviderKind::Claude,value,..} if value == &future)
         );
     }
 }

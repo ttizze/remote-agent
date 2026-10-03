@@ -1640,6 +1640,12 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
             .unwrap();
         let snapshot = completed(&store, &id, 1, "completed").await;
         let thread = &snapshot.conversations[&id];
+        let items = thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap();
+        assert!(items.iter().any(|item| item.status == agent_protocol::execution::ItemStatus::Completed
+            && matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution {exit_code, output, ..}
+                if if prompt == "background" {exit_code.is_none() && output == "background done"} else {*exit_code == Some(0) && output == "approved"})
+        ), "live outcomes must update the originating tool");
+        assert!(!items.iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::Attachment {content, ..} if content["commandMode"] == "task-notification")));
         assert!(
             thread.turns.as_ref().unwrap()[0]
                 .items

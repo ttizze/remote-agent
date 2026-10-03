@@ -1,14 +1,14 @@
 //! Read-only access to Claude's native transcript tree. Never repairs or writes
 //! transcripts, and never launches the CLI to list or display a conversation.
+use super::native;
 use agent_protocol::{
     execution::*,
     ids::ItemId,
-    items::*,
-    models::{Item, Thread, ThreadResponse, Turn},
+    models::{Thread, ThreadResponse, Turn},
     session::{ProviderKind, SessionRef},
 };
 use anyhow::{Context as _, Result, anyhow};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
@@ -157,31 +157,6 @@ fn input_text(content: &Value) -> Option<String> {
             .join("\n")
     };
     (!text.is_empty()).then(|| text.chars().take(160).collect())
-}
-
-fn input_blocks(blocks: &[Value]) -> Vec<MessagePart> {
-    blocks
-        .iter()
-        .filter_map(|block| match block["type"].as_str() {
-            Some("text") => Some(MessagePart::Text {
-                text: block["text"].as_str()?.into(),
-            }),
-            Some("image") => {
-                let source = &block["source"];
-                let source = match source["type"].as_str() {
-                    Some("base64") => format!(
-                        "data:{};base64,{}",
-                        source["media_type"].as_str()?,
-                        source["data"].as_str()?
-                    ),
-                    Some("url") => source["url"].as_str()?.into(),
-                    _ => return None,
-                };
-                Some(MessagePart::Image { source })
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 pub(super) struct NativeItemDetails {
@@ -337,143 +312,98 @@ fn convert(
     let mut model = None;
     let mut block_indices: HashMap<String, usize> = HashMap::new();
     for node in chain {
-        // Queued prompts are user input stored as attachments rather than messages.
-        let queued_prompt = (node["type"] == "attachment"
-            && node["attachment"]["type"] == "queued_command")
-            .then_some(&node["attachment"]["prompt"])
-            .filter(|prompt| prompt.is_string() || prompt.is_array());
-        let kind = if queued_prompt.is_some() {
-            "user"
-        } else {
-            node["type"].as_str().unwrap_or_default()
-        };
+        let kind = node["type"].as_str().unwrap_or_default();
+        let id = node["uuid"].as_str().unwrap_or_default();
         if let Some(cwd) = node["cwd"].as_str() {
             thread.cwd = Some(cwd.into());
         }
-        if kind == "attachment" {
-            match node["attachment"]["type"].as_str() {
-                Some(
-                    "deferred_tools_delta"
-                    | "agent_listing_delta"
-                    | "mcp_instructions_delta"
-                    | "skill_listing"
-                    | "total_tokens_reminder"
-                    | "batching_reminder_sent"
-                    | "silent_turn_reminder"
-                    | "date_change"
-                    | "auto_mode"
-                    | "command_permissions"
-                    | "environment"
-                    | "model"
-                    | "session_context"
-                    | "date"
-                    | "prompt_snapshot"
-                    | "deferred_tools_record"
-                    | "bash_output_audience_note"
-                    | "task_reminder",
-                ) => {}
-                _ => {
-                    let attachment = &node["attachment"];
-                    if !attachment.is_object() {
-                        warnings.push("native attachment content is unavailable");
-                        continue;
-                    }
-                    if turns.is_empty() {
-                        turns.push(Arc::new(Turn {
-                            id: node["uuid"].as_str().unwrap_or_default().into(),
-                            status: TurnStatus::Completed,
-                            items: Some(Vec::new()),
-                            ..Default::default()
-                        }));
-                    }
-                    // Keep the complete payload, including unfamiliar attachment
-                    // types, inspectable without pretending it was a tool call.
-                    Arc::make_mut(turns.last_mut().unwrap())
-                        .items
-                        .as_mut()
-                        .unwrap()
-                        .push(Arc::new(Item::new(
-                            node["uuid"].as_str().unwrap_or_default().into(),
-                            ItemStatus::Unknown,
-                            ItemBody::Attachment {
-                                kind: match attachment["type"].as_str() {
-                                    Some(
-                                        "hook_success"
-                                        | "hook_error"
-                                        | "hook_non_blocking_error"
-                                        | "hook_blocking_error",
-                                    ) => AttachmentKind::HookResult,
-                                    Some("edited_text_file") => AttachmentKind::FileEdit,
-                                    Some("remote_session_change") => AttachmentKind::SessionUpdate,
-                                    _ => AttachmentKind::Other,
-                                },
-                                content: attachment.clone(),
-                            },
-                        )));
+        if kind == "attachment"
+            && node["attachment"]["type"] == "queued_command"
+            && let Some(outcome) = native::queued_task_outcome(
+                node["attachment"]["commandMode"].as_str(),
+                &node["attachment"]["prompt"],
+            )
+            && let Some((turn_index, item_index, item)) =
+                turns
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(turn_index, turn)| {
+                        turn.items
+                            .as_ref()?
+                            .iter()
+                            .enumerate()
+                            .find_map(|(item_index, item)| {
+                                (item.id.as_str() == outcome.tool_id)
+                                    .then(|| outcome.item(item.id.clone(), item.body()))
+                                    .flatten()
+                                    .map(|item| (turn_index, item_index, item))
+                            })
+                    })
+        {
+            Arc::make_mut(&mut turns[turn_index])
+                .items
+                .as_mut()
+                .unwrap()[item_index] = Arc::new(item);
+            continue;
+        }
+        let (initial_item, blocks) = match kind {
+            "attachment" => match native::attachment_item(id, &node["attachment"]) {
+                Ok(Some(item)) => (Some(item), std::borrow::Cow::Borrowed(&[] as &[Value])),
+                Ok(None) => continue,
+                Err(_) => {
+                    warnings.push("native attachment content is unavailable");
+                    continue;
                 }
+            },
+            "user" | "assistant" => {
+                let Some(blocks) = native::message_blocks(&node["message"]["content"]) else {
+                    warnings.push("message content is unavailable");
+                    continue;
+                };
+                let input = if kind == "user" {
+                    native::input_item(id, &blocks, node["isMeta"] == true)
+                } else {
+                    None
+                };
+                (input, blocks)
             }
-            continue;
-        }
-        if kind == "system" {
-            if node["subtype"] == "compact_boundary" {
-                warnings.push("history includes a compaction boundary");
+            "system" => {
+                if node["subtype"] == "compact_boundary" {
+                    warnings.push("history includes a compaction boundary");
+                }
+                continue;
             }
-            continue;
-        }
-        if !matches!(kind, "user" | "assistant") {
-            warnings.push("unsupported transcript content");
-            continue;
-        }
+            _ => {
+                warnings.push("unsupported transcript content");
+                continue;
+            }
+        };
         if let Some(name) = node["message"]["model"].as_str() {
             model = Some(agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Claude,
+                provider: ProviderKind::Claude,
                 id: name.into(),
             });
         }
-        let content = queued_prompt.unwrap_or(&node["message"]["content"]);
-        let user_id = queued_prompt
-            .and_then(|_| node["attachment"]["source_uuid"].as_str())
-            .or(node["uuid"].as_str());
-        let owned;
-        let blocks = if let Some(text) = content.as_str() {
-            owned = vec![json!({"type":"text","text":text})];
-            &owned
-        } else if let Some(blocks) = content.as_array() {
-            blocks
-        } else {
-            warnings.push("message content is unavailable");
-            continue;
-        };
-        let user_input = kind == "user"
-            && (queued_prompt.is_some() || node["isMeta"] != true)
-            && blocks
-                .iter()
-                .any(|block| matches!(block["type"].as_str(), Some("text" | "image")));
-        // Additional input belongs to the running turn, just as it does in
-        // the live adapter. Splitting it creates an extra persisted turn that
-        // survives the live overlay and duplicates its input and response.
-        if (user_input && queued_prompt.is_none()) || turns.is_empty() {
+        // Queued human input and task activity stay in the running turn.
+        // Only a standalone user message starts another persisted turn.
+        if (kind == "user" && initial_item.is_some()) || turns.is_empty() {
             turns.push(Arc::new(Turn {
-                id: user_id.unwrap_or_default().into(),
+                id: initial_item
+                    .as_ref()
+                    .map_or(id, |item| item.id.as_str())
+                    .into(),
                 status: TurnStatus::Completed,
                 items: Some(Vec::new()),
                 ..Default::default()
             }));
         }
-        let turn = Arc::make_mut(turns.last_mut().unwrap());
-        let items = turn.items.as_mut().unwrap();
-        if user_input {
-            items.push(Arc::new(Item {
-                id: user_id.context("user message ID is unavailable")?.into(),
-                status: ItemStatus::Unknown,
-                client_input_id: user_id.map(Into::into),
-                body: ItemContent::Inline {
-                    body: Box::new(ItemBody::UserMessage {
-                        text: None,
-                        content: input_blocks(blocks),
-                    }),
-                },
-            }));
+        let items = Arc::make_mut(turns.last_mut().unwrap())
+            .items
+            .as_mut()
+            .unwrap();
+        if let Some(item) = initial_item {
+            items.push(Arc::new(item));
         }
         let message_id = node["message"]["id"]
             .as_str()
@@ -491,19 +421,13 @@ fn convert(
                         .iter_mut()
                         .find(|item| Some(item.id.as_str()) == block["tool_use_id"].as_str())
                     {
-                        let item = Arc::make_mut(item);
-                        item.status = if block["is_error"] == true {
-                            ItemStatus::Failed
-                        } else {
-                            ItemStatus::Completed
-                        };
-                        item.body = ItemContent::Inline {
-                            body: Box::new(super::tool_result_body(
-                                item.body(),
-                                &block["content"],
-                                &node["toolUseResult"],
-                            )),
-                        };
+                        *item = Arc::new(native::tool_result_item(
+                            item.id.clone(),
+                            item.body(),
+                            &block["content"],
+                            &node["toolUseResult"],
+                            block["is_error"] == true,
+                        ));
                         details.insert(
                             item.id.clone(),
                             NativeItemDetails {
@@ -518,7 +442,7 @@ fn convert(
                     continue;
                 }
                 Some("text" | "image") if kind == "user" => continue,
-                _ => super::content_item(
+                _ => native::content_item(
                     &session,
                     id,
                     block,
@@ -571,6 +495,8 @@ mod tests {
     }
 
     use super::*;
+    use agent_protocol::items::*;
+    use serde_json::json;
     const ID: &str = "12345678-1234-4234-8234-123456789abc";
     const NATIVE: &str = include_str!("../../tests/fixtures/claude-2.1.266.jsonl");
     fn fixture(bytes: &str) -> (tempfile::TempDir, PathBuf) {
@@ -611,7 +537,7 @@ mod tests {
             ),
         ] {
             rows.push(json!({"type":"attachment","uuid":id,"parentUuid":parent,
-                "attachment":{"type":"queued_command","source_uuid":format!("source-{id}"),"prompt":prompt}}));
+                "attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},"source_uuid":format!("source-{id}"),"prompt":prompt}}));
             parent = id.into();
         }
         rows.push(
@@ -639,9 +565,14 @@ mod tests {
         assert_eq!(turns[0].id, "u".into());
         let items = turns[0].items.as_ref().unwrap();
         assert_eq!(items.len(), 8);
-        for (item, attachment) in items[1..].iter().zip(&attachments) {
+        for ((item, attachment), expected_kind) in items[1..].iter().zip(&attachments).zip([
+            AttachmentKind::HookResult,
+            AttachmentKind::FileEdit,
+            AttachmentKind::SessionUpdate,
+            AttachmentKind::Other,
+        ]) {
             assert!(
-                matches!(item.body(), ItemBody::Attachment {content, ..} if content == attachment)
+                matches!(item.body(), ItemBody::Attachment {kind, content} if kind == &expected_kind && content == attachment)
             );
             let presentation =
                 agent_core::presentation::item_presentation(item, Some(ProviderKind::Claude));
@@ -683,6 +614,96 @@ mod tests {
         assert_eq!(summary.branch.as_deref(), Some("bex/task"));
         assert_eq!(summary.thread.preview.as_deref(), Some("question"));
         assert_eq!(fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn late_task_notification_updates_its_original_turn() {
+        let nodes = vec![
+            json!({"type":"user","uuid":"first","parentUuid":null,"message":{"content":"first input"}}),
+            json!({"type":"assistant","uuid":"call","parentUuid":"first","message":{"id":"message","content":[{"type":"tool_use","id":"work","name":"Bash","input":{"command":"work"}}]}}),
+            json!({"type":"user","uuid":"launch","parentUuid":"call","message":{"content":[{"type":"tool_result","tool_use_id":"work","content":"launched"}]},"toolUseResult":{"backgroundTaskId":"task"}}),
+            json!({"type":"user","uuid":"second","parentUuid":"launch","message":{"content":"second input"}}),
+            json!({"type":"attachment","uuid":"notice","parentUuid":"second","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification><tool-use-id>work</tool-use-id><status>failed</status><summary>work failed</summary></task-notification>"}}),
+        ];
+        let history = convert(
+            Thread {
+                id: Some(SessionRef::new(ProviderKind::Claude, ID.into()).unwrap()),
+                ..Default::default()
+            },
+            nodes,
+            10,
+            vec![],
+        )
+        .unwrap();
+        let turns = history.response.thread.turns.unwrap();
+        assert_eq!(turns.len(), 2);
+        let items = turns[0].items.as_ref().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].status, ItemStatus::Failed);
+        assert!(
+            matches!(items[1].body(), ItemBody::CommandExecution {output, exit_code:None, ..} if output == "work failed")
+        );
+        assert_eq!(turns[1].items.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn queued_task_notifications_stay_in_activity_without_splitting_the_turn() {
+        let notification = "<task-notification><status>failed</status><summary>Background command failed with exit code 144</summary></task-notification>";
+        for mode in [
+            json!("task-notification"),
+            json!("unrecognized"),
+            Value::Null,
+        ] {
+            let attachment = json!({"type":"queued_command","commandMode":mode,
+                "source_uuid":"notification-source","prompt":notification});
+            let rows = [
+                json!({"type":"user","uuid":"u","parentUuid":null,
+                    "message":{"content":"question"}}),
+                json!({"type":"attachment","uuid":"notification","parentUuid":"u",
+                    "attachment":attachment}),
+                json!({"type":"assistant","uuid":"answer","parentUuid":"notification",
+                    "message":{"content":[{"type":"text","text":"handled notification"}]}}),
+                // A human can send the same text; classify by native mode, not XML.
+                json!({"type":"attachment","uuid":"queued","parentUuid":"answer",
+                    "attachment":{"type":"queued_command","commandMode":"prompt","origin":{"kind":"human"},
+                        "source_uuid":"human-source","prompt":notification}}),
+                json!({"type":"assistant","uuid":"follow-up","parentUuid":"queued",
+                    "message":{"content":[{"type":"text","text":"queued answer"}]}}),
+                json!({"type":"user","uuid":"next-turn","parentUuid":"follow-up",
+                    "message":{"content":"next question"}}),
+            ];
+            let source = rows
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n";
+            let (_root, path) = fixture(&source);
+            let response = read(&path, 100).unwrap();
+            assert_eq!(
+                response.thread.history_read_state.unwrap().kind,
+                agent_protocol::session::HistoryReadKind::Complete
+            );
+            let turns = response.thread.turns.unwrap();
+            assert_eq!(turns.len(), 2);
+            let items = turns[0].items.as_ref().unwrap();
+            assert_eq!(items.len(), 5);
+            assert_eq!(items[1].id, "notification".into());
+            assert!(
+                matches!(items[1].body(), ItemBody::Attachment {content, ..} if content == &attachment)
+            );
+            assert!(matches!(
+                agent_core::presentation::ItemMetadata::from(items[1].as_ref()).kind,
+                agent_core::presentation::GroupKind::Activity
+            ));
+            assert_eq!(item_text(&items[2]), Some("handled notification"));
+            assert_eq!(items[3].id, "human-source".into());
+            assert!(
+                matches!(items[3].body(), ItemBody::UserMessage {content, ..}
+                if content == &[MessagePart::Text {text: notification.into()}])
+            );
+            assert_eq!(item_text(&items[4]), Some("queued answer"));
+        }
     }
 
     #[test]
