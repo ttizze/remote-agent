@@ -127,8 +127,12 @@ conversation as its target. Preferences are saved on the device. Applying them
 on another Host preserves that Host's drafts and pending submissions.
 Account and worktree settings apply to every project on the selected Host; the
 environment selector switches the actual Host. Device connection registrations
-have a fixed device scope. The iPhone model picker shows the selected account's
-usage before the model list, without requiring account-management navigation.
+have a fixed device scope. The model picker orders harness selection, account,
+model catalog, then reasoning depth and speed. The selected account's weekly
+quota appears as a compact remaining-percentage bar before the model list;
+short-window quotas, reset times and fetched times stay in account management.
+The iPhone catalog scrolls within a bounded area so controls below it remain
+reachable without scrolling through the entire catalog.
 
 Acceptance: desktop
 `model_picker_keeps_quick_controls_and_routes_quota_to_account_management`, core

@@ -133,9 +133,9 @@ extension BexLaunchUITests {
 
     func selectFixtureProvider(_ app: XCUIApplication, _ name: String) {
         openModelChoices(app)
-        let picker = app.segmentedControls["model.provider"]
+        let picker = app.buttons["model.provider"]
         XCTAssertTrue(picker.waitForExistence(timeout: 10))
-        picker.buttons[name == "Codex" ? "Codex" : "Claude Code"].tap()
+        picker.tap(); app.buttons[name == "Codex" ? "Codex" : "Claude Code"].tap()
     }
 
     func openAccountManagement(_ app: XCUIApplication) {
@@ -194,7 +194,7 @@ extension BexLaunchUITests {
         app.buttons["tasks.new.project.simulator-project"].tap()
         chooseFixtureModel(app)
         app.buttons["model.settings"].tap()
-        XCTAssertTrue(app.segmentedControls["model.provider"].exists)
+        XCTAssertTrue(app.buttons["model.provider"].isEnabled)
         XCTAssertTrue(app.buttons["settings.scope.projects"].label.contains("この会話"))
         XCTAssertFalse(app.buttons["model.account.desktop"].exists)
         XCTAssertFalse(app.buttons["account.actions.desktop"].exists)
@@ -210,7 +210,7 @@ extension BexLaunchUITests {
         app.buttons["task.send"].tap()
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
         app.buttons["model.settings"].tap()
-        XCTAssertFalse(app.segmentedControls["model.provider"].exists)
+        XCTAssertFalse(app.buttons["model.provider"].isEnabled)
         XCTAssertTrue(app.buttons["model.choice.fixture-model"].exists)
         XCTAssertFalse(app.buttons["model.choice.default"].exists)
         captureScreen(app, named: "Existing conversation fixes the agent")
