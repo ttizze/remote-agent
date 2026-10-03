@@ -56,12 +56,15 @@ with socket.socket(socket.AF_UNIX) as connection:
 PY
 )
 serial="emulator-$port"
-for ((attempt=0; attempt<180; attempt++)); do
+boot_deadline=$((SECONDS + 300))
+boot_completed=''
+while ((SECONDS < boot_deadline)); do
     kill -0 "$emulator_pid" 2>/dev/null || { cat "$log.emulator.log" >&2; exit 1; }
-    [[ $(adb -P "$server_port" -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r') == 1 ]] && break
+    boot_completed=$(timeout 5 adb -P "$server_port" -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r') || boot_completed=''
+    [[ $boot_completed == 1 ]] && break
     sleep 1
 done
-[[ $(adb -P "$server_port" -s "$serial" shell getprop sys.boot_completed | tr -d '\r') == 1 ]]
+[[ $boot_completed == 1 ]] || { echo "Android emulator did not complete boot" >&2; exit 1; }
 [[ $(adb -P "$server_port" -s "$serial" shell getprop ro.build.version.sdk | tr -d '\r') == 37 ]]
 [[ $(adb -P "$server_port" -s "$serial" shell getprop ro.build.version.codename | tr -d '\r') == REL ]]
 adb -P "$server_port" -s "$serial" shell input keyevent 82

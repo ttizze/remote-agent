@@ -70,7 +70,7 @@
               (pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader pkgs.libGL pkgs.libxkbcommon pkgs.wayland ]);
           };
           android-test = pkgs.mkShell {
-            packages = [ androidTestSdk pkgs.jdk21 pkgs.python3 ];
+            packages = [ androidTestSdk pkgs.jdk21 pkgs.python3 pkgs.coreutils ];
             JAVA_HOME = pkgs.jdk21.home;
             ANDROID_HOME = "${androidTestSdk}/libexec/android-sdk";
             ANDROID_SDK_ROOT = "${androidTestSdk}/libexec/android-sdk";

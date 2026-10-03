@@ -40,8 +40,9 @@ impl Snapshot {
             self.model_defaults.model.as_ref(),
             self.model_defaults.effort.as_deref(),
             self.model_defaults.service_tier.as_deref(),
+            None,
             &self.models,
-            &self.model_errors,
+            !self.model_errors.is_empty(),
         );
         self.models
             .iter()
@@ -54,8 +55,9 @@ impl Snapshot {
             self.model_defaults.model.as_ref(),
             self.model_defaults.effort.as_deref(),
             self.model_defaults.service_tier.as_deref(),
+            None,
             &self.models,
-            &self.model_errors,
+            !self.model_errors.is_empty(),
         );
         quick_controls(
             self.models
