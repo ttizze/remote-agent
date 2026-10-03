@@ -188,7 +188,11 @@ transfer server just to delete that check would reverse A14.
 - `nix develop . --command just conversation-ui` runs the maintained native
   conversation contracts on four fresh isolated Simulator/Host pairs, sharing
   one build. Each pair owns its history, failure controls and app storage.
-  Set `BEX_IOS_TEST_WORKERS=1` for a serial audit, or 2–4 for parallel runs.
+  Set `BEX_IOS_TEST_WORKERS=1` for a serial audit, or 2–10 for parallel runs.
+  An initialized, app-free Simulator template is kept shut down for this Cargo
+  target and runtime. Each worker clones it into its own disposable device, then
+  installs the current app and fixtures. Initial OS migration runs only when
+  preparing the template; test devices and Hosts are still removed after each run.
   The runner retains Xcode derived data under the Cargo target's
   `qa/ios-derived-data`, always builds the current revision, and holds a lock
   through test completion so another run cannot replace the active binaries.

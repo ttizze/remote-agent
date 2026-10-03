@@ -99,6 +99,7 @@ use crate::{
 };
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
@@ -114,14 +115,142 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(300);
 struct WorkerResult {
     tests: Vec<String>,
     seconds: f64,
+    #[serde(rename = "setupSeconds")]
+    setup_seconds: f64,
     bundle: PathBuf,
+}
+
+fn named_devices<'a>(devices: &'a Value, name: &str) -> Result<Vec<&'a Value>> {
+    let mut matching = Vec::new();
+    for devices in devices["devices"]
+        .as_object()
+        .ok_or("missing Simulator devices")?
+        .values()
+    {
+        for device in devices.as_array().ok_or("invalid Simulator devices")? {
+            if device["name"] == name {
+                matching.push(device);
+            }
+        }
+    }
+    Ok(matching)
+}
+
+async fn delete_devices(name: &str, cwd: &Path, log: &File) -> Result<()> {
+    let (_sender, cancel) = watch::channel(false);
+    let devices = supervision::run(
+        &args!["xcrun", "simctl", "list", "devices", "-j"],
+        cwd,
+        Io::Capture,
+        &cancel,
+        Duration::from_secs(60),
+    )
+    .await?;
+    let devices: Value = serde_json::from_slice(&devices.stdout)?;
+    for device in named_devices(&devices, name)? {
+        let id = device["udid"].as_str().ok_or("missing Simulator ID")?;
+        let _ = supervision::run(
+            &args!["xcrun", "simctl", "shutdown", id],
+            cwd,
+            Io::Log(log),
+            &cancel,
+            Duration::from_secs(60),
+        )
+        .await;
+        supervision::run(
+            &args!["xcrun", "simctl", "delete", id],
+            cwd,
+            Io::Log(log),
+            &cancel,
+            Duration::from_secs(60),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn template(
+    qa: &Path,
+    runtime: &str,
+    records: &Path,
+    cwd: &Path,
+    log: &File,
+    cancel: &watch::Receiver<bool>,
+) -> Result<String> {
+    let owner = format!(
+        "{:x}",
+        Sha256::digest(qa.canonicalize()?.as_os_str().as_encoded_bytes())
+    );
+    let name = format!("Bex pristine E2E {owner} {runtime}");
+    let devices = supervision::run(
+        &args!["xcrun", "simctl", "list", "devices", "-j"],
+        cwd,
+        Io::Capture,
+        cancel,
+        SETUP_TIMEOUT,
+    )
+    .await?;
+    let devices: Value = serde_json::from_slice(&devices.stdout)?;
+    let matching = named_devices(&devices, &name)?;
+    if !matching.is_empty() {
+        if matching.len() != 1
+            || matching[0]["state"] != "Shutdown"
+            || matching[0]["isAvailable"] != true
+        {
+            return Err("Simulator template must be unique, available and shut down".into());
+        }
+        println!("Reusing initialized empty Simulator template");
+        return Ok(matching[0]["udid"]
+            .as_str()
+            .ok_or("missing Simulator template ID")?
+            .to_owned());
+    }
+    // Publish the stable name only after migration and shutdown succeed. Failed
+    // preparation is deleted by its unique name, even after create cancellation.
+    let preparing = format!(
+        "{name} preparing {}",
+        records.file_name().unwrap().to_string_lossy()
+    );
+    let result = async {
+        let created = supervision::run(
+            &args![
+                "xcrun",
+                "simctl",
+                "create",
+                &preparing,
+                "com.apple.CoreSimulator.SimDeviceType.iPhone-17",
+                runtime
+            ],
+            cwd,
+            Io::Capture,
+            cancel,
+            SETUP_TIMEOUT,
+        )
+        .await?;
+        let id = std::str::from_utf8(&created.stdout)?.trim().to_owned();
+        for arguments in [
+            args![vec; "xcrun", "simctl", "boot", &id],
+            args![vec; "xcrun", "simctl", "bootstatus", &id, "-b"],
+            args![vec; "xcrun", "simctl", "shutdown", &id],
+            args![vec; "xcrun", "simctl", "rename", &id, &name],
+        ] {
+            supervision::run(&arguments, cwd, Io::Log(log), cancel, SETUP_TIMEOUT).await?;
+        }
+        println!("Initialized empty Simulator template");
+        Ok(id)
+    }
+    .await;
+    if result.is_err() {
+        delete_devices(&preparing, cwd, log).await?;
+    }
+    result
 }
 
 async fn worker(
     tests: Vec<String>,
     target: PathBuf,
     source: PathBuf,
-    runtime: String,
+    template: String,
     prefix: PathBuf,
     without_codex: bool,
     cancel: watch::Receiver<bool>,
@@ -170,7 +299,7 @@ async fn worker(
                 if Instant::now() >= deadline { return Err(format!("{label}: UI fixture timed out").into()); }
                 tokio::select! { _ = tokio::time::sleep(Duration::from_millis(100)) => {}, _ = supervision::cancelled(cancel.clone()) => return Err(supervision::interrupted()) }
             }
-            let simulator = supervision::run(&args!["xcrun", "simctl", "create", &name, "com.apple.CoreSimulator.SimDeviceType.iPhone-17", &runtime], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
+            let simulator = supervision::run(&args!["xcrun", "simctl", "clone", &template, &name], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
             let simulator = std::str::from_utf8(&simulator.stdout)?.trim();
             for arguments in [
                 args![vec; "xcrun", "simctl", "boot", simulator],
@@ -189,6 +318,8 @@ async fn worker(
             let mut arguments = args![vec; "xcodebuild", "-xctestrun", &run, "-destination", format!("platform=iOS Simulator,id={simulator}"), "-parallel-testing-enabled", "NO", "-resultBundlePath", &bundle];
             arguments.extend(tests.iter().map(|test| format!("-only-testing:BexUITests/BexLaunchUITests/{test}").into()));
             arguments.push("test-without-building".into());
+            let setup_seconds = started.elapsed().as_secs_f64();
+            println!("{label}: Simulator and Host ready in {setup_seconds:.2}s");
             let status = supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, BUILD_TIMEOUT).await;
             if *cancel.borrow() { return Err(supervision::interrupted()); }
             let summary = supervision::run(&args!["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", &bundle, "--format", "json"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
@@ -197,57 +328,19 @@ async fn worker(
             check_summary(&summary, tests.len())?;
             status?;
             println!("{label}: {} passed; records: {}", tests.len(), bundle.display());
-            Ok(WorkerResult { tests, seconds: started.elapsed().as_secs_f64(), bundle })
+            Ok(WorkerResult { tests, seconds: started.elapsed().as_secs_f64(), setup_seconds, bundle })
         }.await;
     // Stop the Host before potentially slow Simulator cleanup.
     let shutdown = host.stop(true, Duration::from_secs(10)).await;
     // Cleanup ignores cancellation, and recovers devices by this run's
-    // unique name even if simctl create was cancelled before returning an ID.
+    // unique name even if simctl clone was cancelled before returning an ID.
     let cleanup: Result<()> = async {
         match fs::remove_file(&run) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        let (_sender, cleanup_cancel) = watch::channel(false);
-        let devices = supervision::run(
-            &args!["xcrun", "simctl", "list", "devices", "-j"],
-            &cwd,
-            Io::Capture,
-            &cleanup_cancel,
-            Duration::from_secs(60),
-        )
-        .await?;
-        let devices: Value = serde_json::from_slice(&devices.stdout)?;
-        for devices in devices["devices"]
-            .as_object()
-            .ok_or("missing Simulator devices")?
-            .values()
-        {
-            for device in devices.as_array().ok_or("invalid Simulator devices")? {
-                if device["name"] != name {
-                    continue;
-                }
-                let id = device["udid"].as_str().ok_or("missing Simulator ID")?;
-                let _ = supervision::run(
-                    &args!["xcrun", "simctl", "shutdown", id],
-                    &cwd,
-                    Io::Log(&log),
-                    &cleanup_cancel,
-                    Duration::from_secs(60),
-                )
-                .await;
-                supervision::run(
-                    &args!["xcrun", "simctl", "delete", id],
-                    &cwd,
-                    Io::Log(&log),
-                    &cleanup_cancel,
-                    Duration::from_secs(60),
-                )
-                .await?;
-            }
-        }
-        Ok(())
+        delete_devices(&name, &cwd, &log).await
     }
     .await;
     let result = result?;
@@ -269,8 +362,8 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
     let workers = std::env::var("BEX_IOS_TEST_WORKERS")
         .unwrap_or_else(|_| "4".to_owned())
         .parse::<usize>()?;
-    if !(1..=4).contains(&workers) {
-        return Err("BEX_IOS_TEST_WORKERS must be between 1 and 4".into());
+    if !(1..=10).contains(&workers) {
+        return Err("BEX_IOS_TEST_WORKERS must be between 1 and 10".into());
     }
     let workers = workers.min(tests.len());
     let cancel = supervision::cancellation();
@@ -400,6 +493,9 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
     )
     .await?;
     let runtime = runtime(&serde_json::from_slice(&runtimes.stdout)?)?;
+    let template_started = Instant::now();
+    let template = template(&qa, &runtime, &records, &cwd, &log, &cancel).await?;
+    let template_seconds = template_started.elapsed().as_secs_f64();
     let runs = fs::read_dir(&products)?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<std::io::Result<Vec<_>>>()?
@@ -423,7 +519,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
             tests.iter().skip(index).step_by(workers).cloned().collect(),
             target.clone(),
             runs[0].clone(),
-            runtime.clone(),
+            template.clone(),
             records.join(format!("worker-{}", index + 1)),
             without_codex,
             cancel.clone(),
@@ -449,7 +545,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
         format!(
             "{}\n",
             serde_json::to_string_pretty(
-                &json!({"buildSeconds": build_seconds, "seconds": seconds, "passedTests": tests.len(), "workers": results})
+                &json!({"buildSeconds": build_seconds, "templateSeconds": template_seconds, "seconds": seconds, "passedTests": tests.len(), "workers": results})
             )?
         ),
     )?;
@@ -466,10 +562,32 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn device_ownership_uses_the_entire_name_across_runtimes() {
+        let devices = json!({"devices": {
+            "current": [
+                {"name": "owned", "udid": "first"},
+                {"name": "owned preparing another-run", "udid": "unfinished"},
+                {"name": "someone-else-owned", "udid": "external"}
+            ],
+            "previous": [{"name": "owned", "udid": "duplicate"}]
+        }});
+        let mut ids = named_devices(&devices, "owned")
+            .unwrap()
+            .into_iter()
+            .map(|device| device["udid"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, ["duplicate", "first"]);
+        assert!(named_devices(&devices, "unknown").unwrap().is_empty());
+        assert!(named_devices(&json!({}), "owned").is_err());
+        assert!(named_devices(&json!({"devices": {"current": null}}), "owned").is_err());
+    }
+
+    #[test]
     fn each_worker_preserves_configuration_and_gets_its_own_pairing() {
         let xml = br#"<?xml version="1.0"?><plist version="1.0"><dict><key>TestConfigurations</key><array><dict><key>TestTargets</key><array><dict><key>TestBundlePath</key><string>__TESTROOT__/BexUITests.xctest</string><key>EnvironmentVariables</key><dict><key>UNCHANGED</key><string>value</string></dict><key>IsUITestBundle</key><true/></dict></array></dict></array></dict></plist>"#;
         let source = Plist::from_reader(std::io::Cursor::new(xml)).unwrap();
-        for index in 1..=4 {
+        for index in 1..=10 {
             let url = format!("http://127.0.0.1:{}/pairing", 12300 + index);
             let mut configured = configure_run(source.clone(), &url, "/fixture/xtask").unwrap();
             let target = &mut configured.as_dictionary_mut().unwrap()["TestConfigurations"]
