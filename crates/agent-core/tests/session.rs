@@ -538,6 +538,7 @@ fn local_storage_keeps_user_work_without_host_caches() {
             "model_defaults",
             "navigation",
             "pending_submissions",
+            "scoped_model_defaults",
             "storage_scope"
         ]
     );

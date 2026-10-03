@@ -9,7 +9,7 @@ mod view;
 use crate::{Runtime, diff::DiffView, platform, store_session::StoreSession};
 use agent_core::{
     presentation::conversation::{ActivityExpansion, ConversationRowContent},
-    state::{Attachment, Draft, DraftKey, Intent, PendingSubmission, Snapshot},
+    state::{Attachment, Draft, DraftKey, Intent, ModelDefaultsScope, PendingSubmission, Snapshot},
     store::Outcome,
 };
 use agent_protocol::{
@@ -210,6 +210,7 @@ pub(crate) struct Desktop {
     model_panel: ModelPanel,
     model_search: Entity<InputState>,
     model_provider: Option<agent_protocol::session::ProviderKind>,
+    settings_model_scope: ModelDefaultsScope,
     account_sign_out: Option<String>,
     account_login_draft: Option<DraftKey>,
     worktree_copy_paths: Entity<TextareaState>,
@@ -513,6 +514,7 @@ impl Desktop {
             model_panel: ModelPanel::Models,
             model_search,
             model_provider: None,
+            settings_model_scope: ModelDefaultsScope::Global,
             account_sign_out: None,
             account_login_draft: None,
             worktree_copy_paths,
@@ -559,10 +561,10 @@ impl Desktop {
             markdown_cache: HashMap::new(),
             _subscriptions: subscriptions,
         };
-        view.connect();
+        view.connect(None);
         view
     }
-    fn connect(&mut self) {
+    fn connect(&mut self, preferences: Option<Vec<u8>>) {
         self.epoch += 1;
         self.connecting = true;
         self.busy = 0;
@@ -605,19 +607,32 @@ impl Desktop {
                     }
                     Err(error) => return Err(error.to_string()),
                 };
-                if let Some(cwd) = initial_cwd.or_else(|| {
+                let preferences = match preferences {
+                    Some(preferences) => Some(preferences),
+                    None => {
+                        match tokio::fs::read(path.with_file_name("model-preferences.json")).await {
+                            Ok(bytes) => Some(bytes),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    }
+                };
+                if let Some(preferences) = preferences {
+                    let saved = agent_core::persistence::encode(&snapshot)
+                        .map_err(|error| error.to_string())?;
+                    snapshot = agent_core::persistence::decode(
+                        &agent_core::persistence::apply_model_preferences(&saved, &preferences)
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                let initial_cwd = initial_cwd.or_else(|| {
                     snapshot
                         .navigation
                         .thread_id
                         .is_none()
                         .then(|| snapshot.navigation.cwd.clone())
-                }) {
-                    snapshot = agent_core::state::reduce(
-                        &snapshot,
-                        agent_core::state::Event::Intent(Intent::NewChat { cwd }),
-                    )
-                    .0;
-                }
+                });
                 let store = connections
                     .connect(
                         remote.as_ref().map(|remote| remote.ticket.as_str()),
@@ -625,6 +640,9 @@ impl Desktop {
                     )
                     .await
                     .map_err(|error| format!("{error:#}"))?;
+                if let Some(cwd) = initial_cwd {
+                    drop(store.dispatch(Intent::NewChat { cwd }));
+                }
                 Ok::<_, String>((store, path))
             }
             .await;
@@ -1316,8 +1334,23 @@ impl Desktop {
         }
         self.cancel_recording();
         self.dictation = None;
+        let preferences = self
+            .session
+            .as_ref()
+            .map(|session| {
+                agent_core::persistence::encode_model_preferences(&session.store.snapshot())
+            })
+            .transpose();
+        let preferences = match preferences {
+            Ok(preferences) => preferences,
+            Err(error) => {
+                self.error = error.to_string();
+                return;
+            }
+        };
         self.session.take();
         self.remote = remote;
+        self.settings_model_scope = ModelDefaultsScope::Global;
         self.snapshot = Arc::default();
         self.composer_pending = None;
         self.pending_quote = None;
@@ -1341,7 +1374,7 @@ impl Desktop {
         self.composer_value = "".into();
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.connect();
+        self.connect(preferences);
     }
     fn send(&mut self, cx: &Context<Self>) {
         if !self.snapshot.connected

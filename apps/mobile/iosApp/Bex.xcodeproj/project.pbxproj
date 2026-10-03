@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C0DE0000000000000000029A /* BexModelScopeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE0000000000000000039A /* BexModelScopeUITests.swift */; };
 		C0DE00000000000000000401 /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000402; };
         D60000000000000000000001 /* SkeletonUI in Frameworks */ = {isa = PBXBuildFile; productRef = D60000000000000000000002; };
         D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */; };
@@ -57,6 +58,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		C0DE0000000000000000039A /* BexModelScopeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexModelScopeUITests.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000402 /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
         F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreen.swift; sourceTree = "<group>"; };
 		E50000000000000000000002 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
@@ -147,6 +149,7 @@
 				DFD5E43A73C7D1330B7555BE /* BexSynchronizationUITests.swift */,
 				2F2E21BFDA246CD79D24E025 /* BexNavigationUITests.swift */,
 				C0DE00000000000000000399 /* BexAccountUITests.swift */,
+				C0DE0000000000000000039A /* BexModelScopeUITests.swift */,
 				04889B95D12DED5A33B271D4 /* BexWorktreeUITests.swift */,
 				D3FB9F620E5019535A07535C /* BexDictationUITests.swift */,);
 			path = BexUITests;
@@ -355,6 +358,7 @@
 				7B720FF73022C3D1A61212E7 /* BexSynchronizationUITests.swift in Sources */,
 				50CDAC84E50373218F0D4701 /* BexNavigationUITests.swift in Sources */,
 				C0DE00000000000000000299 /* BexAccountUITests.swift in Sources */,
+				C0DE0000000000000000029A /* BexModelScopeUITests.swift in Sources */,
 				316AE30ED1CAB6B32EF98FFE /* BexWorktreeUITests.swift in Sources */,
 				328998D7336CC8BC714813B1 /* BexDictationUITests.swift in Sources */,);
 			runOnlyForDeploymentPostprocessing = 0;

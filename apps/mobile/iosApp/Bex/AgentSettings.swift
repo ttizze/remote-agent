@@ -72,7 +72,9 @@ struct AgentSettingsScreen: View {
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            SettingsScopeBar(projects: "すべてのプロジェクト", environment: model.selectedProfileName ?? "未選択")
+            SettingsScopeBar { Text("すべてのプロジェクト") } environment: {
+                EnvironmentScopeMenu(model: model).disabled(changingAccount || loginInProgress)
+            }
         }
         .navigationTitle("エージェント")
         .navigationBarTitleDisplayMode(.inline)
@@ -110,6 +112,11 @@ struct AgentSettingsScreen: View {
         }
         .interactiveDismissDisabled(loginInProgress)
         .onAppear(perform: refresh)
+        .onChange(of: model.isConnected) { connected in
+            if connected {
+                refresh()
+            }
+        }
         .onChange(of: provider) { _ in loginError = nil }
         .onChange(of: scenePhase) { phase in
             if phase == .active, let id = login?.loginId {

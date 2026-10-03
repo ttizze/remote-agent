@@ -117,15 +117,18 @@ Account/model changes continue through the shared Store.
 Desktop's conversation and settings pages share the sidebar shell, width,
 header and collapse state. Only navigation contents and footer actions change;
 Back stays at the bottom and returns to the selected conversation and draft.
-Settings pages show a common applicability bar above their contents. It shows
-the current storage scope rather than implying that settings are written to
-every environment. Environment settings apply to every project on that Host;
-iPhone connection registrations belong to that iPhone. New-conversation model
-defaults are device preferences across environments, so their desktop
-applicability bars name all environments and the current device as the storage
-owner. iPhone Settings includes model defaults, using the same catalog and core
-preference intents as the conversation picker. Applying defaults on another
-Host must preserve that Host's existing drafts and pending submissions.
+Settings pages show a common applicability bar above their contents. Model
+defaults can target a project, the current environment, or all environments.
+New drafts use the most specific saved preset: project, then environment, then
+global. Existing drafts retain their selections. A scoped preset can be removed
+to inherit the common preset again. Both native clients use core preference
+intents and scope choices; the iPhone conversation picker also offers the current
+conversation as its target. Preferences are saved on the device. Applying them
+on another Host preserves that Host's drafts and pending submissions.
+Account and worktree settings apply to every project on the selected Host; the
+environment selector switches the actual Host. Device connection registrations
+have a fixed device scope. The iPhone model picker shows the selected account's
+usage before the model list, without requiring account-management navigation.
 
 Acceptance: desktop
 `model_picker_keeps_quick_controls_and_routes_quota_to_account_management`, core

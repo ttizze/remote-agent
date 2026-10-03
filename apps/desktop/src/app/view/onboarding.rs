@@ -219,7 +219,7 @@ impl Desktop {
                                         if view.snapshot.connected {
                                             view.refresh_accounts_and_models();
                                         } else {
-                                            view.connect();
+                                            view.connect(None);
                                         }
                                         if let Some(hosts) = &view.hosts {
                                             hosts.update(cx, |hosts, _| hosts.refresh());

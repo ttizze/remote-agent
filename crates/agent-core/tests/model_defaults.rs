@@ -1,7 +1,7 @@
 use agent_core::{
     persistence,
     state::{
-        DraftKey, Event, Intent, ModelDefaults, Snapshot,
+        DraftKey, Event, Intent, ModelDefaults, ModelDefaultsScope, Snapshot,
         operations::{LoadModels, Operation},
         reduce,
     },
@@ -33,6 +33,97 @@ fn apply(snapshot: &Snapshot, intent: Intent) -> Snapshot {
     reduce(snapshot, Event::Intent(intent)).0
 }
 
+fn scoped_fixture() -> Snapshot {
+    Snapshot {
+        storage_scope: "vm:sessions".into(),
+        models: Arc::new(catalog()),
+        threads: Some(Arc::new(serde_json::from_value(json!({
+            "data": [], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false, "projects": [
+                {"id":"outer", "name":"Outer", "roots":[{"path":"/repo/"}], "position":0, "createdAt":0},
+                {"id":"inner", "name":"Inner", "roots":[{"path":"/repo/nested"}], "position":1, "createdAt":0},
+                {"id":"windows", "name":"Windows", "roots":[{"path":"C:\\repo"}], "position":2, "createdAt":0}
+            ]
+        })).unwrap())),
+        ..Default::default()
+    }
+}
+
+proptest::proptest! {
+    #[test]
+    fn scoped_presets_inherit_isolate_and_restore_without_changing_existing_drafts(
+        suffix in "[a-z]{1,12}",
+        project_high in proptest::bool::ANY,
+    ) {
+        let environment = ModelDefaultsScope::Environment { id: "vm".into() };
+        let project = ModelDefaultsScope::Project { environment: "vm".into(), project: "outer".into() };
+        let inner = ModelDefaultsScope::Project { environment: "vm".into(), project: "inner".into() };
+        let mut snapshot = apply(&scoped_fixture(), Intent::SelectDefaultEffort { scope: ModelDefaultsScope::Global, effort: Some("medium".into()) });
+        snapshot = apply(&snapshot, Intent::SelectDefaultServiceTier { scope: environment.clone(), service_tier: Some("priority".into()) });
+        let effort = if project_high { "high" } else { "medium" };
+        snapshot = apply(&snapshot, Intent::SelectDefaultEffort { scope: project.clone(), effort: Some(effort.into()) });
+        proptest::prop_assert!(snapshot.has_model_defaults_override(project.clone()));
+        snapshot = apply(&snapshot, Intent::SelectDefaultServiceTier { scope: inner.clone(), service_tier: Some("default".into()) });
+        for (cwd, expected_effort, tier) in [
+            (format!("/repo/{suffix}"), effort, "priority"),
+            (format!("/repo/nested/{suffix}"), "medium", "default"),
+            (format!("/repo-sibling/{suffix}"), "medium", "priority"),
+            (format!("C:\\repo\\{suffix}"), "medium", "priority"),
+        ] {
+            snapshot = apply(&snapshot, Intent::NewChat { cwd: cwd.clone() });
+            let draft = &snapshot.drafts[&DraftKey::from(format!("new:{cwd}"))];
+            proptest::prop_assert_eq!(draft.effort.as_deref(), Some(expected_effort));
+            proptest::prop_assert_eq!(draft.service_tier.as_deref(), Some(tier));
+        }
+        let existing = snapshot.drafts.clone();
+        let preferences = persistence::encode_model_preferences(&snapshot).unwrap();
+        let bytes = persistence::encode(&snapshot).unwrap();
+        snapshot = persistence::decode(&persistence::apply_model_preferences(&bytes, &preferences).unwrap()).unwrap();
+        snapshot.threads = scoped_fixture().threads;
+        snapshot.storage_scope = "vm:changed-session-namespace".into();
+        proptest::prop_assert_eq!(&snapshot.drafts, &existing);
+        proptest::prop_assert_eq!(snapshot.model_defaults(project.clone()).effort, Some(effort.into()));
+        snapshot = apply(&snapshot, Intent::InheritModelDefaults { scope: project.clone() });
+        proptest::prop_assert_eq!(&snapshot.drafts, &existing);
+        proptest::prop_assert!(!snapshot.has_model_defaults_override(project.clone()));
+        proptest::prop_assert_eq!(snapshot.model_defaults(project.clone()), snapshot.model_defaults(environment.clone()));
+        snapshot.storage_scope = "different-vm".into();
+        snapshot.models = Arc::new(catalog());
+        let cwd = format!("/repo/other-{suffix}");
+        snapshot = apply(&snapshot, Intent::NewChat { cwd: cwd.clone() });
+        let draft = &snapshot.drafts[&DraftKey::from(format!("new:{cwd}"))];
+        proptest::prop_assert_eq!(draft.effort.as_deref(), Some("medium"));
+        proptest::prop_assert_eq!(draft.service_tier.as_deref(), Some("default"));
+        proptest::prop_assert_eq!(snapshot.model_defaults(inner).service_tier, Some("default".into()));
+    }
+}
+
+#[test]
+fn scope_menus_target_real_defaults_and_conversation_without_cross_environment_projects() {
+    let snapshot = scoped_fixture();
+    let global = ModelDefaultsScope::Global;
+    let environment = ModelDefaultsScope::Environment { id: "vm".into() };
+    let choices = snapshot.model_project_scope_choices(Some(global.clone()), false);
+    assert_eq!(choices[0].scope, Some(global.clone()));
+    assert!(choices.iter().all(|choice| choice.scope.is_some()));
+    assert_eq!(
+        choices[1].scope,
+        Some(ModelDefaultsScope::Project {
+            environment: "vm".into(),
+            project: "outer".into()
+        })
+    );
+    let choices = snapshot.model_environment_scope_choices(Some(global.clone()));
+    assert_eq!(choices[0].scope, Some(environment.clone()));
+    assert_eq!(choices[1].scope, Some(global));
+    let choices = snapshot.model_project_scope_choices(None, true);
+    assert_eq!(choices[0].scope, None);
+    assert_eq!(choices[1].scope, Some(environment));
+    assert_eq!(
+        snapshot.model_environment_scope_choices(None)[0].scope,
+        None
+    );
+}
+
 proptest::proptest! {
     #[test]
     fn defaults_survive_storage_and_apply_only_to_new_drafts(
@@ -48,9 +139,9 @@ proptest::proptest! {
         let snapshot = Snapshot { models: Arc::new(catalog()), ..Default::default() };
         let snapshot = apply(&snapshot, Intent::NewChat { cwd: "/old".into() });
         let old = snapshot.drafts[&DraftKey::from("new:/old")].clone();
-        let snapshot = apply(&snapshot, Intent::SelectDefaultModel { model: Some(model.clone()) });
-        let snapshot = apply(&snapshot, Intent::SelectDefaultEffort { effort: Some(effort.into()) });
-        let snapshot = apply(&snapshot, Intent::SelectDefaultServiceTier { service_tier: Some(tier.into()) });
+        let snapshot = apply(&snapshot, Intent::SelectDefaultModel { scope: ModelDefaultsScope::Global, model: Some(model.clone()) });
+        let snapshot = apply(&snapshot, Intent::SelectDefaultEffort { scope: ModelDefaultsScope::Global, effort: Some(effort.into()) });
+        let snapshot = apply(&snapshot, Intent::SelectDefaultServiceTier { scope: ModelDefaultsScope::Global, service_tier: Some(tier.into()) });
         // Restore through the actual device-storage boundary (catalogs are ephemeral).
         let mut snapshot = persistence::decode(&persistence::encode(&snapshot).unwrap()).unwrap();
         let restored_defaults = snapshot.model_defaults.clone();
@@ -66,7 +157,7 @@ proptest::proptest! {
         proptest::prop_assert_eq!(&snapshot.model_defaults, &restored_defaults);
         proptest::prop_assert_eq!(&snapshot.drafts[&DraftKey::from("new:/old")], &old);
         // Reopening an existing unsent draft must preserve its own choices.
-        let snapshot = apply(&snapshot, Intent::SelectDefaultEffort { effort: Some("medium".into()) });
+        let snapshot = apply(&snapshot, Intent::SelectDefaultEffort { scope: ModelDefaultsScope::Global, effort: Some("medium".into()) });
         let snapshot = apply(&snapshot, Intent::NewChat { cwd: "/new".into() });
         proptest::prop_assert_eq!(snapshot.drafts[&DraftKey::from("new:/new")].effort.as_deref(), Some(effort));
     }
@@ -81,18 +172,26 @@ fn model_changes_reset_options_and_automatic_model_accepts_supported_options() {
     let snapshot = apply(
         &snapshot,
         Intent::SelectDefaultEffort {
+            scope: ModelDefaultsScope::Global,
             effort: Some("high".into()),
         },
     );
     let snapshot = apply(
         &snapshot,
         Intent::SelectDefaultServiceTier {
+            scope: ModelDefaultsScope::Global,
             service_tier: Some("priority".into()),
         },
     );
-    let unchanged = apply(&snapshot, Intent::SelectDefaultModel { model: None });
+    let unchanged = apply(
+        &snapshot,
+        Intent::SelectDefaultModel {
+            scope: ModelDefaultsScope::Global,
+            model: None,
+        },
+    );
     assert_eq!(unchanged.model_defaults, snapshot.model_defaults);
-    let controls = snapshot.default_model_controls();
+    let controls = snapshot.default_model_controls(ModelDefaultsScope::Global);
     assert_eq!(controls.effort, "high");
     assert!(controls.fast);
     let snapshot = apply(
@@ -111,6 +210,7 @@ fn model_changes_reset_options_and_automatic_model_accepts_supported_options() {
     let snapshot = apply(
         &snapshot,
         Intent::SelectDefaultModel {
+            scope: ModelDefaultsScope::Global,
             model: Some(model.clone()),
         },
     );
@@ -121,7 +221,13 @@ fn model_changes_reset_options_and_automatic_model_accepts_supported_options() {
             ..Default::default()
         }
     );
-    let snapshot = apply(&snapshot, Intent::SelectDefaultModel { model: None });
+    let snapshot = apply(
+        &snapshot,
+        Intent::SelectDefaultModel {
+            scope: ModelDefaultsScope::Global,
+            model: None,
+        },
+    );
     assert_eq!(snapshot.model_defaults, ModelDefaults::default());
 }
 
@@ -164,6 +270,7 @@ async fn preference_changes_publish_while_offline() {
     let mut updates = store.subscribe();
     store
         .dispatch(Intent::SelectDefaultEffort {
+            scope: ModelDefaultsScope::Global,
             effort: Some("high".into()),
         })
         .await
@@ -172,6 +279,21 @@ async fn preference_changes_publish_while_offline() {
     assert_eq!(
         updates.borrow_and_update().model_defaults.effort.as_deref(),
         Some("high")
+    );
+    let scope = ModelDefaultsScope::Environment { id: "vm".into() };
+    store
+        .dispatch(Intent::SelectDefaultEffort {
+            scope: scope.clone(),
+            effort: Some("medium".into()),
+        })
+        .await
+        .unwrap();
+    assert!(updates.has_changed().unwrap());
+    assert_eq!(
+        updates.borrow_and_update().scoped_model_defaults[&scope]
+            .effort
+            .as_deref(),
+        Some("medium")
     );
     store.close().await.unwrap();
 }
