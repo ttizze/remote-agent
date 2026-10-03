@@ -356,17 +356,17 @@ UIの責任分割は対象外だが、型変更や非同期完了の意味を接
 nix develop . --command cargo build --locked -p bex-process --bin bex-provider-supervisor
 
 # Rustのテスト・整形・静的検査
-nix develop . --command cargo test --locked --workspace
+nix develop . --command just unit-tests
 nix develop . --command cargo fmt --all -- --check
 nix develop . --command cargo clippy --locked --workspace --all-targets -- -D warnings
 
-# PRのCI結果を確認（現在のcommitに対する結果を使う）
-gh pr checks --watch
+# mainへpushした後、そのcommitのCI結果を確認
+gh run list --workflow native.yml --branch main
 ```
 
 supervisorの配置を変更した段階では、ビルドコマンドとfixtureの参照も実装に合わせて更新する。存在しなくなった旧コマンドを手順に残さない。
 
-Native clients CIが現在のcommitに対して成功し、作業ツリーがcleanであることを確認する。コミット後のローカルQAは実行しない。以前のcommitの成功を流用しない。実認証のprovider推論、Windowsのプロセス管理、iOS/Android/desktopの受け入れ検証は、実施した環境・範囲を区別して報告する。未実施を合格に数えない。[プロジェクトルール][agents] [既存の検証手順][readme]
+全ユニットテストをローカルで通してmainへ統合する。PRやCI成功をマージ条件にはしない。mainへのpush後にNative clients CIを実行し、失敗はmain上で修正する。全体の検証済みと報告するときは、現在のcommitのCI成功とcleanな作業ツリーを確認する。コミット後のローカルQAは自動実行しない。以前のcommitの成功を流用しない。実認証のprovider推論、Windowsのプロセス管理、iOS/Android/desktopの受け入れ検証は、実施した環境・範囲を区別して報告する。未実施を合格に数えない。[プロジェクトルール][agents] [既存の検証手順][readme]
 
 ### 各段階の提出物
 

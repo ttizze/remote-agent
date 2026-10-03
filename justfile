@@ -5,6 +5,19 @@ set positional-arguments
 default:
     @just --list
 
+# Run all unit tests without starting clients, Simulators or emulators.
+unit-tests:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    failed=0
+    cargo build --locked -p bex-process --bin bex-provider-supervisor || failed=1
+    cargo test --locked --no-fail-fast --workspace --lib --bins --features agent-core/bindings,agent-ffi/bindgen || failed=1
+    nix build .#agent-peer --no-link || failed=1
+    if [[ $(uname -s) == Darwin ]]; then
+        cargo xtask ios-markdown || failed=1
+    fi
+    exit "$failed"
+
 # Prune inactive Cargo outputs older than 3 days or over the 32 GiB idle budget.
 clean-builds *args:
     cargo xtask clean-builds {{args}}

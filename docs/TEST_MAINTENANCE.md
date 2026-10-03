@@ -170,19 +170,27 @@ transfer server just to delete that check would reverse A14.
 ## Execution
 
 - Native clients CI owns automated verification; commits do not queue local QA.
-  Opening or updating a PR runs CI; merging it does not repeat the suite.
+  Run all local unit tests with `nix develop . --command just unit-tests`,
+  then integrate into main
+  without requiring a PR or waiting for CI. Pushing main runs full CI;
+  fix failures on main.
   Manual workflow dispatch remains available for focused audits and the soak.
   Require successful CI checks for the current commit and a clean working tree
-  before claiming verification or merging. Manual check commands remain for
+  before claiming full verification. Manual check commands remain for
   debugging. The Apple job runs `nix develop . --command just quality`
   on one Apple Silicon `macos-26` runner with Xcode 26.6. Mac Browser E2E
   and iPhone acceptance run concurrently after shared checks, with two isolated
   Simulator/Host pairs for iPhone tests. Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.
+- `nix develop . --command just unit-tests` runs every Rust workspace library
+  and binary test with native bindings, verifies the standalone agent-peer
+  package, and runs headless Swift Markdown tests on macOS. It starts no client,
+  Simulator or emulator and reuses build caches. Android currently has no JVM
+  unit tests; instrumentation acceptance remains in CI.
 - `nix develop . --command just quality rust` checks formatting, workspace
   Clippy, core library tests including the UniFFI bindings, and desktop rendering/input tests.
-  Its single Cargo test invocation also runs CLI, Host integration and native
+  It runs `just unit-tests` and the selected CLI, Host integration and native
   runner tests, sharing one feature configuration and dependency build.
   The Rust `xtask` tests exercise build cleanup with real Cargo locks, active
   processes, symlinks and Git worktrees; native runner tests retain configuration,

@@ -6,14 +6,11 @@ export CARGO_INCREMENTAL=0
 failed=0
 if [[ $language == apple || $language == rust ]]; then
     actionlint || failed=1
-    nix build .#agent-peer --no-link || failed=1
     cargo fmt --all --check || failed=1
     cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings || failed=1
-    cargo build --locked -p bex-process --bin bex-provider-supervisor || failed=1
-    cargo test --locked --no-fail-fast --features agent-core/bindings \
-        -p agent-protocol -p agent-transport -p agent-core -p bex-desktop \
-        -p agent-cli -p host-daemon -p host-fixture -p xtask \
-        --lib --bins --test errors --test iroh --test iroh_host --test browser_bridge \
+    just unit-tests || failed=1
+    cargo test --locked --no-fail-fast --workspace --features agent-core/bindings,agent-ffi/bindgen \
+        --test errors --test iroh --test iroh_host --test browser_bridge \
         --test management --test codex_accounts --test claude --test adapter_conformance \
         --test crate_boundaries --test build_cleanup --test diagnostics || failed=1
 fi
@@ -24,7 +21,9 @@ fi
 if [[ $language == apple || $language == swift ]]; then
     swiftformat --lint apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests || failed=1
     swiftlint lint --strict || failed=1
-    just ios-markdown || failed=1
+    if [[ $language == swift ]]; then
+        just ios-markdown || failed=1
+    fi
 fi
 macos_pid=
 if [[ $(uname -s) == Darwin && ( $language == apple || $language == rust ) ]]; then
