@@ -1632,8 +1632,25 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
             .unwrap();
         let snapshot = completed(&store, &id, 3, "interrupted").await;
         assert!(snapshot.requests().next().is_none());
+        // A settings change replaces the retained CLI. The same native
+        // conversation must resume after its background work was stopped.
+        store
+            .dispatch(Intent::SelectEffort {
+                thread_id: snapshot.navigation.draft_key.clone(),
+                effort: "high".into(),
+            })
+            .await
+            .unwrap();
         send(&store, "after stop", "after-interruption").await;
-        completed(&store, &id, 4, "completed").await;
+        let snapshot = completed(&store, &id, 4, "completed").await;
+        assert!(
+            snapshot.conversations[&id].turns.as_ref().unwrap()[3]
+                .items
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|item| item_text(item) == Some("reply 4: after stop"))
+        );
         store.close().await.unwrap();
         endpoint.close().await;
         fixture.close().await.unwrap();
