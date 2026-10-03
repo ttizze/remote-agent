@@ -136,7 +136,6 @@ struct ModelSettingsScreen: View {
                     }
                 }.disabled(disabled)
             }
-            modelSection
             if let scope, model.snapshot.hasModelDefaultsOverride(scope: scope) {
                 Section {
                     Button("共通設定を使う") { model.perform(.inheritModelDefaults(scope: scope)) }
@@ -144,6 +143,7 @@ struct ModelSettingsScreen: View {
                         .disabled(disabled)
                 }
             }
+            modelSection
         }
         .contentMargins(.top, 12, for: .scrollContent)
         .safeAreaInset(edge: .top, spacing: 0) {
