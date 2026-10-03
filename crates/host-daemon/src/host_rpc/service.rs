@@ -986,7 +986,7 @@ impl HostRpcService {
             futures_util::pin_mut!(pages);
             while let Some(result) = pages.next().await {
                 match result {
-                    Ok(page) => threads.extend(page),
+                    Ok(page) => threads.extend(page.into_iter().map(|summary| summary.thread)),
                     Err(error) if error.code == "invalid_session_list" => return Err(error),
                     Err(error) => {
                         for w in &mut worktrees {
@@ -1135,11 +1135,16 @@ impl HostRpcService {
             .unwrap_or_default();
         let mut successful = 0;
         let mut threads = Vec::new();
+        let mut branches = std::collections::HashMap::new();
         for (provider, capabilities, result) in listings {
             match result {
                 Ok(data) => {
                     successful += 1;
-                    threads.extend(data.into_iter().map(|mut t| {
+                    threads.extend(data.into_iter().map(|summary| {
+                        let mut t = summary.thread;
+                        if let (Some(id), Some(branch)) = (&t.id, summary.branch) {
+                            branches.insert(id.clone(), branch);
+                        }
                         describe_thread(&mut t, capabilities, &snapshot);
                         t
                     }));
@@ -1168,19 +1173,28 @@ impl HostRpcService {
             }
         }
         let mut page = titles.finish();
-        let statuses = crate::worktrees::directory_statuses(
-            page.data
-                .iter()
-                .filter_map(|thread| thread.cwd.clone())
-                .collect(),
-        )
-        .await
-        .map_err(|error| Failure::new("worktree_status_failed", error))?;
-        for thread in &mut page.data {
-            thread.worktree_status = thread
-                .cwd
+        let sources: Vec<_> = page
+            .data
+            .iter()
+            .map(|thread| {
+                let cwd = thread.cwd.as_ref()?;
+                let mapping = snapshot.worktree_mapping(std::path::Path::new(cwd));
+                Some(crate::worktrees::StatusSource {
+                    cwd: cwd.clone(),
+                    checkout: mapping.map(|(checkout, _)| checkout.to_owned()),
+                    repository: mapping.map(|(_, repository)| repository.to_owned()),
+                    branch: thread.id.as_ref().and_then(|id| branches.remove(id)),
+                })
+            })
+            .collect();
+        let statuses =
+            crate::worktrees::directory_statuses(sources.iter().flatten().cloned().collect())
+                .await
+                .map_err(|error| Failure::new("worktree_status_failed", error))?;
+        for (thread, source) in page.data.iter_mut().zip(sources) {
+            thread.worktree_status = source
                 .as_ref()
-                .and_then(|cwd| statuses.get(cwd))
+                .and_then(|source| statuses.get(source))
                 .copied();
         }
         if !provider_errors.is_empty() {

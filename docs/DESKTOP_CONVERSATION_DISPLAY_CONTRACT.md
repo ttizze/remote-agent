@@ -440,9 +440,10 @@ results after navigation.
 
 ### セッション一覧の変更・マージ表示
 
-- 実行ディレクトリが linked worktree のセッションは、ローカル `main` に未マージのコミット、未コミットの編集、ステージ済み変更、未追跡ファイルがあれば、オレンジの Lucide `diff`（＋／−）アイコンを表示する。変更がなく作業ブランチの先端が `main` に取り込まれていれば、紫の既存 Lucide `git-merge` アイコンを表示する（チェックの合成は行わない）。実行中のローディング／完了・未確認表示の右に並べ、両方の状態を保持する。PC・iOS・Android は共有 `ThreadSummary.worktree_status` を表示する。
+- 実行ディレクトリが linked worktree のセッションは、ローカル `main` との分岐点からブランチに残っているファイル差分、未コミットの編集、ステージ済み変更、未追跡ファイルがあれば、オレンジの Lucide `diff`（＋／−）アイコンを表示する。未マージのコミットがあっても、空コミットや変更の取り消しでファイル差分が残っていなければ表示しない。`main` 側だけにある更新は差分に数えない。変更がなく作業ブランチの先端が `main` に取り込まれていれば、紫の既存 Lucide `git-merge` アイコンを表示する（チェックの合成は行わない）。実行中のローディング／完了・未確認表示の右に並べ、両方の状態を保持する。PC・iOS・Android は共有 `ThreadSummary.worktree_status` を表示する。
 - 作成直後で変更のないブランチ、main 自体、detached HEAD、Git の確認失敗では表示しない。マージ済みの判定は、ブランチの reflog の最古のコミットと先端が異なることを作業履歴の条件にする。作成履歴が不明でも未反映の変更は表示できる。squash/rebase による別コミットへの置換は判定対象外。
-- 一覧の再取得時（既存の実行状態通知・画面復帰・手動更新）に再判定する。マージ済みのあとに追加コミットや編集があれば差分アイコンに切り替え、編集を取り消すとマージ済みに戻る。Git の状態をプロジェクト設定のキャッシュに保存しない。
+- Bex が管理する作業フォルダを削除したあとも、会話のネイティブ履歴に保存されたブランチと元リポジトリの対応から、残ったブランチの差分・マージ済みを判定する。作業フォルダがある場合は現在の Git 状態を優先する。保存ブランチや元リポジトリが不明、ブランチが削除済みの場合は表示しない。
+- 一覧の再取得時（既存の実行状態通知・画面復帰・手動更新）に再判定する。マージ済みのあとにファイル差分を追加すれば差分アイコンに切り替え、未コミットの編集を取り消すとマージ済みに戻る。Git の状態をプロジェクト設定のキャッシュに保存しない。
 - 受け入れ確認: core の `list_preserves_worktree_status_alongside_activity_after_serialization_and_refresh`、実 Git と Host/Store の `session_list_tracks_real_worktree_changes_and_merges_through_host_and_store`、iOS の `testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus`、Android の `worktreeMarksCoexistWithRunningAndUnreadUsingTheCoreAdapter`。
 
 ## Immediate submission feedback

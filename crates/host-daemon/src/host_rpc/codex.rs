@@ -31,8 +31,8 @@ struct ThreadListParams<'a> {
 }
 
 use super::agent::{
-    Agent, AgentChange, AgentEvent, AnswerWrite, Identity, SessionPage, SubmissionState, emit,
-    session_pages,
+    Agent, AgentChange, AgentEvent, AnswerWrite, Identity, SessionPage, SessionSummary,
+    SubmissionState, emit, session_pages,
 };
 use agent_protocol::protocol::Call;
 use agent_transport::peer::PeerEvent;
@@ -791,7 +791,11 @@ impl Agent for Codex {
                 .ok_or_else(|| Failure::new("invalid_thread", "native session list is missing"))?
                 .iter()
                 .cloned()
-                .map(super::native::codex_thread)
+                .map(|value| {
+                    let branch = value["gitInfo"]["branch"].as_str().map(str::to_owned);
+                    super::native::codex_thread(value)
+                        .map(|thread| SessionSummary { thread, branch })
+                })
                 .collect::<Result<_, _>>()?,
             next_cursor: serde_json::from_value(value["nextCursor"].clone())?,
         })
@@ -1002,7 +1006,8 @@ impl Agent for Codex {
         let pages = session_pages(self, "");
         futures_util::pin_mut!(pages);
         while let Some(page) = pages.try_next().await? {
-            for thread in page {
+            for summary in page {
+                let thread = summary.thread;
                 if thread.status == agent_protocol::models::SessionStatus::Running
                     && let Some(cwd) = &thread.cwd
                 {

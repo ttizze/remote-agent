@@ -344,16 +344,14 @@ mod tests {
     proptest! {
         #[test]
         fn worktree_status_distinguishes_pending_work_from_integrated_history(
-            changed in any::<bool>(),
-            history_known in any::<bool>(),
-            contained in any::<bool>(),
             dirty in any::<bool>(),
+            unmerged_changes in any::<bool>(),
+            merged_history in any::<bool>(),
         ) {
-            let head = if changed { "work" } else { "base" };
-            let status = worktree_branch_status(head, history_known.then_some("base"), contained, dirty);
-            let expected = match (dirty, contained, history_known, changed) {
-                (true, _, _, _) | (_, false, _, _) => Some(WorktreeStatus::Unmerged),
-                (false, true, true, true) => Some(WorktreeStatus::Merged),
+            let status = worktree_branch_status(dirty, unmerged_changes, merged_history);
+            let expected = match (dirty, unmerged_changes, merged_history) {
+                (true, _, _) | (_, true, _) => Some(WorktreeStatus::Unmerged),
+                (false, false, true) => Some(WorktreeStatus::Merged),
                 _ => None,
             };
             prop_assert_eq!(status, expected);
@@ -444,16 +442,15 @@ pub enum WorktreeStatus {
     Merged,
 }
 
-/// Uncommitted edits take priority over previously integrated branch work.
+/// Pending file changes take priority over previously integrated branch work.
 pub fn worktree_branch_status(
-    head: &str,
-    initial: Option<&str>,
-    contained_in_main: bool,
     has_uncommitted_changes: bool,
+    has_unmerged_changes: bool,
+    has_merged_history: bool,
 ) -> Option<WorktreeStatus> {
-    if has_uncommitted_changes || !contained_in_main {
+    if has_uncommitted_changes || has_unmerged_changes {
         Some(WorktreeStatus::Unmerged)
-    } else if initial.is_some_and(|initial| initial != head) {
+    } else if has_merged_history {
         Some(WorktreeStatus::Merged)
     } else {
         None

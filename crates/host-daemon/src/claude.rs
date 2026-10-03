@@ -43,7 +43,10 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::host_rpc::{
-    agent::{Agent, AgentChange, AgentEvent, AnswerWrite, SessionPage, SubmissionState, emit},
+    agent::{
+        Agent, AgentChange, AgentEvent, AnswerWrite, SessionPage, SessionSummary, SubmissionState,
+        emit,
+    },
     service::Failure,
 };
 use futures_util::FutureExt;
@@ -302,6 +305,7 @@ impl Claude {
         .await??;
         let record = Arc::new(AsyncMutex::new(Record {
             cwd: summary
+                .thread
                 .cwd
                 .context("Claude working directory is unavailable")?,
             model: "default".into(),
@@ -339,7 +343,7 @@ impl Claude {
         Ok(record)
     }
 
-    async fn list(&self, search: &str) -> anyhow::Result<Vec<Thread>> {
+    async fn list(&self, search: &str) -> anyhow::Result<Vec<SessionSummary>> {
         let home = self.native_home.clone();
         let mut threads = tokio::task::spawn_blocking(move || {
             history::files(&home)?
@@ -363,7 +367,10 @@ impl Claude {
                                 agent_protocol::session::HistoryReadKind::Unavailable,
                                 vec![format!("{error:#}")],
                             ));
-                        thread
+                        SessionSummary {
+                            thread,
+                            branch: None,
+                        }
                     }))
                 })
                 .collect::<anyhow::Result<Vec<_>>>()
@@ -377,26 +384,30 @@ impl Claude {
                     provider: ProviderKind::Claude,
                     id: record.session_id.to_string(),
                 };
-                if let Some(thread) = threads
+                if let Some(summary) = threads
                     .iter_mut()
-                    .find(|thread| thread.id.as_ref() == Some(&id))
+                    .find(|summary| summary.thread.id.as_ref() == Some(&id))
                 {
-                    thread.status = SessionStatus::Running;
+                    summary.thread.status = SessionStatus::Running;
                 } else {
-                    threads.push(Thread {
-                        id: Some(SessionRef {
-                            provider: ProviderKind::Claude,
-                            id: record.session_id.to_string(),
-                        }),
-                        cwd: Some(record.cwd.clone()),
-                        status: SessionStatus::Running,
-                        ..Default::default()
+                    threads.push(SessionSummary {
+                        thread: Thread {
+                            id: Some(SessionRef {
+                                provider: ProviderKind::Claude,
+                                id: record.session_id.to_string(),
+                            }),
+                            cwd: Some(record.cwd.clone()),
+                            status: SessionStatus::Running,
+                            ..Default::default()
+                        },
+                        branch: None,
                     });
                 }
             }
         }
         let search = search.trim().to_lowercase();
-        threads.retain(|thread| {
+        threads.retain(|summary| {
+            let thread = &summary.thread;
             search.is_empty()
                 || thread
                     .name
@@ -412,9 +423,9 @@ impl Claude {
                     .contains(&search)
         });
         threads.sort_by(|left, right| {
-            updated_at(right)
-                .cmp(&updated_at(left))
-                .then_with(|| left.id.cmp(&right.id))
+            updated_at(&right.thread)
+                .cmp(&updated_at(&left.thread))
+                .then_with(|| left.thread.id.cmp(&right.thread.id))
         });
         Ok(threads)
     }
@@ -428,7 +439,7 @@ impl Claude {
             match history::read(&path, requested) {
                 Ok(response) => Ok(response),
                 Err(error) => {
-                    let mut thread = history::summary(&path)?;
+                    let mut thread = history::summary(&path)?.thread;
                     thread.history_read_state =
                         Some(agent_protocol::session::HistoryReadState::new(
                             agent_protocol::session::HistoryReadKind::Unavailable,
@@ -1980,7 +1991,8 @@ impl Agent for Claude {
             .await
             .map_err(|e| Failure::new("session_list_failed", e))?;
         let mut active = Vec::new();
-        for thread in threads {
+        for summary in threads {
+            let thread = summary.thread;
             if let Some(cwd) = &thread.cwd {
                 let cwd = tokio::fs::canonicalize(cwd)
                     .await
