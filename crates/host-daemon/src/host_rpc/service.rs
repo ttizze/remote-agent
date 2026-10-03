@@ -738,18 +738,18 @@ impl HostRpcService {
                     .as_deref()
                     .map(serde_json::from_str)
                     .transpose()?
-                    .unwrap_or_else(|| self.agents().into_iter().map(|(p, _)| (p, None)).collect());
+                    .unwrap_or_else(|| {
+                        self.agents()
+                            .into_iter()
+                            .map(|(provider, _)| provider)
+                            .chain(self.inner.startup_errors.read().unwrap().keys().copied())
+                            .map(|provider| (provider, None))
+                            .collect()
+                    });
                 let mut page = op::ModelPage {
                     data: Vec::new(),
                     next_cursor: None,
-                    provider_errors: if params.cursor.is_none() {
-                        self.provider_errors()
-                            .as_object()
-                            .filter(|errors| !errors.is_empty())
-                            .cloned()
-                    } else {
-                        None
-                    },
+                    provider_errors: None,
                 };
                 let mut next = std::collections::BTreeMap::new();
                 for (provider, cursor) in cursors {
@@ -766,9 +766,6 @@ impl HostRpcService {
                     };
                     match result {
                         Ok(result) => {
-                            if let Some(errors) = &mut page.provider_errors {
-                                errors.remove(&provider_key(provider));
-                            }
                             page.data.extend(result.data);
                             if let Some(cursor) = result.next_cursor {
                                 next.insert(provider, Some(cursor));
@@ -784,7 +781,6 @@ impl HostRpcService {
                 if !next.is_empty() {
                     page.next_cursor = Some(serde_json::to_string(&next)?);
                 }
-                page.provider_errors = page.provider_errors.filter(|errors| !errors.is_empty());
                 if params.cursor.is_none() && page.data.is_empty() && page.provider_errors.is_some()
                 {
                     return Err(Failure::new(
