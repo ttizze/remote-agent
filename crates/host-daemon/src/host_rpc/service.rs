@@ -766,6 +766,9 @@ impl HostRpcService {
                     };
                     match result {
                         Ok(result) => {
+                            if let Some(errors) = &mut page.provider_errors {
+                                errors.remove(&provider_key(provider));
+                            }
                             page.data.extend(result.data);
                             if let Some(cursor) = result.next_cursor {
                                 next.insert(provider, Some(cursor));
@@ -781,6 +784,7 @@ impl HostRpcService {
                 if !next.is_empty() {
                     page.next_cursor = Some(serde_json::to_string(&next)?);
                 }
+                page.provider_errors = page.provider_errors.filter(|errors| !errors.is_empty());
                 if params.cursor.is_none() && page.data.is_empty() && page.provider_errors.is_some()
                 {
                     return Err(Failure::new(

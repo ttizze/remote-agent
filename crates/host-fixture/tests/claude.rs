@@ -762,7 +762,11 @@ async fn unconfigured_claude_keeps_codex_usable_without_model_errors() {
                 saved
             );
             assert!(!store.snapshot().models.is_empty());
-            assert!(store.snapshot().model_errors.is_empty());
+            assert!(
+                store.snapshot().model_errors.is_empty(),
+                "installed={installed}: {:?}",
+                store.snapshot().model_errors
+            );
             assert!(
                 store
                     .snapshot()
