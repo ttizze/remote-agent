@@ -45,17 +45,9 @@ extension BexLaunchUITests {
         let terminal = app.descendants(matching: .any)["terminal.screen"]
         XCTAssertTrue(terminal.waitForExistence(timeout: 5))
         terminal.tap()
-        let probe = #"""
-        import os,re,select,sys,termios,tty
-        saved=termios.tcgetattr(0)
-        tty.setraw(0)
-        os.write(1,b"\x1b[6n")
-        data=os.read(0,128) if select.select([0],[],[],5)[0] else b""
-        extra=select.select([0],[],[],1)[0]
-        termios.tcsetattr(0,termios.TCSANOW,saved)
-        sys.exit(0 if re.fullmatch(rb"\x1b\[[0-9]+;[0-9]+R",data) and not extra else 1)
-        """#.split(separator: "\n").joined(separator: "; ")
-        terminal.typeText("python3 -c '\(probe)'; exit $?\n")
+        let probe = try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_TERMINAL_QUERY_PROBE"])
+            .replacingOccurrences(of: "'", with: "'\\''")
+        terminal.typeText("'\(probe)' terminal-query-probe; exit $?\n")
         XCTAssertTrue(app.staticTexts["終了 · 0"].waitForExistence(timeout: 20))
         captureScreen(app, named: "Only the Host responds to terminal queries")
         closeWorkbench(app)

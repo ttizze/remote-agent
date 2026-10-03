@@ -174,11 +174,17 @@ transfer server just to delete that check would reverse A14.
   Native clients CI, including Android emulator acceptance on Ubuntu with KVM.
 - `nix develop . --command just quality rust` checks formatting, workspace
   Clippy, core library tests including the UniFFI bindings, and desktop rendering/input tests.
+  Its single Cargo test invocation also runs CLI, Host integration and quality
+  worker tests, sharing one feature configuration and dependency build.
+  The Rust `xtask` tests exercise build cleanup with real Cargo locks, active
+  processes, symlinks and Git worktrees; native runner tests retain configuration,
+  result-count and process-lifetime checks. These replace the Python test suite.
+  Proptests remain ordinary tests; failures do not stop the rest of the suite.
   The Native clients CI also enables `agent-core/bindings` to run the native
   connection and foreground recovery regressions.
 - `nix develop . --command cargo test --locked --features agent-core/bindings -p agent-protocol -p agent-transport -p agent-core -p codex-app-server
   -p host-daemon -p host-fixture` covers the integration tests omitted by the
-  library-only quality invocation.
+  selected quality targets.
 - `nix develop . --command just conversation-ui` runs the maintained native
   conversation contracts on two fresh isolated Simulator/Host pairs, sharing
   one build. Each pair owns its history, failure controls and app storage.
@@ -187,7 +193,7 @@ transfer server just to delete that check would reverse A14.
   `qa/ios-derived-data`, always builds the current revision, and holds a lock
   through test completion so another run cannot replace the active binaries.
   Unchanged bindings preserve their timestamps; the compiled Swift bindings
-  are reused only with matching sources, SDK, compiler and build script.
+  are reused only with matching sources, SDK, compiler and Rust runner.
   Per-worker logs, result bundles and a timing summary remain under `qa/Bex-*`.
   `just ios-e2e`
   also covers pagination, foreground refresh, files, dictation, and images.
