@@ -118,6 +118,11 @@ struct AgentSettingsScreen: View {
             }
         }
         .onChange(of: provider) { _ in loginError = nil }
+        .onChange(of: model.selectedProfileId) { _ in
+            loginError = nil
+            loginCode = ""
+            signOutId = nil
+        }
         .onChange(of: scenePhase) { phase in
             if phase == .active, let id = login?.loginId {
                 pollLogin(id)

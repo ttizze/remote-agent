@@ -167,6 +167,10 @@ struct ModelSettingsScreen: View {
             loadingModels = true
             model.perform(.loadModels(LoadModels())) { _ in loadingModels = false }
         }
+        .onChange(of: model.selectedProfileId) { _ in
+            scope = conversation ? nil : .global
+            search = ""
+        }
     }
 
     private var modelSection: some View {
