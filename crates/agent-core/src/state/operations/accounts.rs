@@ -436,7 +436,7 @@ mod account_model_tests {
             Some("b")
         );
         assert_eq!(
-            snapshot.provider_models_matching(crate::session::ProviderKind::Codex, String::new()),
+            snapshot.models_matching(Some(crate::session::ProviderKind::Codex), String::new()),
             vec![restricted]
         );
         assert_eq!(

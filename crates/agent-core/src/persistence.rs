@@ -41,6 +41,24 @@ pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&PersistedState::capture(snapshot))
 }
 
+/// Apply device-wide preferences without changing a Host's saved user work.
+pub fn apply_model_defaults(
+    persisted: &[u8],
+    defaults: &[u8],
+) -> Result<Vec<u8>, serde_json::Error> {
+    let mut saved = if persisted.is_empty() {
+        PersistedState::capture(&Snapshot::default())
+    } else {
+        serde_json::from_slice::<PersistedState>(persisted)?
+    };
+    saved.model_defaults = if defaults.is_empty() {
+        ModelDefaults::default()
+    } else {
+        serde_json::from_slice(defaults)?
+    };
+    serde_json::to_vec(&saved)
+}
+
 pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     if bytes.is_empty() {
         return Ok(Snapshot::default());

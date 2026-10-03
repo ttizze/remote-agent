@@ -727,43 +727,69 @@ async fn provider_selection_cannot_redirect_an_existing_conversation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn missing_claude_keeps_codex_usable() {
+async fn unconfigured_claude_keeps_codex_usable_without_model_errors() {
     tokio::time::timeout(Duration::from_secs(30), async {
-        let root = tempfile::tempdir().unwrap();
-        let fixture = host(
-            root.path(),
-            Arc::new(Memory::default()),
-            &root.path().join("missing-claude"),
-        )
-        .await;
-        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
-        assert!(!store.snapshot().models.is_empty());
-        assert!(
+        for installed in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let program = if installed {
+                std::fs::create_dir_all(root.path().join("claude/accounts")).unwrap();
+                std::fs::write(
+                    root.path().join("claude/accounts/accounts.json"),
+                    json!({"accounts":[],"selectedId":null}).to_string(),
+                )
+                .unwrap();
+                fixture_program().to_path_buf()
+            } else {
+                root.path().join("missing-claude")
+            };
+            let fixture = host(root.path(), Arc::new(Memory::default()), &program).await;
+            let saved = agent_core::state::Draft {
+                model: Some(agent_protocol::models::ModelRef {
+                    provider: ProviderKind::Claude,
+                    id: "sonnet".into(),
+                }),
+                effort: Some("high".into()),
+                service_tier: Some("default".into()),
+                text: "Keep the Claude draft".into(),
+                ..Default::default()
+            };
+            let mut snapshot = Snapshot::default();
+            Arc::make_mut(&mut snapshot.drafts)
+                .insert("saved-claude".into(), Arc::new(saved.clone()));
+            let (store, endpoint) = connect(&fixture, snapshot).await;
+            assert_eq!(
+                *store.snapshot().drafts[&agent_core::state::DraftKey::from("saved-claude")],
+                saved
+            );
+            assert!(!store.snapshot().models.is_empty());
+            assert!(store.snapshot().model_errors.is_empty());
+            assert!(
+                store
+                    .snapshot()
+                    .models
+                    .iter()
+                    .all(|model| model.model.provider == ProviderKind::Codex)
+            );
             store
-                .snapshot()
-                .models
-                .iter()
-                .all(|model| model.model.provider == ProviderKind::Codex)
-        );
-        store
-            .dispatch(Intent::NewChat { cwd: String::new() })
-            .await
-            .unwrap();
-        let id = send(&store, "Codex remains available", "codex-only").await;
-        let snapshot = completed(&store, &id, 1, "completed").await;
-        assert!(snapshot.error.is_none());
-        assert!(
-            snapshot.drafts[&agent_core::state::DraftKey::from(&id)]
-                .text
-                .is_empty()
-                && snapshot.pending_submissions.is_empty()
-        );
-        store.close().await.unwrap();
-        endpoint.close().await;
-        fixture.close().await.unwrap();
+                .dispatch(Intent::NewChat { cwd: String::new() })
+                .await
+                .unwrap();
+            let id = send(&store, "Codex remains available", "codex-only").await;
+            let snapshot = completed(&store, &id, 1, "completed").await;
+            assert!(snapshot.error.is_none());
+            assert!(
+                snapshot.drafts[&agent_core::state::DraftKey::from(&id)]
+                    .text
+                    .is_empty()
+                    && snapshot.pending_submissions.is_empty()
+            );
+            store.close().await.unwrap();
+            endpoint.close().await;
+            fixture.close().await.unwrap();
+        }
     })
     .await
-    .expect("missing Claude deadline");
+    .expect("unconfigured Claude deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

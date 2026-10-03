@@ -269,9 +269,17 @@ impl Snapshot {
         })
     }
 
-    pub fn model_error_messages(&self) -> Vec<String> {
+    pub fn model_error_messages(
+        &self,
+        provider: Option<crate::session::ProviderKind>,
+    ) -> Vec<String> {
+        let provider = provider.map(|provider| match provider {
+            crate::session::ProviderKind::Codex => "codex",
+            crate::session::ProviderKind::Claude => "claude",
+        });
         self.model_errors
             .iter()
+            .filter(|(key, _)| provider.is_none_or(|provider| provider == key.as_str()))
             .map(|(provider, error)| {
                 let message = error
                     .get("message")
@@ -874,7 +882,12 @@ pub(crate) fn supported_settings<'a>(
         })
         .or_else(|| available.next());
     let Some(model) = model else {
-        return (selected_model, None, None);
+        return if models.is_empty() {
+            (selected_model, None, None)
+        } else {
+            // The other provider's catalog cannot validate this draft's options.
+            (selected_model, selected_effort, selected_tier)
+        };
     };
     let changed = selected_model.is_some() && selected_model != Some(&model.model);
     let effort = model

@@ -68,6 +68,7 @@ conversation-ui:
         testSimulatorOpensSideChatWithoutLosingOriginalDraft \
         testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
         testSimulatorCanStartAConversationInAProject \
+        testSimulatorModelDefaultsPersistAndApplyOnlyToNewConversations \
         testSimulatorOpensTasksBeforeHistoryReadFinishes \
         testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
         testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \

@@ -154,6 +154,7 @@ final class BexAppViewModel: ObservableObject {
     }
 
     func openPairing() {
+        persist()
         connection?.cancel()
         isConnecting = false
         pairingError = nil
@@ -187,13 +188,14 @@ final class BexAppViewModel: ObservableObject {
             connection?.cancel()
             connection = Task { [weak self] in
                 do {
-                    let identity = try DeviceIdentity.loadOrGenerate(id)
+                    await self?.persistenceWrite?.value
+                    let persisted = try SnapshotFiles.withModelDefaults(Data())
                     let owner = try await AgentStore.connect(connection: Connection(
                         ticket: invitation.endpoint,
-                        identity: identity,
+                        identity: DeviceIdentity.loadOrGenerate(id),
                         invitation: invitation.invitation,
                         useRelays: true
-                    ), persisted: Data(), diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id))
+                    ), persisted: persisted, diagnosticsDirectory: SnapshotFiles.diagnosticsDirectory(id))
                     guard let self, !Task.isCancelled else { try? await owner.shutdown(); return }
                     persist()
                     observation?.cancel()

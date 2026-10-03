@@ -94,11 +94,11 @@ impl Accounts {
         self.revision
     }
 
-    pub(super) fn home(&self) -> Result<PathBuf, String> {
+    pub(super) fn selected_home(&self) -> Result<Option<PathBuf>, String> {
         match self.registry.selected_id.as_deref() {
-            Some("claude:desktop") => Ok(self.native_home.clone()),
-            Some(id) => self.account_home(id),
-            None => Err("Claude アカウントを選択してください。".into()),
+            Some("claude:desktop") => Ok(Some(self.native_home.clone())),
+            Some(id) => self.account_home(id).map(Some),
+            None => Ok(None),
         }
     }
 
