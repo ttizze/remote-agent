@@ -169,6 +169,9 @@ transfer server just to delete that check would reverse A14.
 
 ## Execution
 
+- `nix develop . --command just quality` and the post-commit worker cover the
+  local Mac Host/desktop and iPhone client. Linux, Windows and Android run in
+  Native clients CI, including Android emulator acceptance on Ubuntu with KVM.
 - `nix develop . --command just quality rust` checks formatting, workspace
   Clippy, core library tests including the UniFFI bindings, and desktop rendering/input tests.
   The Native clients CI also enables `agent-core/bindings` to run the native

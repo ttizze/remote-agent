@@ -194,14 +194,14 @@ nix develop . --command just iroh-e2e                     # real daemon over iso
 nix develop . --command just android-e2e                  # fresh Android 17 emulator: network permission, Markdown, persistence and Host recovery
 nix develop . --command just ios-e2e [TestMethod…]        # Simulator XCUITest against a fixture Host
 nix develop . --command just conversation-ui             # selection, side chat, and activity regressions
-nix develop . --command just quality [rust|kotlin|swift]  # lint, core/desktop tests, Android emulator and conversation-ui
+nix develop . --command just quality [apple|rust|kotlin|swift]  # default: Mac Host/desktop and iPhone checks
 ```
 
 Claude contracts run with `nix develop . --command cargo test --locked -p host-fixture --test claude`. Build the companion supervisor first (see above). The tests use a deterministic external CLI boundary with real Store, iroh, Host routing, native transcript files and isolated Git/filesystem state. An anonymized transcript from Claude Code 2.1.266 also exercises native format compatibility. The opt-in `live_claude_subscription_completes_and_resumes_through_store_and_host` test uses the real authenticated CLI; set `BEX_LIVE_CLAUDE_PROGRAM` to its absolute path and run that test with `-- --ignored --exact` to verify subscription inference, resumption across a Host restart, interruption and successful input after interruption.
 
-Linux CI uses GitHub-hosted Ubuntu 24.04 runners and the `nix develop .#native` shell. Toolchain lookup runs on the same Ubuntu baseline, and Windows consumes the Rust version from the pinned flake. Install Lefthook once per clone (`lefthook install`) to queue quality checks after each commit; read the result with `cargo xtask quality-status --wait`. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
+Linux CI uses GitHub-hosted Ubuntu 24.04 runners and the `nix develop .#native` shell. Toolchain lookup runs on the same Ubuntu baseline, and Windows consumes the Rust version from the pinned flake. Install Lefthook once per clone (`lefthook install`) to queue Mac Host/desktop and iPhone checks after each commit; read the result with `cargo xtask quality-status --wait`. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
 
-Android CI runs on GitHub-hosted Ubuntu 24.04 with the pinned Nix SDK. It runs Kotlin checks and unit tests and builds both app and instrumentation APKs. Emulator acceptance remains available through `just android-e2e` and the local quality suite.
+Android CI runs on GitHub-hosted Ubuntu 24.04 with the pinned Nix SDK. It runs Kotlin checks and unit tests, builds app and instrumentation APKs, and runs emulator acceptance with KVM. Linux, Windows and Android verification runs in CI; the default local quality suite covers Mac and iPhone. `just android-e2e` and `just quality kotlin` remain available for focused Android debugging.
 
 Development and test builds keep filename/line-number backtraces without full variable debug information. Use `CARGO_PROFILE_DEV_DEBUG=full` when a debugger needs variables. Quality checks disable Rust incremental compilation; normal local builds retain it.
 
