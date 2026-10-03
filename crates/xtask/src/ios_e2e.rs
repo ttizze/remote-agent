@@ -170,7 +170,7 @@ async fn delete_devices(name: &str, cwd: &Path, log: &File) -> Result<()> {
 }
 
 async fn template(
-    qa: &Path,
+    owner_root: &Path,
     runtime: &str,
     records: &Path,
     cwd: &Path,
@@ -179,7 +179,7 @@ async fn template(
 ) -> Result<String> {
     let owner = format!(
         "{:x}",
-        Sha256::digest(qa.canonicalize()?.as_os_str().as_encoded_bytes())
+        Sha256::digest(owner_root.canonicalize()?.as_os_str().as_encoded_bytes())
     );
     let name = format!("Bex pristine E2E {owner} {runtime}");
     let devices = supervision::run(
@@ -360,7 +360,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
         return Err("Select unique isolated Simulator tests".into());
     }
     let workers = std::env::var("BEX_IOS_TEST_WORKERS")
-        .unwrap_or_else(|_| "2".to_owned())
+        .unwrap_or_else(|_| "1".to_owned())
         .parse::<usize>()?;
     if !(1..=10).contains(&workers) {
         return Err("BEX_IOS_TEST_WORKERS must be between 1 and 10".into());
@@ -392,12 +392,28 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
     ));
     fs::create_dir(&records)?;
     let build = qa.join("ios-derived-data");
+    let common = supervision::run(
+        &args![
+            "git",
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir"
+        ],
+        &cwd,
+        Io::Capture,
+        &cancel,
+        SETUP_TIMEOUT,
+    )
+    .await?;
+    let state = PathBuf::from(std::str::from_utf8(&common.stdout)?.trim_end()).join("bex-quality");
+    fs::create_dir_all(&state)?;
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(qa.join("ios-e2e.lock"))?;
+        .open(state.join("ios-e2e.lock"))?;
+    println!("Acquiring shared iOS test lock");
     loop {
         match lock.try_lock() {
             Ok(()) => break,
@@ -494,7 +510,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
     .await?;
     let runtime = runtime(&serde_json::from_slice(&runtimes.stdout)?)?;
     let template_started = Instant::now();
-    let template = template(&qa, &runtime, &records, &cwd, &log, &cancel).await?;
+    let template = template(&state, &runtime, &records, &cwd, &log, &cancel).await?;
     let template_seconds = template_started.elapsed().as_secs_f64();
     let runs = fs::read_dir(&products)?
         .map(|entry| entry.map(|entry| entry.path()))

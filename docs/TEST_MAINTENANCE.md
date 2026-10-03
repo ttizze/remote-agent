@@ -186,16 +186,17 @@ transfer server just to delete that check would reverse A14.
   -p host-daemon -p host-fixture` covers the integration tests omitted by the
   selected quality targets.
 - `nix develop . --command just conversation-ui` runs the maintained native
-  conversation contracts on two fresh isolated Simulator/Host pairs, sharing
-  one build. Each pair owns its history, failure controls and app storage.
+  conversation contracts on one fresh isolated Simulator/Host pair.
+  Each pair owns its history, failure controls and app storage.
   Set `BEX_IOS_TEST_WORKERS=1` for a serial audit, or 2–10 for parallel runs.
-  An initialized, app-free Simulator template is kept shut down for this Cargo
-  target and runtime. Each worker clones it into its own disposable device, then
+  An initialized, app-free Simulator template is kept shut down for this
+  repository and runtime. Each worker clones it into its own disposable device, then
   installs the current app and fixtures. Initial OS migration runs only when
   preparing the template; test devices and Hosts are still removed after each run.
   The runner retains Xcode derived data under the Cargo target's
-  `qa/ios-derived-data`, always builds the current revision, and holds a lock
-  through test completion so another run cannot replace the active binaries.
+  `qa/ios-derived-data`, always builds the current revision, and holds a
+  repository-wide lock through cleanup. Manual runs and quality workers in
+  different worktrees or Cargo targets cannot overlap native UI automation.
   Unchanged bindings preserve their timestamps; the compiled Swift bindings
   are reused only with matching sources, SDK, compiler and Rust runner.
   Per-worker logs, result bundles and a timing summary remain under `qa/Bex-*`.
