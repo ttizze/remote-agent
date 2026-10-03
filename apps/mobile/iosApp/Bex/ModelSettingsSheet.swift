@@ -76,6 +76,7 @@ struct ModelSettingsScreen: View {
                             ForEach(controls.efforts, id: \.self) { Text($0).tag(Optional($0)) }
                         }
                         .accessibilityIdentifier("model.sheet.effort")
+                        .accessibilityValue(defaults ? model.snapshot.modelDefaults().effort ?? "自動" : controls.effort)
                     }
                     if defaults, let tier = controls.fastServiceTier {
                         Picker("速度", selection: Binding<String?>(get: {
@@ -84,7 +85,10 @@ struct ModelSettingsScreen: View {
                             Text("自動").tag(String?.none)
                             Text("通常").tag(Optional("default"))
                             Text("高速").tag(Optional(tier))
-                        }.accessibilityIdentifier("model.defaults.speed")
+                        }
+                        .accessibilityIdentifier("model.defaults.speed")
+                        .accessibilityValue(model.snapshot.modelDefaults().serviceTier == nil ? "自動"
+                            : controls.fast ? "高速" : "通常")
                     } else if let next = controls.toggleFastTo {
                         Toggle(
                             "Fast",
