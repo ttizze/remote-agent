@@ -259,16 +259,19 @@ impl Worktrees {
 
 /// Inspect each visible execution directory once per list request. Git state must
 /// not share the project settings cache: main can move without settings changing.
-pub(crate) async fn merged_directories(directories: HashSet<String>) -> Result<HashSet<String>> {
+pub(crate) async fn directory_statuses(
+    directories: HashSet<String>,
+) -> Result<HashMap<String, agent_protocol::models::WorktreeStatus>> {
     use futures_util::{StreamExt, TryStreamExt};
     // Bound process fan-out while avoiding a serial Git round trip for every
     // visible conversation. Recompute on every request so new commits stay fresh.
     let results: Vec<_> = futures_util::stream::iter(directories)
         .map(|cwd| async move {
             tokio::task::spawn_blocking(move || {
-                merged_into_main(Path::new(&cwd))
-                    .unwrap_or(false)
-                    .then_some(cwd)
+                branch_status(Path::new(&cwd))
+                    .ok()
+                    .flatten()
+                    .map(|status| (cwd, status))
             })
             .await
         })
@@ -278,7 +281,7 @@ pub(crate) async fn merged_directories(directories: HashSet<String>) -> Result<H
     Ok(results.into_iter().flatten().collect())
 }
 
-fn merged_into_main(cwd: &Path) -> Result<bool> {
+fn branch_status(cwd: &Path) -> Result<Option<agent_protocol::models::WorktreeStatus>> {
     let identity = crate::git::text(
         cwd,
         &[
@@ -295,26 +298,38 @@ fn merged_into_main(cwd: &Path) -> Result<bool> {
     let (Some(git_dir), Some(common_dir), Some(head), Some(branch)) =
         (fields.next(), fields.next(), fields.next(), fields.next())
     else {
-        return Ok(false);
+        return Ok(None);
     };
     if git_dir == common_dir || branch == "refs/heads/main" || !branch.starts_with("refs/heads/") {
-        return Ok(false);
+        return Ok(None);
     }
-    let history = crate::git::text(cwd, &["reflog", "show", "--format=%H", branch])?;
-    let contained = crate::git::output(
+    let contained = crate::git::text(
         cwd,
         &[
-            "merge-base",
-            "--is-ancestor",
-            head.trim(),
+            "rev-list",
+            "--max-count=1",
+            head,
+            "--not",
             "refs/heads/main",
         ],
-    )
-    .is_ok();
-    Ok(agent_protocol::models::worktree_branch_merged(
+    )?
+    .is_empty();
+    let dirty = !crate::git::output(
+        cwd,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+    )?
+    .stdout
+    .is_empty();
+    let history = (contained && !dirty)
+        .then(|| crate::git::text(cwd, &["reflog", "show", "--format=%H", branch]))
+        .transpose()?;
+    Ok(agent_protocol::models::worktree_branch_status(
         head.trim(),
-        history.lines().last(),
+        history
+            .as_deref()
+            .and_then(|history| history.lines().last()),
         contained,
+        dirty,
     ))
 }
 

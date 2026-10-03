@@ -278,8 +278,20 @@ impl Desktop {
         let id = thread.id.clone();
         let active = thread.active;
         let unread = thread.unread;
-        let merged = thread.worktree_merged;
-        let merged_id = format!("thread-merged-{}", thread.id);
+        let worktree = thread.worktree_status.map(|status| match status {
+            agent_protocol::models::WorktreeStatus::Unmerged => (
+                "bex/diff.svg",
+                0xfb923c,
+                "main に未反映の変更あり",
+                format!("thread-unmerged-{}", thread.id),
+            ),
+            agent_protocol::models::WorktreeStatus::Merged => (
+                "bex/merge.svg",
+                0xa78bfa,
+                "main にマージ済み",
+                format!("thread-merged-{}", thread.id),
+            ),
+        });
         SidebarMenuItem::new(thread.title.clone())
             .active(self.selected() == Some(&id) && self.tab != Tab::Settings)
             .suffix(move |_, _| {
@@ -291,16 +303,17 @@ impl Desktop {
                     .when(!active && unread, |row| {
                         row.child(div().size(px(8.)).rounded_full().bg(rgb(0xffffff)))
                     })
-                    .when(merged, |row| {
+                    .when_some(worktree.clone(), |row, (path, color, label, id)| {
                         row.child(
                             div()
-                                .id(merged_id.clone())
+                                .id(id.clone())
+                                .debug_selector(move || id.clone())
                                 .role(Role::Image)
-                                .child(Icon::default().path("bex/merge.svg").size_4())
-                                .text_color(rgb(0xa78bfa))
-                                .aria_label("main にマージ済み")
-                                .tooltip(|window, cx| {
-                                    tooltip::Tooltip::new("main にマージ済み").build(window, cx)
+                                .child(Icon::default().path(path).size_4())
+                                .text_color(rgb(color))
+                                .aria_label(label)
+                                .tooltip(move |window, cx| {
+                                    tooltip::Tooltip::new(label).build(window, cx)
                                 }),
                         )
                     })
@@ -442,8 +455,8 @@ mod tests {
         let snapshot = Snapshot {
             threads: Some(Arc::new(
                 serde_json::from_value(serde_json::json!({
-                    "data":[{"id":{"provider":"codex","id":"first"},"name":"First task"},
-                            {"id":{"provider":"codex","id":"second"},"name":"Second task"}],
+                    "data":[{"id":{"provider":"codex","id":"first"},"name":"First task","worktreeStatus":"unmerged"},
+                            {"id":{"provider":"codex","id":"second"},"name":"Second task","worktreeStatus":"merged"}],
                     "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
                 }))
                 .unwrap(),
@@ -491,6 +504,17 @@ mod tests {
         });
         window.run_until_parked();
         // Leave the Tokio executor parked so both task reads remain pending.
+        for (id, status) in [("first", "unmerged"), ("second", "merged")] {
+            let session = agent_protocol::session::SessionRef {
+                provider: agent_protocol::session::ProviderKind::Codex,
+                id: id.into(),
+            };
+            assert!(
+                window
+                    .debug_bounds(&format!("thread-{status}-{session}"))
+                    .is_some()
+            );
+        }
         for (id, selector) in [("first", "task-0"), ("second", "task-1")] {
             let button = window.debug_bounds(selector).unwrap().center();
             window.simulate_click(button, Modifiers::default());
