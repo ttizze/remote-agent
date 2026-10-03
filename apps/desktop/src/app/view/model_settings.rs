@@ -8,6 +8,14 @@ fn provider_icon(provider: ProviderKind) -> Icon {
     })
 }
 
+fn fast_icon(fast: bool) -> Icon {
+    Icon::default().path(if fast {
+        "bex/bolt-fill.svg"
+    } else {
+        "bex/bolt.svg"
+    })
+}
+
 fn account_identity(provider: Option<ProviderKind>, identity: &str) -> Div {
     h_flex()
         .min_w_0()
@@ -135,7 +143,7 @@ impl Desktop {
                 Button::new("default-model-speed")
                     .disabled(self.session.is_none())
                     .label(if quick.fast { "高速" } else { "通常" })
-                    .icon(Icon::default().path("bex/bolt.svg"))
+                    .icon(fast_icon(quick.fast))
                     .accessibility_label("新しい会話の速度")
                     .debug_selector(|| "default-model-speed".into())
                     .ghost()
@@ -1038,18 +1046,12 @@ impl Desktop {
         } else {
             "Fast：オフ"
         };
-        self.icon_button(
-            id,
-            Icon::default().path("bex/bolt.svg"),
-            label,
-            cx,
-            move |s, _, _| {
-                s.dispatch(Intent::SelectServiceTier {
-                    thread_id: s.draft_key().clone(),
-                    service_tier: next.clone(),
-                });
-            },
-        )
+        self.icon_button(id, fast_icon(controls.fast), label, cx, move |s, _, _| {
+            s.dispatch(Intent::SelectServiceTier {
+                thread_id: s.draft_key().clone(),
+                service_tier: next.clone(),
+            });
+        })
         .debug_selector(move || id.into())
         .when(!expanded, |button| button.w(px(40.)))
         .when(expanded, |button| {

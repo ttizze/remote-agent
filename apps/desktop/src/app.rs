@@ -83,6 +83,11 @@ enum SettingsPage {
     Connections,
     Worktrees,
 }
+enum WorktreeToggle {
+    Create(bool),
+    Copy(bool),
+    DeleteMerged(bool),
+}
 #[derive(Clone, Copy, PartialEq)]
 enum ModelPanel {
     Models,
@@ -1728,16 +1733,16 @@ impl Desktop {
                         .eq(settings.copy_paths.iter().map(String::as_str))
             })
     }
-    fn save_worktree_settings(&mut self, toggle: Option<(bool, bool)>, cx: &Context<Self>) {
+    fn save_worktree_settings(&mut self, toggle: Option<WorktreeToggle>, cx: &Context<Self>) {
         let Some(settings) = &self.snapshot.workspace.settings else {
             return;
         };
         let mut settings: WorktreeSettings = settings.as_ref().clone();
-        if let Some((create, checked)) = toggle {
-            if create {
-                settings.create_on_new_session = checked;
-            } else {
-                settings.copy_on_create = checked;
+        if let Some(toggle) = toggle {
+            match toggle {
+                WorktreeToggle::Create(checked) => settings.create_on_new_session = checked,
+                WorktreeToggle::Copy(checked) => settings.copy_on_create = checked,
+                WorktreeToggle::DeleteMerged(checked) => settings.delete_merged = checked,
             }
         }
         settings.worktree_directory = self.worktree_directory.read(cx).value().trim().into();

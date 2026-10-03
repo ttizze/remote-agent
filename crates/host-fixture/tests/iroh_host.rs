@@ -1566,7 +1566,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         let initial = request(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":workspace})).await;
         assert_eq!(initial["thread"]["cwd"], workspace.to_str().unwrap());
         let destination = root.join("worktree storage");
-        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"],"worktreeDirectory":destination});
+        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"],"worktreeDirectory":destination,"deleteMerged":false});
         assert_eq!(request(&service, &mut session, "host/worktree/settings/update", settings.clone()).await, settings);
         let mut ids = Vec::new();
         let mut paths = Vec::new();
@@ -2392,6 +2392,235 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         endpoint.close().await;
         fixture.close().await.unwrap();
     }).await.expect("worktree management exceeded its deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn merged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() {
+    fn git(cwd: &Path, args: &[&str]) -> String {
+        let result = std::process::Command::new("git")
+            .current_dir(cwd)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        String::from_utf8(result.stdout).unwrap().trim().to_owned()
+    }
+    async fn removed(path: &Path) {
+        while path.exists() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(210), async {
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        git(&project, &["init", "--initial-branch=main"]);
+        git(&project, &["commit", "--allow-empty", "-m", "base"]);
+        let program = host_fixture::fixture::Config {
+            deferred_thread_metadata: true,
+            ..Default::default()
+        }
+        .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), &root)
+        .unwrap();
+        let fixture = HostFixture::start(
+            &root,
+            AppServerConfig {
+                program,
+                ..Default::default()
+            },
+            Arc::new(Memory::default()),
+            "isolated",
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let local = fixture.local().await.unwrap();
+        let mut settings = models::WorktreeSettings {
+            create_on_new_session: true,
+            ..Default::default()
+        };
+        local
+            .peer
+            .call(&op::UpdateWorktreeSettings {
+                settings: settings.clone(),
+            })
+            .await
+            .unwrap();
+        let mut checkouts = Vec::new();
+        for name in ["running", "terminal", "dirty", "clean"] {
+            let response = local
+                .peer
+                .call(&rpc::CreateSession {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    cwd: Some(project.to_str().unwrap().into()),
+                    model: None,
+                })
+                .await
+                .unwrap();
+            let id = response.thread.id.unwrap();
+            let path = PathBuf::from(response.thread.cwd.unwrap());
+            git(&path, &["commit", "--allow-empty", "-m", name]);
+            let branch = git(&path, &["branch", "--show-current"]);
+            git(&project, &["merge", "--ff-only", &branch]);
+            checkouts.push((id, path, branch));
+        }
+        let (active, active_path, active_branch) = &checkouts[0];
+        let receipt = local
+            .peer
+            .call(&rpc::Submission {
+                thread_id: active.clone(),
+                client_user_message_id: "cleanup-running".into(),
+                input: vec![rpc::Input::Text {
+                    text: "[request] keep running until interrupted".into(),
+                }],
+                model: None,
+                effort: None,
+                service_tier: None,
+            })
+            .await
+            .unwrap();
+        let (opened, mut events) = open_session(&local.peer, &json!(active), 5).await;
+        assert_eq!(opened["response"]["thread"]["status"], "running");
+        let listed = local
+            .peer
+            .call(&rpc::ListSessions::new(Default::default()))
+            .await
+            .unwrap();
+        assert!(
+            !listed
+                .data
+                .iter()
+                .any(|thread| thread.id.as_ref() == Some(active)),
+            "the active first turn must be absent from the history list in this regression"
+        );
+        let terminal_path = &checkouts[1].1;
+        local
+            .peer
+            .call(&rpc::StartTerminal {
+                handle: "cleanup-terminal".into(),
+                cwd: terminal_path.to_str().unwrap().into(),
+                size: rpc::TerminalSize { rows: 24, cols: 80 },
+            })
+            .await
+            .unwrap();
+        local
+            .peer
+            .call(&rpc::DetachTerminal {
+                handle: "cleanup-terminal".into(),
+            })
+            .await
+            .unwrap();
+        let dirty_path = &checkouts[2].1;
+        std::fs::write(dirty_path.join("untracked.txt"), "preserve local data").unwrap();
+        assert!(
+            checkouts.iter().all(|(_, path, _)| path.exists()),
+            "cleanup defaults to disabled"
+        );
+        settings.delete_merged = true;
+        local
+            .peer
+            .call(&op::UpdateWorktreeSettings { settings })
+            .await
+            .unwrap();
+        removed(&checkouts[3].1).await;
+        assert!(active_path.exists(), "a merged running turn must stay");
+        assert!(
+            terminal_path.exists(),
+            "a detached terminal still owns its worktree"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dirty_path.join("untracked.txt")).unwrap(),
+            "preserve local data"
+        );
+        local
+            .peer
+            .call(&rpc::Interrupt {
+                thread_id: active.clone(),
+                turn_id: receipt.turn_id.unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(completed_turn(&mut events).await["status"], "interrupted");
+        git(
+            active_path,
+            &["commit", "--allow-empty", "-m", "new work after merge"],
+        );
+        local
+            .peer
+            .call(&rpc::StartTerminal {
+                handle: "cleanup-terminal".into(),
+                cwd: terminal_path.to_str().unwrap().into(),
+                size: rpc::TerminalSize { rows: 24, cols: 80 },
+            })
+            .await
+            .unwrap();
+        local
+            .peer
+            .request::<models::Empty>(&agent_protocol::protocol::Call::KillTerminal(
+                rpc::TerminalKill {
+                    process_handle: "cleanup-terminal".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        std::fs::remove_file(dirty_path.join("untracked.txt")).unwrap();
+        removed(terminal_path).await;
+        removed(dirty_path).await;
+        assert!(
+            active_path.exists(),
+            "completion must not remove a new unmerged commit"
+        );
+        git(
+            &project,
+            &[
+                "merge",
+                "--no-ff",
+                "-m",
+                "merge additional work",
+                active_branch,
+            ],
+        );
+        removed(active_path).await;
+        for (id, path, branch) in &checkouts {
+            let (opened, _) = open_session(&local.peer, &json!(id), 5).await;
+            assert_eq!(
+                opened["response"]["thread"]["id"],
+                json!(id),
+                "cleanup preserves conversations"
+            );
+            assert_eq!(opened["response"]["thread"]["cwd"], path.to_str().unwrap());
+            assert!(
+                !path.exists(),
+                "reading retained history must not recreate checkouts"
+            );
+            assert!(
+                !git(&project, &["rev-parse", branch]).is_empty(),
+                "cleanup preserves branches"
+            );
+        }
+        local.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("merged worktree cleanup deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
