@@ -5,9 +5,24 @@ set positional-arguments
 default:
     @just --list
 
+# Run all unit tests without starting clients, Simulators or emulators.
+unit-tests:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    failed=0
+    cargo build --locked -p bex-process --bin bex-provider-supervisor || failed=1
+    cargo nextest run --locked --no-fail-fast --workspace --lib --bins --features agent-core/bindings,agent-ffi/bindgen &
+    rust_pid=$!
+    nix build .#agent-peer --no-link || failed=1
+    if [[ $(uname -s) == Darwin ]]; then
+        cargo xtask ios-markdown || failed=1
+    fi
+    wait "$rust_pid" || failed=1
+    exit "$failed"
+
 # Prune inactive Cargo outputs older than 3 days or over the 32 GiB idle budget.
 clean-builds *args:
-    python3 scripts/clean-builds.py {{args}}
+    cargo xtask clean-builds {{args}}
 
 # Build and verify the certificate-signed Host executable.
 build-host-macos:
@@ -34,9 +49,17 @@ dev: build-desktop-macos
 ios-e2e *tests:
     scripts/ios-e2e.sh "$@"
 
+# Archive iOS with the pinned package plugins trusted from the first build.
+ios-archive archive-path derived-data-path *args:
+    scripts/archive-ios.sh "$@"
+
 # Headless tests of the production iOS Markdown parser.
 ios-markdown:
-    scripts/test-ios-markdown.sh
+    cargo xtask ios-markdown
+
+# Exercise the production Mac Browser view and WebKit persistence in fresh processes.
+macos-e2e:
+    cargo test --locked --features agent-core/bindings -p bex-desktop --test chrome_cookie_webview
 
 # Build and test Store recovery, Markdown and network permission on a fresh Android 17 emulator.
 android-e2e:
@@ -44,7 +67,7 @@ android-e2e:
     ./gradlew :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest --console=plain
     nix develop .#android-test --command bash scripts/android-e2e.sh
 
-# Native conversation contracts used by the post-commit Swift check.
+# Native conversation acceptance used by Apple CI and manual checks.
 conversation-ui:
     scripts/ios-e2e.sh \
         testSimulatorNativeTerminalRetainsShellAfterReopening \
@@ -68,6 +91,8 @@ conversation-ui:
         testSimulatorOpensSideChatWithoutLosingOriginalDraft \
         testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
         testSimulatorCanStartAConversationInAProject \
+        testSimulatorModelDefaultsPersistAndApplyOnlyToNewConversations \
+        testSimulatorSelectsModelScopeAndShowsUsageBeforeManagingAccounts \
         testSimulatorOpensTasksBeforeHistoryReadFinishes \
         testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
         testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
@@ -80,8 +105,8 @@ iroh-e2e:
     cargo build --locked --package bex-process --bin bex-provider-supervisor
     cargo test --locked --package host-fixture --test iroh_host
 
-# Run Rust, Kotlin and Swift quality checks, or one selected language.
-quality language="all":
+# Check the local Mac Host/desktop and iPhone client, or one selected language.
+quality language="apple":
     scripts/quality.sh "$1"
 
 # Audit diff presentation tests in an isolated copy; extra arguments go to cargo-mutants.

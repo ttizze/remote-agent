@@ -94,11 +94,11 @@ impl Accounts {
         self.revision
     }
 
-    pub(super) fn home(&self) -> Result<PathBuf, String> {
+    pub(super) fn selected_home(&self) -> Result<Option<PathBuf>, String> {
         match self.registry.selected_id.as_deref() {
-            Some("claude:desktop") => Ok(self.native_home.clone()),
-            Some(id) => self.account_home(id),
-            None => Err("Claude アカウントを選択してください。".into()),
+            Some("claude:desktop") => Ok(Some(self.native_home.clone())),
+            Some(id) => self.account_home(id).map(Some),
+            None => Ok(None),
         }
     }
 
@@ -225,7 +225,6 @@ impl Accounts {
 
     pub(crate) async fn request(&mut self, request: Call) -> Result<Body, String> {
         match request {
-            Call::ListAccounts(_) => unreachable!("listing is merged by Host"),
             Call::SelectAccount(params) => {
                 let home = self.account_home(&params.id)?;
                 self.info(&home, params.id.clone())
@@ -301,6 +300,7 @@ impl Accounts {
                     }
                 };
                 Ok(AccountLogin {
+                    provider: ProviderKind::Claude,
                     login_id: id,
                     user_code: String::new(),
                     verification_url,
@@ -552,6 +552,7 @@ mod tests {
             accounts
                 .request(Call::LogoutAccount(
                     agent_protocol::operations::LogoutAccount {
+                        provider: agent_protocol::session::ProviderKind::Claude,
                         id: "claude:desktop".into(),
                     }
                 ))

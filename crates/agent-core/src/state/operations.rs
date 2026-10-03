@@ -96,13 +96,19 @@ pub enum Intent {
     },
     LoadModels(LoadModels),
     SelectDefaultModel {
+        scope: super::ModelDefaultsScope,
         model: Option<crate::models::ModelRef>,
     },
     SelectDefaultEffort {
+        scope: super::ModelDefaultsScope,
         effort: Option<String>,
     },
     SelectDefaultServiceTier {
+        scope: super::ModelDefaultsScope,
         service_tier: Option<String>,
+    },
+    InheritModelDefaults {
+        scope: super::ModelDefaultsScope,
     },
     SetDraft {
         thread_id: DraftKey,

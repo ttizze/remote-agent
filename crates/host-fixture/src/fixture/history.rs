@@ -159,7 +159,52 @@ pub(super) fn page(
     let offset = offset(params);
     let count = limit(params, 10);
     let descending = params["sortDirection"] == "desc";
-    if method == "thread/turns/list" {
+    if method == "thread/timeline/list" {
+        context.trace(method, params.clone())?;
+        if let Some(response) = thread.metadata.get("fixtureTimelineResponse") {
+            return context.respond(id, response);
+        }
+        let offset = params["cursor"]
+            .as_str()
+            .and_then(|cursor| cursor.strip_prefix("timeline:"))
+            .and_then(|cursor| cursor.parse::<usize>().ok())
+            .unwrap_or(0);
+        let count = count.min(
+            thread
+                .metadata
+                .get("fixtureTimelinePageLimit")
+                .and_then(Value::as_u64)
+                .and_then(|limit| usize::try_from(limit).ok())
+                .unwrap_or(count),
+        );
+        let mut entries = Vec::new();
+        for turn in &turns {
+            entries.push(json!({"type":"turnStarted","position":entries.len(),
+                "turnId":turn["id"],"startedAt":turn["startedAt"]}));
+            for item in turn["items"].as_array().unwrap() {
+                entries.push(json!({"type":"item","position":entries.len(),
+                    "turnId":turn["id"],"item":item}));
+            }
+            if turn["status"] != "inProgress" {
+                entries.push(json!({"type":"turnCompleted","position":entries.len(),
+                    "turnId":turn["id"],"status":turn["status"],
+                    "startedAt":turn["startedAt"],"completedAt":turn["completedAt"],
+                    "durationMs":turn["durationMs"],"error":turn["error"]}));
+            }
+        }
+        let end = entries.len().saturating_sub(offset);
+        let start = end.saturating_sub(count);
+        let data: Vec<_> = entries[start..end].iter().collect();
+        let next_cursor = (start > 0).then(|| format!("timeline:{}", offset + data.len()));
+        context.respond(
+            id,
+            &Page {
+                data,
+                next_cursor,
+                backwards_cursor: None,
+            },
+        )
+    } else if method == "thread/turns/list" {
         let end = offset.saturating_add(count).min(turns.len());
         let data = (offset..end)
             .map(|index| TurnView {
@@ -186,6 +231,7 @@ pub(super) fn page(
             turn_id: &'a Value,
             item: &'a Value,
         }
+        context.trace(method, params.clone())?;
         let mut values: Vec<_> = turns
             .iter()
             .filter(|turn| turn["id"] == params["turnId"])

@@ -1,7 +1,8 @@
 //! Device storage is an explicit subset of runtime state. Host results and
 //! connection authority are fetched again, never restored from this format.
 use crate::state::{
-    Activity, Draft, FileDraft, ModelDefaults, Navigation, PendingSubmission, ScopedData, Snapshot,
+    Activity, Draft, FileDraft, ModelDefaults, ModelDefaultsScope, Navigation, PendingSubmission,
+    ScopedData, Snapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
@@ -12,6 +13,8 @@ use std::{collections::BTreeMap, sync::Arc};
 pub struct PersistedState {
     #[serde(default)]
     model_defaults: ModelDefaults,
+    #[serde(default, with = "entries")]
+    scoped_model_defaults: Arc<BTreeMap<ModelDefaultsScope, ModelDefaults>>,
     storage_scope: String,
     archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(with = "entries")]
@@ -26,6 +29,7 @@ impl PersistedState {
     pub fn capture(snapshot: &Snapshot) -> Self {
         Self {
             model_defaults: snapshot.model_defaults.clone(),
+            scoped_model_defaults: snapshot.scoped_model_defaults.clone(),
             storage_scope: snapshot.storage_scope.clone(),
             archived_scopes: snapshot.archived_scopes.clone(),
             drafts: snapshot.drafts.clone(),
@@ -41,6 +45,45 @@ pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&PersistedState::capture(snapshot))
 }
 
+/// Device-owned presets shared by every saved Host snapshot.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelPreferences {
+    #[serde(flatten)]
+    defaults: ModelDefaults,
+    #[serde(default, with = "entries")]
+    scoped: Arc<BTreeMap<ModelDefaultsScope, ModelDefaults>>,
+}
+impl ModelPreferences {
+    pub fn capture(snapshot: &Snapshot) -> Self {
+        Self {
+            defaults: snapshot.model_defaults.clone(),
+            scoped: snapshot.scoped_model_defaults.clone(),
+        }
+    }
+}
+pub fn encode_model_preferences(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&ModelPreferences::capture(snapshot))
+}
+
+pub fn apply_model_preferences(
+    persisted: &[u8],
+    defaults: &[u8],
+) -> Result<Vec<u8>, serde_json::Error> {
+    let mut saved = if persisted.is_empty() {
+        PersistedState::capture(&Snapshot::default())
+    } else {
+        serde_json::from_slice::<PersistedState>(persisted)?
+    };
+    let preferences: ModelPreferences = if defaults.is_empty() {
+        ModelPreferences::default()
+    } else {
+        serde_json::from_slice(defaults)?
+    };
+    saved.model_defaults = preferences.defaults;
+    saved.scoped_model_defaults = preferences.scoped;
+    serde_json::to_vec(&saved)
+}
+
 pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     if bytes.is_empty() {
         return Ok(Snapshot::default());
@@ -48,6 +91,7 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
     let saved: PersistedState = serde_json::from_slice(bytes)?;
     Ok(Snapshot {
         model_defaults: saved.model_defaults,
+        scoped_model_defaults: saved.scoped_model_defaults,
         storage_scope: saved.storage_scope,
         archived_scopes: saved.archived_scopes,
         drafts: saved.drafts,

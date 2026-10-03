@@ -387,9 +387,9 @@ impl Desktop {
                         )
                         .child(self.permission_menu(cx))
                         .child(div().flex_1())
-                        .child(self.fast_control(cx))
+                        .child(self.fast_control("model-fast", false, cx))
                         .child(self.model_menu(cx))
-                        .child(self.effort_control(cx))
+                        .child(self.effort_control("model-effort", false, cx))
                         .child(microphone)
                         .child(send.large().rounded(px(22.)).w(px(44.)).h(px(44.)).ghost()),
                 )

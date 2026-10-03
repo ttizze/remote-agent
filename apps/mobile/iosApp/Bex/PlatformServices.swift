@@ -5,7 +5,7 @@ import Security
 import SwiftUI
 import UIKit
 
-/// Atomic per-Host persistence for lifecycle flushes and completed submissions/media edits.
+/// Device preferences and atomic per-Host user work share one persistence owner.
 enum SnapshotFiles {
     private static func location(_ host: String) throws -> URL {
         let directory = try FileManager.default.url(
@@ -23,14 +23,21 @@ enum SnapshotFiles {
     }
 
     static func load(_ host: String) async throws -> Data {
-        try await Task.detached(priority: .utility) {
+        let bytes = try await Task.detached(priority: .utility) {
             let url = try location(host)
             return FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : Data()
         }.value
+        return try withModelPreferences(bytes)
+    }
+
+    static func withModelPreferences(_ persisted: Data) throws -> Data {
+        try applyModelPreferences(persisted: persisted,
+                                  defaults: UserDefaults.standard.data(forKey: "bex.model-defaults") ?? Data())
     }
 
     static func save(_ host: String, snapshot: AgentCore.Snapshot) async throws {
         try await Task.detached(priority: .utility) {
+            try UserDefaults.standard.set(snapshot.serializeModelPreferences(), forKey: "bex.model-defaults")
             try snapshot.serializeLocalState().write(to: location(host), options: .atomic)
         }.value
     }

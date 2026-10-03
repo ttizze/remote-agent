@@ -2,12 +2,11 @@ use super::*;
 
 use agent_protocol::composer::ComposerCatalog;
 pub use agent_protocol::operations::LoadComposerCatalog;
+use agent_protocol::session::ProviderKind;
 
 pub(crate) fn prefetch_composer_catalog(snapshot: &mut Snapshot) -> Option<Effect> {
     if !snapshot.connected
         || snapshot.navigation.draft_key.is_empty()
-        || snapshot.model_provider_for_draft(snapshot.navigation.draft_key.clone())
-            == crate::session::ProviderKind::Claude
         || snapshot
             .composer_catalog
             .as_ref()
@@ -54,9 +53,18 @@ impl Operation for LoadComposerCatalog {
             .unwrap_or_else(|_| ComposerCatalog {
                 cwd: self.cwd.clone(),
                 candidates: source.candidates.clone(),
-                errors: vec![
-                    "候補を取得できませんでした。再度 @ または / を入力してください。".into(),
-                ],
+                errors: [ProviderKind::Codex, ProviderKind::Claude]
+                    .into_iter()
+                    .map(|provider| {
+                        (
+                            provider,
+                            vec![
+                                "候補を取得できませんでした。再度 @ または / を入力してください。"
+                                    .into(),
+                            ],
+                        )
+                    })
+                    .collect(),
                 ..Default::default()
             });
         Ok((source, catalog))

@@ -1,13 +1,16 @@
 { lib, rustPlatform }:
 
-rustPlatform.buildRustPackage {
-  pname = "agent-peer";
-  version = "0.1.0";
-  src = lib.fileset.toSource {
+let
+  source = lib.fileset.toSource {
     root = ./.;
     fileset = lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./src ./tests ./SKILL.md ./LICENSE ];
   };
-  cargoLock.lockFile = ./Cargo.lock;
+in
+rustPlatform.buildRustPackage {
+  pname = "agent-peer";
+  version = "0.1.0";
+  src = source;
+  cargoLock.lockFile = source + "/Cargo.lock";
   postInstall = ''
     mkdir -p "$out/share/agent-peer/scripts"
     cp SKILL.md "$out/share/agent-peer/"

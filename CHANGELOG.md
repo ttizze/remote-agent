@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Run all local Rust unit tests across crates in parallel with Nix-pinned cargo-nextest, concurrently with headless Swift Markdown tests, while collecting failures from both suites.
+
+- Run all unit tests locally with `just unit-tests` before integrating into main, then run full Native clients CI after pushes to main without requiring a PR. Run native Mac Browser E2E concurrently with iPhone conversation acceptance on two isolated Simulator/Host pairs within one Apple Silicon Mac. Remove Lefthook, the local background QA worker, its queue/status commands and its shared Cargo cache integration; retain manual debugging commands and workflow dispatch.
+
+- Batch completed dictation audio uploads instead of flushing every 100ms frame. Preserve sample-aligned chunks and transport backpressure, and cover lossless delivery of recordings longer than 30 seconds.
+- Use the OS certificate verifier for dictation WebSocket connections instead of loading and parsing the entire native root store for every recording.
+- Record Mac dictation inside the desktop process using the shared native microphone implementation. Initialize audio framework and device metadata at launch without opening the microphone. Remove the per-recording helper app and temporary audio files, and show microphone permission progress only while awaiting the first permission decision.
+
 - Move Linux and Android CI and Rust toolchain lookup from Hetzner to GitHub-hosted Ubuntu 24.04 runners with the pinned Nix environments. Keep native Windows CI and fix filesystem and CRLF assumptions in its shared presentation fixtures.
 - Use native Windows paths consistently for Host worktrees and provider configuration, compare Git worktree registrations as paths, and preserve JSON escapes in visualization references.
 - Prevent background Host Git status reads from refreshing the index and racing with worktree checkout or recovery.

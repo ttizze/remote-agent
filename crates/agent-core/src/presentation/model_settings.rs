@@ -2,7 +2,7 @@
 use crate::{
     models::{Model, ModelRef, provider_models},
     session::ProviderKind,
-    state::Snapshot,
+    state::{ModelDefaults, ModelDefaultsScope, Snapshot},
 };
 use agent_protocol::operations::UsageWindow;
 
@@ -28,18 +28,103 @@ pub struct ModelQuickControls {
     pub toggle_fast_to: Option<String>,
     pub fast_service_tier: Option<String>,
 }
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ModelScopeChoice {
+    pub id: String,
+    pub label: String,
+    pub scope: ModelDefaultsScope,
+}
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
-    pub fn model_defaults(&self) -> crate::state::ModelDefaults {
-        self.model_defaults.clone()
+    pub fn model_defaults(&self, scope: ModelDefaultsScope) -> ModelDefaults {
+        if scope == ModelDefaultsScope::Global {
+            return self.model_defaults.clone();
+        }
+        let inherited = match &scope {
+            ModelDefaultsScope::Project { environment, .. } => {
+                self.scoped_model_defaults
+                    .get(&ModelDefaultsScope::Environment {
+                        id: environment.clone(),
+                    })
+            }
+            _ => None,
+        };
+        self.scoped_model_defaults
+            .get(&scope)
+            .or(inherited)
+            .unwrap_or(&self.model_defaults)
+            .clone()
     }
 
-    pub fn default_model(&self) -> Option<Model> {
+    pub fn has_model_defaults_override(&self, scope: ModelDefaultsScope) -> bool {
+        self.scoped_model_defaults.contains_key(&scope)
+    }
+
+    pub fn model_project_scope_choices(&self, scope: ModelDefaultsScope) -> Vec<ModelScopeChoice> {
+        let all = match scope {
+            ModelDefaultsScope::Global => ModelDefaultsScope::Global,
+            _ if !self.storage_scope.is_empty() => ModelDefaultsScope::Environment {
+                id: self.model_environment_id().to_owned(),
+            },
+            _ => ModelDefaultsScope::Global,
+        };
+        let mut choices = vec![ModelScopeChoice {
+            id: "all".into(),
+            label: "すべてのプロジェクト".into(),
+            scope: all,
+        }];
+        if !self.storage_scope.is_empty() {
+            choices.extend(
+                self.threads
+                    .iter()
+                    .flat_map(|list| &list.projects)
+                    .map(|project| ModelScopeChoice {
+                        id: project.id.clone(),
+                        label: project.name.clone(),
+                        scope: ModelDefaultsScope::Project {
+                            environment: self.model_environment_id().to_owned(),
+                            project: project.id.clone(),
+                        },
+                    }),
+            );
+        }
+        choices
+    }
+
+    pub fn model_environment_scope_choices(
+        &self,
+        scope: ModelDefaultsScope,
+    ) -> Vec<ModelScopeChoice> {
+        let mut choices = Vec::new();
+        if !self.storage_scope.is_empty() {
+            let current = match scope {
+                ModelDefaultsScope::Global => ModelDefaultsScope::Environment {
+                    id: self.model_environment_id().to_owned(),
+                },
+                other => other,
+            };
+            choices.push(ModelScopeChoice {
+                id: "current".into(),
+                label: self.host_name.clone().unwrap_or("この環境".into()),
+                scope: current,
+            });
+        }
+        choices.push(ModelScopeChoice {
+            id: "all".into(),
+            label: "すべての環境".into(),
+            scope: ModelDefaultsScope::Global,
+        });
+        choices
+    }
+
+    pub fn default_model(&self, scope: ModelDefaultsScope) -> Option<Model> {
+        let defaults = self.model_defaults(scope);
         let (model, _, _) = crate::state::supported_settings(
-            self.model_defaults.model.as_ref(),
-            self.model_defaults.effort.as_deref(),
-            self.model_defaults.service_tier.as_deref(),
+            defaults.model.as_ref(),
+            defaults.effort.as_deref(),
+            defaults.service_tier.as_deref(),
             None,
             &self.models,
             !self.model_errors.is_empty(),
@@ -50,11 +135,12 @@ impl Snapshot {
             .cloned()
     }
 
-    pub fn default_model_controls(&self) -> ModelQuickControls {
+    pub fn default_model_controls(&self, scope: ModelDefaultsScope) -> ModelQuickControls {
+        let defaults = self.model_defaults(scope);
         let (model, effort, tier) = crate::state::supported_settings(
-            self.model_defaults.model.as_ref(),
-            self.model_defaults.effort.as_deref(),
-            self.model_defaults.service_tier.as_deref(),
+            defaults.model.as_ref(),
+            defaults.effort.as_deref(),
+            defaults.service_tier.as_deref(),
             None,
             &self.models,
             !self.model_errors.is_empty(),
@@ -77,14 +163,16 @@ impl Snapshot {
         )
     }
 
-    pub fn provider_models_matching(&self, provider: ProviderKind, query: String) -> Vec<Model> {
+    pub fn models_matching(&self, provider: Option<ProviderKind>, query: String) -> Vec<Model> {
         let query = query.trim().to_lowercase();
-        provider_models(&self.models, provider)
-            .into_iter()
+        self.models
+            .iter()
+            .filter(|model| provider.is_none_or(|provider| model.model.provider == provider))
             .filter(|model| {
                 model.display_name.to_lowercase().contains(&query)
                     || model.model.id.to_lowercase().contains(&query)
             })
+            .cloned()
             .collect()
     }
 
@@ -108,11 +196,16 @@ impl Snapshot {
 
     /// Keep every weekly bucket (including model-specific limits); never turn
     /// an unavailable quota into a full or empty bar. Labels are Host-normalized.
-    pub fn account_weekly_usage(&self, id: String) -> Vec<UsageWindow> {
+    pub fn account_weekly_usage(&self, provider: ProviderKind, id: String) -> Vec<UsageWindow> {
         self.account
             .accounts
             .as_ref()
-            .and_then(|accounts| accounts.accounts.iter().find(|account| account.id == id))
+            .and_then(|accounts| {
+                accounts
+                    .accounts
+                    .iter()
+                    .find(|account| account.provider == provider && account.id == id)
+            })
             .and_then(|account| account.usage.as_ref())
             .filter(|usage| usage.error.is_none())
             .map(|usage| {
@@ -215,11 +308,35 @@ mod tests {
                     proptest::prop_assert_eq!(snapshot.model_for_provider(key.clone(), provider), Some(selected.clone()));
                     proptest::prop_assert_eq!(snapshot.model_quick_controls(key).effort, effort);
                 }
-                let choices = snapshot.provider_models_matching(provider, id.clone());
+                let choices = snapshot.models_matching(Some(provider), id.clone());
                 proptest::prop_assert_eq!(choices.len(), 1);
                 proptest::prop_assert_eq!(&choices[0].model, &selected);
             }
+            proptest::prop_assert_eq!(snapshot.models_matching(None, id).len(), 2);
         }
+    }
+
+    #[test]
+    fn model_failures_are_shown_only_for_the_requested_provider() {
+        let snapshot = Snapshot {
+            model_errors: Arc::new(
+                serde_json::from_value(serde_json::json!({
+                    "codex": {"message": "Codex catalog failed"},
+                    "claude": {"message": "Claude catalog failed"}
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            snapshot.model_error_messages(Some(ProviderKind::Codex)),
+            ["codex: Codex catalog failed"]
+        );
+        assert_eq!(
+            snapshot.model_error_messages(Some(ProviderKind::Claude)),
+            ["claude: Claude catalog failed"]
+        );
+        assert_eq!(snapshot.model_error_messages(None).len(), 2);
     }
 
     #[test]
@@ -270,15 +387,23 @@ mod tests {
         assert!(controls.toggle_fast_to.is_none());
         assert!(
             snapshot
-                .provider_models_matching(ProviderKind::Codex, "haiku".into())
+                .models_matching(Some(ProviderKind::Codex), "haiku".into())
                 .is_empty()
         );
-        Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(serde_json::json!({"accounts":[
+        Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(
+            serde_json::from_value(serde_json::json!({"accounts":[
             {"id":"a","provider":"codex","usage":{"fetchedAt":1,"windows":[
                 {"label":"5時間枠","remainingPercent":72},{"label":"週間枠","remainingPercent":42},
                 {"label":"Opus 週間枠","remainingPercent":12}]}}
-        ]})).unwrap()));
-        assert_eq!(snapshot.account_weekly_usage("a".into()).len(), 2);
+        ],"selected":{}}))
+            .unwrap(),
+        ));
+        assert_eq!(
+            snapshot
+                .account_weekly_usage(ProviderKind::Codex, "a".into())
+                .len(),
+            2
+        );
         let accounts = Arc::make_mut(
             Arc::make_mut(&mut snapshot.account)
                 .accounts
@@ -286,6 +411,10 @@ mod tests {
                 .unwrap(),
         );
         accounts.accounts[0].usage.as_mut().unwrap().error = Some("unavailable".into());
-        assert!(snapshot.account_weekly_usage("a".into()).is_empty());
+        assert!(
+            snapshot
+                .account_weekly_usage(ProviderKind::Codex, "a".into())
+                .is_empty()
+        );
     }
 }

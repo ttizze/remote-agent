@@ -40,21 +40,7 @@ gpu=auto
 if [[ $(uname) == Darwin ]]; then gpu=host; fi
 emulator -avd "$avd" -gpu "$gpu" -report-console "unix:$fixture/console.sock,server,max=30" -no-window -no-audio -no-snapshot -no-boot-anim >"$log.emulator.log" 2>&1 &
 emulator_pid=$!
-port=$(python3 - "$fixture/console.sock" <<'PY'
-import socket, sys, time
-with socket.socket(socket.AF_UNIX) as connection:
-    connection.settimeout(30)
-    for attempt in range(300):
-        try:
-            connection.connect(sys.argv[1])
-            break
-        except (FileNotFoundError, ConnectionRefusedError):
-            time.sleep(0.1)
-    else:
-        raise SystemExit("Emulator did not publish its console socket")
-    print(int(connection.recv(32)))
-PY
-)
+port=$(cargo xtask android-console "$fixture/console.sock")
 serial="emulator-$port"
 boot_deadline=$((SECONDS + 300))
 boot_completed=''
@@ -76,27 +62,7 @@ if [[ $mode == terminal ]]; then
     adb -P "$server_port" -s "$serial" shell pm grant dev.remoteagent.mobile android.permission.ACCESS_LOCAL_NETWORK
 else
 test_status=0
-python3 - "$serial" "$log.network.log" "$server_port" <<'PYTHON' || test_status=$?
-import pathlib, re, socketserver, subprocess, sys, threading
-
-class Host(socketserver.StreamRequestHandler):
-    def handle(self):
-        self.wfile.write(b"bex-os-network-ok\n")
-
-with socketserver.TCPServer(('127.0.0.1', 0), Host) as host:
-    threading.Thread(target=host.serve_forever, daemon=True).start()
-    result = subprocess.run(
-        ['adb', '-P', sys.argv[3], '-s', sys.argv[1], 'shell', 'am', 'instrument', '-w', '-r',
-         '-e', 'networkPort', str(host.server_address[1]),
-         '-e', 'class', 'dev.remoteagent.mobile.NetworkPermissionTest',
-         'dev.remoteagent.mobile.test/androidx.test.runner.AndroidJUnitRunner'],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=180,
-    )
-    host.shutdown()
-pathlib.Path(sys.argv[2]).write_text(result.stdout)
-print(result.stdout)
-assert result.returncode == 0 and re.search(r'^OK \(1 test\)', result.stdout, re.M), "Android tests did not all pass"
-PYTHON
+cargo xtask android-network-permission "$serial" "$log.network.log" "$server_port" || test_status=$?
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission.png "$log.permission.png" || true
 if [[ $test_status != 0 ]]; then
     adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.startup-failure.png" || true

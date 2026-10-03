@@ -15,12 +15,21 @@ Switching between Claude and Codex requires a new conversation. Claude does not
 yet support active-turn steering or fork-based side chats; those requests fail
 explicitly instead of creating a Codex conversation or dropping the draft.
 
+Claude's `result` ends one response, while `session_state_changed: idle` marks
+the end of its run, including background work and the resulting follow-up.
+The Host requests these state events and keeps the turn running until both the
+result and idle have arrived, in either order, and queued input has been consumed.
+Intermediate text such as “あとで報告します” therefore retains the loading
+indicator; a promise in the text alone does not imply active work. Reconnection
+and history refresh retain the running turn and actionable requests.
+Acceptance: `claude_keeps_loading_through_background_results_and_follow_up_after_reconnect`.
+
 ## Turn lifecycle
 
 | Input state | Expanded work | Header / divider | Transition |
 | --- | --- | --- | --- |
 | No work item yet | n/a | Thinking | Replaced as the first renderable work item arrives |
-| `inProgress` | collapsed by default | Activity summary | Commentary stays visible; each work group opens only on explicit action |
+| `Running` | collapsed by default | Activity summary | Commentary stays visible; each work group opens only on explicit action |
 | Waiting on approval | collapsed by default | Awaiting approval | The pending request stays visible and actionable outside work |
 | Waiting on user input or MCP elicitation | collapsed by default | Waiting for your answer | The request stays outside a hidden collapsed body |
 | Final assistant output starts | collapsed by default | Past-message count | The answer stays visible outside work |
@@ -117,12 +126,24 @@ Account/model changes continue through the shared Store.
 Desktop's conversation and settings pages share the sidebar shell, width,
 header and collapse state. Only navigation contents and footer actions change;
 Back stays at the bottom and returns to the selected conversation and draft.
-Settings pages show a common applicability bar above their contents. It shows
-the current storage scope rather than implying that settings are written to
-every environment. Environment settings apply to every project on that Host;
-iPhone connection registrations belong to that iPhone. New-conversation model
-defaults are device preferences across environments, so their desktop
-applicability bar names all environments and this PC as the storage owner.
+Settings pages show a common applicability bar above their contents. Model
+defaults can target a project, the current environment, or all environments.
+New drafts use the most specific saved preset: project, then environment, then
+global. Existing drafts retain their selections. A scoped preset can be removed
+to inherit the common preset again. Both native clients use core preference
+intents and scope choices. The conversation picker applies model, reasoning depth
+and speed to the current conversation and shows no applicability selector.
+Applicability selectors belong to model defaults in settings, with environment
+before project. Preferences are saved on the device. Applying them
+on another Host preserves that Host's drafts and pending submissions.
+Account and worktree settings apply to every project on the selected Host; the
+environment selector switches the actual Host. Device connection registrations
+have a fixed device scope. The model picker orders agent selection, account,
+model catalog, then reasoning depth and speed. The selected account's weekly
+quota appears as a compact remaining-percentage bar before the model list;
+short-window quotas, reset times and fetched times stay in account management.
+The iPhone catalog scrolls within a bounded area so controls below it remain
+reachable without scrolling through the entire catalog.
 
 Acceptance: desktop
 `model_picker_keeps_quick_controls_and_routes_quota_to_account_management`, core
@@ -134,20 +155,18 @@ layout, capability filtering, navigation, quota and selection behavior.
 ## Project registration
 
 Desktop's project heading has a “＋” action. Both this action and the new-chat
-folder picker use Codex's `project/create` API before opening the chat draft.
-The Host reads `project/list` and supplies `projectId` when starting a chat in
-that project. A non-null native assignment is authoritative. Missing or null
-membership uses Host workspace matching for both Codex and Claude, including
-worktree roots. A null alone does not indicate an intentional projectless chat;
-Bex's dedicated chat directory remains projectless. Bex keeps no
-separate persistent project registry and does not read Desktop's retired JSON
-project metadata. A late registration refreshes the list without changing newer
-navigation.
+folder picker register the directory through the Host's ProjectStore before
+opening the chat draft. The Host persists registration in `bex-projects.json`
+and determines membership from workspace paths for both providers, including
+worktree roots. Adapters receive cwd when creating a conversation; native
+project catalogs and assignments do not determine Bex membership. Bex's dedicated
+chat directory remains projectless. A late registration refreshes the list
+without changing newer navigation.
 
 Acceptance: `adding_a_chat_folder_registers_a_project_before_submission` and
 `project_registration_navigates_only_while_current` cover registration, restart,
-duplicate selections, and navigation races. Native assignment and workspace
-matching are covered by `projects::state` tests.
+duplicate selections, and navigation races. Host registration and workspace
+matching are covered by `projects` tests.
 
 ## Workspace folder labels
 
@@ -387,7 +406,14 @@ Desktop file-change headers and patches, and the mobile expanded text, read
 field, so it must never be looked up in `Item::extra`. Deferred items retain
 file headers while their diff bodies are fetched separately.
 
-When a provider is unavailable, the model menu displays the remaining catalog and the provider error. An existing draft keeps its saved model and settings until the user changes them; a new draft selects an available default. iOS exposes the model catalog without requiring a Codex account. Codex exit fails its active turn but leaves the Host connection and Claude approvals/conversations usable.
+When a provider is unavailable, the model menu displays the remaining catalog.
+Missing Claude installation or account selection returns an empty catalog,
+without a model error. Genuine model failures appear only for the provider
+being viewed; device defaults in automatic mode may show failures across
+providers. An existing draft keeps its saved model and settings until the user
+changes them; a new draft selects an available default. iOS exposes the model
+catalog without requiring a Codex account. Codex exit fails its active turn but
+leaves the Host connection and Claude approvals/conversations usable.
 
 
 The September 2026 test consolidation preserves the assertions above. Full and
@@ -412,12 +438,12 @@ checks Store RPC parameters, returned conversation, subsequent deltas and late
 results after navigation.
 
 
-### セッション一覧のマージ表示
+### セッション一覧の変更・マージ表示
 
-- 実行ディレクトリが linked worktree のセッションは、作業ブランチの先端がローカル `main` に取り込まれているとき、紫の既存 Lucide `git-merge` アイコンを表示する（チェックの合成は行わない）。実行中のローディング／完了・未確認表示の右に並べ、両方の状態を保持する。PC・iOS・Android は共有 `ThreadSummary.worktree_merged` を表示する。
-- 作成直後、main 自体、detached HEAD、Git の確認失敗、作成履歴を確認できない場合は表示しない。ブランチの reflog の最古のコミットと先端が異なることを作業履歴の条件にする。squash/rebase による別コミットへの置換は判定対象外。
-- 一覧の再取得時（既存の実行状態通知・画面復帰・手動更新）に再判定し、未マージの追加コミットがあればマークを消す。Git の状態をプロジェクト設定のキャッシュに保存しない。
-- 受け入れ確認: core の `list_preserves_merge_status_alongside_activity_after_serialization_and_refresh`、実 Git と Host/Store の `session_list_tracks_real_worktree_merges_through_host_and_store`、iOS の `testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus`、Android の `mergeMarksCoexistWithRunningAndUnreadUsingTheCoreAdapter`。
+- 実行ディレクトリが linked worktree のセッションは、ローカル `main` に未マージのコミット、未コミットの編集、ステージ済み変更、未追跡ファイルがあれば、オレンジの Lucide `diff`（＋／−）アイコンを表示する。変更がなく作業ブランチの先端が `main` に取り込まれていれば、紫の既存 Lucide `git-merge` アイコンを表示する（チェックの合成は行わない）。実行中のローディング／完了・未確認表示の右に並べ、両方の状態を保持する。PC・iOS・Android は共有 `ThreadSummary.worktree_status` を表示する。
+- 作成直後で変更のないブランチ、main 自体、detached HEAD、Git の確認失敗では表示しない。マージ済みの判定は、ブランチの reflog の最古のコミットと先端が異なることを作業履歴の条件にする。作成履歴が不明でも未反映の変更は表示できる。squash/rebase による別コミットへの置換は判定対象外。
+- 一覧の再取得時（既存の実行状態通知・画面復帰・手動更新）に再判定する。マージ済みのあとに追加コミットや編集があれば差分アイコンに切り替え、編集を取り消すとマージ済みに戻る。Git の状態をプロジェクト設定のキャッシュに保存しない。
+- 受け入れ確認: core の `list_preserves_worktree_status_alongside_activity_after_serialization_and_refresh`、実 Git と Host/Store の `session_list_tracks_real_worktree_changes_and_merges_through_host_and_store`、iOS の `testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus`、Android の `worktreeMarksCoexistWithRunningAndUnreadUsingTheCoreAdapter`。
 
 ## Immediate submission feedback
 

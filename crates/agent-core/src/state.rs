@@ -32,6 +32,19 @@ pub struct ModelDefaults {
     pub effort: Option<String>,
     pub service_tier: Option<String>,
 }
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum ModelDefaultsScope {
+    #[default]
+    Global,
+    Environment {
+        id: String,
+    },
+    Project {
+        environment: String,
+        project: String,
+    },
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -191,6 +204,8 @@ pub struct TerminalView {
 pub struct Snapshot {
     #[serde(default)]
     pub model_defaults: ModelDefaults,
+    #[serde(default, with = "crate::persistence::entries")]
+    pub scoped_model_defaults: Arc<BTreeMap<ModelDefaultsScope, ModelDefaults>>,
     #[serde(skip)]
     pub permission_settings: Option<Arc<op::PermissionSettingsState>>,
     #[serde(skip)]
@@ -269,9 +284,17 @@ impl Snapshot {
         })
     }
 
-    pub fn model_error_messages(&self) -> Vec<String> {
+    pub fn model_error_messages(
+        &self,
+        provider: Option<crate::session::ProviderKind>,
+    ) -> Vec<String> {
+        let provider = provider.map(|provider| match provider {
+            crate::session::ProviderKind::Codex => "codex",
+            crate::session::ProviderKind::Claude => "claude",
+        });
         self.model_errors
             .iter()
+            .filter(|(key, _)| provider.is_none_or(|provider| provider == key.as_str()))
             .map(|(provider, error)| {
                 let message = error
                     .get("message")
@@ -455,10 +478,11 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             next.epoch += 1;
             let key = DraftKey::Local { key: format!("new:{cwd}") };
             if !previous.drafts.contains_key(&key) {
+                let defaults = previous.model_defaults_for_cwd(&cwd);
                 let mut draft = Draft {
-                    model: previous.model_defaults.model.clone(),
-                    effort: previous.model_defaults.effort.clone(),
-                    service_tier: previous.model_defaults.service_tier.clone(),
+                    model: defaults.model,
+                    effort: defaults.effort,
+                    service_tier: defaults.service_tier,
                     ..Default::default()
                 };
                 if !previous.models.is_empty() {
@@ -506,20 +530,33 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             }
         }
 
-        Intent::SelectDefaultModel { model } => {
-            if next.model_defaults.model != model {
-                next.model_defaults = ModelDefaults { model, ..Default::default() };
+        Intent::SelectDefaultModel { scope, model } => {
+            let mut defaults = previous.model_defaults(scope.clone());
+            if defaults.model != model {
+                defaults = ModelDefaults { model, ..Default::default() };
             }
+            set_model_defaults(&mut next, scope, defaults);
         }
-        Intent::SelectDefaultEffort { effort } => next.model_defaults.effort = effort,
-        Intent::SelectDefaultServiceTier { service_tier } => next.model_defaults.service_tier = service_tier,
+        Intent::SelectDefaultEffort { scope, effort } => {
+            let mut defaults = previous.model_defaults(scope.clone());
+            defaults.effort = effort;
+            set_model_defaults(&mut next, scope, defaults);
+        }
+        Intent::SelectDefaultServiceTier { scope, service_tier } => {
+            let mut defaults = previous.model_defaults(scope.clone());
+            defaults.service_tier = service_tier;
+            set_model_defaults(&mut next, scope, defaults);
+        }
+        Intent::InheritModelDefaults { scope } => {
+            Arc::make_mut(&mut next.scoped_model_defaults).remove(&scope);
+        }
         Intent::SetDraft { thread_id, draft } => {
             Arc::make_mut(&mut next.drafts).insert(thread_id, Arc::new(draft));
         }
         Intent::EditComposer { thread_id, text, cursor } => {
             let load_catalog = thread_id == previous.navigation.draft_key
                 && previous.connected
-                && previous.composer_query(&text, cursor as usize).is_some_and(|(_, _, filter)| {
+                && crate::composer::query(&text, cursor as usize).is_some_and(|(_, _, filter)| {
                     crate::composer::should_refresh_catalog(
                         previous.composer_catalog.as_ref()
                             .filter(|catalog| catalog.cwd == previous.navigation.cwd)
@@ -874,7 +911,12 @@ pub(crate) fn supported_settings<'a>(
         })
         .or_else(|| available.next());
     let Some(model) = model else {
-        return (selected_model, None, None);
+        return if models.is_empty() {
+            (selected_model, None, None)
+        } else {
+            // The other provider's catalog cannot validate this draft's options.
+            (selected_model, selected_effort, selected_tier)
+        };
     };
     let changed = selected_model.is_some() && selected_model != Some(&model.model);
     let effort = model
@@ -1086,5 +1128,55 @@ fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &crate::session::Sessio
         .any(|(id, pending)| echoed(id, pending))
     {
         Arc::make_mut(&mut snapshot.pending_submissions).retain(|id, pending| !echoed(id, pending));
+    }
+}
+
+fn set_model_defaults(snapshot: &mut Snapshot, scope: ModelDefaultsScope, defaults: ModelDefaults) {
+    if scope == ModelDefaultsScope::Global {
+        snapshot.model_defaults = defaults;
+    } else {
+        Arc::make_mut(&mut snapshot.scoped_model_defaults).insert(scope, defaults);
+    }
+}
+
+impl Snapshot {
+    /// Storage scope is Host node ID plus its session namespace. Model presets
+    /// belong to the Host even when that namespace changes.
+    pub(crate) fn model_environment_id(&self) -> &str {
+        self.storage_scope.split(':').next().unwrap_or_default()
+    }
+
+    pub(crate) fn model_defaults_for_cwd(&self, cwd: &str) -> ModelDefaults {
+        let project = self.threads.as_ref().and_then(|list| {
+            list.projects
+                .iter()
+                .flat_map(|project| {
+                    project.roots.iter().filter_map(move |root| {
+                        let trimmed = root.path.trim_end_matches(['/', '\\']);
+                        let path = if trimmed.is_empty() {
+                            root.path.as_str()
+                        } else {
+                            trimmed
+                        };
+                        (!path.is_empty()
+                            && (cwd == path
+                                || cwd.strip_prefix(path).is_some_and(|rest| {
+                                    path.ends_with(['/', '\\']) || rest.starts_with(['/', '\\'])
+                                })))
+                        .then_some((path.len(), &project.id))
+                    })
+                })
+                .max_by_key(|(length, _)| *length)
+                .map(|(_, id)| id.clone())
+        });
+        self.model_defaults(match project {
+            Some(project) => ModelDefaultsScope::Project {
+                environment: self.model_environment_id().to_owned(),
+                project,
+            },
+            None => ModelDefaultsScope::Environment {
+                id: self.model_environment_id().to_owned(),
+            },
+        })
     }
 }

@@ -133,3 +133,50 @@ async fn local_client_connects_over_loopback_without_relays() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn incompatible_wire_versions_are_rejected_in_both_directions() {
+    use agent_transport::transport::{Endpoint, Relays, Ticket};
+    use std::time::Duration;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let incompatible_alpn = b"remote-agent/streams/2";
+        let current = Endpoint::bind(Identity::generate(), Relays::Loopback)
+            .await
+            .unwrap();
+        let incompatible = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
+            .alpns(vec![incompatible_alpn.to_vec()])
+            .relay_mode(iroh::RelayMode::Disabled)
+            .clear_address_lookup()
+            .clear_ip_transports()
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+
+        let ticket: Ticket = iroh_tickets::endpoint::EndpointTicket::new(incompatible.addr())
+            .to_string()
+            .parse()
+            .unwrap();
+        let (outgoing, incoming) = tokio::join!(current.connect(&ticket), async {
+            incompatible.accept().await.unwrap().await
+        });
+        assert!(matches!(outgoing, Err(TransportError::Connection(_))));
+        assert!(incoming.is_err());
+
+        let ticket: iroh_tickets::endpoint::EndpointTicket =
+            current.local_ticket().to_string().parse().unwrap();
+        let (outgoing, incoming) = tokio::join!(
+            incompatible.connect(ticket.endpoint_addr().clone(), incompatible_alpn),
+            current.accept()
+        );
+        assert!(outgoing.is_err());
+        assert!(matches!(incoming, Some(Err(TransportError::Connection(_)))));
+
+        incompatible.close().await;
+        current.close().await;
+    })
+    .await
+    .unwrap();
+}

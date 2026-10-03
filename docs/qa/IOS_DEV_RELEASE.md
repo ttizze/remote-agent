@@ -4,11 +4,27 @@ BEX Dev is a separate TestFlight app (`com.ttizze.b-codex.dev`). It can be
 installed alongside BEX; its preferences, snapshots, and default Keychain
 access group are separate. Pair it with the development Host explicitly.
 
-Build the device core with `nix develop . --command scripts/build-agent-ios.sh device`.
-Archive the existing Bex scheme in Release with
-`-xcconfig apps/mobile/iosApp/Config/Dev.xcconfig`, a fresh archive/derived-data
-path, and the dedicated BEX signing keychain. The xcconfig owns the independent
+Archive with the reproducible command and fresh archive/derived-data paths:
+
+```sh
+nix develop . --command just ios-archive \
+  "$PWD/target/release-dev/BexDev.xcarchive" "$PWD/target/release-dev/DerivedData" \
+  -xcconfig "$PWD/apps/mobile/iosApp/Config/Dev.xcconfig" \
+  DEVELOPMENT_TEAM=K65K9J8686 \
+  OTHER_CODE_SIGN_FLAGS="--keychain /Users/tt/.appstoreconnect/signing/BEX.keychain-db"
+```
+
+This builds the device core and archives the existing Bex scheme in Release.
+The command uses only the checked-in package versions and trusts their build
+plugins from the first build, including SwiftTerm's build-info generator.
+Passing the development team also covers the package's build tools. Unlock the
+dedicated BEX signing keychain before archiving. The xcconfig owns the independent
 dev build number; increment it before subsequent dev uploads.
+
+For a direct installation on a registered device, use `CODE_SIGN_IDENTITY="Apple Development"`
+and the keychain containing that development identity. Install the app from
+`BexDev.xcarchive/Products/Applications`, verify its signature, and launch it on
+the device.
 
 Before upload, verify `CFBundleIdentifier = com.ttizze.b-codex.dev` and
 `CFBundleDisplayName = BEX Dev` in the archive. Export using the distribution

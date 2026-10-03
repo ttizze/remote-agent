@@ -701,7 +701,7 @@ fn turn_error(error: &models::ExecutionError) -> TurnErrorPresentation {
             Sandbox => "サンドボックスエラー",
             InputUnavailable => "この作業中はメッセージを追加できません",
             Network => "接続エラー",
-            Other => "エラー",
+            Other | Provider(_) => "エラー",
         }
     };
     TurnErrorPresentation {

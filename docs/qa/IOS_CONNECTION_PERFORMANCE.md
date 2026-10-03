@@ -27,11 +27,11 @@ Host の詳細ファイル出力は blocking worker へ渡す。
 アドレス、端末鍵、認証ヘッダー、会話本文、任意の依存ライブラリのメッセージは保存しない。
 
 ```sh
-python3 scripts/connection_diagnostics.py
+cargo xtask connection-diagnostics
 # ローカル検証用の Host を解析する場合
-python3 scripts/connection_diagnostics.py --log /path/to/logs/host.jsonl --platform Macos
+cargo xtask connection-diagnostics --log /path/to/logs/host.jsonl --platform Macos
 # 過去のアプリ起動から回収したキャプチャ
-python3 scripts/connection_diagnostics.py --trace TRACE_ID --attempt ATTEMPT_ID
+cargo xtask connection-diagnostics --trace TRACE_ID --attempt ATTEMPT_ID
 ```
 
 ## 計測点
@@ -103,7 +103,7 @@ TransportとCoreの実通信テストで、先行応答、期限、キャンセ�
 nix develop . --command cargo test -p agent-transport -p agent-core --features agent-core/bindings --lib
 nix develop . --command cargo test -p agent-transport --lib \
   real_relay_records_upstream_connection_boundaries -- --ignored --nocapture
-python3 -m unittest discover -s scripts/tests -p test_connection_diagnostics.py
+nix develop . --command cargo test --locked -p xtask --lib connection_diagnostics
 ```
 
 ## 詳細計測で分かったこと

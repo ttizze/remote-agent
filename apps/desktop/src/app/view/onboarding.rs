@@ -219,7 +219,7 @@ impl Desktop {
                                         if view.snapshot.connected {
                                             view.refresh_accounts_and_models();
                                         } else {
-                                            view.connect();
+                                            view.connect(None);
                                         }
                                         if let Some(hosts) = &view.hosts {
                                             hosts.update(cx, |hosts, _| hosts.refresh());
@@ -297,7 +297,7 @@ mod tests {
                     {"id":"gpt","model":{"provider":"codex","id":"gpt"},"displayName":"GPT","defaultReasoningEffort":"","supportedReasoningEfforts":[]},
                     {"id":"sonnet","model":{"provider":"claude","id":"sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
                 ])).unwrap());
-                Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(serde_json::json!({"accounts":[]})).unwrap()));
+                Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(serde_json::json!({"accounts":[],"selected":{}})).unwrap()));
             });
             cx.observe(&desktop, |_, _, cx| cx.notify()).detach();
             SetupView(desktop)
@@ -323,6 +323,7 @@ mod tests {
                 view.account_polling = true;
                 Arc::make_mut(&mut Arc::make_mut(&mut view.snapshot).account).login =
                     Some(Arc::new(agent_protocol::operations::AccountLogin {
+                        provider: agent_protocol::session::ProviderKind::Claude,
                         login_id: "fixture-login".into(),
                         requires_code_submission: true,
                         user_code: String::new(),

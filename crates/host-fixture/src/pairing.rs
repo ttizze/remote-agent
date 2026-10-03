@@ -143,7 +143,8 @@ fn route(
             }
         }
         "/worktree-conversation" => worktree_conversation(root)?,
-        "/merge-worktree/fresh" | "/merge-worktree/merged" | "/merge-worktree/new-work" => {
+        "/merge-worktree/fresh" | "/merge-worktree/merged" | "/merge-worktree/new-work"
+        | "/merge-worktree/dirty" | "/merge-worktree/clean" => {
             merge_worktree(root, path)?
         }
         "/worktree/unavailable" => fs::rename(
@@ -293,6 +294,8 @@ fn merge_worktree(root: &Path, path: &str) -> Result<()> {
             git(&checkout, &["commit", "--allow-empty", "-m", "work"])?;
             git(&repo, &["merge", "--ff-only", "task"])?;
         }
+        "/merge-worktree/dirty" => fs::write(checkout.join("pending.txt"), "pending\n")?,
+        "/merge-worktree/clean" => fs::remove_file(checkout.join("pending.txt"))?,
         _ => {
             git(&checkout, &["commit", "--allow-empty", "-m", "new work"])?;
         }
@@ -355,7 +358,7 @@ fn worktree_conversation(root: &Path) -> Result<()> {
 }
 
 fn list_fixture(root: &Path, path: &str) -> Result<()> {
-    let projects_path = root.join("projects.json");
+    let projects_path = root.join("bex-projects.json");
     let backup = root.join("projects-before-list-fixture.json");
     let fixture = root.join("list-fixture.json");
     if path.ends_with("/reset") {

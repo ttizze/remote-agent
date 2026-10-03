@@ -148,17 +148,20 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         }
         "accounts" => call!(ListAccounts {}),
         "selectAccount" => call!(SelectAccount {
+            provider: agent_protocol::session::ProviderKind::Codex,
             id: text(command, "accountId").to_owned()
         }),
         "startAccountLogin" => call!(StartAccountLogin {
             provider: agent_protocol::session::ProviderKind::Codex
         }),
         "accountLoginStatus" => call!(ReadAccountLogin {
+            provider: agent_protocol::session::ProviderKind::Codex,
             id: text(command, "loginId").to_owned(),
             thread_id: None,
         }),
         "cancelAccountLogin" => {
             call!(CancelAccountLogin {
+                provider: agent_protocol::session::ProviderKind::Codex,
                 id: text(command, "loginId").to_owned()
             });
             Value::Null

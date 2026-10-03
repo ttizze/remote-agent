@@ -92,7 +92,7 @@ pub struct Thread {
     pub id: Option<crate::session::SessionRef>,
     pub name: Option<String>,
     pub cwd: Option<String>,
-    pub worktree_merged: Option<bool>,
+    pub worktree_status: Option<WorktreeStatus>,
     #[serde(default)]
     pub status: SessionStatus,
     pub turns: Option<Vec<Arc<Turn>>>,
@@ -102,7 +102,6 @@ pub struct Thread {
     pub preview: Option<String>,
     pub created_at: Option<f64>,
     pub updated_at: Option<f64>,
-    pub history_mode: Option<String>,
     pub history_has_more: Option<bool>,
     pub history_limit: Option<u64>,
     pub list_stale: Option<bool>,
@@ -115,7 +114,6 @@ pub struct Turn {
     #[serde(default)]
     pub status: TurnStatus,
     pub items: Option<Vec<Arc<Item>>>,
-    pub items_view: Option<String>,
     pub items_has_more: Option<bool>,
     pub opening_user_message: Option<Arc<Item>>,
     pub started_at: Option<f64>,
@@ -340,7 +338,28 @@ pub struct ChangedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use serde_json::json;
+
+    proptest! {
+        #[test]
+        fn worktree_status_distinguishes_pending_work_from_integrated_history(
+            changed in any::<bool>(),
+            history_known in any::<bool>(),
+            contained in any::<bool>(),
+            dirty in any::<bool>(),
+        ) {
+            let head = if changed { "work" } else { "base" };
+            let status = worktree_branch_status(head, history_known.then_some("base"), contained, dirty);
+            let expected = match (dirty, contained, history_known, changed) {
+                (true, _, _, _) | (_, false, _, _) => Some(WorktreeStatus::Unmerged),
+                (false, true, true, true) => Some(WorktreeStatus::Merged),
+                _ => None,
+            };
+            prop_assert_eq!(status, expected);
+        }
+    }
+
     #[test]
     fn deferred_read_keeps_conversation_and_activity_headers() {
         let text = "会話".repeat(4096);
@@ -418,6 +437,25 @@ pub fn compact_title(value: &str) -> String {
     }
 }
 
-pub fn worktree_branch_merged(head: &str, initial: Option<&str>, contained_in_main: bool) -> bool {
-    contained_in_main && initial.is_some_and(|initial| initial != head)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorktreeStatus {
+    Unmerged,
+    Merged,
+}
+
+/// Uncommitted edits take priority over previously integrated branch work.
+pub fn worktree_branch_status(
+    head: &str,
+    initial: Option<&str>,
+    contained_in_main: bool,
+    has_uncommitted_changes: bool,
+) -> Option<WorktreeStatus> {
+    if has_uncommitted_changes || !contained_in_main {
+        Some(WorktreeStatus::Unmerged)
+    } else if initial.is_some_and(|initial| initial != head) {
+        Some(WorktreeStatus::Merged)
+    } else {
+        None
+    }
 }

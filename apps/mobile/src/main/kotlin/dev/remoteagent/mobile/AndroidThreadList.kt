@@ -26,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.Intent
@@ -35,6 +36,7 @@ import dev.remoteagent.core.ReadThread
 import dev.remoteagent.core.SessionRef
 import dev.remoteagent.core.ThreadList
 import dev.remoteagent.core.ThreadSummary
+import dev.remoteagent.core.WorktreeStatus
 
 @Composable
 internal fun ThreadListScreen(
@@ -92,17 +94,20 @@ private fun SummaryRow(thread: ThreadSummary, openConversation: (Intent) -> Unit
         Text(thread.title, Modifier.weight(1f))
         if (thread.active) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
         else if (thread.unread) Text("● 完了・未確認")
-        if (thread.worktreeMerged)
+        thread.worktreeStatus?.let { status ->
+            val unmerged = status == WorktreeStatus.UNMERGED
             Icon(
-                painterResource(R.drawable.ic_merge),
-                "main にマージ済み",
+                painterResource(if (unmerged) R.drawable.ic_diff else R.drawable.ic_merge),
+                if (unmerged) "main に未反映の変更あり" else "main にマージ済み",
                 Modifier.padding(start = 8.dp).size(18.dp),
-                tint = MaterialTheme.colorScheme.tertiary,
+                tint = if (unmerged) Color(UNMERGED_COLOR_ARGB) else MaterialTheme.colorScheme.tertiary,
             )
+        }
     }
 }
 
 private const val SEARCH_DEBOUNCE_MILLIS = 200L
+private const val UNMERGED_COLOR_ARGB = 0xFFFB923C
 
 private val SessionRef.listKey: String
     get() = "session:$provider:$id"

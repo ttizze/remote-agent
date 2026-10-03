@@ -51,14 +51,41 @@ impl Desktop {
     }
 
     pub(super) fn settings(&self, cx: &mut Context<Self>) -> AnyElement {
-        let environment = match self.settings_page {
-            SettingsPage::Models => "すべての環境（このPC）".to_owned(),
-            SettingsPage::Connections => "このPCと登録済みの環境".to_owned(),
-            SettingsPage::Agents | SettingsPage::Worktrees => self
-                .remote
-                .as_ref()
-                .map_or("このPC", |host| host.name.as_str())
-                .to_owned(),
+        let (projects, environment) = match self.settings_page {
+            SettingsPage::Models => (
+                self.model_scope_menu(
+                    "settings-scope-projects",
+                    self.snapshot
+                        .model_project_scope_choices(self.settings_model_scope.clone()),
+                    cx,
+                ),
+                self.model_scope_menu(
+                    "settings-scope-environment",
+                    self.snapshot
+                        .model_environment_scope_choices(self.settings_model_scope.clone()),
+                    cx,
+                ),
+            ),
+            page => (
+                div().child("すべてのプロジェクト").into_any_element(),
+                if page == SettingsPage::Connections {
+                    div().child("このPC").into_any_element()
+                } else if let Some(hosts) = &self.hosts {
+                    Hosts::menu(
+                        hosts,
+                        "settings-scope-environment",
+                        self.remote.as_ref().map(|host| host.id.as_str()),
+                        self.busy > 0
+                            || self.worktree_dirty
+                            || self.worktree_saving
+                            || self.snapshot.account.login.is_some(),
+                        cx,
+                    )
+                    .into_any_element()
+                } else {
+                    div().child("このPC").into_any_element()
+                },
+            ),
         };
         let (title, subtitle) = match self.settings_page {
             SettingsPage::Models => ("モデル", "新しい会話で使うモデルの初期値を設定します。"),
@@ -157,9 +184,9 @@ impl Desktop {
                     })
                     .text_xs()
                     .child(div().text_color(rgb(0x949ca8)).child("設定の適用先"))
-                    .child("すべてのプロジェクト")
-                    .child(div().text_color(rgb(0x949ca8)).child("／"))
                     .child(environment)
+                    .child(div().text_color(rgb(0x949ca8)).child("／"))
+                    .child(projects)
                     .border_b_1()
                     .border_color(rgb(0x2b2f35)),
             )
@@ -176,6 +203,47 @@ impl Desktop {
                     .overflow_y_scroll()
                     .child(div().pt_6().px_8().pb_8().child(body)),
             )
+            .into_any_element()
+    }
+
+    fn model_scope_menu(
+        &self,
+        id: &'static str,
+        choices: Vec<agent_core::presentation::model_settings::ModelScopeChoice>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let selected = self.settings_model_scope.clone();
+        let label = choices
+            .iter()
+            .find(|choice| choice.scope == selected)
+            .map_or("すべてのプロジェクト", |choice| {
+                choice.label.as_str()
+            })
+            .to_owned();
+        let owner = cx.entity().downgrade();
+        Button::new(id)
+            .label(label)
+            .dropdown_caret(true)
+            .small()
+            .ghost()
+            .debug_selector(move || id.into())
+            .dropdown_menu(move |mut menu, _, _| {
+                for choice in &choices {
+                    let scope = choice.scope.clone();
+                    let owner = owner.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(choice.label.clone())
+                            .checked(scope == selected)
+                            .on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |view, cx| {
+                                    view.settings_model_scope = scope.clone();
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
             .into_any_element()
     }
 

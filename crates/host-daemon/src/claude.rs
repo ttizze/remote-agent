@@ -42,15 +42,30 @@ use tokio::sync::{Mutex as AsyncMutex, Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::host_rpc::routing::SessionRouter;
+use crate::host_rpc::{
+    agent::{Agent, AgentChange, AgentEvent, AnswerWrite, SessionPage, SubmissionState, emit},
+    service::Failure,
+};
+use futures_util::FutureExt;
 use process::Process;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
-pub(crate) struct OperationError {
-    pub(crate) message: String,
-    pub(crate) delivery: agent_transport::peer::Delivery,
+struct OperationError {
+    message: String,
+    delivery: agent_transport::peer::Delivery,
 }
+impl From<OperationError> for Failure {
+    fn from(error: OperationError) -> Self {
+        Self {
+            code: "provider_failed",
+            message: error.message,
+            delivery: error.delivery,
+            execution: None,
+        }
+    }
+}
+
 impl From<String> for OperationError {
     fn from(message: String) -> Self {
         Self {
@@ -75,10 +90,11 @@ pub(crate) struct Claude {
     program: PathBuf,
     directory: PathBuf,
     native_home: PathBuf,
-    pub(crate) accounts: AsyncMutex<accounts::Accounts>,
+    accounts: AsyncMutex<accounts::Accounts>,
     records: AsyncMutex<HashMap<String, Arc<AsyncMutex<Record>>>>,
     processes: Arc<Semaphore>,
-    router: SessionRouter,
+    events: mpsc::Sender<AgentEvent>,
+    event_receiver: std::sync::Mutex<Option<mpsc::Receiver<AgentEvent>>>,
     stop: CancellationToken,
     workers: AsyncMutex<tokio::task::JoinSet<()>>,
 }
@@ -119,20 +135,10 @@ impl Drop for Claude {
 }
 
 impl Claude {
-    pub(crate) fn capabilities() -> agent_protocol::session::Capabilities {
-        agent_protocol::session::Capabilities {
-            additional_input: true,
-            fork: false,
-            rename: false,
-            model_change: true,
-        }
-    }
-
     pub(crate) async fn load(
         program: PathBuf,
         directory: PathBuf,
         native_home: Option<PathBuf>,
-        router: SessionRouter,
         browser: Option<Arc<crate::browser::Browser>>,
     ) -> anyhow::Result<Self> {
         crate::platform::create_state_directory(&directory)?;
@@ -143,6 +149,7 @@ impl Claude {
             native_home.clone(),
         )
         .await?;
+        let (events, event_receiver) = mpsc::channel(256);
         Ok(Self {
             browser,
             accounts: AsyncMutex::new(accounts),
@@ -151,36 +158,20 @@ impl Claude {
             native_home,
             records: AsyncMutex::new(HashMap::new()),
             processes: Arc::new(Semaphore::new(8)),
-            router,
+            events,
+            event_receiver: std::sync::Mutex::new(Some(event_receiver)),
             stop: CancellationToken::new(),
             workers: AsyncMutex::new(tokio::task::JoinSet::new()),
         })
     }
 
-    pub(crate) async fn shutdown(&self) {
-        self.stop.cancel();
-        let _ = self.accounts.lock().await.cancel().await;
-        let mut workers = self.workers.lock().await;
-        while let Some(result) = workers.join_next().await {
-            if let Err(error) = result {
-                tracing::error!(target: "bex", operation = "claude.worker", message = %error);
-            }
-        }
-    }
-
-    pub(crate) async fn models(&self) -> Result<Vec<Model>, String> {
-        let available = if self.program.components().count() > 1 {
-            self.program.is_file()
-        } else {
-            std::env::var_os("PATH").is_some_and(|path| {
-                std::env::split_paths(&path)
-                    .any(|directory| directory.join(&self.program).is_file())
-            })
-        };
-        if !available {
+    async fn models(&self) -> Result<Vec<Model>, String> {
+        if self.availability().is_err() {
             return Ok(Vec::new());
         }
-        let auth_home = self.accounts.lock().await.home()?;
+        let Some(auth_home) = self.accounts.lock().await.selected_home()? else {
+            return Ok(Vec::new());
+        };
         let cwd = tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
         let (process, initialized) = Process::start(
             &self.program,
@@ -261,7 +252,7 @@ impl Claude {
             .collect::<Result<Vec<Model>, String>>()
     }
 
-    pub(crate) async fn create(&self, cwd: &str, model: &str) -> anyhow::Result<ThreadResponse> {
+    async fn create(&self, cwd: &str, model: &str) -> anyhow::Result<ThreadResponse> {
         let cwd = dunce::simplified(&tokio::fs::canonicalize(cwd).await?).to_owned();
         if !cwd.is_dir() {
             return Err(anyhow::anyhow!("Claudeの作業フォルダがありません。"));
@@ -348,11 +339,7 @@ impl Claude {
         Ok(record)
     }
 
-    pub(crate) fn storage_directory(&self) -> &Path {
-        &self.native_home
-    }
-
-    pub(crate) async fn list(&self, search: &str) -> anyhow::Result<Vec<Thread>> {
+    async fn list(&self, search: &str) -> anyhow::Result<Vec<Thread>> {
         let home = self.native_home.clone();
         let mut threads = tokio::task::spawn_blocking(move || {
             history::files(&home)?
@@ -433,7 +420,7 @@ impl Claude {
     }
 
     /// Read native history on each open; the router overlays only owned execution.
-    pub(crate) async fn read(&self, id: &str, requested: usize) -> anyhow::Result<ThreadResponse> {
+    async fn read(&self, id: &str, requested: usize) -> anyhow::Result<ThreadResponse> {
         let native = Uuid::parse_str(id)?;
         let home = self.native_home.clone();
         let history: anyhow::Result<ThreadResponse> = tokio::task::spawn_blocking(move || {
@@ -493,27 +480,16 @@ impl Claude {
         }
     }
 
-    pub(crate) async fn read_item(
-        &self,
-        id: &str,
-        params: &op::ReadItem,
-    ) -> Result<op::ItemResponse, OperationError> {
-        let native = Uuid::parse_str(id).map_err(|_| "invalid Claude ID")?;
+    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, OperationError> {
+        let native = Uuid::parse_str(&params.thread_id.id).map_err(|_| "invalid Claude ID")?;
         let home = self.native_home.clone();
-        let mut native_history = tokio::task::spawn_blocking(move || {
+        let native_history = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native)?;
             history::read_details(&path, usize::MAX)
         })
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| format!("{error:#}"))?;
-        self.router.overlay_execution(
-            &SessionRef {
-                provider: ProviderKind::Claude,
-                id: id.into(),
-            },
-            &mut native_history.response,
-        );
         let response = native_history.response;
         let item = response
             .thread
@@ -577,7 +553,7 @@ impl Claude {
         })
     }
 
-    pub(crate) async fn discard_workspace_processes(&self, directory: &Path) -> anyhow::Result<()> {
+    async fn discard_workspace_processes(&self, directory: &Path) -> anyhow::Result<()> {
         let records: Vec<_> = self.records.lock().await.values().cloned().collect();
         for record in records {
             let idle = {
@@ -597,7 +573,7 @@ impl Claude {
         Ok(())
     }
 
-    pub(crate) async fn interrupt(
+    async fn interrupt(
         &self,
         id: &str,
         turn_id: &agent_protocol::ids::TurnId,
@@ -633,13 +609,12 @@ impl Claude {
         Ok(())
     }
 
-    pub(crate) async fn additional_input(
+    async fn additional_input(
         &self,
         id: &str,
-        expected_turn_id: Option<&str>,
         input: &[op::Input],
         client_id: &str,
-    ) -> Result<String, OperationError> {
+    ) -> Result<agent_protocol::ids::TurnId, OperationError> {
         if self.stop.is_cancelled() {
             return Err("Host is shutting down".into());
         }
@@ -650,10 +625,8 @@ impl Claude {
             .running
             .as_ref()
             .ok_or("Claudeは実行中ではありません。")?;
-        if expected_turn_id.is_some_and(|id| id != running.turn_id.as_str()) {
-            return Err("Claudeの実行対象が変わりました。会話を更新してください。".into());
-        }
         let sender = running.input.clone();
+        let turn_id = running.turn_id.clone();
         let session = state.session_id;
         drop(state);
         let id = client_id.to_owned();
@@ -669,20 +642,22 @@ impl Claude {
                 message: "Claude input delivery is unknown".into(),
                 delivery: agent_transport::peer::Delivery::Unknown,
             })?
-            .map_err(|_| "Claude finished before accepting additional input")?
+            .map_err(|_| OperationError {
+                message: "Claude exited before confirming additional input".into(),
+                delivery: agent_transport::peer::Delivery::Unknown,
+            })?
             .map_err(|message| OperationError {
                 message,
                 delivery: agent_transport::peer::Delivery::Unknown,
             })?;
-        Ok(id)
+        Ok(turn_id)
     }
 
-    pub(crate) async fn start_turn(
+    async fn start_turn(
         &self,
-        id: &str,
         params: &op::Submission,
     ) -> Result<agent_protocol::ids::TurnId, OperationError> {
-        let record = self.record(id).await?;
+        let record = self.record(&params.thread_id.id).await?;
         if self.stop.is_cancelled() {
             return Err("Host is shutting down".into());
         }
@@ -711,7 +686,12 @@ impl Claude {
         let cwd = state.cwd.clone();
         let (auth_home, auth_revision) = {
             let accounts = self.accounts.lock().await;
-            (accounts.home()?, accounts.revision())
+            (
+                accounts
+                    .selected_home()?
+                    .ok_or("Claude アカウントを選択してください。")?,
+                accounts.revision(),
+            )
         };
         let idle = state.idle.take();
         let mut process = if idle.as_ref().is_some_and(|idle| {
@@ -779,6 +759,10 @@ impl Claude {
             started_at: Some(now() as f64),
             ..Default::default()
         };
+        let mut workers = self.workers.lock().await;
+        if self.stop.is_cancelled() {
+            return Err("Host is shutting down".into());
+        }
         if let Err(error) = process.write(&json!({"type":"user","uuid":params.client_user_message_id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null})).await {
             return Err(OperationError { message: error, delivery: agent_transport::peer::Delivery::Unknown });
         }
@@ -793,18 +777,15 @@ impl Claude {
         drop(state);
         let target = SessionRef {
             provider: ProviderKind::Claude,
-            id: id.into(),
+            id: params.thread_id.id.clone(),
         };
-        self.router.session_change(
-            &target,
-            SessionChange::Turn {
-                turn,
-                completed: false,
-            },
-        );
         let worker = Worker {
             record,
-            router: self.router.clone(),
+            events: self.events.clone(),
+            live: Thread {
+                turns: Some(vec![Arc::new(turn)]),
+                ..Default::default()
+            },
             instance: Uuid::new_v4(),
             session: target,
             turn_id: turn_id.clone(),
@@ -816,7 +797,6 @@ impl Claude {
             effort: effort.map(str::to_owned),
             auth_revision,
         };
-        let mut workers = self.workers.lock().await;
         while let Some(result) = workers.try_join_next() {
             if let Err(error) = result {
                 tracing::error!(target: "bex", operation = "claude.worker", message = %error);
@@ -831,7 +811,8 @@ struct Worker {
     instance: Uuid,
     auth_revision: u64,
     record: Arc<AsyncMutex<Record>>,
-    router: SessionRouter,
+    events: mpsc::Sender<AgentEvent>,
+    live: Thread,
     session: SessionRef,
     turn_id: agent_protocol::ids::TurnId,
     input: mpsc::Sender<Command>,
@@ -843,16 +824,47 @@ struct Worker {
 }
 
 impl Worker {
+    fn current_turn(&self) -> Option<&Turn> {
+        self.live
+            .turns
+            .as_ref()?
+            .iter()
+            .find(|t| t.id == self.turn_id)
+            .map(AsRef::as_ref)
+    }
+    async fn change(&mut self, change: SessionChange) -> Result<(), String> {
+        self.live = change.apply(&self.live).map_err(|e| e.to_string())?;
+        emit(
+            &self.events,
+            AgentChange::Session {
+                session: self.session.clone(),
+                change,
+            },
+        )
+        .await
+    }
+
     async fn run(mut self, mut process: Process, mut input: mpsc::Receiver<Command>) {
-        let router = self.router.clone();
+        let events = self.events.clone();
         let _requests = scopeguard::guard(self.instance, move |instance| {
-            router.close_request_source(instance)
+            tokio::spawn(async move {
+                let _ = events
+                    .send(AgentEvent {
+                        change: AgentChange::SourceClosed(instance),
+                        applied: None,
+                    })
+                    .await;
+            });
         });
         let mut interrupted = false;
         let mut pending_inputs = HashSet::new();
+        let mut result_received = false;
+        let mut idle = false;
         let outcome = async {
+            let turn=self.current_turn().cloned().ok_or("Claude execution state is unavailable")?;
+            self.change(SessionChange::Turn {turn,completed:false}).await?;
             loop {
-                tokio::select! {
+                let message = tokio::select! {
                     _ = self.stop.cancelled() => {
                         interrupted = true;
                         process.write(&json!({"type":"control_request","request_id":"shutdown","request":{"subtype":"interrupt"}})).await?;
@@ -862,62 +874,85 @@ impl Worker {
                         let command = command.ok_or("Claude input queue is closed")?;
                         let result = process.write(&command.value).await;
                         if result.is_ok() && let Some(user) = command.user {
+                            result_received = false;
+                            idle = false;
                             pending_inputs.insert(user.id.clone());
-                            self.router.session_change(&self.session, SessionChange::Item {
+                            self.change(SessionChange::Item {
                                 turn_id: self.turn_id.clone(), item: Arc::new(user),
-                            });
+                            }).await?;
                         }
                         if let Some(delivered) = command.delivered { let _ = delivered.send(result.clone()); }
                         result?;
+                        continue;
                     }
-                    message = process.read() => {
-                        let message = message?.ok_or("Claude Code exited without a result")?;
-                        if message["type"] == "result" {
-                            if message["is_error"] == true {
-                                let mut error = execution_error(&message, false);
-                                if error.category == ErrorCategory::Other && let Some(previous) = self.router.current_turn(&self.session, &self.turn_id).and_then(|turn| turn.error) {
-                                    error.category = previous.category;
-                                    error.provider_code = previous.provider_code;
-                                }
-                                let text = error.message.clone();
-                                self.router.session_change(&self.session, SessionChange::Error {turn_id: self.turn_id.clone(), error});
-                                return Err(text);
+                    message = process.read() => message?.ok_or("Claude Code exited before the turn completed")?,
+                };
+                let kind = message["type"].as_str().unwrap_or_default();
+                match kind {
+                    "system" if message["subtype"] == "session_state_changed" => {
+                        idle = message["state"] == "idle";
+                    }
+                    "result" => {
+                        if message["is_error"] == true {
+                            let mut error = execution_error(&message, false);
+                            if matches!(error.category, ErrorCategory::Other | ErrorCategory::Provider(_))
+                                && let Some(previous) = self.current_turn().and_then(|turn| turn.error.as_ref())
+                            {
+                                error.category = previous.category.clone();
+                                error.provider_code = previous.provider_code.clone();
                             }
-                            // A result can belong to the input before a queued message.
-                            // Keep reading until Claude has consumed every submitted input.
-                            if interrupted || pending_inputs.is_empty() {
-                                return Ok(());
-                            }
-                            continue;
+                            let text = error.message.clone();
+                            self.change(SessionChange::Error {turn_id: self.turn_id.clone(), error}).await?;
+                            return Err(text);
                         }
-                        if message["type"] == "user" && let Some(id) = message["uuid"].as_str() {
-                            pending_inputs.remove(id);
-                        }
-                        if message["type"] == "control_request" {
-                            if let Err(error) = self.permission(&message) {
-                                tracing::warn!(target: "bex", operation = "host.claude.request_rejected", message = %error);
-                                let response = if message["request"]["subtype"] == "request_user_dialog" {
-                                    json!({"subtype":"success","request_id":message["request_id"],"response":{"behavior":"cancelled"}})
-                                } else { json!({"subtype":"error","request_id":message["request_id"],"error":error}) };
-                                process.write(&json!({"type":"control_response","response":response})).await?;
-                            }
-                        } else if message["type"] == "control_cancel_request" {
-                            let request_id = message["request_id"].as_str().ok_or("Claude canceled request ID is missing")?;
-                            self.router.resolve_native_request(self.instance, &request_id.into());
-                        } else if message["type"] == "control_response" && message["response"]["request_id"] == "interrupt" {
-                            let result = if message["response"]["subtype"] == "success" { interrupted = true; Ok(()) }
-                                else { Err(format!("Claude Codeの停止に失敗しました: {}", message["response"]["error"])) };
-                            self.interrupt.send_replace(Some(result));
-                        } else {
-                            self.message(message).await?;
+                        result_received = true;
+                        if interrupted {
+                            return Ok(());
                         }
                     }
+                    "control_request" => {
+                        if let Err(error) = self.permission(&message).await {
+                            tracing::warn!(target: "bex", operation = "host.claude.request_rejected", message = %error);
+                            let response = if message["request"]["subtype"] == "request_user_dialog" {
+                                json!({"subtype":"success","request_id":message["request_id"],"response":{"behavior":"cancelled"}})
+                            } else { json!({"subtype":"error","request_id":message["request_id"],"error":error}) };
+                            process.write(&json!({"type":"control_response","response":response})).await?;
+                        }
+                    }
+                    "control_cancel_request" => {
+                        let request_id = message["request_id"].as_str().ok_or("Claude canceled request ID is missing")?;
+                        emit(&self.events, AgentChange::Resolved {instance:self.instance,native_id:request_id.into()}).await?;
+                    }
+                    "control_response" if message["response"]["request_id"] == "interrupt" => {
+                        let result = if message["response"]["subtype"] == "success" { interrupted = true; Ok(()) }
+                            else { Err(format!("Claude Codeの停止に失敗しました: {}", message["response"]["error"])) };
+                        self.interrupt.send_replace(Some(result));
+                    }
+                    _ => {
+                        let input_consumed = kind == "user"
+                            && message["uuid"].as_str().is_some_and(|id| pending_inputs.remove(id));
+                        let response_started = message["parent_tool_use_id"].is_null()
+                            && (kind == "assistant"
+                                || (kind == "stream_event" && message["event"]["type"] == "message_start"));
+                        if input_consumed || response_started {
+                            result_received = false;
+                            idle = false;
+                        }
+                        self.message(message).await?;
+                    }
+                }
+                // A result ends one response, not necessarily the background
+                // work and its follow-up. Idle is Claude's run-end signal.
+                // It can precede the result; queued input must still be consumed.
+                if result_received && idle && pending_inputs.is_empty() {
+                    return Ok(());
                 }
             }
         }.await;
         // Reject commands that lost the race with completion before retaining the process.
         drop(input);
-        drop(_requests);
+        let _ = emit(&self.events, AgentChange::SourceClosed(self.instance)).await;
+        scopeguard::ScopeGuard::into_inner(_requests);
         let mut retained = None;
         let outcome = if outcome.is_ok() && !self.stop.is_cancelled() {
             retained = Some(process);
@@ -926,19 +961,19 @@ impl Worker {
             let exited = process.finish().await;
             outcome.and(exited)
         };
-        let mut record = self.record.lock().await;
-        let Some(mut turn) = self.router.current_turn(&self.session, &self.turn_id) else {
+        let owned_record = self.record.clone();
+        let mut record = owned_record.lock().await;
+        let Some(mut turn) = self.current_turn().cloned() else {
             record.running = None;
             drop(record);
             if let Some(process) = retained {
                 let _ = process.finish().await;
             }
-            self.router.session_change(
-                &self.session,
-                SessionChange::Status {
+            let _ = self
+                .change(SessionChange::Status {
                     status: SessionStatus::Unknown,
-                },
-            );
+                })
+                .await;
             return;
         };
         turn.status = if interrupted {
@@ -974,20 +1009,21 @@ impl Worker {
             record.idle = Some(Idle {
                 process,
                 auth_revision: self.auth_revision,
-                model: self.model,
-                effort: self.effort,
+                model: self.model.clone(),
+                effort: self.effort.clone(),
                 released: released.clone(),
             });
         }
-        self.router.session_change(
-            &self.session,
-            SessionChange::Turn {
+        let _ = self
+            .change(SessionChange::Turn {
                 turn,
                 completed: true,
-            },
-        );
+            })
+            .await;
         let retained = record.idle.is_some();
         drop(record);
+        self.live = Thread::default();
+        self.stream.clear();
         if retained {
             tokio::select! {
                 _ = released.cancelled() => return,
@@ -995,7 +1031,8 @@ impl Worker {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {},
             }
             let idle = {
-                let mut record = self.record.lock().await;
+                let owned_record = self.record.clone();
+                let mut record = owned_record.lock().await;
                 if released.is_cancelled() {
                     None
                 } else {
@@ -1008,7 +1045,7 @@ impl Worker {
         }
     }
 
-    fn permission(&self, message: &Value) -> Result<(), String> {
+    async fn permission(&self, message: &Value) -> Result<(), String> {
         if message.to_string().len() > 32 * 1024 {
             return Err("Claude control request exceeds its size limit".into());
         }
@@ -1020,17 +1057,21 @@ impl Worker {
             &self.turn_id,
             &message["request"],
         )?;
-        self.router.request(
-            self.session.clone(),
-            crate::host_rpc::requests::RequestOrigin {
-                instance: self.instance,
-                native_id: request_id.into(),
-                destination: crate::host_rpc::requests::RequestDestination::Claude {
-                    input: self.input.clone(),
+        emit(
+            &self.events,
+            AgentChange::Request {
+                session: self.session.clone(),
+                origin: crate::host_rpc::requests::RequestOrigin {
+                    instance: self.instance,
+                    native_id: request_id.into(),
+                    destination: crate::host_rpc::requests::RequestDestination::Claude {
+                        input: self.input.clone(),
+                    },
                 },
+                adapted,
             },
-            adapted,
         )
+        .await
     }
 
     async fn message(&mut self, message: Value) -> Result<(), String> {
@@ -1040,97 +1081,86 @@ impl Worker {
         }
         if message["type"] == "rate_limit_event" {
             if let Some(error) = usage_limit_error(&message["rate_limit_info"]) {
-                self.router.session_change(
-                    &self.session,
-                    SessionChange::Error {
-                        turn_id: self.turn_id.clone(),
-                        error,
-                    },
-                );
+                self.change(SessionChange::Error {
+                    turn_id: self.turn_id.clone(),
+                    error,
+                })
+                .await?;
             }
             return Ok(());
         }
         if message["type"] == "system" && message["subtype"] == "api_retry" {
             if let Some(id) = self.stream.remove(scope)
-                && let Some(turn) = self.router.current_turn(&self.session, &self.turn_id)
+                && let Some(turn) = self.current_turn()
             {
                 let prefix = format!("{id}:");
-                for item in turn.items.iter().flatten().filter(|item| {
-                    item.id.starts_with(&prefix)
-                        && item.status == ItemStatus::Running
-                        && matches!(
-                            item.body(),
-                            ItemBody::AssistantText { .. } | ItemBody::Reasoning { .. }
-                        )
-                }) {
-                    self.router.session_change(
-                        &self.session,
-                        SessionChange::RemoveItem {
-                            turn_id: self.turn_id.clone(),
-                            item_id: item.id.clone(),
-                        },
-                    );
+                let items: Vec<_> = turn
+                    .items
+                    .iter()
+                    .flatten()
+                    .filter(|item| {
+                        item.id.starts_with(&prefix)
+                            && item.status == ItemStatus::Running
+                            && matches!(
+                                item.body(),
+                                ItemBody::AssistantText { .. } | ItemBody::Reasoning { .. }
+                            )
+                    })
+                    .map(|item| item.id.clone())
+                    .collect();
+                for item_id in items {
+                    self.change(SessionChange::RemoveItem {
+                        turn_id: self.turn_id.clone(),
+                        item_id,
+                    })
+                    .await?;
                 }
             }
-            self.router.session_change(
-                &self.session,
-                SessionChange::Error {
-                    turn_id: self.turn_id.clone(),
-                    error: execution_error(&message, true),
-                },
-            );
+            self.change(SessionChange::Error {
+                turn_id: self.turn_id.clone(),
+                error: execution_error(&message, true),
+            })
+            .await?;
             return Ok(());
         }
-        let mut record = self.record.lock().await;
         let kind = message["type"].as_str().unwrap_or_default();
         if kind == "system" && message["subtype"] == "init" {
+            let mut record = self.record.lock().await;
             if message["session_id"].as_str() != Some(record.session_id.to_string().as_str()) {
                 return Err("Claude session identity changed".into());
             }
             record.resumable = true;
+            return Ok(());
         }
         if kind != "assistant" && kind != "user" {
             return Ok(());
         }
         if kind == "assistant" && message["error"].is_string() {
-            self.router.session_change(
-                &self.session,
-                SessionChange::Error {
-                    turn_id: self.turn_id.clone(),
-                    error: execution_error(&message, false),
-                },
-            );
+            self.change(SessionChange::Error {
+                turn_id: self.turn_id.clone(),
+                error: execution_error(&message, false),
+            })
+            .await?;
         }
         let blocks = message["message"]["content"]
             .as_array()
             .ok_or("Claude message content is missing")?;
         let message_id = message["message"]["id"].as_str();
-        let cwd = record.cwd.clone();
-        drop(record);
-        let mut turn = self
-            .router
-            .current_turn(&self.session, &self.turn_id)
-            .ok_or("Claude execution state is unavailable")?;
-        let items = turn.items.get_or_insert_default();
+        let cwd = self.record.lock().await.cwd.clone();
         for (index, block) in blocks.iter().enumerate() {
-            // Claude emits one assistant envelope per completed block, often
-            // with the same message ID. Preserve the stream's block index.
-            let id = message_item_id(
-                items,
-                message_id
-                    .or_else(|| message["uuid"].as_str())
-                    .unwrap_or("tool-result"),
-                index,
-                blocks.len(),
-                block,
-            );
+            let items = self
+                .current_turn()
+                .ok_or("Claude execution state is unavailable")?
+                .items
+                .as_deref()
+                .unwrap_or_default();
             let item = match block["type"].as_str() {
                 Some("tool_result") => {
-                    let item = items
-                        .iter_mut()
+                    let mut item = items
+                        .iter()
                         .find(|item| Some(item.id.as_str()) == block["tool_use_id"].as_str())
+                        .map(|item| (**item).clone())
                         .ok_or("Claude tool result has no matching tool call")?;
-                    let item = Arc::make_mut(item);
                     item.status = if block["is_error"] == true {
                         ItemStatus::Failed
                     } else {
@@ -1143,37 +1173,36 @@ impl Worker {
                             &message["toolUseResult"],
                         )),
                     };
-                    self.router.session_change(
-                        &self.session,
-                        SessionChange::Item {
-                            turn_id: self.turn_id.clone(),
-                            item: item.clone().into(),
-                        },
-                    );
-                    continue;
+                    item
                 }
                 Some("text") if kind != "assistant" => continue,
-                _ => content_item(
-                    &self.session,
-                    id,
-                    block,
-                    Some(cwd.as_str()),
-                    ItemStatus::Running,
-                )
-                .map_err(|error| error.to_string())?,
+                _ => {
+                    // Claude emits one assistant envelope per completed block,
+                    // often with the same message ID. Preserve the stream index.
+                    let id = message_item_id(
+                        items,
+                        message_id
+                            .or_else(|| message["uuid"].as_str())
+                            .unwrap_or("tool-result"),
+                        index,
+                        blocks.len(),
+                        block,
+                    );
+                    content_item(
+                        &self.session,
+                        id,
+                        block,
+                        Some(cwd.as_str()),
+                        ItemStatus::Running,
+                    )
+                    .map_err(|error| error.to_string())?
+                }
             };
-            self.router.session_change(
-                &self.session,
-                SessionChange::Item {
-                    turn_id: self.turn_id.clone(),
-                    item: item.clone().into(),
-                },
-            );
-            if let Some(existing) = items.iter_mut().find(|existing| existing.id == item.id) {
-                *existing = Arc::new(item);
-            } else {
-                items.push(Arc::new(item));
-            }
+            self.change(SessionChange::Item {
+                turn_id: self.turn_id.clone(),
+                item: item.into(),
+            })
+            .await?;
         }
         Ok(())
     }
@@ -1214,13 +1243,11 @@ impl Worker {
                     ItemStatus::Running,
                     body,
                 );
-                self.router.session_change(
-                    &self.session,
-                    SessionChange::Item {
-                        turn_id: self.turn_id.clone(),
-                        item: item.into(),
-                    },
-                );
+                self.change(SessionChange::Item {
+                    turn_id: self.turn_id.clone(),
+                    item: item.into(),
+                })
+                .await?;
             }
             Some("content_block_delta") => {
                 let (target, field) = match event["delta"]["type"].as_str() {
@@ -1241,15 +1268,13 @@ impl Worker {
                 let delta = event["delta"][field]
                     .as_str()
                     .ok_or("Claude stream text is missing")?;
-                self.router.session_change(
-                    &self.session,
-                    SessionChange::Text {
-                        turn_id: self.turn_id.clone(),
-                        item_id: id.into(),
-                        field: target,
-                        delta: delta.into(),
-                    },
-                );
+                self.change(SessionChange::Text {
+                    turn_id: self.turn_id.clone(),
+                    item_id: id.into(),
+                    field: target,
+                    delta: delta.into(),
+                })
+                .await?;
             }
             _ => {}
         }
@@ -1337,6 +1362,9 @@ fn execution_error(message: &Value, retrying: bool) -> ExecutionError {
             Some(400 | 404 | 422) => ErrorCategory::InvalidInput,
             Some(500..=599) => ErrorCategory::Internal,
             None if retrying => ErrorCategory::Network,
+            _ if code.is_some() => {
+                ErrorCategory::Provider(serde_json::json!({"code":code,"httpStatus":status}))
+            }
             _ => ErrorCategory::Other,
         },
     };
@@ -1363,6 +1391,7 @@ fn execution_error(message: &Value, retrying: bool) -> ExecutionError {
         })
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| "Claude Codeの実行に失敗しました。".into());
+    let overloaded = category == ErrorCategory::Overloaded;
     ExecutionError {
         category,
         message: text,
@@ -1370,7 +1399,7 @@ fn execution_error(message: &Value, retrying: bool) -> ExecutionError {
         http_status: status.and_then(|v| v.try_into().ok()),
         retry: retrying.then(|| RetryEvidence {
             retrying,
-            overloaded: category == ErrorCategory::Overloaded,
+            overloaded,
             attempt: message["attempt"].as_u64().and_then(|v| v.try_into().ok()),
             max_attempts: message["max_retries"]
                 .as_u64()
@@ -1580,16 +1609,40 @@ fn tool_result_body(body: &ItemBody, content: &Value, metadata: &Value) -> ItemB
     body
 }
 
+fn skill_invocation(name: &str, path: &str) -> agent_protocol::composer::Invocation {
+    agent_protocol::composer::Invocation {
+        provider: ProviderKind::Claude,
+        kind: agent_protocol::composer::InvocationKind::Skill,
+        name: name.into(),
+        path: path.into(),
+    }
+}
+
 async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
     if input.is_empty() {
         return Err("メッセージを入力してください。".into());
     }
     let mut content = Vec::with_capacity(input.len());
-    for input in input {
-        match input {
-            op::Input::Text { text, .. } => content.push(json!({"type":"text","text":text})),
-            op::Input::Skill { name, .. } => {
-                content.push(json!({"type":"text","text":format!("${name}")}))
+    for part in input {
+        match part {
+            op::Input::Text { text, .. } => {
+                let text = input.iter().fold(text.clone(), |text, part| match part {
+                    op::Input::Skill { name, path } => {
+                        let invocation = skill_invocation(name, path);
+                        invocation.replace_in(&text, &format!("/{name}"))
+                    }
+                    _ => text,
+                });
+                content.push(json!({"type":"text","text":text}));
+            }
+            op::Input::Skill { name, path } => {
+                let invocation = skill_invocation(name, path);
+                if !input
+                    .iter()
+                    .any(|part| matches!(part,op::Input::Text {text} if invocation.is_in(text)))
+                {
+                    content.push(json!({"type":"text","text":format!("/{name}")}));
+                }
             }
             op::Input::Mention { path, .. } => {
                 content.push(json!({"type":"text","text":format!("添付ファイル: {path}")}))
@@ -1616,7 +1669,7 @@ async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
     Ok(content)
 }
 
-pub(crate) fn updated_at(thread: &Thread) -> u64 {
+fn updated_at(thread: &Thread) -> u64 {
     thread
         .updated_at
         .as_ref()
@@ -1630,9 +1683,446 @@ fn now() -> u64 {
         .as_secs()
 }
 
+#[async_trait::async_trait]
+impl crate::host_rpc::agent::Identity for Claude {
+    async fn list(&self) -> Result<op::Accounts, crate::host_rpc::service::Failure> {
+        let (accounts, selected) =
+            self.accounts.lock().await.list().await.map_err(|e| {
+                crate::host_rpc::service::Failure::new("account_operation_failed", e)
+            })?;
+        Ok(op::Accounts {
+            accounts,
+            selected: selected
+                .map(|id| (ProviderKind::Claude, id))
+                .into_iter()
+                .collect(),
+            error: None,
+        })
+    }
+    async fn login(
+        &self,
+        request: agent_protocol::protocol::Call,
+    ) -> Result<agent_protocol::protocol::Body, crate::host_rpc::service::Failure> {
+        self.accounts
+            .lock()
+            .await
+            .request(request)
+            .await
+            .map_err(|e| crate::host_rpc::service::Failure::new("account_operation_failed", e))
+    }
+    async fn usage(&self, id: &str) -> Result<op::AccountUsage, crate::host_rpc::service::Failure> {
+        let fetch =
+            self.accounts.lock().await.usage_request(id).map_err(|e| {
+                crate::host_rpc::service::Failure::new("account_operation_failed", e)
+            })?;
+        Ok(fetch.await)
+    }
+}
+
+#[async_trait::async_trait]
+impl Agent for Claude {
+    fn session_state(
+        &self,
+        status: agent_protocol::models::SessionStatus,
+        running_turn: Option<agent_protocol::ids::TurnId>,
+    ) -> crate::host_rpc::submission::SessionState {
+        let running = status == agent_protocol::models::SessionStatus::Running;
+        crate::host_rpc::submission::SessionState {
+            status,
+            running_turn,
+            accepts_steer: false,
+            accepts_queue: running,
+        }
+    }
+    fn capabilities(&self) -> agent_protocol::session::Capabilities {
+        agent_protocol::session::Capabilities {
+            additional_input: true,
+            fork: false,
+            rename: false,
+            model_change: true,
+        }
+    }
+    fn validate_create(&self) -> Result<(), Failure> {
+        if self.stop.is_cancelled() {
+            return Err(Failure::new(
+                "provider_unavailable",
+                "agent is shutting down",
+            ));
+        }
+        Ok(())
+    }
+    fn availability(&self) -> Result<(), Failure> {
+        self.validate_create()?;
+        let program = self.program.as_path();
+        #[cfg(windows)]
+        let program = if program.extension().is_none() {
+            std::borrow::Cow::Owned(program.with_extension("exe"))
+        } else {
+            std::borrow::Cow::Borrowed(program)
+        };
+        let available = if program.components().count() > 1 {
+            program.is_file()
+        } else {
+            std::env::var_os("PATH").is_some_and(|path| {
+                std::env::split_paths(&path)
+                    .any(|directory| directory.join(program.as_os_str()).is_file())
+            })
+        };
+        if !available {
+            return Err(Failure::new(
+                "provider_unavailable",
+                "agent executable is missing",
+            ));
+        }
+        Ok(())
+    }
+    fn storage_directory(&self) -> &Path {
+        &self.native_home
+    }
+    async fn list(&self, search: &str, cursor: Option<String>) -> Result<SessionPage, Failure> {
+        if cursor.is_some() {
+            return Err(Failure::new("invalid_cursor", "unexpected session cursor"));
+        }
+        Ok(SessionPage {
+            data: Claude::list(self, search)
+                .await
+                .map_err(|e| Failure::new("session_list_failed", e))?,
+            next_cursor: None,
+        })
+    }
+    async fn open(&self, id: &str, limit: usize) -> Result<ThreadResponse, Failure> {
+        self.read(id, limit)
+            .await
+            .map_err(|e| Failure::new("session_read_failed", e))
+    }
+    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure> {
+        Claude::read_item(self, params).await.map_err(Into::into)
+    }
+    async fn create(
+        &self,
+        cwd: &str,
+        model: Option<&str>,
+        _browser: Option<Value>,
+    ) -> Result<ThreadResponse, Failure> {
+        Claude::create(self, cwd, model.unwrap_or("default"))
+            .await
+            .map_err(|e| Failure::new("provider_unavailable", e))
+    }
+    async fn state(&self, id: &str) -> Result<SubmissionState, Failure> {
+        let mut response = self
+            .read(id, 1)
+            .await
+            .map_err(|e| Failure::new("session_read_failed", e))?;
+        if let Some(record) = self.records.lock().await.get(id).cloned() {
+            let record = record.lock().await;
+            if let Some(running) = &record.running {
+                response.thread.status = SessionStatus::Running;
+                response.thread.turns = Some(vec![Arc::new(Turn {
+                    id: running.turn_id.clone(),
+                    status: TurnStatus::Running,
+                    ..Default::default()
+                })]);
+            }
+        }
+        Ok(SubmissionState {
+            response,
+            needs_reload: false,
+        })
+    }
+    async fn submit(
+        &self,
+        input: &op::Submission,
+        route: crate::host_rpc::submission::SubmissionTarget<'_>,
+        _reload: bool,
+        _browser: Option<Value>,
+    ) -> Result<op::SubmissionReceipt, Failure> {
+        use crate::host_rpc::submission::SubmissionTarget;
+        let turn_id = match route {
+            SubmissionTarget::Steer(_) => {
+                return Err(Failure::new(
+                    "unsupported_operation",
+                    "this provider accepts queued input",
+                ));
+            }
+            SubmissionTarget::Queue => Some(
+                self.additional_input(
+                    &input.thread_id.id,
+                    &input.input,
+                    &input.client_user_message_id,
+                )
+                .await?,
+            ),
+            SubmissionTarget::Start { .. } => Some(self.start_turn(input).await?),
+        };
+        Ok(op::SubmissionReceipt { turn_id })
+    }
+    async fn interrupt(
+        &self,
+        id: &str,
+        turn: &agent_protocol::ids::TurnId,
+    ) -> Result<agent_protocol::models::Empty, Failure> {
+        Claude::interrupt(self, id, turn).await?;
+        Ok(agent_protocol::models::Empty {})
+    }
+    async fn answer(
+        &self,
+        origin: crate::host_rpc::requests::RequestOrigin,
+        result: Value,
+    ) -> Result<AnswerWrite, Failure> {
+        let crate::host_rpc::requests::RequestDestination::Claude { input } = origin.destination
+        else {
+            return Err(Failure::new(
+                "answer_not_sent",
+                "request source has changed",
+            ));
+        };
+        let request_id = origin
+            .native_id
+            .as_str()
+            .ok_or_else(|| Failure::new("invalid_answer", "request ID must be a string"))?
+            .to_owned();
+        let permit = input
+            .reserve_owned()
+            .await
+            .map_err(|_| Failure::new("answer_not_sent", "agent input is closed"))?;
+        Ok(async move {
+            let (delivered,receipt) = tokio::sync::oneshot::channel();
+            permit.send(Command {value:json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}),user:None,delivered:Some(delivered)});
+            tokio::time::timeout(std::time::Duration::from_secs(15),receipt).await.map_err(|_|Failure::unknown("answer_delivery_unknown","answer delivery timed out"))?
+                .map_err(|_|Failure::unknown("answer_delivery_unknown","agent exited before confirming the answer write"))?
+                .map_err(|e|Failure::unknown("answer_delivery_unknown",e))
+        }.boxed())
+    }
+    async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
+        Ok(op::ModelPage {
+            data: if params.cursor.is_none() {
+                Claude::models(self)
+                    .await
+                    .map_err(|e| Failure::new("models_unavailable", e))?
+            } else {
+                Vec::new()
+            },
+            next_cursor: None,
+            provider_errors: None,
+        })
+    }
+    async fn catalog(&self, cwd: &str) -> agent_protocol::composer::ComposerCatalog {
+        use agent_protocol::composer::{ComposerCandidate, ComposerCatalog};
+        let mut catalog = ComposerCatalog {
+            cwd: cwd.into(),
+            ..Default::default()
+        };
+        if self.availability().is_err() {
+            return catalog;
+        }
+        let candidates = async {
+            let Some(auth_home) = self.accounts.lock().await.selected_home()? else {
+                return Ok(Vec::new());
+            };
+            let directory = if cwd.is_empty() {
+                self.directory.as_path()
+            } else {
+                Path::new(cwd)
+            };
+            let _permit = self
+                .processes
+                .clone()
+                .try_acquire_owned()
+                .map_err(|error| error.to_string())?;
+            let (process, initialized) = Process::start(
+                &self.program,
+                &self.native_home,
+                &auth_home,
+                directory,
+                None,
+                None,
+                None,
+            )
+            .await?;
+            if let Err(error) = process.finish().await {
+                catalog
+                    .errors
+                    .entry(ProviderKind::Claude)
+                    .or_default()
+                    .push(error);
+            }
+            let commands = initialized["commands"]
+                .as_array()
+                .ok_or("スキル一覧を取得できませんでした。")?;
+            Ok::<_, String>(
+                commands
+                    .iter()
+                    .filter_map(|command| {
+                        let name = command["name"].as_str()?;
+                        Some(ComposerCandidate {
+                            invocation: skill_invocation(name, &format!("skill://claude/{name}")),
+                            description: command["description"].as_str().unwrap_or_default().into(),
+                        })
+                    })
+                    .collect(),
+            )
+        }
+        .await;
+        match candidates {
+            Ok(candidates) => catalog.candidates = candidates,
+            Err(error) => {
+                catalog
+                    .errors
+                    .entry(ProviderKind::Claude)
+                    .or_default()
+                    .push(error);
+            }
+        }
+        catalog
+    }
+    async fn active_sessions_in(&self, dir: &Path) -> Result<Vec<SessionRef>, Failure> {
+        let threads = Claude::list(self, "")
+            .await
+            .map_err(|e| Failure::new("session_list_failed", e))?;
+        let mut active = Vec::new();
+        for thread in threads {
+            if let Some(cwd) = &thread.cwd {
+                let cwd = tokio::fs::canonicalize(cwd)
+                    .await
+                    .unwrap_or_else(|_| cwd.into());
+                if dunce::simplified(&cwd).starts_with(dir)
+                    && let Some(id) = thread.id
+                {
+                    if thread.status == SessionStatus::Running {
+                        active.push(id);
+                    } else {
+                        let record = self.records.lock().await.get(&id.id).cloned();
+                        let observed_idle = if let Some(record) = record {
+                            record.lock().await.idle.is_some()
+                        } else {
+                            false
+                        };
+                        if !observed_idle {
+                            return Err(Failure::new(
+                                "activity_unavailable",
+                                "native transcript does not expose external process activity",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(active)
+    }
+    async fn discard_workspace_processes(&self, dir: &Path) -> Result<(), Failure> {
+        Claude::discard_workspace_processes(self, dir)
+            .await
+            .map_err(|e| Failure::new("workspace_resume_failed", e))
+    }
+    async fn read_permissions(
+        &self,
+    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
+        crate::host_rpc::permissions::read_claude_permissions(&self.native_home)
+    }
+    async fn update_permissions(
+        &self,
+        mode: agent_protocol::permissions::PermissionMode,
+        version: &str,
+    ) -> Result<agent_protocol::permissions::PermissionSettings, Failure> {
+        crate::host_rpc::permissions::update_claude_permissions(&self.native_home, mode, version)
+    }
+    async fn fork(
+        &self,
+        _id: &str,
+        _turn: &str,
+        _exclude: bool,
+        _browser: Option<Value>,
+    ) -> Result<ThreadResponse, Failure> {
+        Err(Failure::new(
+            "unsupported_operation",
+            "fork is unsupported by this provider",
+        ))
+    }
+    async fn rename(
+        &self,
+        _id: &str,
+        _name: &str,
+    ) -> Result<agent_protocol::models::Empty, Failure> {
+        Err(Failure::new(
+            "unsupported_operation",
+            "rename is unsupported by this provider",
+        ))
+    }
+    fn event_stream(&self) -> Option<mpsc::Receiver<AgentEvent>> {
+        self.event_receiver
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+    async fn shutdown(&self) {
+        self.stop.cancel();
+        let _ = self.accounts.lock().await.cancel().await;
+        let mut workers = self.workers.lock().await;
+        while let Some(result) = workers.join_next().await {
+            if let Err(error) = result {
+                tracing::error!(target: "bex", operation = "claude.worker", message = %error);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod execution_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queued_input_requires_write_confirmation_to_prove_delivery() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let claude = Claude::load(
+            root.join("unused"),
+            root.join("adapter"),
+            Some(root.join("native")),
+            None,
+        )
+        .await
+        .unwrap();
+        let session = Claude::create(&claude, root.to_str().unwrap(), "default")
+            .await
+            .unwrap()
+            .thread
+            .id
+            .unwrap();
+        let record = claude.record(&session.id).await.unwrap();
+        for enqueued in [false, true] {
+            let (input, mut receiver) = mpsc::channel(1);
+            let (_interrupt, interrupt) = watch::channel(None);
+            record.lock().await.running = Some(Running {
+                turn_id: "turn".into(),
+                input,
+                interrupt,
+            });
+            if !enqueued {
+                receiver.close();
+            }
+            let parts = [op::Input::Text {
+                text: "additional input".into(),
+            }];
+            let (result, ()) = tokio::join!(
+                claude.additional_input(&session.id, &parts, "input"),
+                async move {
+                    if enqueued {
+                        // Once accepted by the worker queue, closing the receipt
+                        // does not establish whether the native write happened.
+                        drop(receiver.recv().await.unwrap());
+                    }
+                },
+            );
+            assert_eq!(
+                result.unwrap_err().delivery,
+                if enqueued {
+                    agent_transport::peer::Delivery::Unknown
+                } else {
+                    agent_transport::peer::Delivery::NotSent
+                }
+            );
+        }
+    }
 
     #[test]
     fn final_blocks_match_content_kind_and_native_message_before_falling_back() {
@@ -1716,7 +2206,17 @@ mod execution_tests {
     }
     #[tokio::test]
     async fn late_blocks_and_api_retry_preserve_only_valid_stream_items() {
-        let router = SessionRouter::new();
+        let router = crate::host_rpc::routing::SessionRouter::new();
+        let (events, mut receiver) = mpsc::channel::<AgentEvent>(256);
+        let consumer = router.clone();
+        tokio::spawn(async move {
+            while let Some(event) = receiver.recv().await {
+                let result = event.change.apply(&consumer);
+                if let Some(applied) = event.applied {
+                    let _ = applied.send(result);
+                }
+            }
+        });
         let uuid = Uuid::new_v4();
         let session = SessionRef::new(ProviderKind::Claude, uuid.to_string()).unwrap();
         router.session_change(
@@ -1742,7 +2242,14 @@ mod execution_tests {
                 running: None,
                 idle: None,
             })),
-            router: router.clone(),
+            events,
+            live: Thread {
+                turns: Some(vec![Arc::new(Turn {
+                    id: "turn".into(),
+                    ..Default::default()
+                })]),
+                ..Default::default()
+            },
             session: session.clone(),
             turn_id: "turn".into(),
             input,
@@ -1832,6 +2339,11 @@ mod execution_tests {
         .unwrap();
         assert_eq!(limit.category, ErrorCategory::UsageLimit);
         assert_eq!(limit.resets_at_seconds, Some(123456));
+        let future = json!({"code":"future_failure","httpStatus":null});
+        assert_eq!(
+            execution_error(&json!({"error":"future_failure"}), false).category,
+            ErrorCategory::Provider(future)
+        );
     }
     #[test]
     fn native_tools_preserve_observations_without_inventing_exit_codes_or_diffs() {

@@ -45,6 +45,14 @@ pub fn account_error_message(message: String) -> String {
 }
 
 #[uniffi::export]
+pub fn apply_model_preferences(
+    persisted: Vec<u8>,
+    defaults: Vec<u8>,
+) -> Result<Vec<u8>, AgentError> {
+    crate::persistence::apply_model_preferences(&persisted, &defaults).map_err(error)
+}
+
+#[uniffi::export]
 pub fn generate_identity() -> Vec<u8> {
     Identity::generate().to_bytes().to_vec()
 }
@@ -485,7 +493,7 @@ mod tests {
                     .expect("Connected must reload without native intents").unwrap().unwrap();
                 methods.insert(request["method"].as_str().unwrap().to_owned());
             }
-            assert_eq!(methods, ["host/session/list", "host/session/open", "model/list", "host/account/list"].map(str::to_owned).into());
+            assert_eq!(methods, ["host/session/list", "host/session/open", "host/model/list", "host/account/list"].map(str::to_owned).into());
             let server = async {
                 assert!(!matches!(old.read_request().await, Ok(Some(_))),
                     "reconnect must close the old stream without probing it with list/history reads");
@@ -495,7 +503,7 @@ mod tests {
                     let request = reader.read_request().await.unwrap().unwrap();
                     assert!(requests.insert(request["method"].as_str().unwrap().to_owned(), request).is_none());
                 }
-                writer.reply(&requests["host/account/list"], json!({"result":{"accounts":[]}})).await.unwrap();
+                writer.reply(&requests["host/account/list"], json!({"result":{"accounts":[],"selected":{}}})).await.unwrap();
                 let list = &requests["host/session/list"];
                 assert_eq!(list["params"]["projectLimit"], 15);
                 assert_eq!(list["params"]["chatLimit"], 25);
@@ -505,7 +513,7 @@ mod tests {
                 assert_eq!(open["params"]["session"]["id"], "thread");
                 // Finish the conversation before the lists; no reload invalidates another.
                 writer.reply(open, json!({"result":{"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"after reconnect","phase":"unknown"}}}}}],"status":"unknown"}]}}}})).await.unwrap();
-                writer.reply(&requests["model/list"], json!({ "result":{"data":[{"id":"fresh-model","model":{"provider": "codex", "id": "fresh-model"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}})).await.unwrap();
+                writer.reply(&requests["host/model/list"], json!({ "result":{"data":[{"id":"fresh-model","model":{"provider": "codex", "id": "fresh-model"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}})).await.unwrap();
                 writer.reply(list, json!({ "result":{"data":[{"id":{"provider":"codex","id":"thread"},"name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
                 assert!(!matches!(reader.read_request().await, Ok(Some(_))));
                 next.close();
@@ -575,10 +583,10 @@ mod tests {
                         let result = match request["method"].as_str().unwrap() {
                             "host/session/scope" => json!("fixture-storage"),
                             "host/diagnostics/connection" => json!({}),
-                            "host/account/list" => json!({"accounts":[]}),
+                            "host/account/list" => json!({"accounts":[],"selected":{}}),
                             "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                             "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}}],"status":"unknown"}]}}}),
-                            "model/list" => json!({"data":[],"nextCursor":null}),
+                            "host/model/list" => json!({"data":[],"nextCursor":null}),
                             method => panic!("unexpected request: {method}"),
                         };
                         json!({"result":result})
@@ -798,7 +806,7 @@ mod tests {
         }
         assert_eq!(
             methods,
-            ["host/session/list", "model/list", "host/account/list"]
+            ["host/session/list", "host/model/list", "host/account/list"]
                 .map(str::to_owned)
                 .into()
         );
@@ -895,8 +903,8 @@ mod tests {
                             let result = match request["method"].as_str().unwrap() {
                                 "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":format!("round {round}")}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                                 "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[]}}}),
-                                "host/account/list" if round == 0 => json!({"accounts":[]}),
-                                "model/list" if round == 0 => json!({"data":[],"nextCursor":null}),
+                                "host/account/list" if round == 0 => json!({"accounts":[],"selected":{}}),
+                                "host/model/list" if round == 0 => json!({"data":[],"nextCursor":null}),
                                 method => panic!("unexpected refresh request {method}"),
                             };
                             if round == 2 && selected && request["method"] == "host/session/open" { pending.push(request); continue; }
