@@ -233,30 +233,52 @@ impl Desktop {
         }
         let key = self.draft_key().to_owned();
         let attachments = self.draft().attachments.clone();
-        let mut files = h_flex().gap_2().flex_wrap();
+        let mut files = h_flex().gap_3().p_2().flex_wrap();
         for (i, file) in attachments.iter().enumerate() {
             let key = key.clone();
-            let remove = self
-                .button(format!("attachment-{i}"), "×", cx, move |s, _, _| {
+            let remove = Button::new(format!("attachment-{i}"))
+                .icon(IconName::Close)
+                .xsmall()
+                .ghost()
+                .on_click(cx.listener(move |s, _, _, cx| {
                     s.dispatch(Intent::RemoveAttachment {
                         draft_key: key.clone(),
                         index: i as u32,
                     });
-                })
+                    cx.notify();
+                }))
                 .accessibility_label(format!("{}を外す", file.name))
-                .w(px(28.))
-                .h(px(28.))
+                .size(px(28.))
                 .rounded_full()
                 .bg(rgb(0x222222));
             files = files.child(if file.is_image {
+                let group = SharedString::from(format!("draft-image-{i}"));
                 div()
                     .relative()
-                    .w(px(104.))
-                    .h(px(104.))
-                    .rounded_lg()
-                    .overflow_hidden()
-                    .child(self.image(&file.path, false, 104., true, cx))
-                    .child(div().absolute().top_0().right_0().child(remove))
+                    .group(group.clone())
+                    .size(px(120.))
+                    .flex_shrink_0()
+                    .child(
+                        div()
+                            .size_full()
+                            .rounded_lg()
+                            .overflow_hidden()
+                            .child(self.image(&file.path, false, 120., true, cx)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(-4.))
+                            .right(px(-4.))
+                            .invisible()
+                            .group_hover(group, |style| style.visible())
+                            .child(
+                                remove
+                                    .size(px(18.))
+                                    .bg(rgb(0xffffff))
+                                    .text_color(rgb(0x222222)),
+                            ),
+                    )
                     .into_any_element()
             } else {
                 h_flex()

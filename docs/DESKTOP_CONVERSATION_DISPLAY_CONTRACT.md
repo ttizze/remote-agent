@@ -482,10 +482,15 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
 - Desktop image previews expose decrease, percentage/reset, and increase controls
   (25–400% of the fitted view). Enlarged images scroll in both directions; selecting
   another gallery image resets the scale.
+- Desktop image preview save and close controls use icons with accessible names
+  and tooltips. A successful save changes the download icon to a check mark.
 - Desktop, iPhone and Android show draft image thumbnails inside the composer,
   above the text. Each attachment has a top-right remove button. Removing an
   attachment preserves the text and other attachments. Non-image files retain
   their filenames. Mobile thumbnails use the authenticated Host download.
+- Desktop draft image thumbnails are 120 px squares with rounded corners. Only
+  the hovered thumbnail shows its small white circular remove button, overlapping
+  the top-right corner without being clipped by the image's rounded bounds.
 - iOS `testSimulatorCanAddASecondPhoto` verifies decoded thumbnails, removal
   placement and draft preservation in addition to separate photo selections.
 

@@ -303,8 +303,13 @@ impl Desktop {
                     .child(div().flex_1().child(label))
                     .when(loading, |row| row.child("画像一覧を読み込み中…"))
                     .child(
-                        self.button(
+                        self.icon_button(
                             "gallery-save",
+                            if saved {
+                                Icon::new(IconName::Check)
+                            } else {
+                                Icon::default().path("bex/download.svg")
+                            },
                             if saved { "保存済み" } else { "保存" },
                             cx,
                             |s, _, cx| s.save_gallery_image(cx),
@@ -312,9 +317,13 @@ impl Desktop {
                         .disabled(!ready || saving || saved),
                     )
                     .child(
-                        self.button("gallery-close", "閉じる", cx, |s, _, _| {
-                            s.image_gallery = None
-                        })
+                        self.icon_button(
+                            "gallery-close",
+                            IconName::Close,
+                            "閉じる",
+                            cx,
+                            |s, _, _| s.image_gallery = None,
+                        )
                         .disabled(saving),
                     ),
             )
