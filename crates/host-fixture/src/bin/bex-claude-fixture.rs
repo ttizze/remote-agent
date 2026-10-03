@@ -62,8 +62,12 @@ fn native(mut value: Value) {
 }
 
 fn emit(value: Value) {
+    let idle = (value["type"] == "result").then(|| json!({"type":"system","subtype":"session_state_changed","state":"idle","session_id":value["session_id"],"sdk_host_only":true}));
     native(value.clone());
     output(value);
+    if let Some(idle) = idle {
+        output(idle);
+    }
 }
 
 fn output(value: Value) {
@@ -92,16 +96,22 @@ fn block(session: &str, message: &str, index: usize, kind: &str, text: &str) {
     );
 }
 
-fn reply(session: &str, count: usize, text: &str) {
+fn reply(session: &str, count: usize, text: &str, idle_before_result: bool) {
     let message = format!("message-{count}");
     emit(
         json!({"type":"stream_event","session_id":session,"event":{"type":"message_start","message":{"id":message}}}),
     );
     block(session, &message, 0, "thinking", "Fixture reasoning");
     block(session, &message, 1, "text", text);
-    emit(
-        json!({"type":"result","subtype":"success","session_id":session,"is_error":false,"result":text}),
-    );
+    let result = json!({"type":"result","subtype":"success","session_id":session,"is_error":false,"result":text});
+    if idle_before_result {
+        output(
+            json!({"type":"system","subtype":"session_state_changed","state":"idle","session_id":session,"sdk_host_only":true}),
+        );
+        output(result);
+    } else {
+        emit(result);
+    }
 }
 
 fn main() {
@@ -120,6 +130,10 @@ fn main() {
     assert_eq!(option("--input-format").as_deref(), Some("stream-json"));
     assert_eq!(option("--output-format").as_deref(), Some("stream-json"));
     assert_eq!(option("--permission-prompt-tool").as_deref(), Some("stdio"));
+    assert_eq!(
+        std::env::var("CLAUDE_CODE_SDK_READS_SESSION_STATE").as_deref(),
+        Ok("1")
+    );
     assert!(
         !args
             .iter()
@@ -243,6 +257,9 @@ fn main() {
                 fs::write(&history, &bytes).unwrap();
                 fs::write(&path, bytes).unwrap();
                 emit(json!({"type":"system","subtype":"init","session_id":session}));
+                output(
+                    json!({"type":"system","subtype":"session_state_changed","state":"running","session_id":session,"sdk_host_only":true}),
+                );
                 let text = content
                     .as_array()
                     .unwrap()
@@ -277,7 +294,29 @@ fn main() {
                         "elicitation" => "elicitation",
                         _ => "unknown_control",
                     });
-                } else if text == "permission" || text == "question" {
+                } else if matches!(
+                    text.as_str(),
+                    "permission" | "question" | "background" | "background-settled"
+                ) {
+                    if text.starts_with("background") {
+                        emit(
+                            json!({"type":"system","subtype":"task_started","task_id":"background-1","task_type":"local_agent","description":"background work","session_id":session}),
+                        );
+                        let message = format!("background-{}", inputs.len());
+                        emit(
+                            json!({"type":"stream_event","session_id":session,"event":{"type":"message_start","message":{"id":message}}}),
+                        );
+                        block(&session, &message, 0, "text", "あとで報告します");
+                        if text == "background-settled" {
+                            emit(
+                                json!({"type":"system","subtype":"task_notification","task_id":"background-1","status":"completed","summary":"background done","session_id":session}),
+                            );
+                        }
+                        // The parent still owes a follow-up after this result.
+                        output(
+                            json!({"type":"result","session_id":session,"is_error":false,"result":"あとで報告します"}),
+                        );
+                    }
                     let tool = if text == "question" {
                         "AskUserQuestion"
                     } else {
@@ -294,7 +333,11 @@ fn main() {
                     emit(
                         json!({"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":tool,"tool_use_id":"tool-1","input":input}}),
                     );
-                    waiting = Some(if text == "question" {
+                    waiting = Some(if text == "background-settled" {
+                        "background-settled"
+                    } else if text == "background" {
+                        "background"
+                    } else if text == "question" {
                         "question"
                     } else {
                         "permission"
@@ -304,6 +347,7 @@ fn main() {
                         &session,
                         inputs.len(),
                         &format!("reply {}: {text}", inputs.len()),
+                        config["idleBeforeResult"] == true,
                     );
                 }
             }
@@ -321,7 +365,12 @@ fn main() {
                         ),
                         _ => unreachable!(),
                     }
-                    reply(&session, inputs.len(), "control resolved");
+                    reply(
+                        &session,
+                        inputs.len(),
+                        "control resolved",
+                        config["idleBeforeResult"] == true,
+                    );
                     waiting = None;
                     continue;
                 }
@@ -342,7 +391,17 @@ fn main() {
                 emit(
                     json!({"type":"user","uuid":"tool-result","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":text,"is_error":!allowed}]}}),
                 );
-                reply(&session, inputs.len(), &text);
+                if waiting == Some("background") {
+                    emit(
+                        json!({"type":"system","subtype":"task_notification","task_id":"background-1","status":"completed","summary":"background done","session_id":session}),
+                    );
+                }
+                reply(
+                    &session,
+                    inputs.len(),
+                    &text,
+                    config["idleBeforeResult"] == true,
+                );
                 waiting = None;
             }
             "control_request" if value["request"]["subtype"] == "interrupt" => {

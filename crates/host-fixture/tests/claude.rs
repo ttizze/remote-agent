@@ -1525,6 +1525,122 @@ async fn live_claude_account_login_url_and_cancellation() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claude_keeps_loading_through_background_results_and_follow_up_after_reconnect() {
+    use agent_core::presentation::conversation::ConversationRowContent;
+    use agent_protocol::execution::TurnStatus;
+
+    for (prompt, idle_before_result) in [("background", false), ("background-settled", true)] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("claude-fixture.json"),
+            json!({"idleBeforeResult":idle_before_result}).to_string(),
+        )
+        .unwrap();
+        let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        store
+            .dispatch(Intent::NewChat {
+                cwd: root.path().to_str().unwrap().into(),
+            })
+            .await
+            .unwrap();
+        store
+            .dispatch(Intent::SelectModel {
+                thread_id: store.snapshot().navigation.draft_key.clone(),
+                model: models::ModelRef {
+                    provider: ProviderKind::Claude,
+                    id: "default".into(),
+                },
+            })
+            .await
+            .unwrap();
+        let id = send(&store, prompt, "background-input").await;
+        until(&store, |snapshot| snapshot.requests().next().is_some()).await;
+        store.disconnect().await.unwrap();
+        store
+            .reconnect(&endpoint, &fixture.ticket, None)
+            .await
+            .unwrap();
+        until(&store, |snapshot| snapshot.requests().next().is_some()).await;
+        store
+            .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+            .await
+            .unwrap();
+        let snapshot = store.snapshot();
+        let thread = &snapshot.conversations[&id];
+        let turn = thread.turns.as_ref().unwrap().last().unwrap();
+        assert_eq!(
+            turn.status,
+            TurnStatus::Running,
+            "an intermediate result must stay live"
+        );
+        assert!(
+            turn.items
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|item| item_text(item) == Some("あとで報告します"))
+        );
+        let projected = agent_core::presentation::conversation::project_conversation(
+            &snapshot,
+            thread.clone(),
+            &None,
+        );
+        assert!(projected.turns.last().unwrap().rows.iter().any(|row| matches!(
+            &row.content, ConversationRowContent::ActivityHeader { activity } if activity.is_in_progress
+        )), "the shared native presentation must retain its loading indicator");
+        let request = snapshot.requests().next().unwrap();
+        store
+            .dispatch(Intent::Respond(op::Respond {
+                request_id: request.id.clone(),
+                answer: Answer::Approval {
+                    choice_id: request.body.choices()[0].id.clone(),
+                },
+            }))
+            .await
+            .unwrap();
+        let snapshot = completed(&store, &id, 1, "completed").await;
+        let thread = &snapshot.conversations[&id];
+        assert!(
+            thread.turns.as_ref().unwrap()[0]
+                .items
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|item| item_text(item) == Some("approved"))
+        );
+        let projected = agent_core::presentation::conversation::project_conversation(
+            &snapshot,
+            thread.clone(),
+            &Some(projected),
+        );
+        assert!(!projected.turns[0].rows.iter().any(|row| matches!(
+            &row.content, ConversationRowContent::ActivityHeader { activity } if activity.is_in_progress
+        )));
+        send(&store, "next turn", "after-background").await;
+        completed(&store, &id, 2, "completed").await;
+        send(&store, prompt, "stop-background").await;
+        let snapshot = until(&store, |snapshot| snapshot.requests().next().is_some()).await;
+        store
+            .dispatch(Intent::Interrupt(op::Interrupt {
+                thread_id: id.clone(),
+                turn_id: snapshot.conversations[&id].turns.as_ref().unwrap()[2]
+                    .id
+                    .clone(),
+            }))
+            .await
+            .unwrap();
+        let snapshot = completed(&store, &id, 3, "interrupted").await;
+        assert!(snapshot.requests().next().is_none());
+        send(&store, "after stop", "after-interruption").await;
+        completed(&store, &id, 4, "completed").await;
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
     let root = tempfile::tempdir().unwrap();
     let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
