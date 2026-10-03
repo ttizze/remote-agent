@@ -1554,6 +1554,13 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
             })
             .await
             .unwrap();
+        store
+            .dispatch(Intent::SelectEffort {
+                thread_id: store.snapshot().navigation.draft_key.clone(),
+                effort: "low".into(),
+            })
+            .await
+            .unwrap();
         let id = send(&store, prompt, "background-input").await;
         until(&store, |snapshot| snapshot.requests().next().is_some()).await;
         store.disconnect().await.unwrap();
@@ -1651,6 +1658,12 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
                 .iter()
                 .any(|item| item_text(item) == Some("reply 4: after stop"))
         );
+        let inputs: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join(format!("claude-session-{}.json", id.id))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inputs[3]["effort"], "high");
+        assert_ne!(inputs[2]["pid"], inputs[3]["pid"]);
         store.close().await.unwrap();
         endpoint.close().await;
         fixture.close().await.unwrap();

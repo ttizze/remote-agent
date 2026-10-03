@@ -875,7 +875,7 @@ impl Worker {
                         result?;
                         continue;
                     }
-                    message = process.read() => message?.ok_or("Claude Code exited without a result")?,
+                    message = process.read() => message?.ok_or("Claude Code exited before the turn completed")?,
                 };
                 if message["type"] == "system" && message["subtype"] == "session_state_changed" {
                     idle = message["state"] == "idle";
