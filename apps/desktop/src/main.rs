@@ -34,6 +34,10 @@ impl DesktopAssets {
         ("bex/shield.svg", include_bytes!("../assets/shield.svg")),
         ("bex/bolt.svg", include_bytes!("../assets/bolt.svg")),
         (
+            "bex/bolt-fill.svg",
+            include_bytes!("../assets/bolt-fill.svg"),
+        ),
+        (
             "bex/microphone.svg",
             include_bytes!("../assets/microphone.svg"),
         ),
