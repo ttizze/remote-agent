@@ -54,11 +54,6 @@ impl TryFrom<JsonValue> for Value {
     }
 }
 #[uniffi::export]
-pub fn format_json_value(value: Value) -> Result<String, AgentError> {
-    serde_json::to_string_pretty(&value).map_err(error)
-}
-
-#[uniffi::export]
 pub fn request_answer_from_json(
     body: agent_protocol::requests::RequestBody,
     text: String,
