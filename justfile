@@ -81,8 +81,8 @@ iroh-e2e:
     cargo build --locked --package bex-process --bin bex-provider-supervisor
     cargo test --locked --package host-fixture --test iroh_host
 
-# Run Rust, Kotlin and Swift quality checks, or one selected language.
-quality language="all":
+# Check the local Mac Host/desktop and iPhone client, or one selected language.
+quality language="apple":
     scripts/quality.sh "$1"
 
 # Audit diff presentation tests in an isolated copy; extra arguments go to cargo-mutants.

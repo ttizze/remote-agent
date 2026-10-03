@@ -63,7 +63,6 @@ jobs:
           cmd-format: nix develop . --command {0}
           key: android-${{ hashFiles('flake.lock') }}
           cache-on-failure: true
-      # Build instrumentation tests here; run them with just android-e2e.
       - name: Check Android and build app and test APKs
         env:
           GRADLE_USER_HOME: ${{ runner.temp }}/gradle
@@ -74,6 +73,12 @@ jobs:
           :apps:mobile:testDebugUnitTest
           :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest
           --no-daemon --no-parallel --max-workers=2 --console=plain
+      - name: Enable emulator hardware acceleration
+        run: sudo chmod a+rw /dev/kvm
+      - name: Build isolated Android Host fixtures
+        run: nix develop .#native --command cargo build --locked -p host-fixture -p codex-app-server -p bex-process --bins
+      - name: Android emulator acceptance
+        run: nix develop .#android-test --command bash scripts/android-e2e.sh
   windows:
     needs: toolchain
     # Latest stable Windows Server major; Windows 11 UI acceptance is separate.
