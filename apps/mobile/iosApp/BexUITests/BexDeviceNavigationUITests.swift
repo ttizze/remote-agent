@@ -63,7 +63,7 @@ extension BexLaunchUITests {
             assertTerminalReady(app)
         }
         let composer = app.textFields["task.message"]
-        composer.tap(); composer.typeText("Keep my draft")
+        replaceFieldText(field: composer, text: "Keep my draft")
         let chat = app.descendants(matching: .any)["task.empty"]
         XCTAssertTrue(chat.waitForExistence(timeout: 10))
         let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0))
