@@ -78,6 +78,8 @@ contracts! {
     ComposerCatalog, "host/composer/catalog" => (op::LoadComposerCatalog, crate::composer::ComposerCatalog) [clone],
     ListModels, "host/model/list" => (op::ListModels, op::ModelPage) [clone],
     Transcribe, "host/dictation/transcribe" => (op::Transcribe, op::Transcription),
+    PrepareDictation, "host/dictation/prepare" => (op::DictationPreparation, m::Empty),
+    CancelDictation, "host/dictation/cancel" => (op::DictationPreparation, m::Empty),
     ListFiles, "host/file/list" => (op::ListFiles, m::FileList) [clone],
     ReadFile, "host/file/read" => (op::ListFiles, m::FileContent),
     WriteFile, "host/file/write" => (op::WriteFile, m::FileContent) [clone],

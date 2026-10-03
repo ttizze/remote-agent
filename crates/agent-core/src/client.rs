@@ -6,6 +6,46 @@ use agent_transport::client::{Client, Updates};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+/// A recording owns its prepared connection until transcription finishes or
+/// capture is cancelled. The Store worker orders preparation before cancellation.
+#[cfg_attr(feature = "bindings", derive(uniffi::Object))]
+pub struct DictationPreparation {
+    pub(crate) id: String,
+    pub(crate) _cancel: tokio_util::sync::DropGuard,
+}
+
+#[cfg_attr(feature = "bindings", uniffi::export)]
+impl DictationPreparation {
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+}
+
+pub(crate) async fn prepare_dictation(
+    peer: &Client,
+    id: String,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    if cancel.is_cancelled() {
+        return;
+    }
+    let preparation = agent_protocol::operations::DictationPreparation { id };
+    if peer
+        .request::<crate::models::Empty>(&crate::protocol::Call::PrepareDictation(
+            preparation.clone(),
+        ))
+        .await
+        .is_ok()
+    {
+        cancel.cancelled().await;
+    }
+    // A lost preparation reply may still leave a connection on Host. Cancel it
+    // after that request completes, including failures, rather than racing start.
+    let _ = peer
+        .request::<crate::models::Empty>(&crate::protocol::Call::CancelDictation(preparation))
+        .await;
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SessionImage {

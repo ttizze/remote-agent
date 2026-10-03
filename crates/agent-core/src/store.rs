@@ -38,6 +38,10 @@ pub enum Outcome {
     },
 }
 enum Command {
+    PrepareDictation {
+        id: String,
+        cancel: CancellationToken,
+    },
     ConnectionPerformance {
         epoch: u64,
         performance: ConnectionPerformance,
@@ -474,6 +478,16 @@ impl Store {
     pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
         self.updates.clone()
     }
+    pub fn prepare_dictation(&self) -> crate::client::DictationPreparation {
+        let id = uuid::Uuid::new_v4().to_string();
+        let cancel = self.stop.child_token();
+        let preparation = crate::client::DictationPreparation {
+            id: id.clone(),
+            _cancel: cancel.clone().drop_guard(),
+        };
+        let _ = self.commands.send(Command::PrepareDictation { id, cancel });
+        preparation
+    }
     /// Best-effort diagnostics use the owned connection without delaying recovery.
     pub fn record_connection_performance(&self, performance: ConnectionPerformance) {
         let _ = self.commands.send(Command::ConnectionPerformance {
@@ -827,6 +841,7 @@ async fn run(
     let mut jobs = FuturesUnordered::new();
     let mut browser_jobs = FuturesUnordered::new();
     let mut diagnostic_jobs = FuturesUnordered::new();
+    let mut preparation_jobs = FuturesUnordered::new();
     let mut subscriptions = tokio_stream::StreamMap::new();
     let mut terminal_commands = VecDeque::new();
     let mut item_reads = ItemReads::default();
@@ -922,6 +937,10 @@ async fn run(
             command = commands.recv() => {
                 let Some(command) = command else { break "store closed".into() };
                 let command = match command {
+                    Command::PrepareDictation { id, cancel } => {
+                        preparation_jobs.push(crate::client::prepare_dictation(peer, id, cancel));
+                        continue;
+                    }
                     Command::ConnectionPerformance { epoch, performance } => {
                         if epoch == updates.borrow().epoch && performance.connection_id == peer.diagnostic_id {
                             diagnostic_jobs.clear();
@@ -988,6 +1007,7 @@ async fn run(
                 }
                 effects.extend(item_reads.finish(&updates, result));
             }
+            Some(()) = preparation_jobs.next(), if !preparation_jobs.is_empty() => {},
             Some((id, update)) = subscriptions.next(), if !subscriptions.is_empty() => {
                 match update {
                     Ok(change) => effects.extend(apply(&updates, Event::SessionUpdate(Box::new(crate::session::SessionUpdate { subscription_id: id, change })))),
@@ -1010,6 +1030,7 @@ async fn run(
     drop(jobs);
     drop(browser_jobs);
     drop(diagnostic_jobs);
+    drop(preparation_jobs);
     peer.close().await;
     drop(connection);
     apply(&updates, Event::Disconnected(reason));
@@ -1030,6 +1051,7 @@ async fn run_offline(
             command = commands.recv() => match command { Some(command) => command, None => break },
         };
         let command = match command {
+            Command::PrepareDictation { .. } => continue,
             Command::ConnectionPerformance { .. } => continue,
             Command::Dispatch(command) => command,
             Command::Browser { complete, .. } => {

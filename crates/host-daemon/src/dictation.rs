@@ -1,6 +1,10 @@
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+    time::Duration,
+};
 
-use crate::codex_accounts::AuthToken;
+use crate::{codex_accounts::AuthToken, host_rpc::SessionId};
 use async_tungstenite::{
     WebSocketStream,
     tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
@@ -19,45 +23,171 @@ const DICTATION_URL: &str = "wss://chatgpt.com/backend-api/dictation/stream";
 const API_TRANSCRIBE_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 const TRANSCRIBE_URL: &str = "https://chatgpt.com/backend-api/transcribe";
 
+type DictationSocket = WebSocketStream<async_tungstenite::tokio::ConnectStream>;
+
+struct PreparedConnection {
+    token: Zeroizing<String>,
+    socket: DictationSocket,
+}
+
+struct Prepared {
+    id: String,
+    ready: tokio::sync::oneshot::Sender<()>,
+    task: tokio_util::task::AbortOnDropHandle<Result<PreparedConnection, String>>,
+}
+impl Prepared {
+    fn new(
+        id: String,
+        connection: impl std::future::Future<Output = Result<PreparedConnection, String>>
+        + Send
+        + 'static,
+    ) -> Self {
+        let (ready, recorded) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let PreparedConnection { token, socket } =
+                tokio::time::timeout(Duration::from_secs(10), connection)
+                    .await
+                    .map_err(|_| "音声接続の準備がタイムアウトしました。")??;
+            let socket = wait_for_recording(socket, recorded, Duration::from_secs(300)).await?;
+            Ok(PreparedConnection { token, socket })
+        });
+        Self {
+            id,
+            ready,
+            task: tokio_util::task::AbortOnDropHandle::new(task),
+        }
+    }
+    async fn take(self) -> Option<PreparedConnection> {
+        let _ = self.ready.send(());
+        self.task.await.ok()?.ok()
+    }
+}
+
+// One recording per authenticated client. Replacing or cancelling a recording
+// drops its task and socket; another client's preparation remains independent.
 pub(crate) struct Dictation {
-    backend: Result<std::sync::Arc<CodexAppServer>, String>,
+    backend: Result<Arc<CodexAppServer>, String>,
+    prepared: Mutex<HashMap<SessionId, Prepared>>,
 }
 impl Dictation {
-    pub(crate) fn new(backend: Result<std::sync::Arc<CodexAppServer>, String>) -> Self {
-        Self { backend }
+    pub(crate) fn new(backend: Result<Arc<CodexAppServer>, String>) -> Self {
+        Self {
+            backend,
+            prepared: Default::default(),
+        }
+    }
+    pub(crate) fn prepare(&self, session: SessionId, id: String) -> Result<(), String> {
+        uuid::Uuid::parse_str(&id).map_err(|_| "録音の識別子が無効です。")?;
+        let app_server = self
+            .backend
+            .as_ref()
+            .map_err(|_| "音声入力のCodexバックエンドを利用できません。")?
+            .clone();
+        let connection = async move {
+            let AuthToken::ChatGpt(token) =
+                crate::codex_accounts::auth_token(&app_server, false).await?
+            else {
+                // API-key transcription is a single HTTP file request. It has no
+                // idle WebSocket to prepare; keep that request at recording stop.
+                return Err("APIキーの音声入力は録音後に接続します。".into());
+            };
+            let socket = connect_stream(
+                &token,
+                &app_server.initialize_response().user_agent,
+                DICTATION_URL,
+            )
+            .await?;
+            Ok(PreparedConnection { token, socket })
+        };
+        self.prepared
+            .lock()
+            .unwrap()
+            .insert(session, Prepared::new(id, connection));
+        Ok(())
+    }
+    pub(crate) fn cancel(&self, session: SessionId, id: &str) {
+        drop(self.take_preparation(session, Some(id)));
+    }
+    pub(crate) fn close_session(&self, session: SessionId) {
+        self.prepared.lock().unwrap().remove(&session);
+    }
+    fn take_preparation(&self, session: SessionId, id: Option<&str>) -> Option<Prepared> {
+        let mut prepared = self.prepared.lock().unwrap();
+        if id.is_some_and(|id| prepared.get(&session).is_some_and(|entry| entry.id == id)) {
+            prepared.remove(&session)
+        } else {
+            None
+        }
     }
     pub(crate) async fn transcribe(
         &self,
+        session: SessionId,
+        preparation: Option<&str>,
         audio: &[u8],
     ) -> Result<agent_protocol::operations::Transcription, String> {
+        let prepared = self.take_preparation(session, preparation);
         let app_server = self
             .backend
             .as_deref()
             .map_err(|error| format!("音声入力のCodexバックエンドを利用できません: {error}"))?;
         tokio::time::timeout(
             Duration::from_secs(25),
-            transcribe_request(app_server, audio),
+            transcribe_request(app_server, audio, prepared),
         )
         .await
         .map_err(|_| "文字起こしがタイムアウトしました。")?
     }
 }
 
+async fn wait_for_recording<S>(
+    mut socket: WebSocketStream<S>,
+    mut recorded: tokio::sync::oneshot::Receiver<()>,
+    lifetime: Duration,
+) -> Result<WebSocketStream<S>, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let expires = tokio::time::sleep(lifetime);
+    tokio::pin!(expires);
+    loop {
+        tokio::select! {
+            result = &mut recorded => {
+                result.map_err(|_| "録音が取り消されました。")?;
+                return Ok(socket);
+            }
+            _ = &mut expires => return Err("音声接続の準備が期限切れになりました。".into()),
+            message = socket.next() => match message {
+                Some(Ok(Message::Ping(_))) => socket.flush().await.map_err(|_| "音声接続の準備中に接続が切れました。")?,
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return Err("音声接続の準備中に接続が切れました。".into()),
+                _ => {},
+            }
+        }
+    }
+}
+
 async fn transcribe_request(
     app_server: &CodexAppServer,
     pcm: &[u8],
+    prepared: Option<Prepared>,
 ) -> Result<agent_protocol::operations::Transcription, String> {
     if pcm.is_empty() || !pcm.len().is_multiple_of(2) {
         return Err("録音データが無効です。".into());
     }
-
-    // Keep the desktop account token on the Host. Neither the RPC response nor
-    // an error contains the token or the authenticated WebSocket request.
+    // Re-read the selected account at stop. Never use the prepared socket after
+    // an account switch or refreshed token. Credentials stay exclusively on Host.
     let text = match crate::codex_accounts::auth_token(app_server, false).await? {
         AuthToken::ApiKey(key) => {
             transcribe_recording(&key, RecordingService::OpenAi, pcm, API_TRANSCRIBE_URL).await?
         }
         AuthToken::ChatGpt(token) => {
+            let socket = match prepared {
+                Some(prepared) => prepared
+                    .take()
+                    .await
+                    .filter(|connection| connection.token == token)
+                    .map(|connection| connection.socket),
+                None => None,
+            };
             let audio = Zeroizing::new(STANDARD.encode(pcm));
             transcribe_authenticated(
                 &token,
@@ -66,6 +196,7 @@ async fn transcribe_request(
                 pcm,
                 DICTATION_URL,
                 TRANSCRIBE_URL,
+                socket,
             )
             .await?
         }
@@ -88,14 +219,20 @@ async fn transcribe_authenticated(
     pcm: &[u8],
     stream_url: &str,
     recording_url: &str,
+    prepared: Option<DictationSocket>,
 ) -> Result<String, String> {
-    install_tls_provider();
-    // The desktop retains a recording alongside its stream and submits that
-    // recording to /transcribe when streaming cannot produce a transcript.
-    let stream_result = tokio::time::timeout(
-        Duration::from_secs(18),
-        transcribe_stream(token, user_agent, audio, stream_url),
-    )
+    // Keep complete PCM for file transcription if the WebSocket attempts fail.
+    let stream_result = tokio::time::timeout(Duration::from_secs(18), async {
+        if let Some(socket) = prepared
+            && let Ok(text) = transcribe_socket(socket, audio).await
+        {
+            return Ok(text);
+        }
+        // An idle prepared connection may have expired. Retry with all of
+        // the same recording before falling back to the file endpoint.
+        let socket = connect_stream(token, user_agent, stream_url).await?;
+        transcribe_socket(socket, audio).await
+    })
     .await
     .unwrap_or_else(|_| Err("音声ストリームがタイムアウトしました。".into()));
     match stream_result {
@@ -111,12 +248,12 @@ async fn transcribe_authenticated(
     }
 }
 
-async fn transcribe_stream(
+async fn connect_stream(
     token: &str,
     user_agent: &str,
-    audio: &str,
     url: &str,
-) -> Result<String, String> {
+) -> Result<DictationSocket, String> {
+    install_tls_provider();
     let mut request = url
         .into_client_request()
         .map_err(|_| "音声処理の接続先が無効です。")?;
@@ -157,7 +294,7 @@ async fn transcribe_stream(
             ),
             _ => "Codexの音声処理とのWebSocket接続に失敗しました。".into(),
         })?;
-    transcribe_socket(socket, audio).await
+    Ok(socket)
 }
 
 enum RecordingService<'a> {
@@ -183,8 +320,7 @@ async fn transcribe_recording(
         .as_ref()
         .map_err(|_| "録音ファイルの接続を初期化できませんでした。")?;
 
-    // The phone provides raw PCM rather than the desktop's MediaRecorder Blob.
-    // A WAV container preserves those samples and declares their capture format.
+    // The WAV container preserves native PCM and declares its capture format.
     let data_len = u32::try_from(pcm.len()).map_err(|_| "録音データが大きすぎます。")?;
     let mut wav = Vec::with_capacity(44 + pcm.len());
     wav.extend_from_slice(b"RIFF");
@@ -355,6 +491,226 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[allow(
+        clippy::result_large_err,
+        reason = "Tungstenite fixes the callback's unboxed ErrorResponse type"
+    )]
+    async fn accept_provider(
+        stream: tokio::net::TcpStream,
+    ) -> WebSocketStream<async_tungstenite::tokio::TokioAdapter<tokio::net::TcpStream>> {
+        use async_tungstenite::tungstenite::handshake::server::{Request, Response};
+        async_tungstenite::tokio::accept_hdr_async(
+            stream,
+            |request: &Request, mut response: Response| {
+                assert!(
+                    request.headers()["Sec-WebSocket-Protocol"]
+                        .to_str()
+                        .unwrap()
+                        .starts_with("chatgpt-dictation, openai-bearer.")
+                );
+                response.headers_mut().insert(
+                    "Sec-WebSocket-Protocol",
+                    HeaderValue::from_static("chatgpt-dictation"),
+                );
+                Ok(response)
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn prepares_only_the_connection_then_reuses_it_for_the_complete_recording() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}/stream", listener.local_addr().unwrap());
+            let (alive, warmed) = tokio::sync::oneshot::channel();
+            let provider = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_provider(stream).await;
+                socket.send(Message::Ping(vec![7].into())).await.unwrap();
+                assert_eq!(socket.next().await.unwrap().unwrap(), Message::Pong(vec![7].into()),
+                    "preparation must service keepalive without starting recognition or sending audio");
+                alive.send(()).unwrap();
+                provider_recording(socket, "AQD/fw==", vec![
+                    json!({"type":"transcript.final","utterance_id":"full","revision":1,"text":"全文"}),
+                    json!({"type":"session.updated","session":{"status":"closed"}}),
+                ], CloseCode::Normal).await;
+                assert!(tokio::time::timeout(Duration::from_millis(20), listener.accept()).await.is_err(),
+                    "prepared socket must be reused");
+            };
+            let operation = async {
+                let connection_url = url.clone();
+                let prepared = Prepared::new("recording".into(), async move {
+                    let token = Zeroizing::new("isolated-token".to_owned());
+                    let socket = connect_stream(&token, "isolated-codex/1.0", &connection_url).await?;
+                    Ok(PreparedConnection { token, socket })
+                });
+                warmed.await.unwrap();
+                let connection = prepared.take().await.unwrap();
+                transcribe_authenticated(&connection.token, "isolated-codex/1.0", "AQD/fw==",
+                    &[1, 0, 255, 127], &url, "http://127.0.0.1:1/unused", Some(connection.socket)).await.unwrap()
+            };
+            let (text, ()) = tokio::join!(operation, provider);
+            assert_eq!(text, "全文");
+        }).await.expect("prepared transcription stalled");
+    }
+
+    #[tokio::test]
+    async fn retries_a_lost_prepared_socket_with_all_audio_and_discards_partial_text() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}/stream", listener.local_addr().unwrap());
+            let provider = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut first = accept_provider(stream).await;
+                let start: Value = serde_json::from_str(first.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+                assert_eq!(start["type"], "session.start");
+                first.send(Message::Text(json!({"type":"session.started"}).to_string().into())).await.unwrap();
+                first.send(Message::Text(json!({"type":"transcript.final","utterance_id":"partial","revision":1,"text":"不完全"}).to_string().into())).await.unwrap();
+                first.send(Message::Close(Some(CloseFrame { code: CloseCode::Error, reason: "".into() }))).await.unwrap();
+                drop(first);
+                let (stream, _) = listener.accept().await.unwrap();
+                let socket = accept_provider(stream).await;
+                provider_recording(socket, "AQD/fw==", vec![
+                    json!({"type":"transcript.final","utterance_id":"full","revision":1,"text":"再接続後の全文"}),
+                    json!({"type":"session.updated","session":{"status":"closed"}}),
+                ], CloseCode::Normal).await;
+            };
+            let operation = async {
+                let connection_url = url.clone();
+                let prepared = Prepared::new("recording".into(), async move {
+                    let token = Zeroizing::new("isolated-token".to_owned());
+                    let socket = connect_stream(&token, "isolated-codex/1.0", &connection_url).await?;
+                    Ok(PreparedConnection { token, socket })
+                });
+                // Stop can precede completion of the initial handshake.
+                let connection = prepared.take().await.unwrap();
+                transcribe_authenticated(&connection.token, "isolated-codex/1.0", "AQD/fw==",
+                    &[1, 0, 255, 127], &url, "http://127.0.0.1:1/unused", Some(connection.socket)).await.unwrap()
+            };
+            let (text, ()) = tokio::join!(operation, provider);
+            assert_eq!(text, "再接続後の全文");
+        }).await.expect("prepared retry stalled");
+    }
+
+    #[tokio::test]
+    async fn idle_connections_close_on_cancellation_expiry_and_remote_disconnect() {
+        for end in ["cancel", "expire", "disconnect"] {
+            let (client, server) = tokio::io::duplex(1024);
+            let client = WebSocketStream::from_raw_socket(
+                async_tungstenite::tokio::TokioAdapter::new(client),
+                Role::Client,
+                None,
+            )
+            .await;
+            let mut server = WebSocketStream::from_raw_socket(
+                async_tungstenite::tokio::TokioAdapter::new(server),
+                Role::Server,
+                None,
+            )
+            .await;
+            let (recorded, receiver) = tokio::sync::oneshot::channel();
+            let waiting = wait_for_recording(client, receiver, Duration::from_millis(20));
+            let provider = async {
+                server.send(Message::Ping(vec![1].into())).await.unwrap();
+                assert_eq!(
+                    server.next().await.unwrap().unwrap(),
+                    Message::Pong(vec![1].into())
+                );
+                if end == "cancel" {
+                    drop(recorded);
+                } else {
+                    let _keep_recording = recorded;
+                    if end == "disconnect" {
+                        server.close(None).await.unwrap();
+                    }
+                    std::future::pending::<()>().await;
+                }
+            };
+            tokio::pin!(waiting, provider);
+            let error = tokio::time::timeout(Duration::from_secs(1), async {
+                tokio::select! {
+                    result = &mut waiting => result.err().unwrap(),
+                    () = &mut provider => waiting.await.err().unwrap(),
+                }
+            })
+            .await
+            .unwrap();
+            assert!(error.contains(match end {
+                "cancel" => "取り消",
+                "expire" => "期限切れ",
+                _ => "接続が切れ",
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn preparation_ownership_is_scoped_to_client_and_recording() {
+        let dictation = Dictation::new(Err("isolated backend".into()));
+        for session in [1, 2] {
+            dictation.prepared.lock().unwrap().insert(
+                session,
+                Prepared::new(format!("recording-{session}"), std::future::pending()),
+            );
+        }
+        dictation.cancel(1, "old-recording");
+        assert!(dictation.take_preparation(2, Some("recording-1")).is_none());
+        assert!(dictation.take_preparation(1, None).is_none());
+        assert_eq!(dictation.prepared.lock().unwrap().len(), 2);
+        dictation.cancel(1, "recording-1");
+        assert_eq!(dictation.prepared.lock().unwrap().len(), 1);
+        assert_eq!(
+            dictation
+                .take_preparation(2, Some("recording-2"))
+                .unwrap()
+                .id,
+            "recording-2"
+        );
+        assert!(dictation.prepared.lock().unwrap().is_empty());
+        dictation.prepared.lock().unwrap().insert(
+            3,
+            Prepared::new("last-recording".into(), std::future::pending()),
+        );
+        dictation.close_session(3);
+        assert!(dictation.prepared.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropping_a_preparation_releases_its_live_socket() {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}/stream", listener.local_addr().unwrap());
+            let (alive, warmed) = tokio::sync::oneshot::channel();
+            let provider = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_provider(stream).await;
+                socket.send(Message::Ping(vec![9].into())).await.unwrap();
+                assert_eq!(
+                    socket.next().await.unwrap().unwrap(),
+                    Message::Pong(vec![9].into())
+                );
+                alive.send(()).unwrap();
+                assert!(
+                    !matches!(socket.next().await, Some(Ok(_))),
+                    "cancellation must drop the socket without starting recognition"
+                );
+            };
+            let operation = async {
+                let prepared = Prepared::new("cancelled".into(), async move {
+                    let token = Zeroizing::new("isolated-token".to_owned());
+                    let socket = connect_stream(&token, "isolated-codex/1.0", &url).await?;
+                    Ok(PreparedConnection { token, socket })
+                });
+                warmed.await.unwrap();
+                drop(prepared);
+            };
+            tokio::join!(operation, provider);
+        })
+        .await
+        .expect("cancelled preparation leaked its socket");
+    }
+
     struct CountFlushes<'a> {
         stream: tokio::io::DuplexStream,
         count: &'a Cell<usize>,
@@ -392,6 +748,66 @@ mod tests {
         }
     }
 
+    async fn provider_recording<S>(
+        mut server: WebSocketStream<S>,
+        audio: &str,
+        events: Vec<Value>,
+        close_code: CloseCode,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let start: Value =
+            serde_json::from_str(server.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(start["type"], "session.start");
+        assert_eq!(start["config"]["input_audio_format"], "pcm16");
+        assert_eq!(start["config"]["sample_rate_hz"], 24000);
+        assert_eq!(start["config"]["num_channels"], 1);
+        server
+            .send(Message::Text(
+                json!({"type":"session.started"}).to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let mut received = Vec::new();
+        loop {
+            let message: Value =
+                serde_json::from_str(server.next().await.unwrap().unwrap().to_text().unwrap())
+                    .unwrap();
+            if message["type"] == "session.close" {
+                break;
+            }
+            assert_eq!(message["type"], "audio.append");
+            let chunk = message["audio"].as_str().unwrap();
+            assert!(chunk.len() <= AUDIO_CHUNK_BASE64_BYTES);
+            let samples = STANDARD.decode(chunk).unwrap();
+            assert_eq!(samples.len() % 2, 0);
+            received.extend_from_slice(&samples);
+        }
+        assert_eq!(received, STANDARD.decode(audio).unwrap());
+        for event in events {
+            let closed =
+                event["type"] == "session.updated" && event["session"]["status"] == "closed";
+            server
+                .send(Message::Text(event.to_string().into()))
+                .await
+                .unwrap();
+            if closed {
+                assert!(matches!(
+                    server.next().await.unwrap().unwrap(),
+                    Message::Close(_)
+                ));
+                return;
+            }
+        }
+        server
+            .send(Message::Close(Some(CloseFrame {
+                code: close_code,
+                reason: "".into(),
+            })))
+            .await
+            .unwrap();
+    }
+
     // The provider is the only test double. Both sides exercise the real
     // WebSocket implementation and dictation protocol, without account access.
     async fn recording_result(
@@ -412,66 +828,13 @@ mod tests {
                 None,
             )
             .await;
-            let mut server = WebSocketStream::from_raw_socket(
+            let server = WebSocketStream::from_raw_socket(
                 async_tungstenite::tokio::TokioAdapter::new(server),
                 Role::Server,
                 None,
             )
             .await;
-            let provider = async {
-                let start: Value =
-                    serde_json::from_str(server.next().await.unwrap().unwrap().to_text().unwrap())
-                        .unwrap();
-                assert_eq!(start["type"], "session.start");
-                assert_eq!(start["config"]["input_audio_format"], "pcm16");
-                assert_eq!(start["config"]["sample_rate_hz"], 24000);
-                assert_eq!(start["config"]["num_channels"], 1);
-                server
-                    .send(Message::Text(
-                        json!({"type":"session.started"}).to_string().into(),
-                    ))
-                    .await
-                    .unwrap();
-                let mut received = Vec::new();
-                loop {
-                    let message: Value = serde_json::from_str(
-                        server.next().await.unwrap().unwrap().to_text().unwrap(),
-                    )
-                    .unwrap();
-                    if message["type"] == "session.close" {
-                        break;
-                    }
-                    assert_eq!(message["type"], "audio.append");
-                    let chunk = message["audio"].as_str().unwrap();
-                    assert!(chunk.len() <= AUDIO_CHUNK_BASE64_BYTES);
-                    let samples = STANDARD.decode(chunk).unwrap();
-                    assert_eq!(samples.len() % 2, 0);
-                    received.extend_from_slice(&samples);
-                }
-                assert_eq!(received, STANDARD.decode(audio).unwrap());
-                for event in events {
-                    let closed = event["type"] == "session.updated"
-                        && event["session"]["status"] == "closed";
-                    server
-                        .send(Message::Text(event.to_string().into()))
-                        .await
-                        .unwrap();
-                    if closed {
-                        assert!(matches!(
-                            server.next().await.unwrap().unwrap(),
-                            Message::Close(_)
-                        ));
-                        return;
-                    }
-                }
-                server
-                    .send(Message::Close(Some(CloseFrame {
-                        code: close_code,
-                        reason: "".into(),
-                    })))
-                    .await
-                    .unwrap();
-            };
+            let provider = provider_recording(server, audio, events, close_code);
             let (result, ()) = tokio::join!(transcribe_socket(client, audio), provider);
             let flushes = flushes.get();
             assert!(
@@ -643,7 +1006,7 @@ mod tests {
                 if api_key {
                     transcribe_recording(&token, RecordingService::OpenAi, &[1, 0, 255, 127], &recording_url).await
                 } else {
-                    transcribe_authenticated(&token, "isolated-codex/1.0", "AQD/fw==", &[1, 0, 255, 127], &stream_url, &recording_url).await
+                    transcribe_authenticated(&token, "isolated-codex/1.0", "AQD/fw==", &[1, 0, 255, 127], &stream_url, &recording_url, None).await
                 }
             };
             let (result, ()) = tokio::join!(operation, provider);

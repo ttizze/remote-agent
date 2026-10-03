@@ -109,6 +109,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         "transcribe" => json!(
             client
                 .call(&Transcribe {
+                    preparation: None,
                     audio: base64::Engine::decode(
                         &base64::engine::general_purpose::STANDARD,
                         text(command, "audio")

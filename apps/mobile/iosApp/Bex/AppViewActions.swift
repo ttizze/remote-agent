@@ -149,17 +149,21 @@ extension BexAppViewModel {
         perform(.removeAttachment(draftKey: coreDraftKey, index: UInt32(id))) { [weak self] _ in self?.persist() }
     }
 
-    func transcribe(_ audio: Data, draftKey key: DraftIdentity, sendImmediately: Bool) {
+    func transcribe(_ audio: Data, draftKey key: DraftIdentity, sendImmediately: Bool,
+                    preparation: DictationPreparation?) {
         guard !transcribing, key == draftKey else { return }
         transcribing = true
         perform(.transcribe(Dictate(
             draftKey: coreDraftKey,
+            preparation: preparation?.id(),
             audio: audio,
             send: sendImmediately,
             clientUserMessageId: UUID().uuidString
         ))) { [weak self] _ in
-            self?.persist()
-            self?.transcribing = false
+            withExtendedLifetime(preparation) {
+                self?.persist()
+                self?.transcribing = false
+            }
         }
     }
 

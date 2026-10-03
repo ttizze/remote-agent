@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prepare the authenticated dictation connection while desktop and iPhone record. Start recognition and upload the complete PCM only after recording stops, keeping the same recognition settings. Scope preparation to the client and recording, service keepalive, release cancelled or expired connections, and retry a lost prepared socket with the complete recording.
+
 - Batch completed dictation audio uploads instead of flushing every 100ms frame. Preserve sample-aligned chunks and transport backpressure, and cover lossless delivery of recordings longer than 30 seconds.
 - Use the OS certificate verifier for dictation WebSocket connections instead of loading and parsing the entire native root store for every recording.
 - Record Mac dictation inside the desktop process using the shared native microphone implementation. Initialize audio framework and device metadata at launch without opening the microphone. Remove the per-recording helper app and temporary audio files, and show microphone permission progress only while awaiting the first permission decision.

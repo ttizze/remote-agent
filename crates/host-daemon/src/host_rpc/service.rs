@@ -293,6 +293,7 @@ impl HostRpcService {
         self.inner.router.close_session(session);
         self.inner.terminals.close_session(session);
         self.inner.files.clear_session(session);
+        self.inner.dictation.close_session(session);
     }
 
     pub(crate) fn data_recipients(&self) -> (Vec<String>, Option<String>) {
@@ -894,10 +895,21 @@ impl HostRpcService {
                 .await
                 .map_err(|error| Failure::new("terminal_operation_failed", error))?)
             .into(),
+            Call::PrepareDictation(params) => {
+                self.inner
+                    .dictation
+                    .prepare(session, params.id.clone())
+                    .map_err(|error| Failure::new("dictation_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
+            Call::CancelDictation(params) => {
+                self.inner.dictation.cancel(session, &params.id);
+                agent_protocol::models::Empty {}.into()
+            }
             Call::Transcribe(params) => (self
                 .inner
                 .dictation
-                .transcribe(&params.audio)
+                .transcribe(session, params.preparation.as_deref(), &params.audio)
                 .await
                 .map_err(|error| Failure::new("dictation_failed", error))?)
             .into(),
