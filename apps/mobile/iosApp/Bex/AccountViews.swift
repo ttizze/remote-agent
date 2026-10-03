@@ -73,7 +73,7 @@ private struct UsageWindowView: View {
             HStack(spacing: 12) {
                 ProgressView(value: Double(window.remainingPercent), total: 100)
                     .tint(tint)
-                Text("\(window.remainingPercent)%").monospacedDigit()
+                Text("週間残量 \(window.remainingPercent)%").monospacedDigit()
                     .font(.caption).foregroundStyle(.secondary)
             }
         } else {

@@ -175,9 +175,9 @@ struct SettingsScopeBar<Projects: View, Environment: View>: View {
     var body: some View {
         HStack(spacing: 8) {
             Text("設定の適用先").foregroundStyle(.secondary)
-            projects()
-            Text("／").foregroundStyle(.secondary)
             environment()
+            Text("／").foregroundStyle(.secondary)
+            projects()
         }
         .font(.caption)
         .frame(maxWidth: .infinity, alignment: .leading)

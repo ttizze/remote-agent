@@ -165,8 +165,7 @@ extension BexLaunchUITests {
 
     func testSimulatorOpensAccountManagementFromSettingsAndModelPicker() throws {
         let app = try connectedSimulatorApp()
-        app.buttons["tasks.menu"].tap()
-        app.buttons["tasks.settings"].tap()
+        app.buttons["tasks.menu"].tap(); app.buttons["tasks.settings"].tap()
         XCTAssertTrue(app.buttons["settings.agents"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["settings.connections"].exists)
         XCTAssertTrue(app.buttons["settings.worktrees"].exists)
@@ -195,7 +194,8 @@ extension BexLaunchUITests {
         chooseFixtureModel(app)
         app.buttons["model.settings"].tap()
         XCTAssertTrue(app.buttons["model.provider"].isEnabled)
-        XCTAssertTrue(app.buttons["settings.scope.projects"].label.contains("この会話"))
+        XCTAssertFalse(app.buttons["settings.scope.projects"].exists || app.buttons["settings.scope.environment"]
+            .exists)
         XCTAssertFalse(app.buttons["model.account.desktop"].exists)
         XCTAssertFalse(app.buttons["account.actions.desktop"].exists)
         captureScreen(app, named: "Model picker with read-only account")

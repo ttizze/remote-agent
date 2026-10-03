@@ -55,16 +55,14 @@ impl Desktop {
             SettingsPage::Models => (
                 self.model_scope_menu(
                     "settings-scope-projects",
-                    self.snapshot.model_project_scope_choices(
-                        Some(self.settings_model_scope.clone()),
-                        false,
-                    ),
+                    self.snapshot
+                        .model_project_scope_choices(self.settings_model_scope.clone()),
                     cx,
                 ),
                 self.model_scope_menu(
                     "settings-scope-environment",
                     self.snapshot
-                        .model_environment_scope_choices(Some(self.settings_model_scope.clone())),
+                        .model_environment_scope_choices(self.settings_model_scope.clone()),
                     cx,
                 ),
             ),
@@ -186,9 +184,9 @@ impl Desktop {
                     })
                     .text_xs()
                     .child(div().text_color(rgb(0x949ca8)).child("設定の適用先"))
-                    .child(projects)
-                    .child(div().text_color(rgb(0x949ca8)).child("／"))
                     .child(environment)
+                    .child(div().text_color(rgb(0x949ca8)).child("／"))
+                    .child(projects)
                     .border_b_1()
                     .border_color(rgb(0x2b2f35)),
             )
@@ -217,7 +215,7 @@ impl Desktop {
         let selected = self.settings_model_scope.clone();
         let label = choices
             .iter()
-            .find(|choice| choice.scope.as_ref() == Some(&selected))
+            .find(|choice| choice.scope == selected)
             .map_or("すべてのプロジェクト", |choice| {
                 choice.label.as_str()
             })
@@ -231,9 +229,7 @@ impl Desktop {
             .debug_selector(move || id.into())
             .dropdown_menu(move |mut menu, _, _| {
                 for choice in &choices {
-                    let Some(scope) = choice.scope.clone() else {
-                        continue;
-                    };
+                    let scope = choice.scope.clone();
                     let owner = owner.clone();
                     menu = menu.item(
                         PopupMenuItem::new(choice.label.clone())

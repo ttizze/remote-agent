@@ -33,7 +33,7 @@ pub struct ModelQuickControls {
 pub struct ModelScopeChoice {
     pub id: String,
     pub label: String,
-    pub scope: Option<ModelDefaultsScope>,
+    pub scope: ModelDefaultsScope,
 }
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
@@ -62,31 +62,19 @@ impl Snapshot {
         self.scoped_model_defaults.contains_key(&scope)
     }
 
-    pub fn model_project_scope_choices(
-        &self,
-        scope: Option<ModelDefaultsScope>,
-        conversation: bool,
-    ) -> Vec<ModelScopeChoice> {
-        let mut choices = Vec::new();
-        if conversation {
-            choices.push(ModelScopeChoice {
-                id: "conversation".into(),
-                label: "この会話".into(),
-                scope: None,
-            });
-        }
+    pub fn model_project_scope_choices(&self, scope: ModelDefaultsScope) -> Vec<ModelScopeChoice> {
         let all = match scope {
-            Some(ModelDefaultsScope::Global) => ModelDefaultsScope::Global,
+            ModelDefaultsScope::Global => ModelDefaultsScope::Global,
             _ if !self.storage_scope.is_empty() => ModelDefaultsScope::Environment {
                 id: self.model_environment_id().to_owned(),
             },
             _ => ModelDefaultsScope::Global,
         };
-        choices.push(ModelScopeChoice {
+        let mut choices = vec![ModelScopeChoice {
             id: "all".into(),
             label: "すべてのプロジェクト".into(),
-            scope: Some(all),
-        });
+            scope: all,
+        }];
         if !self.storage_scope.is_empty() {
             choices.extend(
                 self.threads
@@ -95,10 +83,10 @@ impl Snapshot {
                     .map(|project| ModelScopeChoice {
                         id: project.id.clone(),
                         label: project.name.clone(),
-                        scope: Some(ModelDefaultsScope::Project {
+                        scope: ModelDefaultsScope::Project {
                             environment: self.model_environment_id().to_owned(),
                             project: project.id.clone(),
-                        }),
+                        },
                     }),
             );
         }
@@ -107,14 +95,14 @@ impl Snapshot {
 
     pub fn model_environment_scope_choices(
         &self,
-        scope: Option<ModelDefaultsScope>,
+        scope: ModelDefaultsScope,
     ) -> Vec<ModelScopeChoice> {
         let mut choices = Vec::new();
         if !self.storage_scope.is_empty() {
             let current = match scope {
-                Some(ModelDefaultsScope::Global) => Some(ModelDefaultsScope::Environment {
+                ModelDefaultsScope::Global => ModelDefaultsScope::Environment {
                     id: self.model_environment_id().to_owned(),
-                }),
+                },
                 other => other,
             };
             choices.push(ModelScopeChoice {
@@ -126,7 +114,7 @@ impl Snapshot {
         choices.push(ModelScopeChoice {
             id: "all".into(),
             label: "すべての環境".into(),
-            scope: Some(ModelDefaultsScope::Global),
+            scope: ModelDefaultsScope::Global,
         });
         choices
     }

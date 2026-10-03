@@ -236,9 +236,9 @@ impl Desktop {
         let entity = cx.entity().downgrade();
         let opening = entity.clone();
         popover::Popover::new("model-controls")
-            .bg(rgb(0x2b2b2b))
-            .rounded(px(16.))
-            .border_color(rgb(0x3b3b3b))
+            .bg(rgb(0x171819))
+            .rounded(px(10.))
+            .border_color(rgb(0x2a2c2e))
             // Open toward the conversation. Native terminal/browser views in
             // the right panel sit above GPUI's in-window popup layer.
             .anchor(Anchor::BottomRight)
@@ -804,7 +804,7 @@ impl Desktop {
                 .px_2()
                 .justify_between()
                 .border_b_1()
-                .border_color(rgb(0x3b3b3b))
+                .border_color(rgb(0x2a2c2e))
                 .child(
                     div()
                         .id("model-agent-label")
@@ -812,11 +812,11 @@ impl Desktop {
                         .text_base()
                         .line_height(px(20.))
                         .font_weight(FontWeight::NORMAL)
-                        .child("ハーネス"),
+                        .child("エージェント"),
                 )
                 .child(
                     Button::new("model-agent")
-                        .accessibility_label("ハーネスを選択")
+                        .accessibility_label("エージェントを選択")
                         .child(
                             div()
                                 .text_base()
@@ -927,12 +927,12 @@ impl Desktop {
                 ),
         );
         body = body
-            .child(div().h(px(1.)).w_full().bg(rgb(0x3b3b3b)))
+            .child(div().h(px(1.)).w_full().bg(rgb(0x2a2c2e)))
             .child(
                 Input::new(&self.model_search)
                     .prefix(IconName::Search)
                     .border_1()
-                    .border_color(rgb(0x454b55))
+                    .border_color(rgb(0x2a2c2e))
                     .large()
                     .aria_label("モデルを検索"),
             );
@@ -968,7 +968,7 @@ impl Desktop {
                     .px_2()
                     .disabled(disabled)
                     .selected(selected)
-                    .when(selected, |button| button.bg(rgb(0x343b46)))
+                    .when(selected, |button| button.bg(rgb(0x262b32)))
                     .child(
                         h_flex()
                             .w_full()
@@ -1016,7 +1016,7 @@ impl Desktop {
             .child(
                 v_flex()
                     .border_t_1()
-                    .border_color(rgb(0x3b3b3b))
+                    .border_color(rgb(0x2a2c2e))
                     .child(self.effort_control("model-picker-effort", true, cx))
                     .child(self.fast_control("model-picker-speed", true, cx)),
             )

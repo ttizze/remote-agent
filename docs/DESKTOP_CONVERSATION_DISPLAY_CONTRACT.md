@@ -122,12 +122,14 @@ defaults can target a project, the current environment, or all environments.
 New drafts use the most specific saved preset: project, then environment, then
 global. Existing drafts retain their selections. A scoped preset can be removed
 to inherit the common preset again. Both native clients use core preference
-intents and scope choices; the iPhone conversation picker also offers the current
-conversation as its target. Preferences are saved on the device. Applying them
+intents and scope choices. The conversation picker applies model, reasoning depth
+and speed to the current conversation and shows no applicability selector.
+Applicability selectors belong to model defaults in settings, with environment
+before project. Preferences are saved on the device. Applying them
 on another Host preserves that Host's drafts and pending submissions.
 Account and worktree settings apply to every project on the selected Host; the
 environment selector switches the actual Host. Device connection registrations
-have a fixed device scope. The model picker orders harness selection, account,
+have a fixed device scope. The model picker orders agent selection, account,
 model catalog, then reasoning depth and speed. The selected account's weekly
 quota appears as a compact remaining-percentage bar before the model list;
 short-window quotas, reset times and fetched times stay in account management.

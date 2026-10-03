@@ -98,29 +98,27 @@ proptest::proptest! {
 }
 
 #[test]
-fn scope_menus_target_real_defaults_and_conversation_without_cross_environment_projects() {
+fn scope_menus_target_real_defaults_without_cross_environment_projects() {
     let snapshot = scoped_fixture();
     let global = ModelDefaultsScope::Global;
     let environment = ModelDefaultsScope::Environment { id: "vm".into() };
-    let choices = snapshot.model_project_scope_choices(Some(global.clone()), false);
-    assert_eq!(choices[0].scope, Some(global.clone()));
-    assert!(choices.iter().all(|choice| choice.scope.is_some()));
+    let choices = snapshot.model_project_scope_choices(global.clone());
+    assert_eq!(choices[0].scope, global.clone());
     assert_eq!(
         choices[1].scope,
-        Some(ModelDefaultsScope::Project {
+        ModelDefaultsScope::Project {
             environment: "vm".into(),
             project: "outer".into()
-        })
+        }
     );
-    let choices = snapshot.model_environment_scope_choices(Some(global.clone()));
-    assert_eq!(choices[0].scope, Some(environment.clone()));
-    assert_eq!(choices[1].scope, Some(global));
-    let choices = snapshot.model_project_scope_choices(None, true);
-    assert_eq!(choices[0].scope, None);
-    assert_eq!(choices[1].scope, Some(environment));
+    let choices = snapshot.model_environment_scope_choices(global.clone());
+    assert_eq!(choices[0].scope, environment.clone());
+    assert_eq!(choices[1].scope, global);
+    let choices = snapshot.model_project_scope_choices(environment.clone());
+    assert_eq!(choices[0].scope, environment.clone());
     assert_eq!(
-        snapshot.model_environment_scope_choices(None)[0].scope,
-        None
+        snapshot.model_environment_scope_choices(choices[1].scope.clone())[0].scope,
+        choices[1].scope
     );
 }
 
