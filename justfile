@@ -38,6 +38,10 @@ ios-e2e *tests:
 ios-markdown:
     cargo xtask ios-markdown
 
+# Exercise the production Mac Browser view and WebKit persistence in fresh processes.
+macos-e2e:
+    cargo test --locked --features agent-core/bindings -p bex-desktop --test chrome_cookie_webview
+
 # Build and test Store recovery, Markdown and network permission on a fresh Android 17 emulator.
 android-e2e:
     cargo build --locked -p host-fixture -p codex-app-server -p bex-process --bins

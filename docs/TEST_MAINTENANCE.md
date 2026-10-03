@@ -170,8 +170,12 @@ transfer server just to delete that check would reverse A14.
 ## Execution
 
 - `nix develop . --command just quality` and the post-commit worker cover the
-  local Mac Host/desktop and iPhone client. Linux, Windows and Android run in
-  Native clients CI, including Android emulator acceptance on Ubuntu with KVM.
+  local Mac Host/desktop and iPhone client. Native clients CI also runs this
+  suite on one Apple Silicon `macos-26` runner with Xcode 26.6. Mac Browser E2E
+  and iPhone acceptance run concurrently after shared checks, with two isolated
+  Simulator/Host pairs for iPhone tests. Logs and Xcode result bundles are
+  retained for seven days, including failures. Linux, Windows and Android run
+  alongside this job, including Android emulator acceptance on Ubuntu with KVM.
 - `nix develop . --command just quality rust` checks formatting, workspace
   Clippy, core library tests including the UniFFI bindings, and desktop rendering/input tests.
   Its single Cargo test invocation also runs CLI, Host integration and quality
@@ -182,6 +186,11 @@ transfer server just to delete that check would reverse A14.
   Proptests remain ordinary tests; failures do not stop the rest of the suite.
   The Native clients CI also enables `agent-core/bindings` to run the native
   connection and foreground recovery regressions.
+- `nix develop . --command just macos-e2e` exercises the production Browser view
+  and WebKit through encrypted fixture cookie import, denied-access recovery,
+  authenticated HTTP, HttpOnly protection and persistence across fresh native
+  processes. Both `quality rust` and the default Apple quality suite include it
+  on macOS. It owns disposable storage and uses no personal browser credentials.
 - `nix develop . --command cargo test --locked --features agent-core/bindings -p agent-protocol -p agent-transport -p agent-core -p codex-app-server
   -p host-daemon -p host-fixture` covers the integration tests omitted by the
   selected quality targets.
