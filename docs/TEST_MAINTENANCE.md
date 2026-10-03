@@ -170,6 +170,8 @@ transfer server just to delete that check would reverse A14.
 ## Execution
 
 - Native clients CI owns automated verification; commits do not queue local QA.
+  Opening or updating a PR runs CI; merging it does not repeat the suite.
+  Manual workflow dispatch remains available for focused audits and the soak.
   Require successful CI checks for the current commit and a clean working tree
   before claiming verification or merging. Manual check commands remain for
   debugging. The Apple job runs `nix develop . --command just quality`

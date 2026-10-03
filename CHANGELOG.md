@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Move automated Mac and iPhone verification to Native clients CI. Run native Mac Browser E2E concurrently with iPhone conversation acceptance on two isolated Simulator/Host pairs within one Apple Silicon Mac. Remove Lefthook, the local background QA worker, its queue/status commands and its shared Cargo cache integration; retain manual debugging commands.
+- Move automated Mac and iPhone verification to Native clients CI on PR updates, without rerunning after merge. Run native Mac Browser E2E concurrently with iPhone conversation acceptance on two isolated Simulator/Host pairs within one Apple Silicon Mac. Remove Lefthook, the local background QA worker, its queue/status commands and its shared Cargo cache integration; retain manual debugging commands and workflow dispatch.
 
 - Batch completed dictation audio uploads instead of flushing every 100ms frame. Preserve sample-aligned chunks and transport backpressure, and cover lossless delivery of recordings longer than 30 seconds.
 - Use the OS certificate verifier for dictation WebSocket connections instead of loading and parsing the entire native root store for every recording.
