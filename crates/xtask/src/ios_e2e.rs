@@ -405,7 +405,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
         SETUP_TIMEOUT,
     )
     .await?;
-    let state = PathBuf::from(std::str::from_utf8(&common.stdout)?.trim_end()).join("bex-quality");
+    let state = PathBuf::from(std::str::from_utf8(&common.stdout)?.trim_end()).join("bex-ios-e2e");
     fs::create_dir_all(&state)?;
     let lock = OpenOptions::new()
         .read(true)

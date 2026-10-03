@@ -22,7 +22,7 @@ async fn cli_discovers_worktrees_preserves_sources_and_rejects_failed_inspection
     let fixture = Fixture::new().await;
     let root = fixture.project("main with spaces").await;
     git(&root, &["init"]);
-    let unmanaged = fixture.common.join("unmanaged-build");
+    let unmanaged = fixture.root.join("unmanaged-build");
     fixture.build(&root, &unmanaged).await;
     git(&root, &["add", "Cargo.toml", "src"]);
     git(
