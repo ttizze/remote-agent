@@ -182,8 +182,15 @@ jobs:
           set -o pipefail
           mkdir -p target/qa
           if [[ "$BEX_QUALITY_LANGUAGE" == swift ]]; then
-            # Exercise the Host's normal macOS browser, as Mac acceptance does.
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version
+            export BEX_BROWSER_LOG="$PWD/target/qa/chrome.log"
+            export BEX_BROWSER_EXECUTABLE="$RUNNER_TEMP/bex-ci-chrome"
+            cat > "$BEX_BROWSER_EXECUTABLE" <<'CHROME'
+          #!/bin/bash
+          printf 'Chrome start %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$BEX_BROWSER_LOG"
+          exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "$@" 2>> "$BEX_BROWSER_LOG"
+          CHROME
+            chmod +x "$BEX_BROWSER_EXECUTABLE"
           fi
           nix develop . --command just quality "$BEX_QUALITY_LANGUAGE" 2>&1 | tee target/qa/quality.log
       - name: Save iPhone Swift builds once for all shards
@@ -199,6 +206,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: |
             target/qa/quality.log
+            target/qa/chrome.log
             target/qa/Bex-*
           retention-days: 7
   windows:

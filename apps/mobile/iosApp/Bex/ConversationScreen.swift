@@ -142,10 +142,10 @@ struct ThreadScreen: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 6)
                     .background(ConversationScrollToTop {
-                        scrollPosition = ScrollPosition(idType: String.self)
+                        scrollPosition.isPositionedByUser = true
                     })
                 }
-                .scrollPosition($scrollPosition, anchor: .bottom)
+                .scrollPosition($scrollPosition)
                 .defaultScrollAnchor(.bottom, for: .alignment)
                 .accessibilityIdentifier("task.detail")
                 .accessibilityValue(threadAccessibilityValue(thread))
@@ -153,7 +153,7 @@ struct ThreadScreen: View {
                 .simultaneousGesture(DragGesture(minimumDistance: 1).onChanged { gesture in
                     guard abs(gesture.translation.height) > abs(gesture.translation.width) else { return }
                     if scrollPosition.edge == .bottom {
-                        scrollPosition = ScrollPosition(idType: String.self)
+                        scrollPosition.isPositionedByUser = true
                     }
                     loadVisibleHistory()
                 }.onEnded { gesture in

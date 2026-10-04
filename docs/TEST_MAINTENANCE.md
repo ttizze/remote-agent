@@ -179,7 +179,6 @@ transfer server just to delete that check would reverse A14.
   before claiming full verification. Manual check commands remain for
   debugging. Apple CI uses five Apple Silicon `macos-26` runners with Xcode 26.6.
   It selects the image's preinstalled Xcode directly.
-  iPhone browser acceptance uses the image's preinstalled Chrome for Testing.
   The Mac runner uses `nix develop . --command just quality rust` for Rust
   contracts and Mac Browser E2E. Four iPhone runners use
   `nix develop . --command just quality swift` for Swift checks and acceptance.
@@ -192,8 +191,9 @@ transfer server just to delete that check would reverse A14.
   all four shards run their selected Simulator acceptance tests.
   Each runner has separate processes,
   memory and logs. iPhone acceptance uses the Host's normal preinstalled Google
-  Chrome, matching Mac acceptance. Mac and iPhone Rust dependency caches are
-  separate; only shard zero saves each cache. All iPhone shards restore the Swift bindings,
+  Chrome with unchanged launch arguments, retaining its startup time and stderr
+  in `qa/chrome.log`. Mac and iPhone Rust dependency caches are separate;
+  only shard zero saves each cache. All iPhone shards restore the Swift bindings,
   headless Markdown build and Xcode DerivedData cache, with one shard saving
   it even when acceptance fails. Builders check the current source/toolchain
   hashes before reusing Swift outputs, and still rebuild and exercise current
