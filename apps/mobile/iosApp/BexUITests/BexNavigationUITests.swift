@@ -221,9 +221,7 @@ extension BexLaunchUITests {
     func dismissModelSettings(_ app: XCUIApplication) {
         if app.buttons["model.close"].exists {
             app.buttons["model.close"].tap()
-        } else if app.buttons["settings.close"].exists {
-            app.buttons["settings.close"].tap()
-        } else if app.buttons["settings.scope.environment"].exists {
+        } else if app.buttons["settings.scope.projects"].exists {
             let back = app.navigationBars.buttons["BackButton"]
             XCTAssertTrue(back.waitForExistence(timeout: 10))
             back.tap()
