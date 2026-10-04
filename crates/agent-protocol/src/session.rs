@@ -632,6 +632,7 @@ fn append_part(parts: &mut Vec<String>, index: u32, delta: &str) -> Result<(), U
 mod history_tests {
     use super::*;
     use proptest::prelude::*;
+    use std::slice::from_ref;
 
     fn turn(id: usize, range: std::ops::Range<usize>, summary: bool) -> Arc<Turn> {
         Arc::new(Turn {
@@ -690,7 +691,7 @@ mod history_tests {
     fn changed_summaries_and_repeated_boundaries_do_not_claim_complete_details() {
         let cached = turn(0, 0..8, false);
         let fresh = turn(0, 7..9, true);
-        let retained = retained_history(&[cached.clone()], &[fresh]).unwrap();
+        let retained = retained_history(from_ref(&cached), &[fresh]).unwrap();
         assert!(retained[0].items_summary);
         assert_eq!(retained[0].items.as_ref().unwrap().len(), 9);
         assert_eq!(
@@ -705,7 +706,7 @@ mod history_tests {
         let cached = turn(0, 0..1, false);
         let mut fresh = turn(0, 0..2, true);
         crate::models::defer_item_details(std::slice::from_mut(&mut fresh), 0);
-        let retained = retained_history(&[cached.clone()], &[fresh]).unwrap();
+        let retained = retained_history(from_ref(&cached), &[fresh]).unwrap();
         assert_eq!(retained[0].items.as_ref().unwrap().len(), 2);
         assert!(retained[0].items.as_ref().unwrap()[0].is_deferred());
         assert!(retained[0].items_summary);
@@ -718,7 +719,7 @@ mod history_tests {
 
         let mut unchanged = turn(0, 0..1, true);
         crate::models::defer_item_details(std::slice::from_mut(&mut unchanged), 0);
-        let retained = retained_history(&[cached.clone()], &[unchanged]).unwrap();
+        let retained = retained_history(from_ref(&cached), &[unchanged]).unwrap();
         assert_eq!(retained[0].items, cached.items);
         assert!(!retained[0].items_summary);
         let mut update = turn(0, 0..1, true);
@@ -730,7 +731,7 @@ mod history_tests {
                 phase: crate::models::AssistantPhase::Final,
             },
         ))]);
-        let retained = retained_history(&[cached], &[update.clone()]).unwrap();
+        let retained = retained_history(&[cached], from_ref(&update)).unwrap();
         assert_eq!(retained[0].items, update.items);
         assert!(!retained[0].items_summary);
     }
@@ -740,19 +741,19 @@ mod history_tests {
         let cached = turn(0, 0..8, false);
         let full = turn(0, 0..2, false);
         assert_eq!(
-            retained_history(&[cached.clone()], &[full.clone()]).unwrap(),
+            retained_history(from_ref(&cached), from_ref(&full)).unwrap(),
             vec![full]
         );
         let mut omitted = turn(0, 0..0, false);
         Arc::make_mut(&mut omitted).items = None;
-        let retained = retained_history(&[cached.clone()], &[omitted]).unwrap();
+        let retained = retained_history(from_ref(&cached), &[omitted]).unwrap();
         assert_eq!(retained[0].items, cached.items);
         assert!(!retained[0].items_summary);
         let mut absent = cached.clone();
         Arc::make_mut(&mut absent).items = None;
         let summary = turn(0, 0..1, true);
         assert_eq!(
-            retained_history(&[absent], &[summary.clone()]).unwrap(),
+            retained_history(&[absent], from_ref(&summary)).unwrap(),
             vec![summary]
         );
         for changed in ["status", "duration"] {
@@ -762,7 +763,7 @@ mod history_tests {
             } else {
                 Arc::make_mut(&mut summary).duration_ms = Some(500);
             }
-            let retained = retained_history(&[cached.clone()], &[summary.clone()]).unwrap();
+            let retained = retained_history(from_ref(&cached), from_ref(&summary)).unwrap();
             assert!(retained[0].items_summary);
             assert_eq!(retained[0].status, summary.status);
             assert_eq!(retained[0].duration_ms, summary.duration_ms);

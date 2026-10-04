@@ -44,7 +44,9 @@ async fn call(
     );
     let mut result: Value = serde_json::from_str(&line).unwrap();
     assert!(result.get("result").is_some() || result.get("error").is_some());
-    if method == "host/session/open" && result.get("error").is_none() {
+    if matches!(method, "host/session/open" | "host/session/create")
+        && result.get("error").is_none()
+    {
         result["result"] = result["result"]["response"].take();
     }
     result
