@@ -73,6 +73,10 @@ if [[ $test_status != 0 ]]; then
     done
     adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.startup-failure.png" || true
     adb -P "$server_port" -s "$serial" logcat -b main -b system -b crash -d -v threadtime -t 2000 >"$log.startup-failure.log" || true
+    adb -P "$server_port" -s "$serial" logcat -b main -b system -b crash -d -v threadtime -s \
+        ActivityTaskManager:V ActivityScenario:V UiDevice:V UiObject2:V \
+        GrantPermissionsActivity:V GrantPermissionsViewModel:V TestRunner:V '*:S' \
+        | tail -n 2000 >"$log.permission-chronology.log" || true
     exit "$test_status"
 fi
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission-granted.png "$log.granted.png"

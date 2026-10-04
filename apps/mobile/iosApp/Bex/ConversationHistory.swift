@@ -103,8 +103,8 @@ extension ThreadScreen {
               model.notice == nil, AgentCore.shouldLoadHistory(
                   hasMore: conversation?.source.hasMoreHistory() == true,
                   loading: model.loadingHistory,
-                  oldestVisible: historyViewport.oldestVisible,
-                  latestVisible: historyViewport.latestVisible,
+                  oldestVisible: oldestHistoryRowVisible,
+                  latestVisible: latestHistoryRowVisible,
                   followingLatest: isFollowingLatest
               ) else { return }
         model.loadOlderHistory()

@@ -29,7 +29,7 @@ pub(super) struct Chrome {
 
 impl Chrome {
     pub async fn launch(profile: &Path, executable: &Path) -> Result<Self, String> {
-        let diagnostics = std::env::var_os("BEX_BROWSER_LOG_DIR").is_some();
+        let diagnostics = std::env::var_os("BEX_CHROME_LOG").is_some();
         let log = |message: &str| {
             if diagnostics {
                 eprintln!("[bex-browser-launch] {message}");

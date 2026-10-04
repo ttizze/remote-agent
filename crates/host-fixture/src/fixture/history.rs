@@ -21,8 +21,6 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
         return None;
     }
     let mut turns = if long_history {
-        // Keep the initial summary scrollable without preloading the older page.
-        let final_answer_repetitions = if id == "fixture-long-history" { 32 } else { 4 };
         let sizes = [286, 6, 325, 393, 859, 424, 21, 609, 641, 154];
         let inputs = [4, 1, 6, 8, 1, 2, 1, 4, 1, 2];
         let statuses = [
@@ -44,10 +42,8 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
                 if boundaries.contains(&index) {
                     json!({"id":id,"type":"userMessage","content":[{"type":"text","text":format!("Review section {number}, input {index}.")}]})
                 } else if index == size - 1 || index % 5 == 0 {
-                    let final_answer = status == "completed" && index == size - 1;
-                    json!({"id":id,"type":"agentMessage","text":format!("Section {number}, progress {index}. ")
-                        .repeat(if final_answer { final_answer_repetitions } else { 4 }),
-                        "phase":if final_answer { "final_answer" } else { "commentary" }})
+                    json!({"id":id,"type":"agentMessage","text":format!("Section {number}, progress {index}. ").repeat(4),
+                        "phase":if status == "completed" && index == size - 1 { "final_answer" } else { "commentary" }})
                 } else {
                     json!({"id":id,"type":"commandExecution","command":format!("inspect section-{number}/file-{index}.txt"),
                         "status":"completed","aggregatedOutput":"Inspection complete.\n".repeat(12),"exitCode":0})
