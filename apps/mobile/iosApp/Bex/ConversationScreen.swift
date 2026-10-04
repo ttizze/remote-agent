@@ -3,11 +3,6 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct ConversationViewport {
-    let oldestVisible: Bool
-    let latestVisible: Bool
-}
-
 struct ThreadScreen: View {
     @ObservedObject var model: BexAppViewModel
     let conversation: ConversationPresentation?
@@ -23,7 +18,8 @@ struct ThreadScreen: View {
     @State var showingModelSettings = false
     @State var isVisible = false
     @State var isFollowingLatest = true
-    @State var historyViewport = ConversationViewport(oldestVisible: false, latestVisible: false)
+    @State var oldestHistoryRowVisible = false
+    @State var latestHistoryRowVisible = false
     @State private var scrollToTopRequest = 0
     @State var expandedItemIds = Set<String>()
     @State var activityExpansionOverrides = [String: ActivityExpansion]()
@@ -154,7 +150,7 @@ struct ThreadScreen: View {
                         isFollowingLatest = false
                         loadVisibleHistory()
                     }.onEnded { gesture in
-                        if gesture.translation.height <= 0, historyViewport.latestVisible {
+                        if gesture.translation.height <= 0, latestHistoryRowVisible {
                             isFollowingLatest = true
                         }
                     })
@@ -165,14 +161,14 @@ struct ThreadScreen: View {
                         }
                     }
                     .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
-                        historyViewport.oldestVisible = firstRowId.map { visible.contains($0) } ?? false
+                        oldestHistoryRowVisible = firstRowId.map { visible.contains($0) } ?? false
                         loadVisibleHistory()
                     }
                     .onScrollGeometryChange(for: Bool.self) { geometry in
                         geometry.containerSize.height > 0 && geometry.contentSize.height > 0 &&
                             geometry.contentSize.height - geometry.visibleRect.maxY <= 80
                     } action: { _, latestVisible in
-                        historyViewport.latestVisible = latestVisible
+                        latestHistoryRowVisible = latestVisible
                         loadVisibleHistory()
                     }
                     // Offset changes must not request another scroll. Follow only content
@@ -183,7 +179,7 @@ struct ThreadScreen: View {
                         }
                     }
                     .overlay(alignment: .bottom) {
-                        if !historyViewport.latestVisible {
+                        if !latestHistoryRowVisible {
                             Button {
                                 isFollowingLatest = true
                                 if let latestRowId {
