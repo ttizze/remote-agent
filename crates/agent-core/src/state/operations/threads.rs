@@ -5,7 +5,9 @@ pub use agent_protocol::operations::AddProject;
 
 impl Operation for AddProject {
     rpc_operation!();
-    const INVALIDATES: bool = true;
+    fn invalidates(&self) -> bool {
+        true
+    }
     fn apply(self, snapshot: &mut Snapshot, cwd: Self::Output) -> Vec<Effect> {
         let (next, mut effects) = reduce_intent(snapshot, Intent::NewChat { cwd });
         *snapshot = next;
@@ -24,9 +26,12 @@ impl Operation for AddProject {
 pub use agent_protocol::operations::ListSessions;
 
 impl Operation for ListSessions {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::SessionList)
+    }
     rpc_operation!();
-    fn list_query(&self) -> Option<&crate::models::ListQuery> {
-        Some(&self.query)
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::LatestList(self.query.clone())
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         snapshot.error = None;
@@ -92,9 +97,21 @@ pub use agent_protocol::operations::ReadItem;
 pub use agent_protocol::session::ReadHistory;
 
 impl Operation for ReadHistory {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::History {
+            session: self.session.clone(),
+        })
+    }
+    type Input = Option<uuid::Uuid>;
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        Ok(snapshot.subscriptions.get(&self.session).copied())
+    }
     type Output = (agent_protocol::session::HistoryPage, Option<uuid::Uuid>);
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        let subscription = context.snapshot.subscriptions.get(&self.session).copied();
+    async fn run(
+        &self,
+        subscription: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         Ok((context.call(self).await?, subscription))
     }
     fn apply(self, snapshot: &mut Snapshot, (page, subscription): Self::Output) -> Vec<Effect> {
@@ -185,53 +202,26 @@ fn item_source<'a>(request: &ReadItem, snapshot: &'a Snapshot) -> Option<&'a Arc
         .iter()
         .find(|item| item.id == request.item_id)
 }
-fn item_deferred(request: &ReadItem, snapshot: &Snapshot) -> bool {
-    item_source(request, snapshot).is_some_and(|item| item.is_deferred())
-}
-fn apply_item_read(
-    request: ReadItem,
-    snapshot: &mut Snapshot,
-    output: ItemRead,
-    current_epoch: bool,
-) -> Result<Vec<Effect>, PeerError> {
-    let current = item_source(&request, snapshot);
-    if !current_epoch
-        || output.subscription != snapshot.subscriptions.get(&request.thread_id).copied()
-        || !current
-            .zip(output.source.as_ref())
-            .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
-    {
-        // Full Item updates already supply the new body. A delta preserves
-        // the deferred marker, so retry once this transfer has finished.
-        return if current.is_some() && item_deferred(&request, snapshot) {
-            Ok(vec![Effect::continuation(request)])
-        } else if current.is_some() {
-            Ok(Vec::new())
-        } else {
-            Err(PeerError::InvalidMessage(
-                "item is no longer available".into(),
-            ))
-        };
-    }
-    let response = output.response?;
-    *snapshot = upsert_item(
-        snapshot,
-        &request.thread_id,
-        &request.turn_id,
-        response.item,
-    );
-    reconcile_pending(snapshot, &request.thread_id);
-    Ok(Vec::new())
-}
-
 impl Operation for ReadItem {
-    fn item_read(&self) -> Option<&ReadItem> {
-        Some(self)
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Item { item: self.clone() })
+    }
+    type Input = (Option<Arc<Item>>, Option<uuid::Uuid>);
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        Ok((
+            item_source(self, snapshot).cloned(),
+            snapshot.subscriptions.get(&self.thread_id).copied(),
+        ))
+    }
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::Item(self.clone())
     }
     type Output = ItemRead;
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        let source = item_source(self, context.snapshot).cloned();
-        let subscription = context.snapshot.subscriptions.get(&self.thread_id).copied();
+    async fn run(
+        &self,
+        (source, subscription): Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         let response = context.call(self).await?;
         let response = tokio::time::timeout(
             std::time::Duration::from_secs(120),
@@ -254,9 +244,29 @@ impl Operation for ReadItem {
         self,
         snapshot: &mut Snapshot,
         output: Self::Output,
-        current: bool,
+        current_epoch: bool,
     ) -> Result<Vec<Effect>, PeerError> {
-        apply_item_read(self, snapshot, output, current)
+        let current = item_source(&self, snapshot);
+        if !current_epoch
+            || output.subscription != snapshot.subscriptions.get(&self.thread_id).copied()
+            || !current
+                .zip(output.source.as_ref())
+                .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
+        {
+            // Full Item updates already supply the new body. A delta preserves
+            // the deferred marker, so retry once this transfer has finished.
+            return match current {
+                Some(item) if item.is_deferred() => Ok(vec![Effect::continuation(self)]),
+                Some(_) => Ok(Vec::new()),
+                None => Err(PeerError::InvalidMessage(
+                    "item is no longer available".into(),
+                )),
+            };
+        }
+        let response = output.response?;
+        *snapshot = upsert_item(snapshot, &self.thread_id, &self.turn_id, response.item);
+        reconcile_pending(snapshot, &self.thread_id);
+        Ok(Vec::new())
     }
 }
 
@@ -279,17 +289,15 @@ impl ReadThread {
             limit: 5,
         }
     }
-    pub(in crate::state) fn with_history(
-        mut self,
+    pub(in crate::state) fn history_limit(
+        requested: u32,
         history_limit: Option<u64>,
         loaded_turns: usize,
-    ) -> Self {
-        self.limit = self
-            .limit
-            .max(u32::try_from(history_limit.unwrap_or(5)).unwrap_or(u32::MAX))
+    ) -> u32 {
+        requested
+            .max(u32::try_from(history_limit.unwrap_or_default()).unwrap_or(u32::MAX))
             .max(u32::try_from(loaded_turns).unwrap_or(u32::MAX))
-            .max(5);
-        self
+            .max(5)
     }
     pub fn open(thread_id: crate::session::SessionRef) -> Self {
         Self {
@@ -320,13 +328,19 @@ impl rpc::RpcMethod for ReadThread {
 }
 
 impl Operation for ReadThread {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::History {
+            session: self.thread_id.clone(),
+        })
+    }
     rpc_operation!();
-    fn invalidates(&self, _snapshot: &Snapshot) -> bool {
+    fn invalidates(&self) -> bool {
         self.open
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         let cached = snapshot.conversations.get(&self.thread_id);
-        *self = self.clone().with_history(
+        self.limit = Self::history_limit(
+            self.limit,
             cached.and_then(|thread| thread.history_limit),
             cached
                 .and_then(|thread| thread.turns.as_ref())
@@ -501,7 +515,9 @@ pub use agent_protocol::operations::ForkSession;
 
 impl Operation for ForkSession {
     rpc_operation!();
-    const INVALIDATES: bool = true;
+    fn invalidates(&self) -> bool {
+        true
+    }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         let id = output.thread.id.clone().expect("validated thread ID");
         let mut effects = open_thread(snapshot, output.thread, output.model);
@@ -537,6 +553,16 @@ impl Operation for CreateSession {
 pub use agent_protocol::operations::Interrupt;
 
 impl Operation for Interrupt {
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::Control
+    }
+
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Interrupt {
+            session: self.thread_id.clone(),
+            turn: self.turn_id.clone(),
+        })
+    }
     rpc_operation!();
 }
 
@@ -544,11 +570,19 @@ impl Operation for Interrupt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadModels {}
 impl Operation for LoadModels {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Models)
+    }
+    no_input!();
     type Output = agent_protocol::operations::ModelPage;
 
     const STALE_POLICY: StalePolicy = StalePolicy::Retry;
 
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         context.client.models().await
     }
     fn apply(self, snapshot: &mut Snapshot, catalog: Self::Output) -> Vec<Effect> {
@@ -594,16 +628,33 @@ impl Operation for LoadModels {
 pub use agent_protocol::operations::OpenRequest;
 
 impl Operation for OpenRequest {
+    type Input = BTreeMap<crate::session::SessionRef, u32>;
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        Ok(snapshot
+            .conversations
+            .iter()
+            .map(|(id, thread)| {
+                let limit = ReadThread::history_limit(
+                    5,
+                    thread.history_limit,
+                    thread.turns.as_ref().map_or(0, Vec::len),
+                );
+                (id.clone(), limit)
+            })
+            .collect())
+    }
     type Output = crate::session::OpenedSession;
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+    async fn run(
+        &self,
+        limits: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         let id = context.client.call(self).await?;
-        let cached = context.snapshot.conversations.get(&id);
-        let open = ReadThread::new(id).with_history(
-            cached.and_then(|thread| thread.history_limit),
-            cached
-                .and_then(|thread| thread.turns.as_ref())
-                .map_or(0, Vec::len),
-        );
+        let limit = limits.get(&id).copied().unwrap_or(5);
+        let open = ReadThread {
+            limit,
+            ..ReadThread::new(id)
+        };
         context.call(&open).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
@@ -777,7 +828,8 @@ mod item_read_tests {
         update(&mut snapshot, SessionChange::Item {turn_id:"turn".into(),item: serde_json::from_value(serde_json::json!({"id":"item","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new full body","phase":"unknown"}}}}})).unwrap()});
         let current = snapshot.conversations.clone();
         assert!(
-            apply_item_read(request, &mut snapshot, old, true)
+            request
+                .complete(&mut snapshot, old, true)
                 .unwrap()
                 .is_empty()
         );
@@ -810,9 +862,9 @@ mod item_read_tests {
             }
             assert!(snapshot.error.is_none());
             assert!(snapshot.subscriptions.contains_key(&request.thread_id));
-            let effects = apply_item_read(request.clone(), &mut snapshot, old, true).unwrap();
+            let effects = request.clone().complete(&mut snapshot, old, true).unwrap();
             assert_eq!(effects.len(), 1);
-            assert!(item_deferred(&request, &snapshot));
+            assert!(item_source(&request, &snapshot).unwrap().is_deferred());
             assert_ne!(
                 item_text(item_source(&request, &snapshot).unwrap()),
                 Some("old full body")
@@ -833,7 +885,7 @@ mod item_read_tests {
                     },
                 );
             }
-            let result = apply_item_read(request, &mut snapshot, old, deleted);
+            let result = request.complete(&mut snapshot, old, deleted);
             if deleted {
                 assert!(result.is_err());
             } else {
@@ -873,13 +925,13 @@ mod item_read_tests {
                     },
                 );
             }
-            let result = apply_item_read(request.clone(), &mut snapshot, old, true);
+            let result = request.clone().complete(&mut snapshot, old, true);
             if changed {
                 assert_eq!(result.unwrap().len(), 1);
             } else {
                 assert!(result.is_err());
             }
-            assert!(item_deferred(&request, &snapshot));
+            assert!(item_source(&request, &snapshot).unwrap().is_deferred());
         }
     }
 }

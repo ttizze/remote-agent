@@ -6,6 +6,15 @@ use crate::{
 use agent_protocol::operations as rpc;
 use rpc::{Input, Submission};
 
+macro_rules! no_input {
+    () => {
+        type Input = ();
+        fn capture(&self, _: &Snapshot) -> Result<(), PeerError> {
+            Ok(())
+        }
+    };
+}
+
 macro_rules! rpc_operation {
     ($parent:ident.$field:ident) => {
         rpc_operation!();
@@ -15,8 +24,13 @@ macro_rules! rpc_operation {
         }
     };
     () => {
+        no_input!();
         type Output = <Self as rpc::RpcMethod>::Output;
-        async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+        async fn run(
+            &self,
+            _: Self::Input,
+            context: &mut Execution<'_>,
+        ) -> Result<Self::Output, PeerError> {
             context.call(self).await
         }
     };
@@ -160,10 +174,102 @@ pub enum StalePolicy {
     Retry,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
+pub enum OperationKey {
+    SessionList,
+    History {
+        session: crate::session::SessionRef,
+    },
+    Item {
+        item: ReadItem,
+    },
+    Directory,
+    File,
+    SaveFile {
+        path: String,
+    },
+    WorkspaceReview,
+    Models,
+    Accounts,
+    AccountLogin {
+        provider: crate::session::ProviderKind,
+    },
+    Permissions {
+        provider: crate::session::ProviderKind,
+    },
+    WorktreeSettings,
+    Worktrees,
+    Submission {
+        draft_key: DraftKey,
+    },
+    Dictation {
+        draft_key: DraftKey,
+    },
+    Attachment {
+        draft_key: DraftKey,
+    },
+    Interrupt {
+        session: crate::session::SessionRef,
+        turn: agent_protocol::ids::TurnId,
+    },
+    Request {
+        id: agent_protocol::ids::RequestId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperationPhase {
+    Running,
+    Failed { message: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationState {
+    pub generation: u64,
+    pub phase: OperationPhase,
+}
+
+#[derive(Debug)]
+pub enum Scheduling {
+    Concurrent,
+    Control,
+    LatestList(crate::models::ListQuery),
+    Item(ReadItem),
+    Terminal { handle: String, starts: bool },
+}
+impl Scheduling {
+    pub(crate) fn item(&self) -> Option<&ReadItem> {
+        if let Self::Item(item) = self {
+            Some(item)
+        } else {
+            None
+        }
+    }
+    pub(crate) fn query(&self) -> Option<&crate::models::ListQuery> {
+        if let Self::LatestList(query) = self {
+            Some(query)
+        } else {
+            None
+        }
+    }
+    pub(crate) fn terminal(&self) -> Option<&str> {
+        if let Self::Terminal { handle, .. } = self {
+            Some(handle)
+        } else {
+            None
+        }
+    }
+}
+
 /// Typed state application after Store checks the navigation epoch or list query.
 pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
+    type Input: Send + std::fmt::Debug + 'static;
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError>;
+    fn key(&self) -> Option<OperationKey> {
+        None
+    }
     type Output: Send + std::fmt::Debug + 'static;
-    const INVALIDATES: bool = false;
     /// Metadata refreshes publish later without holding the initiating receipt.
     const BACKGROUND: bool = false;
     const STALE_POLICY: StalePolicy = StalePolicy::Discard;
@@ -171,21 +277,20 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
     fn submission_id(&self) -> Option<&str> {
         None
     }
-    fn item_read(&self) -> Option<&ReadItem> {
-        None
-    }
-    fn list_query(&self) -> Option<&crate::models::ListQuery> {
-        None
-    }
-    fn terminal_handle(&self) -> Option<&str> {
-        None
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::Concurrent
     }
     fn run(
         &self,
+        input: Self::Input,
         context: &mut Execution<'_>,
     ) -> impl Future<Output = Result<Self::Output, PeerError>> + Send;
-    fn invalidates(&self, _snapshot: &Snapshot) -> bool {
-        Self::INVALIDATES
+    /// Finish prepared state when the scheduler cannot admit this operation.
+    fn rejected_output(&self, _input: Self::Input) -> Option<Self::Output> {
+        None
+    }
+    fn invalidates(&self) -> bool {
+        false
     }
     fn prepare(&mut self, _snapshot: &mut Snapshot) -> Result<(), String> {
         Ok(())

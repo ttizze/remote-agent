@@ -162,8 +162,8 @@ impl Render for Desktop {
         }
         if composer_visible
             && self.has_older_history()
-            && !self.history_loading
-            && self.history_error.is_empty()
+            && !self.history_loading()
+            && self.history_error().is_none()
         {
             let entity = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| {

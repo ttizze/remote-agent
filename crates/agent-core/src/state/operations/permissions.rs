@@ -13,6 +13,12 @@ pub struct PermissionSettingsState {
 macro_rules! permission_operation {
     ($ty:ty) => {
         impl Operation for $ty {
+            fn key(&self) -> Option<OperationKey> {
+                Some(OperationKey::Permissions {
+                    provider: self.provider,
+                })
+            }
+            no_input!();
             type Output = Result<PermissionSettings, String>;
             fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
                 snapshot.permission_settings = Some(Arc::new(PermissionSettingsState {
@@ -21,7 +27,11 @@ macro_rules! permission_operation {
                 }));
                 Ok(())
             }
-            async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+            async fn run(
+                &self,
+                _: Self::Input,
+                context: &mut Execution<'_>,
+            ) -> Result<Self::Output, PeerError> {
                 Ok(context.call(self).await.map_err(|error| error.to_string()))
             }
             fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {

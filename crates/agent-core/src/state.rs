@@ -202,6 +202,10 @@ pub struct TerminalView {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
+    #[serde(skip)]
+    pub operations: Arc<BTreeMap<operations::OperationKey, operations::OperationState>>,
+    #[serde(skip)]
+    pub operation_sequence: u64,
     #[serde(default)]
     pub model_defaults: ModelDefaults,
     #[serde(default, with = "crate::persistence::entries")]
@@ -265,6 +269,19 @@ impl Snapshot {
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
+    pub fn operation_running(&self, key: operations::OperationKey) -> bool {
+        self.operations
+            .get(&key)
+            .is_some_and(|state| state.phase == operations::OperationPhase::Running)
+    }
+    pub fn operation_error(&self, key: operations::OperationKey) -> Option<String> {
+        self.operations
+            .get(&key)
+            .and_then(|state| match &state.phase {
+                operations::OperationPhase::Failed { message } => Some(message.clone()),
+                _ => None,
+            })
+    }
     pub fn terminal_view(&self, handle: String) -> Option<TerminalView> {
         self.terminals.get(&handle).map(|terminal| TerminalView {
             status: match terminal.phase {
@@ -683,7 +700,7 @@ fn prepare<O: operations::Operation>(
     mut next: Snapshot,
     mut operation: O,
 ) -> (Snapshot, Vec<Effect>) {
-    if operation.invalidates(previous) {
+    if operation.invalidates() {
         next.epoch += 1;
     }
     if let Err(error) = operation.prepare(&mut next) {
@@ -772,6 +789,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             }
         }
         Event::Connected => {
+            next.operations = Arc::default();
             reset_session(&mut next);
             next.connected = true;
             next.error = None;
@@ -798,6 +816,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             return (next, effects);
         }
         Event::Disconnected(reason) => {
+            next.operations = Arc::default();
             reset_session(&mut next);
             next.connected = false;
             for terminal in Arc::make_mut(&mut next.terminals).values_mut() {

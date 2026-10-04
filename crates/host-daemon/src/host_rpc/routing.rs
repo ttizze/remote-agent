@@ -1,74 +1,103 @@
-use agent_protocol::protocol;
-use std::{
-    collections::HashMap,
-    fmt,
-    sync::{Arc, Mutex, Weak},
-};
-
-use super::session_actor::SessionActor;
+use super::{requests::RequestOrigin, session_actor::SessionActor};
 use agent_protocol::{
     models::{Thread, ThreadResponse},
-    protocol::Notification,
+    protocol::{self, Notification},
     session::{OpenedSession, ProviderKind, SessionChange, SessionRef},
 };
 #[cfg(test)]
 use agent_transport::peer::RpcMessage;
 use serde_json::Value;
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed},
+    },
+};
 use tokio::sync::mpsc;
+
+pub type SessionId = u64;
+const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
+fn frame_cost(capacity: usize) -> usize {
+    capacity + std::mem::size_of::<Vec<u8>>()
+}
 
 pub(super) struct SessionLease {
     router: SessionRouter,
     target: SessionRef,
+    actor: Arc<Mutex<SessionActor>>,
 }
 impl Drop for SessionLease {
     fn drop(&mut self) {
-        let mut state = lock_state(&self.router.state);
-        if let Some(actor) = state.executions.get_mut(&self.target) {
-            actor.leases -= 1;
-        }
-        state.executions.retain(|_, actor| actor.release());
+        let mut actor = lock_state(&self.actor);
+        actor.leases -= 1;
+        drop(actor);
+        self.router.prune(&self.target, &self.actor);
     }
 }
 
-/// An identifier allocated by the daemon for one authenticated mobile
-/// session. It is never put on the wire.
-pub type SessionId = u64;
-
-/// A live authenticated session's bounded outbound queue.
 pub struct HostSession {
     id: SessionId,
     receiver: mpsc::UnboundedReceiver<Vec<u8>>,
-    queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    queued_bytes: Arc<AtomicUsize>,
     state: Weak<Mutex<State>>,
 }
+impl HostSession {
+    pub fn id(&self) -> SessionId {
+        self.id
+    }
+    pub async fn recv(&mut self) -> Option<Vec<u8>> {
+        let frame = self.receiver.recv().await?;
+        self.queued_bytes
+            .fetch_sub(frame_cost(frame.capacity()), Relaxed);
+        Some(frame)
+    }
+}
+impl fmt::Debug for HostSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostSession")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+impl Drop for HostSession {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.upgrade() {
+            SessionRouter { state }.close_session(self.id);
+        }
+    }
+}
 
-/// The response stream owns its subscription; dropping it unsubscribes.
+/// The stream owns its subscription. Conversation content is never owned by a connection.
 pub struct HostSubscription {
     id: uuid::Uuid,
+    target: SessionRef,
+    actor: Weak<Mutex<SessionActor>>,
     receiver: mpsc::UnboundedReceiver<Vec<u8>>,
-    queued_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    queued_bytes: Arc<AtomicUsize>,
     state: Weak<Mutex<State>>,
 }
 impl HostSubscription {
     pub async fn recv(&mut self) -> Option<Vec<u8>> {
-        let line = self.receiver.recv().await?;
-        self.queued_bytes.fetch_sub(
-            frame_cost(line.capacity()),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        Some(line)
+        let frame = self.receiver.recv().await?;
+        self.queued_bytes
+            .fetch_sub(frame_cost(frame.capacity()), Relaxed);
+        Some(frame)
     }
 }
 impl Drop for HostSubscription {
     fn drop(&mut self) {
-        if let Some(state) = self.state.upgrade() {
-            lock_state(&state).subscriptions.remove(&self.id);
+        if let Some(actor) = self.actor.upgrade() {
+            lock_state(&actor).subscriptions.remove(&self.id);
+            if let Some(state) = self.state.upgrade() {
+                lock_state(&state).subscriptions.remove(&self.id);
+                SessionRouter { state }.prune(&self.target, &actor);
+            }
         }
-        while let Ok(line) = self.receiver.try_recv() {
-            self.queued_bytes.fetch_sub(
-                frame_cost(line.capacity()),
-                std::sync::atomic::Ordering::Relaxed,
-            );
+        while let Ok(frame) = self.receiver.try_recv() {
+            self.queued_bytes
+                .fetch_sub(frame_cost(frame.capacity()), Relaxed);
         }
     }
 }
@@ -77,172 +106,146 @@ pub struct HostReply {
     pub updates: Option<HostSubscription>,
 }
 impl From<protocol::Response> for HostReply {
-    fn from(initial: protocol::Response) -> Self {
+    fn from(response: protocol::Response) -> Self {
         Self {
-            initial: protocol::response_frame(initial).expect("response encodes"),
+            initial: protocol::response_frame(response).expect("response encodes"),
             updates: None,
         }
     }
 }
 
-impl HostSession {
-    pub fn id(&self) -> SessionId {
-        self.id
-    }
-
-    pub async fn recv(&mut self) -> Option<Vec<u8>> {
-        let line = self.receiver.recv().await?;
-        self.queued_bytes.fetch_sub(
-            frame_cost(line.capacity()),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        Some(line)
-    }
-}
-
-impl fmt::Debug for HostSession {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("HostSession")
-            .field("id", &self.id)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Drop for HostSession {
-    fn drop(&mut self) {
-        close_session_state(&self.state, self.id);
-    }
-}
-
-/// Owns bounded connection queues and the shared current session state.
 #[derive(Clone)]
-pub(crate) struct SessionRouter {
-    state: Arc<Mutex<State>>,
-}
-
-const MAX_QUEUED_BYTES: usize = 16 * 1024 * 1024;
-
-// Count allocated payload capacity and the entry, including empty frames.
-// The channel has no message-count cutoff: a buffered provider burst must not
-// disconnect a healthy client before its network writer gets scheduled.
-fn frame_cost(capacity: usize) -> usize {
-    capacity + std::mem::size_of::<Vec<u8>>()
-}
-#[derive(Clone)]
-struct Outbound {
+pub(super) struct Outbound {
     principal: String,
     sender: mpsc::UnboundedSender<Vec<u8>>,
-    bytes: Arc<std::sync::atomic::AtomicUsize>,
+    bytes: Arc<AtomicUsize>,
+    alive: Arc<AtomicBool>,
 }
 impl Outbound {
     fn try_send(
         &self,
         session: SessionId,
-        line: Vec<u8>,
+        frame: Vec<u8>,
     ) -> Result<(), mpsc::error::TrySendError<Vec<u8>>> {
-        use std::sync::atomic::Ordering::Relaxed;
-        let length = frame_cost(line.capacity());
+        if !self.alive.load(Relaxed) {
+            return Err(mpsc::error::TrySendError::Closed(frame));
+        }
+        let cost = frame_cost(frame.capacity());
         if self
             .bytes
             .fetch_update(Relaxed, Relaxed, |bytes| {
                 bytes
-                    .checked_add(length)
+                    .checked_add(cost)
                     .filter(|bytes| *bytes <= MAX_QUEUED_BYTES)
             })
             .is_err()
         {
-            tracing::warn!(target: "bex", operation = "host.session.queue_failed", message = %format_args!(
-                "session={session} reason=byte_limit queued_bytes={} frame_bytes={} frame_cost={length} limit_bytes={MAX_QUEUED_BYTES}",
-                self.bytes.load(Relaxed), line.len()));
-            return Err(mpsc::error::TrySendError::Full(line));
+            tracing::warn!(target: "bex", operation = "host.session.queue_failed", message = %format_args!("session={session} reason=byte_limit queued_bytes={} frame_bytes={} frame_cost={cost} limit_bytes={MAX_QUEUED_BYTES}", self.bytes.load(Relaxed), frame.len()));
+            return Err(mpsc::error::TrySendError::Full(frame));
         }
-        self.sender.send(line).map_err(|error| {
-            self.bytes.fetch_sub(length, Relaxed);
-            tracing::warn!(target: "bex", operation = "host.session.queue_failed", message = %format_args!(
-                "session={session} reason=receiver_closed frame_bytes={}", error.0.len()));
+        self.sender.send(frame).map_err(|error| {
+            self.bytes.fetch_sub(cost, Relaxed);
+            tracing::warn!(target: "bex", operation = "host.session.queue_failed", message = %format_args!("session={session} reason=receiver_closed frame_bytes={}", error.0.len()));
             mpsc::error::TrySendError::Closed(error.0)
         })
     }
 }
 
+/// Only the connection and identity registries share this lock. History transforms,
+/// encoders, arbitration and queue delivery run under their conversation's lock.
+#[derive(Default)]
 struct State {
     next_session_id: SessionId,
     sessions: HashMap<SessionId, Outbound>,
-    executions: HashMap<SessionRef, SessionActor>,
-    subscriptions: HashMap<uuid::Uuid, (SessionRef, SessionId, Outbound)>,
+    executions: HashMap<SessionRef, Arc<Mutex<SessionActor>>>,
+    subscriptions: HashMap<uuid::Uuid, (SessionRef, SessionId)>,
+    requests: HashMap<agent_protocol::ids::RequestId, SessionRef>,
+    native_requests: HashMap<(uuid::Uuid, String), agent_protocol::ids::RequestId>,
 }
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            next_session_id: 1,
-            sessions: HashMap::new(),
-            executions: HashMap::new(),
-            subscriptions: HashMap::new(),
+#[derive(Clone)]
+pub(crate) struct SessionRouter {
+    state: Arc<Mutex<State>>,
+}
+fn native_key(instance: uuid::Uuid, id: &Value) -> (uuid::Uuid, String) {
+    (
+        instance,
+        serde_json::to_string(id).expect("native ID serializes"),
+    )
+}
+fn request_target_is_live(
+    target: &agent_protocol::requests::RequestTarget,
+    turns: Option<&[Arc<agent_protocol::models::Turn>]>,
+) -> bool {
+    match target {
+        agent_protocol::requests::RequestTarget::Session => true,
+        agent_protocol::requests::RequestTarget::Turn { turn_id, .. } => {
+            turns.into_iter().flatten().any(|turn| {
+                &turn.id == turn_id && turn.status == agent_protocol::execution::TurnStatus::Running
+            })
         }
     }
 }
-
-impl State {
-    fn pending_request(&self, id: &str) -> Option<(SessionRef, &super::requests::PendingRequest)> {
-        self.executions.iter().find_map(|(target, actor)| {
-            actor
-                .pending_requests
-                .get(id)
-                .map(|pending| (target.clone(), pending))
-        })
-    }
-    fn pending_native(
-        &self,
-        instance: uuid::Uuid,
-        id: &Value,
-    ) -> Option<(SessionRef, agent_protocol::ids::RequestId)> {
-        self.executions.iter().find_map(|(target, actor)| {
-            actor
-                .pending_requests
-                .values()
-                .find(|pending| {
-                    pending.origin.instance == instance && &pending.origin.native_id == id
-                })
-                .map(|pending| (target.clone(), pending.request.id.clone()))
-        })
-    }
+fn lock_state<T>(state: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl SessionRouter {
     pub(crate) fn new() -> Self {
         Self {
-            state: Arc::new(Mutex::new(State::default())),
+            state: Arc::new(Mutex::new(State {
+                next_session_id: 1,
+                ..Default::default()
+            })),
         }
     }
-
+    fn actor(&self, target: &SessionRef) -> Arc<Mutex<SessionActor>> {
+        lock_state(&self.state)
+            .executions
+            .entry(target.clone())
+            .or_default()
+            .clone()
+    }
+    fn existing(&self, target: &SessionRef) -> Option<Arc<Mutex<SessionActor>>> {
+        lock_state(&self.state).executions.get(target).cloned()
+    }
+    fn prune(&self, target: &SessionRef, actor: &Arc<Mutex<SessionActor>>) {
+        let mut owned = lock_state(actor);
+        if owned.release() || !owned.subscriptions.is_empty() {
+            return;
+        }
+        let mut state = lock_state(&self.state);
+        if Arc::strong_count(actor) == 2
+            && state
+                .executions
+                .get(target)
+                .is_some_and(|current| Arc::ptr_eq(current, actor))
+        {
+            state.executions.remove(target);
+        }
+    }
     pub(crate) fn open_session(&self) -> HostSession {
         self.open_authenticated_session(None)
     }
-
-    pub(crate) fn principal(&self, session: SessionId) -> Result<String, String> {
-        lock_state(&self.state)
-            .sessions
-            .get(&session)
-            .map(|outbound| outbound.principal.clone())
-            .ok_or_else(|| "connection is closed".into())
-    }
-
     pub(crate) fn open_authenticated_session(&self, principal: Option<String>) -> HostSession {
         let (sender, receiver) = mpsc::unbounded_channel();
         let mut state = lock_state(&self.state);
-        let id = allocate_session_id(&mut state);
-        let queued_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let id = loop {
+            let id = state.next_session_id;
+            state.next_session_id = state.next_session_id.checked_add(1).unwrap_or(1);
+            if !state.sessions.contains_key(&id) {
+                break id;
+            }
+        };
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
         state.sessions.insert(
             id,
             Outbound {
                 principal: principal.unwrap_or_else(|| format!("session:{id}")),
                 sender,
                 bytes: queued_bytes.clone(),
+                alive: Arc::new(AtomicBool::new(true)),
             },
         );
-
         HostSession {
             id,
             receiver,
@@ -250,41 +253,52 @@ impl SessionRouter {
             state: Arc::downgrade(&self.state),
         }
     }
-
-    pub(super) fn submission_lock(&self, target: &SessionRef) -> Arc<tokio::sync::Mutex<()>> {
+    pub(crate) fn principal(&self, session: SessionId) -> Result<String, String> {
+        self.connection(session)
+            .map(|output| output.principal)
+            .ok_or_else(|| "connection is closed".into())
+    }
+    fn connection(&self, session: SessionId) -> Option<Outbound> {
         lock_state(&self.state)
-            .executions
-            .entry(target.clone())
-            .or_default()
-            .submission_lock
-            .clone()
+            .sessions
+            .get(&session)
+            .filter(|output| output.alive.load(Relaxed))
+            .cloned()
     }
-
-    pub(crate) fn overlay_execution(&self, target: &SessionRef, thread: Thread) -> Thread {
-        match lock_state(&self.state).executions.get(target) {
-            Some(actor) => actor.overlay(thread),
-            None => thread,
+    pub(crate) fn ensure_session(&self, session: SessionId) -> Result<(), String> {
+        self.connection(session)
+            .map(|_| ())
+            .ok_or_else(|| "connection is closed".into())
+    }
+    pub(super) fn submission_lock(&self, target: &SessionRef) -> Arc<tokio::sync::Mutex<()>> {
+        lock_state(&self.actor(target)).submission_lock.clone()
+    }
+    pub(crate) fn overlay_execution(&self, target: &SessionRef, mut thread: Thread) -> Thread {
+        if let Some(actor) = self.existing(target) {
+            thread = lock_state(&actor).overlay(thread);
+            self.prune(target, &actor);
         }
+        thread
     }
-
     pub(super) fn execution_targets(&self) -> Vec<SessionRef> {
         lock_state(&self.state).executions.keys().cloned().collect()
     }
-
     pub(super) fn submission_receipt(
         &self,
         target: &SessionRef,
         id: &str,
     ) -> Option<agent_protocol::operations::SubmissionReceipt> {
-        let state = lock_state(&self.state);
-        match state.executions.get(target)?.live.submissions.get(id)? {
-            agent_protocol::session::SubmissionDelivery::Accepted { turn_id } => {
+        let actor = self.existing(target)?;
+        let receipt = match lock_state(&actor).timeline.submissions.get(id) {
+            Some(agent_protocol::session::SubmissionDelivery::Accepted { turn_id }) => {
                 Some(agent_protocol::operations::SubmissionReceipt {
                     turn_id: turn_id.clone(),
                 })
             }
             _ => None,
-        }
+        };
+        self.prune(target, &actor);
+        receipt
     }
 
     pub(super) fn begin_submission(
@@ -299,9 +313,9 @@ impl SessionRouter {
                 "clientUserMessageId is required",
             ));
         }
-        let mut state = lock_state(&self.state);
-        let actor = state.executions.entry(target.clone()).or_default();
-        if actor.live.submissions.get(id).is_some_and(|delivery| {
+        let actor = self.actor(target);
+        let mut owned = lock_state(&actor);
+        if owned.timeline.submissions.get(id).is_some_and(|delivery| {
             *delivery != agent_protocol::session::SubmissionDelivery::Rejected
         }) {
             return Err(Failure::unknown(
@@ -309,234 +323,197 @@ impl SessionRouter {
                 "submission is already in flight; read the session before sending again",
             ));
         }
-        // Rejections have no provider side effect. Keep them available for a
-        // reconnect until another input needs the bounded execution capacity.
-        if actor.live.submissions.len() >= 128 {
-            actor.live.submissions.retain(|_, delivery| {
+        if owned.timeline.submissions.len() >= 128 {
+            owned.timeline.submissions.retain(|_, delivery| {
                 *delivery != agent_protocol::session::SubmissionDelivery::Rejected
             });
         }
-        if actor.live.submissions.len() >= 128 {
+        if owned.timeline.submissions.len() >= 128 {
             return Err(Failure::new(
                 "input_capacity_reached",
                 "active input capacity reached",
             ));
         }
-        change_locked(
-            &mut state,
+        let mut failed = Vec::new();
+        self.change_locked(
+            &mut owned,
             target,
             &SessionChange::Submission {
                 id: id.into(),
                 delivery: agent_protocol::session::SubmissionDelivery::Sending,
             },
+            &mut failed,
         );
+        drop(owned);
+        self.close_failed(failed);
         Ok(())
     }
-
     pub(super) fn finish_submission(
         &self,
         target: &SessionRef,
         id: &str,
         delivery: agent_protocol::session::SubmissionDelivery,
     ) {
-        let mut state = lock_state(&self.state);
-        // A completed execution may already have retired its inputs. Do not
-        // recreate execution state from a late RPC completion.
-        if state
-            .executions
-            .get(target)
-            .is_some_and(|actor| actor.live.submissions.contains_key(id))
-        {
-            change_locked(
-                &mut state,
+        let Some(actor) = self.existing(target) else {
+            return;
+        };
+        let mut owned = lock_state(&actor);
+        let mut failed = Vec::new();
+        if owned.timeline.submissions.contains_key(id) {
+            self.change_locked(
+                &mut owned,
                 target,
                 &SessionChange::Submission {
                     id: id.into(),
                     delivery,
                 },
+                &mut failed,
             );
         }
+        drop(owned);
+        self.close_failed(failed);
+        self.prune(target, &actor);
     }
-
     pub(crate) fn current_turn(
         &self,
         target: &SessionRef,
-        turn_id: &str,
-    ) -> Option<agent_protocol::models::Turn> {
-        lock_state(&self.state)
-            .executions
-            .get(target)
-            .and_then(|actor| {
-                actor
-                    .live
-                    .turns
-                    .as_ref()?
+        turn: &str,
+    ) -> Option<Arc<agent_protocol::models::Turn>> {
+        let actor = self.existing(target)?;
+        let result = lock_state(&actor)
+            .timeline
+            .turns
+            .as_ref()
+            .and_then(|turns| {
+                turns
                     .iter()
-                    .rfind(|turn| turn.id.as_str() == turn_id)
-            })
-            .map(|turn| (**turn).clone())
+                    .rfind(|current| current.id.as_str() == turn)
+                    .cloned()
+            });
+        self.prune(target, &actor);
+        result
     }
 
     pub(super) fn retain_execution(&self, target: SessionRef) -> Result<SessionLease, String> {
         target.validate()?;
-        let mut state = lock_state(&self.state);
-        state.executions.entry(target.clone()).or_default().leases += 1;
+        let actor = self.actor(&target);
+        lock_state(&actor).leases += 1;
         Ok(SessionLease {
             router: self.clone(),
             target,
+            actor,
         })
     }
-
     pub(super) fn finish_session_read(
         &self,
         read: SessionLease,
         session: SessionId,
         mut response: ThreadResponse,
     ) -> Result<HostReply, String> {
-        let mut state = lock_state(&self.state);
-        if !state.sessions.contains_key(&session) {
-            return Err("connection closed during session open".into());
-        }
+        let connection = self
+            .connection(session)
+            .ok_or("connection closed during session open")?;
+        let mut actor = lock_state(&read.actor);
         if response.thread.id.as_ref() != Some(&read.target) {
             return Err("native session ID does not match".into());
         }
-        if let Some(actor) = state.executions.get(&read.target) {
-            response.thread = actor.overlay(response.thread);
-        }
+        response.thread = actor.overlay(response.thread);
         response
             .thread
             .defer_item_details(agent_protocol::models::MAX_INLINE_ITEM_BYTES);
-        let subscription_id = uuid::Uuid::new_v4();
         let mut opened = OpenedSession {
             session: read.target.clone(),
             subscription_id: uuid::Uuid::nil(),
             response,
         };
-        let mut line = protocol::encode(protocol::Response::Success { result: &opened })
-            .map_err(|error| error.to_string())?;
-        if line.len() > MAX_QUEUED_BYTES {
-            // Many individually small items can also exceed one physical RPC.
-            // Defer bodies without discarding turns or keeping a Host snapshot.
+        let mut initial = protocol::encode(protocol::Response::Success { result: &opened })
+            .map_err(|e| e.to_string())?;
+        if initial.len() > MAX_QUEUED_BYTES {
             opened.response.thread.defer_item_details(0);
-            line = protocol::encode(protocol::Response::Success { result: &opened })
-                .map_err(|error| error.to_string())?;
+            initial = protocol::encode(protocol::Response::Success { result: &opened })
+                .map_err(|e| e.to_string())?;
         }
-        if line.len() > MAX_QUEUED_BYTES {
-            let error = protocol::Response::error(
+        if initial.len() > MAX_QUEUED_BYTES {
+            return Ok(protocol::Response::error(
                 "response_too_large",
                 &"Session metadata exceeds the RPC limit; request fewer turns",
             )
-            .map_err(|error| error.to_string())?;
-            return Ok(error.into());
+            .map_err(|e| e.to_string())?
+            .into());
         }
+        let id = uuid::Uuid::new_v4();
         let (sender, receiver) = mpsc::unbounded_channel();
-        let queued_bytes = state.sessions[&session].bytes.clone();
-        let principal = state.sessions[&session].principal.clone();
-        state.subscriptions.insert(
-            subscription_id,
+        // Conversation -> registry is the only nested lock order. Registration,
+        // removal and claims all verify the same live connection here.
+        let mut state = lock_state(&self.state);
+        if !state.sessions.contains_key(&session) || !connection.alive.load(Relaxed) {
+            return Err("connection closed during session open".into());
+        }
+        state
+            .subscriptions
+            .insert(id, (read.target.clone(), session));
+        actor.subscriptions.insert(
+            id,
             (
-                read.target.clone(),
                 session,
                 Outbound {
-                    principal,
                     sender,
-                    bytes: queued_bytes.clone(),
+                    ..connection.clone()
                 },
             ),
         );
+        drop(state);
+        drop(actor);
         Ok(HostReply {
-            initial: line,
+            initial,
             updates: Some(HostSubscription {
-                id: subscription_id,
+                id,
+                target: read.target.clone(),
+                actor: Arc::downgrade(&read.actor),
                 receiver,
-                queued_bytes,
+                queued_bytes: connection.bytes,
                 state: Arc::downgrade(&self.state),
             }),
         })
     }
-
     pub(crate) fn close_session(&self, session: SessionId) {
-        remove_session_locked(&mut lock_state(&self.state), session);
-    }
-
-    pub(crate) fn fail_provider(&self, provider: ProviderKind, message: &str) {
-        let mut state = lock_state(&self.state);
-        let live: Vec<_> = state
-            .executions
-            .iter()
-            .filter(|(target, _)| target.provider == provider)
-            .map(|(target, actor)| {
-                (
-                    target.clone(),
-                    actor.live.clone(),
-                    actor.pending_requests.keys().cloned().collect::<Vec<_>>(),
-                )
-            })
-            .collect();
-        for (target, thread, requests) in live {
-            for id in requests {
-                change_locked(
-                    &mut state,
-                    &target,
-                    &SessionChange::ResolveRequest { request_id: id },
-                );
+        let actors: HashMap<_, _> = {
+            let mut state = lock_state(&self.state);
+            if let Some(connection) = state.sessions.remove(&session) {
+                connection.alive.store(false, Relaxed);
             }
-            for turn in thread
-                .turns
-                .iter()
-                .flatten()
-                .filter(|turn| turn.status == agent_protocol::execution::TurnStatus::Running)
-            {
-                let mut turn = (**turn).clone();
-                turn.status = agent_protocol::execution::TurnStatus::Failed;
-                turn.error = Some(agent_protocol::execution::ExecutionError {
-                    category: agent_protocol::execution::ErrorCategory::Network,
-                    message: message.into(),
-                    ..Default::default()
-                });
-                change_locked(
-                    &mut state,
-                    &target,
-                    &SessionChange::Turn {
-                        turn,
-                        completed: true,
-                    },
-                );
-            }
-            for (id, delivery) in &thread.submissions {
-                if matches!(
-                    delivery,
-                    agent_protocol::session::SubmissionDelivery::Sending
-                ) {
-                    change_locked(
-                        &mut state,
-                        &target,
-                        &SessionChange::Submission {
-                            id: id.clone(),
-                            delivery: agent_protocol::session::SubmissionDelivery::Unknown,
-                        },
-                    );
-                }
-            }
-            change_locked(
-                &mut state,
-                &target,
-                &SessionChange::Status {
-                    status: agent_protocol::models::SessionStatus::Unavailable,
-                },
-            );
-        }
-        state.executions.retain(|_, actor| actor.release());
-    }
-
-    pub(crate) fn ensure_session(&self, session: SessionId) -> Result<(), String> {
-        if lock_state(&self.state).sessions.contains_key(&session) {
-            Ok(())
-        } else {
-            Err(format!("RPC session {session} is not open"))
+            let targets: Vec<_> = state
+                .subscriptions
+                .values()
+                .filter(|(_, owner)| *owner == session)
+                .map(|(target, _)| target.clone())
+                .collect();
+            state
+                .subscriptions
+                .retain(|_, (_, owner)| *owner != session);
+            targets
+                .into_iter()
+                .filter_map(|target| {
+                    state
+                        .executions
+                        .get(&target)
+                        .cloned()
+                        .map(|actor| (target, actor))
+                })
+                .collect()
+        };
+        for (target, actor) in actors {
+            lock_state(&actor)
+                .subscriptions
+                .retain(|_, (owner, _)| *owner != session);
+            self.prune(&target, &actor);
         }
     }
-
+    fn close_failed(&self, failed: Vec<SessionId>) {
+        for session in failed {
+            self.close_session(session);
+        }
+    }
     pub(crate) fn send(
         &self,
         session: SessionId,
@@ -544,377 +521,339 @@ impl SessionRouter {
     ) -> Result<(), String> {
         self.send_frame(
             session,
-            protocol::encode(notification).map_err(|error| error.to_string())?,
+            protocol::encode(notification).map_err(|e| e.to_string())?,
         )
     }
-    fn send_frame(&self, session: SessionId, line: Vec<u8>) -> Result<(), String> {
-        let mut state = lock_state(&self.state);
-        let sender = state
-            .sessions
-            .get(&session)
-            .cloned()
+    fn send_frame(&self, session: SessionId, frame: Vec<u8>) -> Result<(), String> {
+        let output = self
+            .connection(session)
             .ok_or_else(|| format!("RPC session {session} is not open"))?;
-        match sender.try_send(session, line) {
-            Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                remove_session_locked(&mut state, session);
-                Err(format!("RPC session {session} outbound queue is full"))
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                remove_session_locked(&mut state, session);
-                Err(format!("RPC session {session} is not open"))
-            }
-        }
+        output.try_send(session, frame).map_err(|_| {
+            self.close_session(session);
+            format!("RPC session {session} outbound queue failed")
+        })
     }
-
+    fn broadcast_frames(&self, frame: Vec<u8>) -> Vec<SessionId> {
+        let outputs: Vec<_> = lock_state(&self.state)
+            .sessions
+            .iter()
+            .map(|(id, output)| (*id, output.clone()))
+            .collect();
+        outputs
+            .into_iter()
+            .filter_map(|(id, output)| output.try_send(id, frame.clone()).is_err().then_some(id))
+            .collect()
+    }
+    pub(crate) fn broadcast(&self, notification: Notification) {
+        let failed =
+            self.broadcast_frames(protocol::encode(notification).expect("notification encodes"));
+        self.close_failed(failed);
+    }
     pub(crate) fn request(
         &self,
         target: SessionRef,
-        origin: super::requests::RequestOrigin,
-        adapted: super::requests::AdaptedRequest,
+        origin: RequestOrigin,
+        request: agent_protocol::requests::Request,
     ) -> Result<(), String> {
-        let provider = match origin.destination {
-            super::requests::RequestDestination::Codex { .. } => ProviderKind::Codex,
-            super::requests::RequestDestination::Claude { .. } => ProviderKind::Claude,
-        };
-        if target.provider != provider {
+        if target.provider != origin.provider {
             return Err("request provider does not match session".into());
         }
-        if !origin.is_alive() {
+        if !origin.source.is_alive() {
             return Err("request source is closed".into());
         }
-        let mut state = lock_state(&self.state);
-        if state
-            .pending_native(origin.instance, &origin.native_id)
-            .is_some()
-        {
-            return Ok(());
-        }
-        if state
-            .executions
-            .values()
-            .map(|actor| actor.pending_requests.len())
-            .sum::<usize>()
-            >= 256
-            || state
-                .executions
-                .get(&target)
-                .is_some_and(|actor| actor.pending_requests.len() >= 32)
-            || serde_json::to_vec(&adapted.request)
-                .map_err(|e| e.to_string())?
-                .len()
-                > 64 * 1024
+        if serde_json::to_vec(&request)
+            .map_err(|e| e.to_string())?
+            .len()
+            > 64 * 1024
         {
             return Err("pending request capacity reached".into());
         }
-        if let agent_protocol::requests::RequestTarget::Turn { turn_id, .. } =
-            &adapted.request.target
-            && state.executions.get(&target).is_none_or(|actor| {
-                !actor.live.turns.iter().flatten().any(|turn| {
-                    &turn.id == turn_id
-                        && turn.status == agent_protocol::execution::TurnStatus::Running
-                })
-            })
-        {
+        let native = native_key(origin.instance, &origin.native_id);
+        let lease = self.retain_execution(target.clone())?;
+        let actor = &lease.actor;
+        let mut owned = lock_state(actor);
+        let mut state = lock_state(&self.state);
+        if state.native_requests.contains_key(&native) {
+            return Ok(());
+        }
+        if state.requests.len() >= 256 || owned.timeline.requests.len() >= 32 {
+            return Err("pending request capacity reached".into());
+        }
+        if !request_target_is_live(&request.target, owned.timeline.turns.as_deref()) {
             return Err("request has no owned live turn".into());
         }
-        let request = adapted.request;
-        state
-            .executions
-            .entry(target.clone())
-            .or_default()
-            .pending_requests
-            .insert(
-                request.id.clone(),
-                super::requests::PendingRequest {
-                    request: request.clone(),
-                    origin,
-                    answers: adapted.answers,
-                },
-            );
-        change_locked(&mut state, &target, &SessionChange::Request { request });
+        state.requests.insert(request.id.clone(), target.clone());
+        state.native_requests.insert(native, request.id.clone());
+        drop(state);
+        owned.request_origins.insert(request.id.clone(), origin);
+        let mut failed = Vec::new();
+        self.change_locked(
+            &mut owned,
+            &target,
+            &SessionChange::Request { request },
+            &mut failed,
+        );
+        drop(owned);
+        self.close_failed(failed);
         Ok(())
     }
-
-    pub(crate) fn session_change(
-        &self,
-        target: &SessionRef,
-        change: agent_protocol::session::SessionChange,
-    ) {
-        change_locked(&mut lock_state(&self.state), target, &change);
+    pub(crate) fn session_change(&self, target: &SessionRef, change: SessionChange) {
+        let actor = self.actor(target);
+        let mut failed = Vec::new();
+        self.change_locked(&mut lock_state(&actor), target, &change, &mut failed);
+        self.close_failed(failed);
+        self.prune(target, &actor);
     }
-
-    pub(crate) fn resolve_native_request(&self, instance: uuid::Uuid, id: &Value) {
-        let mut state = lock_state(&self.state);
-        if let Some((target, request_id)) = state.pending_native(instance, id) {
-            change_locked(
-                &mut state,
-                &target,
-                &SessionChange::ResolveRequest { request_id },
-            );
+    pub(crate) fn resolve_native_request(&self, instance: uuid::Uuid, native: &Value) {
+        let resolved = {
+            let state = lock_state(&self.state);
+            state
+                .native_requests
+                .get(&native_key(instance, native))
+                .and_then(|id| {
+                    state
+                        .requests
+                        .get(id)
+                        .map(|target| (target.clone(), id.clone()))
+                })
+        };
+        if let Some((target, request_id)) = resolved {
+            self.session_change(&target, SessionChange::ResolveRequest { request_id });
         }
     }
-
     pub(crate) fn close_request_source(&self, instance: uuid::Uuid) {
-        let mut state = lock_state(&self.state);
-        let requests: Vec<_> = state
-            .executions
-            .iter()
-            .flat_map(|(target, actor)| {
-                actor
-                    .pending_requests
-                    .values()
-                    .filter(move |pending| pending.origin.instance == instance)
-                    .map(move |pending| (target.clone(), pending.request.id.clone()))
-            })
-            .collect();
+        let requests: Vec<_> = {
+            let state = lock_state(&self.state);
+            state
+                .native_requests
+                .iter()
+                .filter(|((source, _), _)| *source == instance)
+                .filter_map(|(_, id)| {
+                    state
+                        .requests
+                        .get(id)
+                        .map(|target| (target.clone(), id.clone()))
+                })
+                .collect()
+        };
         for (target, request_id) in requests {
-            change_locked(
-                &mut state,
-                &target,
-                &SessionChange::ResolveRequest { request_id },
-            );
+            self.session_change(&target, SessionChange::ResolveRequest { request_id });
         }
     }
-
-    pub(crate) fn broadcast(&self, notification: Notification) {
-        let line = protocol::encode(notification).expect("notification serializes");
-        let mut state = lock_state(&self.state);
-        let deliveries = state
-            .sessions
-            .keys()
-            .map(|id| (*id, line.clone()))
-            .collect();
-        deliver_locked(&mut state, deliveries);
-    }
-
     pub(super) fn request_session(&self, id: &str) -> Option<SessionRef> {
-        lock_state(&self.state)
-            .pending_request(id)
-            .map(|(session, _)| session)
+        lock_state(&self.state).requests.get(id).cloned()
     }
-
     pub(crate) fn claim_response(
         &self,
         session: SessionId,
         id: &str,
         answer: &agent_protocol::requests::Answer,
-    ) -> Result<(super::requests::RequestOrigin, Value), String> {
-        let mut state = lock_state(&self.state);
-        if !state.sessions.contains_key(&session) {
-            return Err("connection is closed".into());
-        }
-        let (target, pending) = state
-            .pending_request(id)
+    ) -> Result<(RequestOrigin, agent_protocol::requests::RequestBody), String> {
+        let target = self
+            .request_session(id)
             .ok_or("request was already answered or its execution has ended")?;
-        if pending.request.delivery != agent_protocol::session::RequestDelivery::Awaiting
-            || !pending.origin.is_alive()
+        let actor = self
+            .existing(&target)
+            .ok_or("request execution has ended")?;
+        let mut owned = lock_state(&actor);
+        let request = owned
+            .timeline
+            .requests
+            .get(id)
+            .ok_or("request was already answered or its execution has ended")?;
+        let origin = owned
+            .request_origins
+            .get(id)
+            .ok_or("request source has ended")?;
+        if request.delivery != agent_protocol::session::RequestDelivery::Awaiting
+            || !origin.source.is_alive()
         {
             return Err("request was already answered or its source has ended".into());
         }
-        if let agent_protocol::requests::RequestTarget::Turn { turn_id, .. } =
-            &pending.request.target
-            && !state.executions[&target]
-                .live
-                .turns
-                .iter()
-                .flatten()
-                .any(|turn| {
-                    &turn.id == turn_id
-                        && turn.status == agent_protocol::execution::TurnStatus::Running
-                })
-        {
+        if !request_target_is_live(&request.target, owned.timeline.turns.as_deref()) {
             return Err("request execution has ended".into());
         }
-        let result = pending.answers.translate(&pending.request.body, answer)?;
-        let origin = pending.origin.clone();
-        change_locked(
-            &mut state,
+        agent_protocol::requests::validate_answer(&request.body, answer)?;
+        let body = request.body.clone();
+        let origin = origin.clone();
+        let state = lock_state(&self.state);
+        if !state
+            .sessions
+            .get(&session)
+            .is_some_and(|output| output.alive.load(Relaxed))
+        {
+            return Err("connection is closed".into());
+        }
+        drop(state);
+        let mut failed = Vec::new();
+        self.change_locked(
+            &mut owned,
             &target,
             &SessionChange::RequestDelivery {
                 request_id: id.into(),
                 state: agent_protocol::session::RequestDelivery::Sending,
             },
+            &mut failed,
         );
-        Ok((origin, result))
+        drop(owned);
+        self.close_failed(failed);
+        Ok((origin, body))
     }
-
     pub(crate) fn response_delivery(
         &self,
         id: &str,
         delivery: agent_protocol::session::RequestDelivery,
     ) {
-        let mut state = lock_state(&self.state);
-        if let Some((target, pending)) = state.pending_request(id)
-            && pending.request.delivery == agent_protocol::session::RequestDelivery::Sending
-        {
-            change_locked(
-                &mut state,
+        let Some(target) = self.request_session(id) else {
+            return;
+        };
+        let Some(actor) = self.existing(&target) else {
+            return;
+        };
+        let mut owned = lock_state(&actor);
+        let mut failed = Vec::new();
+        if owned.timeline.requests.get(id).is_some_and(|request| {
+            request.delivery == agent_protocol::session::RequestDelivery::Sending
+        }) {
+            self.change_locked(
+                &mut owned,
                 &target,
                 &SessionChange::RequestDelivery {
                     request_id: id.into(),
                     state: delivery,
                 },
+                &mut failed,
             );
         }
+        drop(owned);
+        self.close_failed(failed);
+        self.prune(&target, &actor);
     }
-}
-
-fn change_locked(
-    state: &mut State,
-    target: &SessionRef,
-    change: &agent_protocol::session::SessionChange,
-) {
-    if let SessionChange::Turn {
-        turn,
-        completed: true,
-    } = change
-    {
-        let expired: Vec<_> = state.executions.get(target).into_iter().flat_map(|actor| actor.pending_requests.values()).filter(|pending| matches!(&pending.request.target, agent_protocol::requests::RequestTarget::Turn { turn_id, .. } if turn_id == &turn.id)).map(|pending| pending.request.id.clone()).collect();
-        for request_id in expired {
-            change_locked(state, target, &SessionChange::ResolveRequest { request_id });
-        }
-    }
-    if let SessionChange::Item { turn_id, item } = change {
-        let terminal = matches!(
-            item.status,
-            agent_protocol::execution::ItemStatus::Completed
-                | agent_protocol::execution::ItemStatus::Failed
-                | agent_protocol::execution::ItemStatus::Declined
-                | agent_protocol::execution::ItemStatus::Interrupted
-        );
-        let resolved: Vec<_> = state.executions.get(target).into_iter().flat_map(|actor| actor.pending_requests.values()).filter(|pending| (terminal || pending.request.delivery != agent_protocol::session::RequestDelivery::Awaiting) && matches!(&pending.request.target, agent_protocol::requests::RequestTarget::Turn {turn_id: request_turn, item_id} if request_turn == turn_id && item_id.as_ref() == Some(&item.id))).map(|pending| pending.request.id.clone()).collect();
-        for request_id in resolved {
-            change_locked(state, target, &SessionChange::ResolveRequest { request_id });
-        }
-    }
-    let actor = state.executions.entry(target.clone()).or_default();
-    match change {
-        SessionChange::Request { .. } => {}
-        SessionChange::RequestDelivery { request_id, state } => {
-            if let Some(pending) = actor.pending_requests.get_mut(request_id) {
-                pending.request.delivery = *state;
-            }
-        }
-        SessionChange::ResolveRequest { request_id } => {
-            actor.pending_requests.remove(request_id);
-        }
-        _ => {
-            // Native providers can finish a turn before independent item
-            // notifications arrive. Completed history belongs to subscribers,
-            // not this live execution owner; forward those updates below.
-            let turn_id = match change {
-                SessionChange::Item { turn_id, .. }
-                | SessionChange::RemoveItem { turn_id, .. }
-                | SessionChange::Text { turn_id, .. }
-                | SessionChange::ReasoningPart { turn_id, .. }
-                | SessionChange::Error { turn_id, .. } => Some(turn_id),
-                _ => None,
-            };
-            if turn_id.is_none_or(|id| actor.live.turns.iter().flatten().any(|turn| &turn.id == id))
-            {
-                actor.live = match change.apply(&actor.live) {
-                    Ok(next) => next,
-                    Err(reason) => {
-                        tracing::warn!(target: "bex", operation = "host.session.invalid_update", message = %reason);
-                        state.executions.retain(|_, actor| actor.release());
-                        return;
-                    }
-                };
-            }
-        }
-    }
-    let mut failed = Vec::new();
-    let line = protocol::encode(change).expect("change encodes");
-    for (id, connection, output) in state.subscriptions.values() {
-        if id != target {
-            continue;
-        }
-        if output.try_send(*connection, line.clone()).is_err() {
-            failed.push(*connection);
-        }
-    }
-    for connection in failed {
-        remove_session_locked(state, connection);
-    }
-    // Background navigation needs activity, not copies of
-    // provider turn/item payloads outside a subscription.
-    let active = match change {
-        agent_protocol::session::SessionChange::Status { status } => {
-            Some(*status == agent_protocol::models::SessionStatus::Running)
-        }
-        agent_protocol::session::SessionChange::Turn { .. } => {
-            state.executions.get(target).map(|actor| {
-                actor
-                    .live
+    pub(crate) fn fail_provider(&self, provider: ProviderKind, message: &str) {
+        let actors: Vec<_> = lock_state(&self.state)
+            .executions
+            .iter()
+            .filter(|(target, _)| target.provider == provider)
+            .map(|(target, actor)| (target.clone(), actor.clone()))
+            .collect();
+        for (target, actor) in actors {
+            let mut owned = lock_state(&actor);
+            let mut changes: Vec<_> = owned
+                .timeline
+                .requests
+                .keys()
+                .cloned()
+                .map(|request_id| SessionChange::ResolveRequest { request_id })
+                .collect();
+            changes.extend(
+                owned
+                    .timeline
                     .turns
                     .iter()
                     .flatten()
-                    .any(|turn| turn.status == agent_protocol::execution::TurnStatus::Running)
-            })
+                    .filter(|turn| turn.status == agent_protocol::execution::TurnStatus::Running)
+                    .map(|turn| {
+                        let mut turn = (**turn).clone();
+                        turn.status = agent_protocol::execution::TurnStatus::Failed;
+                        turn.error = Some(agent_protocol::execution::ExecutionError {
+                            category: agent_protocol::execution::ErrorCategory::Network,
+                            message: message.into(),
+                            ..Default::default()
+                        });
+                        SessionChange::Turn {
+                            turn,
+                            completed: true,
+                        }
+                    }),
+            );
+            changes.extend(
+                owned
+                    .timeline
+                    .submissions
+                    .iter()
+                    .filter(|(_, delivery)| {
+                        matches!(
+                            delivery,
+                            agent_protocol::session::SubmissionDelivery::Sending
+                        )
+                    })
+                    .map(|(id, _)| SessionChange::Submission {
+                        id: id.clone(),
+                        delivery: agent_protocol::session::SubmissionDelivery::Unknown,
+                    }),
+            );
+            changes.push(SessionChange::Status {
+                status: agent_protocol::models::SessionStatus::Unavailable,
+            });
+            let mut failed = Vec::new();
+            for change in changes {
+                self.change_locked(&mut owned, &target, &change, &mut failed);
+            }
+            drop(owned);
+            self.close_failed(failed);
+            self.prune(&target, &actor);
         }
-        _ => None,
-    };
-    if let Some(active) = active {
-        let line = protocol::encode(Notification::Activity {
-            session: target.clone(), active,
-            finished: !active && matches!(change, agent_protocol::session::SessionChange::Turn {completed:true, turn} if turn.status == agent_protocol::execution::TurnStatus::Completed),
-        }).expect("activity encodes");
-        let deliveries = state
-            .sessions
-            .keys()
-            .map(|id| (*id, line.clone()))
-            .collect();
-        deliver_locked(state, deliveries);
     }
-    state.executions.retain(|_, actor| actor.release());
-}
-
-fn deliver_locked(state: &mut State, deliveries: Vec<(SessionId, Vec<u8>)>) {
-    // Keep transitions, delivery, and failure cleanup under the same lock.
-    // A concurrent response cannot observe aliases for a failed delivery.
-    for delivery in deliveries {
-        let (session, line) = delivery;
-        let failed = state
-            .sessions
-            .get(&session)
-            .is_none_or(|sender| sender.try_send(session, line).is_err())
-            .then_some(session);
-        if let Some(session) = failed {
-            remove_session_locked(state, session);
+    fn change_locked(
+        &self,
+        actor: &mut SessionActor,
+        target: &SessionRef,
+        change: &SessionChange,
+        failed: &mut Vec<SessionId>,
+    ) {
+        let expired: Vec<_> = actor.timeline.requests.values().filter(|request| match change {
+            SessionChange::Turn { turn, completed: true } => matches!(&request.target, agent_protocol::requests::RequestTarget::Turn { turn_id, .. } if turn_id == &turn.id),
+            SessionChange::Item { turn_id, item } => {
+                let terminal = matches!(item.status, agent_protocol::execution::ItemStatus::Completed | agent_protocol::execution::ItemStatus::Failed | agent_protocol::execution::ItemStatus::Declined | agent_protocol::execution::ItemStatus::Interrupted);
+                (terminal || request.delivery != agent_protocol::session::RequestDelivery::Awaiting) && matches!(&request.target, agent_protocol::requests::RequestTarget::Turn { turn_id: request_turn, item_id } if request_turn == turn_id && item_id.as_ref() == Some(&item.id))
+            }
+            _ => false,
+        }).map(|request| request.id.clone()).collect();
+        for request_id in expired {
+            self.change_locked(
+                actor,
+                target,
+                &SessionChange::ResolveRequest { request_id },
+                failed,
+            );
         }
-    }
-}
-
-fn allocate_session_id(state: &mut State) -> SessionId {
-    loop {
-        let id = state.next_session_id;
-        state.next_session_id = state.next_session_id.checked_add(1).unwrap_or(1);
-        if !state.sessions.contains_key(&id) {
-            return id;
+        if let SessionChange::ResolveRequest { request_id } = change
+            && let Some(origin) = actor.request_origins.remove(request_id)
+        {
+            let mut state = lock_state(&self.state);
+            state.requests.remove(request_id);
+            state
+                .native_requests
+                .remove(&native_key(origin.instance, &origin.native_id));
         }
+        let (next, result) = change.apply_timeline(std::mem::take(&mut actor.timeline));
+        actor.timeline = next;
+        // An update may target native history that the Host deliberately does
+        // not retain. Subscribers still apply it to their own history window.
+        if let Err(reason) = result
+            && reason != agent_protocol::session::UpdateError::MissingTurn
+        {
+            tracing::warn!(target: "bex", operation = "host.session.invalid_update", message = %reason);
+            actor.release();
+            return;
+        }
+        let frame = protocol::encode(change).expect("change encodes");
+        for (connection, output) in actor.subscriptions.values() {
+            if output.try_send(*connection, frame.clone()).is_err() {
+                failed.push(*connection);
+            }
+        }
+        if matches!(
+            change,
+            SessionChange::Status { .. } | SessionChange::Turn { .. }
+        ) {
+            let active = actor.timeline.status == agent_protocol::models::SessionStatus::Running;
+            let frame = protocol::encode(Notification::Activity { session: target.clone(), active, finished: !active && matches!(change, SessionChange::Turn { completed: true, turn } if turn.status == agent_protocol::execution::TurnStatus::Completed) }).expect("activity encodes");
+            failed.extend(self.broadcast_frames(frame));
+        }
+        actor.release();
     }
 }
-
-fn lock_state(state: &Mutex<State>) -> std::sync::MutexGuard<'_, State> {
-    state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn close_session_state(state: &Weak<Mutex<State>>, session: SessionId) {
-    if let Some(state) = state.upgrade() {
-        remove_session_locked(&mut lock_state(&state), session);
-    }
-}
-
-fn remove_session_locked(state: &mut State, session: SessionId) {
-    state.sessions.remove(&session);
-    state
-        .subscriptions
-        .retain(|_, (_, owner, _)| *owner != session);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,6 +886,63 @@ mod tests {
         );
     }
 
+    fn assert_no_execution(router: &SessionRouter) {
+        let actors: Vec<_> = lock_state(&router.state)
+            .executions
+            .values()
+            .cloned()
+            .collect();
+        for actor in actors {
+            let actor = lock_state(&actor);
+            assert!(actor.timeline.turns.is_none());
+            assert!(actor.timeline.submissions.is_empty());
+            assert!(actor.timeline.requests.is_empty());
+            assert!(actor.request_origins.is_empty());
+            assert_eq!(actor.leases, 0);
+        }
+    }
+    #[test]
+    fn a_busy_conversation_does_not_hold_the_registry_or_another_conversation() {
+        let router = SessionRouter::new();
+        let a = SessionRef::new(ProviderKind::Codex, "A".into()).unwrap();
+        let b = SessionRef::new(ProviderKind::Codex, "B".into()).unwrap();
+        let lease = router.retain_execution(a.clone()).unwrap();
+        let guard = lock_state(&lease.actor);
+        let stalled = std::thread::spawn({
+            let router = router.clone();
+            move || {
+                router.session_change(
+                    &a,
+                    SessionChange::Status {
+                        status: agent_protocol::models::SessionStatus::Running,
+                    },
+                )
+            }
+        });
+        let (send, receive) = std::sync::mpsc::channel();
+        let independent = std::thread::spawn({
+            let router = router.clone();
+            move || {
+                router.session_change(
+                    &b,
+                    SessionChange::Turn {
+                        turn: Turn {
+                            id: "turn".into(),
+                            ..Default::default()
+                        },
+                        completed: false,
+                    },
+                );
+                send.send(router.current_turn(&b, "turn").is_some())
+                    .unwrap();
+            }
+        });
+        let progress = receive.recv_timeout(std::time::Duration::from_secs(2));
+        drop(guard);
+        stalled.join().unwrap();
+        independent.join().unwrap();
+        assert!(progress.unwrap());
+    }
     #[tokio::test]
     async fn malformed_delta_keeps_all_subscriptions_and_the_last_valid_item() {
         let router = SessionRouter::new();
@@ -1024,7 +1020,6 @@ mod tests {
 
     #[test]
     fn resolving_unsubscribed_elicitation_releases_its_execution_immediately() {
-        use super::super::requests::{RequestDestination, RequestOrigin};
         let router = SessionRouter::new();
         let target = SessionRef::new(ProviderKind::Claude, "native".into()).unwrap();
         let (input, _receiver) = tokio::sync::mpsc::channel(1);
@@ -1038,17 +1033,124 @@ mod tests {
         router
             .request(
                 target.clone(),
-                RequestOrigin {
+                crate::claude::request_origin(
                     instance,
-                    native_id: json!("native-request"),
-                    destination: RequestDestination::Claude { input },
-                },
-                adapted,
+                    json!("native-request"),
+                    input,
+                    adapted.answers,
+                ),
+                adapted.request,
             )
             .unwrap();
         assert!(lock_state(&router.state).executions.contains_key(&target));
         router.resolve_native_request(instance, &json!("native-request"));
         assert!(!lock_state(&router.state).executions.contains_key(&target));
+    }
+    #[test]
+    fn turn_requests_require_live_ownership_and_retire_only_with_their_target() {
+        use agent_protocol::{execution::ItemStatus, requests::Answer, session::RequestDelivery};
+        let router = SessionRouter::new();
+        let connection = router.open_session();
+        let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+        // An outstanding native read also retains the completed turn below.
+        let _read = open(&router, "native");
+        let instance = uuid::Uuid::new_v4();
+        let request = || {
+            super::super::requests::codex(
+                "request".into(),
+                "item/commandExecution/requestApproval",
+                &json!({"turnId":"wanted","itemId":"tool","availableDecisions":["accept","decline"]}),
+            )
+            .unwrap()
+            .request
+        };
+        let register = || {
+            router.request(
+                target.clone(),
+                super::super::requests::unavailable_origin(
+                    instance,
+                    json!("native-request"),
+                    Default::default(),
+                ),
+                request(),
+            )
+        };
+        let pending = || {
+            router
+                .overlay_execution(&target, Thread::default())
+                .requests
+        };
+        let lifecycle = |id: &str, completed| {
+            router.session_change(
+                &target,
+                SessionChange::Turn {
+                    turn: Turn {
+                        id: id.into(),
+                        ..Default::default()
+                    },
+                    completed,
+                },
+            );
+        };
+        let item = |turn: &str, id: &str, status| {
+            router.session_change(
+                &target,
+                SessionChange::Item {
+                    turn_id: turn.into(),
+                    item: Arc::new(Item::new(
+                        id.into(),
+                        status,
+                        agent_protocol::items::ItemBody::CommandExecution {
+                            command: "true".into(),
+                            actions: Vec::new(),
+                            source: Default::default(),
+                            process_id: None,
+                            cwd: None,
+                            output: String::new(),
+                            exit_code: None,
+                            duration_ms: None,
+                        },
+                    )),
+                },
+            );
+        };
+        assert!(register().is_err());
+        lifecycle("other", false);
+        assert!(register().is_err());
+        lifecycle("wanted", false);
+        register().unwrap();
+        let previous = pending();
+        for (turn, id) in [("other", "tool"), ("wanted", "other"), ("wanted", "tool")] {
+            item(turn, id, ItemStatus::Running);
+            assert_eq!(pending()["request"].delivery, RequestDelivery::Awaiting);
+        }
+        router
+            .claim_response(
+                connection.id(),
+                "request",
+                &Answer::Approval {
+                    choice_id: request().body.choices()[0].id.clone(),
+                },
+            )
+            .unwrap();
+        assert_eq!(previous["request"].delivery, RequestDelivery::Awaiting);
+        assert_eq!(pending()["request"].delivery, RequestDelivery::Sending);
+        router.response_delivery("request", RequestDelivery::Unknown);
+        router.response_delivery("request", RequestDelivery::Awaiting);
+        assert_eq!(pending()["request"].delivery, RequestDelivery::Unknown);
+        item("other", "tool", ItemStatus::Completed);
+        assert!(pending().contains_key("request"));
+        item("wanted", "tool", ItemStatus::Running);
+        assert!(pending().is_empty());
+        // Native identity indexes are released along with the normalized request.
+        register().unwrap();
+        item("wanted", "tool", ItemStatus::Completed);
+        assert!(pending().is_empty());
+        register().unwrap();
+        lifecycle("wanted", true);
+        assert!(pending().is_empty());
+        assert!(register().is_err());
+        assert_eq!(previous["request"].delivery, RequestDelivery::Awaiting);
     }
     #[tokio::test]
     async fn history_is_not_retained_or_trimmed_and_subscriptions_do_not_pin_execution() {
@@ -1077,7 +1179,7 @@ mod tests {
             },
             model: None,
         };
-        let response = router
+        let mut response = router
             .finish_session_read(open(&router, "native"), connection.id(), response)
             .unwrap();
         let reply = agent_protocol::protocol::decode::<
@@ -1103,13 +1205,31 @@ mod tests {
             reply["result"]["response"]["thread"]["turns"][0]["items"][0]["body"]["deferred"]
                 .is_object()
         );
-        assert!(lock_state(&router.state).executions.is_empty());
+        assert_no_execution(&router);
+        let delta = SessionChange::Text {
+            turn_id: "first".into(),
+            item_id: "answer".into(),
+            field: TextField::AssistantText,
+            delta: " forwarded to native history".into(),
+        };
+        let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+        router.session_change(&target, delta.clone());
+        let frame = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            response.updates.as_mut().unwrap().recv(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(protocol::decode::<SessionChange>(&frame).unwrap(), delta);
+        assert_no_execution(&router);
         turn(&router, false);
         assert_eq!(lock_state(&router.state).executions.len(), 1);
         turn(&router, true);
         let state = lock_state(&router.state);
-        assert!(state.executions.is_empty());
         assert_eq!(state.subscriptions.len(), 1);
+        drop(state);
+        assert_no_execution(&router);
     }
 
     #[tokio::test]
@@ -1145,7 +1265,7 @@ mod tests {
             41
         );
         router.ensure_session(connection.id()).unwrap();
-        assert!(lock_state(&router.state).executions.is_empty());
+        assert_no_execution(&router);
     }
 
     #[tokio::test]
@@ -1169,7 +1289,7 @@ mod tests {
             router.ensure_session(connection.id()).unwrap();
         }
         assert!(lock_state(&router.state).subscriptions.is_empty());
-        assert!(lock_state(&router.state).executions.is_empty());
+        assert_no_execution(&router);
     }
 
     #[tokio::test]
@@ -1236,7 +1356,7 @@ mod tests {
             current["items"][0]["body"]["inline"]["body"]["assistantText"]["text"],
             "start final suffix"
         );
-        assert!(lock_state(&router.state).executions.is_empty());
+        assert_no_execution(&router);
     }
 
     #[test]
@@ -1297,12 +1417,13 @@ mod tests {
             },
         );
         assert_eq!(
-            lock_state(&router.state).executions[&target].live.status,
+            lock_state(&router.actor(&target)).timeline.status,
             SessionStatus::Running
         );
         router.fail_provider(ProviderKind::Codex, "provider stopped");
-        let state = lock_state(&router.state);
-        let live = &state.executions[&target].live;
+        let actor = router.actor(&target);
+        let state = lock_state(&actor);
+        let live = &state.timeline;
         assert_eq!(live.status, SessionStatus::Unknown);
         assert_eq!(live.submissions["input"], SubmissionDelivery::Unknown);
     }
@@ -1440,12 +1561,15 @@ mod tests {
             .unwrap()
             .updates
             .unwrap();
-        let (a, b, budget) = {
-            let state = lock_state(&router.state);
+        let budget = lock_state(&router.state).sessions[&connection.id()]
+            .bytes
+            .clone();
+        let actor = router.actor(&SessionRef::new(ProviderKind::Codex, "native".into()).unwrap());
+        let (a, b) = {
+            let actor = lock_state(&actor);
             (
-                state.subscriptions[&first.id].2.clone(),
-                state.subscriptions[&second.id].2.clone(),
-                state.sessions[&connection.id()].bytes.clone(),
+                actor.subscriptions[&first.id].1.clone(),
+                actor.subscriptions[&second.id].1.clone(),
             )
         };
         a.try_send(connection.id(), Vec::with_capacity(MAX_QUEUED_BYTES / 2))
@@ -1496,7 +1620,6 @@ mod tests {
 }
 #[test]
 fn identical_native_request_ids_keep_their_source_instance() {
-    use super::requests::{RequestDestination, RequestOrigin};
     use agent_protocol::requests::Answer;
     let router = SessionRouter::new();
     let connection = router.open_session();
@@ -1532,25 +1655,13 @@ fn identical_native_request_ids_keep_their_source_instance() {
         };
         let request_id = adapted.request.id.clone();
         let choice_id = adapted.request.body.choices()[0].id.clone();
-        let destination = if provider == ProviderKind::Codex {
-            RequestDestination::Codex {
-                stopped: Default::default(),
-            }
+        let origin = if provider == ProviderKind::Codex {
+            super::requests::unavailable_origin(instance, native.clone(), Default::default())
         } else {
-            RequestDestination::Claude {
-                input: input.clone(),
-            }
+            crate::claude::request_origin(instance, native.clone(), input.clone(), adapted.answers)
         };
         router
-            .request(
-                target.clone(),
-                RequestOrigin {
-                    instance,
-                    native_id: native.clone(),
-                    destination,
-                },
-                adapted,
-            )
+            .request(target.clone(), origin, adapted.request)
             .unwrap();
         let (origin, _) = router
             .claim_response(

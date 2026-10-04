@@ -7,6 +7,9 @@ pub struct ListAccounts {}
 rpc::rpc_method!(ListAccounts, ListAccounts, |self| crate::models::Empty {});
 
 impl Operation for ListAccounts {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Accounts)
+    }
     rpc_operation!();
     const STALE_POLICY: StalePolicy = StalePolicy::Retry;
     fn apply(self, snapshot: &mut Snapshot, mut output: Self::Output) -> Vec<Effect> {
@@ -74,8 +77,10 @@ impl Operation for ReadAccountUsage {
 pub use agent_protocol::operations::SelectAccount;
 
 impl Operation for SelectAccount {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Accounts)
+    }
     rpc_operation!();
-    const INVALIDATES: bool = true;
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         apply_selection(snapshot, output);
         vec![
@@ -108,10 +113,17 @@ pub struct SelectAccountForDraft {
 }
 
 impl Operation for SelectAccountForDraft {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Accounts)
+    }
+    no_input!();
     type Output = (rpc::AccountSelection, Result<rpc::ModelPage, PeerError>);
-    const INVALIDATES: bool = true;
 
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         let selection = context
             .call(&SelectAccount {
                 provider: self.provider,
@@ -169,8 +181,12 @@ impl Operation for SelectAccountForDraft {
 pub use agent_protocol::operations::{StartAccountLogin, SubmitAccountLogin};
 
 impl Operation for StartAccountLogin {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::AccountLogin {
+            provider: self.provider,
+        })
+    }
     rpc_operation!();
-    const INVALIDATES: bool = true;
     fn apply(self, snapshot: &mut Snapshot, login: Self::Output) -> Vec<Effect> {
         let account = Arc::make_mut(&mut snapshot.account);
         account.login = Some(Arc::new(login));
@@ -193,6 +209,11 @@ rpc::rpc_method!(ReadAccountLogin, ReadAccountLogin, |self| {
 });
 
 impl Operation for ReadAccountLogin {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::AccountLogin {
+            provider: self.provider,
+        })
+    }
     rpc_operation!();
     fn apply(self, snapshot: &mut Snapshot, status: Self::Output) -> Vec<Effect> {
         if status.completed {
@@ -225,8 +246,12 @@ impl Operation for ReadAccountLogin {
 pub use agent_protocol::operations::CancelAccountLogin;
 
 impl Operation for CancelAccountLogin {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::AccountLogin {
+            provider: self.provider,
+        })
+    }
     rpc_operation!();
-    const INVALIDATES: bool = true;
     fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
         let account = Arc::make_mut(&mut snapshot.account);
         account.login = None;
@@ -237,8 +262,10 @@ impl Operation for CancelAccountLogin {
 pub use agent_protocol::operations::LogoutAccount;
 
 impl Operation for LogoutAccount {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Accounts)
+    }
     rpc_operation!();
-    const INVALIDATES: bool = true;
     fn apply(self, snapshot: &mut Snapshot, _output: Self::Output) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.account).accounts = None;
         vec![
@@ -249,6 +276,11 @@ impl Operation for LogoutAccount {
 }
 
 impl Operation for SubmitAccountLogin {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::AccountLogin {
+            provider: self.provider,
+        })
+    }
     rpc_operation!();
 }
 

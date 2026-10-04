@@ -99,6 +99,42 @@ async fn dictation_preparation_failure_does_not_block_complete_recording_transcr
 }
 
 #[tokio::test]
+async fn saturated_dictation_preparations_leave_complete_recording_transcription_available() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let preparations: Vec<_> = (0..32).map(|_| store.prepare_dictation()).collect();
+    for _ in &preparations {
+        let request = read(&mut reader).await;
+        assert_eq!(request["method"], "host/dictation/prepare");
+        writer.reply(&request, json!({"result":{}})).await.unwrap();
+    }
+    let overflow = store.prepare_dictation();
+    let transcription = store.dispatch(Intent::Transcribe(op::Dictate {
+        draft_key: DraftKey::from("/fixture"),
+        preparation: Some(overflow.id()),
+        audio: vec![1, 0, 255, 127],
+        send: false,
+        client_user_message_id: "spoken".into(),
+    }));
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/dictation/transcribe");
+    assert_eq!(
+        request["params"],
+        json!({"preparation":overflow.id(),"audio":"AQD/fw=="})
+    );
+    writer
+        .reply(&request, json!({"result":{"text":"spoken"}}))
+        .await
+        .unwrap();
+    transcription.await.unwrap();
+    assert_eq!(
+        store.snapshot().drafts[&DraftKey::from("/fixture")].text,
+        "spoken"
+    );
+    assert!(store.snapshot().error.is_none());
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_navigation() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let first = store.dispatch(Intent::ListSessions(op::ListSessions::new(
@@ -679,6 +715,103 @@ async fn approval_can_complete_while_another_request_is_waiting() {
     assert!(store.snapshot().requests().next().is_none());
     assert_eq!(loaded_text(&store.snapshot()), Some("approved path"));
 }
+#[tokio::test]
+async fn approval_reserve_is_bounded_when_ordinary_work_is_full() {
+    let (store, mut reader, writer) = setup(snapshot()).await;
+    for index in 0..17 {
+        writer
+            .notify(json!({
+                "method": "fixture/session/request",
+                "session": {"provider": "codex", "id": "thread"},
+                "request": {
+                    "id": format!("approval-reserve-{index}"),
+                    "target": "session",
+                    "delivery": "awaiting",
+                    "body": {"approval": {
+                        "kind": "command", "description": "", "details": "",
+                        "choices": [{"id": "deny", "label": "拒否", "description": "", "meaning": "deny", "scope": "once"}]
+                    }}
+                }
+            }))
+            .await
+            .unwrap();
+    }
+    wait_for(&store, |snapshot| {
+        snapshot.request("approval-reserve-16").is_some()
+    })
+    .await;
+
+    let mut requests = Vec::new();
+    let mut receipts = Vec::new();
+    for index in 0..32 {
+        receipts.push(store.dispatch(Intent::ReadFile(op::ReadFile {
+            path: format!("/pending/{index}"),
+            discard_draft: false,
+        })));
+        if index < 16 {
+            let request = read(&mut reader).await;
+            assert_eq!(request["method"], "host/file/read");
+            requests.push(request);
+        }
+    }
+    for index in 0..16 {
+        receipts.push(store.dispatch(Intent::Respond(op::Respond {
+            request_id: format!("approval-reserve-{index}").into(),
+            answer: Answer::Approval {
+                choice_id: "deny".into(),
+            },
+        })));
+    }
+    let overflow = store
+        .dispatch(Intent::Respond(op::Respond {
+            request_id: "approval-reserve-16".into(),
+            answer: Answer::Approval {
+                choice_id: "deny".into(),
+            },
+        }))
+        .await
+        .unwrap_err();
+    assert!(matches!(overflow, PeerError::InvalidMessage(message) if message.contains("混み合")));
+    for index in 0..16 {
+        assert!(
+            store
+                .snapshot()
+                .operation_running(op::OperationKey::Request {
+                    id: format!("approval-reserve-{index}").into(),
+                })
+        );
+    }
+
+    for request in requests {
+        writer
+            .reply(&request, json!({"result":file(request["params"]["path"].as_str().unwrap(), "r1", "content")}))
+            .await
+            .unwrap();
+    }
+    let mut answers = 0;
+    for _ in 0..32 {
+        let request = read(&mut reader).await;
+        let result = match request["method"].as_str().unwrap() {
+            "host/file/read" => file(request["params"]["path"].as_str().unwrap(), "r1", "content"),
+            "host/session/answer" => {
+                answers += 1;
+                json!({})
+            }
+            method => panic!("unexpected request: {method}"),
+        };
+        writer
+            .reply(&request, json!({"result":result}))
+            .await
+            .unwrap();
+    }
+    assert_eq!(answers, 16);
+    for receipt in receipts {
+        receipt.await.unwrap();
+    }
+    assert!(store.snapshot().request("approval-reserve-16").is_some());
+    store.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn invalid_typed_reply_does_not_block_later_wire_events() {
     let (store, mut reader, writer) = setup(snapshot()).await;
@@ -3567,6 +3700,79 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
 }
 
 #[tokio::test]
+async fn overloaded_catalog_prefetch_finishes_loading_and_can_be_retried() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    reader.script_composer_catalog();
+    let mut requests = Vec::new();
+    let mut receipts = Vec::new();
+    for index in 0..32 {
+        receipts.push(store.dispatch(Intent::ReadFile(op::ReadFile {
+            path: format!("/pending/{index}"),
+            discard_draft: false,
+        })));
+        // The fixture permits 16 wire requests; the other 16 occupy Store jobs
+        // while waiting for a transport permit.
+        if index < 16 {
+            requests.push(read(&mut reader).await);
+        }
+    }
+    assert!(
+        store
+            .dispatch(Intent::NewChat {
+                cwd: "/project".into(),
+            })
+            .await
+            .is_err()
+    );
+    wait_for(&store, |snapshot| {
+        snapshot
+            .composer_catalog
+            .as_ref()
+            .is_some_and(|catalog| !catalog.loading && !catalog.errors.is_empty())
+    })
+    .await;
+    for request in &requests {
+        writer
+            .reply(request, json!({"result":file(request["params"]["path"].as_str().unwrap(), "r1", "content")}))
+            .await
+            .unwrap();
+    }
+    for _ in 0..16 {
+        let request = read(&mut reader).await;
+        writer
+            .reply(&request, json!({"result":file(request["params"]["path"].as_str().unwrap(), "r1", "content")}))
+            .await
+            .unwrap();
+    }
+    for receipt in receipts {
+        receipt.await.unwrap();
+    }
+    let retry = store.dispatch(Intent::EditComposer {
+        thread_id: store.snapshot().navigation.draft_key.clone(),
+        text: "/".into(),
+        cursor: 1,
+    });
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/composer/catalog");
+    writer
+        .reply(
+            &request,
+            json!({"result":{"cwd":"/project","loading":false,"candidates":[],"errors":{}}}),
+        )
+        .await
+        .unwrap();
+    retry.await.unwrap();
+    wait_for(&store, |snapshot| {
+        snapshot
+            .composer_catalog
+            .as_ref()
+            .is_some_and(|catalog| !catalog.loading && catalog.errors.is_empty())
+    })
+    .await;
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn composer_catalog_prefetch_and_refresh_keep_candidates_available() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     reader.script_composer_catalog();
@@ -3959,6 +4165,9 @@ async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries()
 #[tokio::test]
 async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace_a_refresh() {
     let id = SessionRef::new(ProviderKind::Codex, "history".into()).unwrap();
+    let history = agent_core::state::operations::OperationKey::History {
+        session: id.clone(),
+    };
     let item = |id: &str| {
         json!({"id":id,"status":"unknown","clientInputId":null,
         "body":{"inline":{"body":{"assistantText":{"text":id,"phase":"unknown"}}}}})
@@ -3973,6 +4182,7 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
         ..Default::default()
     })
     .await;
+    assert!(store.snapshot().subscriptions.contains_key(&id));
     let cached = store.snapshot().conversations.clone();
     let failed = store.dispatch(Intent::ReadOlder {
         thread_id: id.clone(),
@@ -3980,6 +4190,7 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "host/session/history/read");
     assert_eq!(request["params"], json!({"session":id,"cursor":"oldest-A"}));
+    assert!(store.snapshot().operation_running(history.clone()));
     writer
         .reply(
             &request,
@@ -3989,12 +4200,22 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
         .unwrap();
     assert!(failed.await.is_err());
     assert_eq!(store.snapshot().conversations, cached);
+    assert!(!store.snapshot().operation_running(history.clone()));
+    assert!(
+        store
+            .snapshot()
+            .operation_error(history.clone())
+            .unwrap()
+            .contains("temporary history failure")
+    );
 
     let retry = store.dispatch(Intent::ReadOlder {
         thread_id: id.clone(),
     });
     let request = read(&mut reader).await;
     assert_eq!(request["params"]["cursor"], "oldest-A");
+    assert!(store.snapshot().operation_running(history.clone()));
+    assert!(store.snapshot().operation_error(history.clone()).is_none());
     writer
         .reply(
             &request,
@@ -4005,6 +4226,7 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
         .unwrap();
     retry.await.unwrap();
     let joined = store.snapshot();
+    assert!(!joined.operation_running(history.clone()));
     let thread = &joined.conversations[&id];
     assert_eq!(thread.history_cursor.as_deref(), Some("oldest-B"));
     let turn = &thread.turns.as_ref().unwrap()[0];
@@ -4036,6 +4258,8 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
     writer.reply(&old_request, json!({"result":{"nextCursor":null,
         "turns":[{"id":"stale-turn","status":"completed","itemsHasMore":false,"items":[item("stale")]}]}})).await.unwrap();
     pending.await.unwrap();
+    assert!(!store.snapshot().operation_running(history.clone()));
+    assert!(store.snapshot().operation_error(history).is_none());
     assert_eq!(
         store.snapshot().conversations,
         refreshed,
@@ -4047,5 +4271,142 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
             .as_deref(),
         Some("fresh-C")
     );
+    store.close().await.unwrap();
+}
+#[tokio::test]
+async fn independent_view_operations_complete_without_invalidating_each_other() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let epoch = store.snapshot().epoch;
+    let reading = store.dispatch(Intent::ReadFile(op::ReadFile {
+        path: "/selected/file".into(),
+        discard_draft: false,
+    }));
+    let file_request = read(&mut reader).await;
+    let reviewing = store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+        cwd: "/selected".into(),
+    }));
+    let review_request = read(&mut reader).await;
+    assert_eq!(store.snapshot().epoch, epoch);
+    assert!(store.snapshot().operation_running(op::OperationKey::File));
+    assert!(
+        store
+            .snapshot()
+            .operation_running(op::OperationKey::WorkspaceReview)
+    );
+    writer.reply(&review_request, json!({"result":{"branch":"main","additions":0,"deletions":0,"files":[],"diff":"review"}})).await.unwrap();
+    reviewing.await.unwrap();
+    assert!(
+        !store
+            .snapshot()
+            .operation_running(op::OperationKey::WorkspaceReview)
+    );
+    assert!(store.snapshot().operation_running(op::OperationKey::File));
+    writer
+        .reply(
+            &file_request,
+            json!({"result":file("/selected/file", "r1", "selected content")}),
+        )
+        .await
+        .unwrap();
+    reading.await.unwrap();
+    assert_eq!(
+        store.snapshot().workspace.file.as_ref().unwrap().text,
+        "selected content"
+    );
+    assert!(!store.snapshot().operation_running(op::OperationKey::File));
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_queue_overload_preserves_live_terminal_and_finishes_rejected_start() {
+    use agent_core::state::TerminalPhase;
+    use agent_protocol::operations::TerminalSize;
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let start = |handle: &str| {
+        store.dispatch(Intent::StartTerminal(op::StartTerminal {
+            handle: handle.into(),
+            cwd: "/fixture".into(),
+            size: TerminalSize { cols: 80, rows: 24 },
+        }))
+    };
+    let starting = start("live");
+    let request = read(&mut reader).await;
+    writer.reply(&request, json!({"result":{}})).await.unwrap();
+    starting.await.unwrap();
+    let write = || {
+        store.dispatch(Intent::WriteTerminal(op::WriteTerminal {
+            handle: "live".into(),
+            data: b"input".to_vec(),
+        }))
+    };
+    drop(write());
+    let _pending = read(&mut reader).await;
+    for _ in 0..128 {
+        drop(write());
+    }
+    assert!(matches!(write().await, Err(PeerError::InvalidMessage(_))));
+    assert_eq!(
+        store.snapshot().terminals["live"].phase,
+        TerminalPhase::Running
+    );
+    assert!(matches!(
+        start("rejected").await,
+        Err(PeerError::InvalidMessage(_))
+    ));
+    assert!(matches!(
+        store.snapshot().terminals["rejected"].phase,
+        TerminalPhase::Failed(_)
+    ));
+    assert_eq!(
+        store.snapshot().terminals["live"].phase,
+        TerminalPhase::Running
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_handles_progress_independently_while_each_keeps_input_order() {
+    use agent_protocol::operations::TerminalSize;
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let start = |handle: &str| {
+        store.dispatch(Intent::StartTerminal(op::StartTerminal {
+            handle: handle.into(),
+            cwd: "/fixture".into(),
+            size: TerminalSize { cols: 80, rows: 24 },
+        }))
+    };
+    let a = start("A");
+    let request_a = read(&mut reader).await;
+    let writing_a = store.dispatch(Intent::WriteTerminal(op::WriteTerminal {
+        handle: "A".into(),
+        data: b"queued".to_vec(),
+    }));
+    let b = start("B");
+    let request_b = tokio::time::timeout(Duration::from_secs(5), read(&mut reader))
+        .await
+        .unwrap();
+    assert_eq!(request_b["method"], "host/terminal/start");
+    writer
+        .reply(&request_b, json!({"result":{}}))
+        .await
+        .unwrap();
+    b.await.unwrap();
+    let writing_b = store.dispatch(Intent::WriteTerminal(op::WriteTerminal {
+        handle: "B".into(),
+        data: b"independent".to_vec(),
+    }));
+    let input_b = read(&mut reader).await;
+    assert_eq!(input_b["params"]["processHandle"], "B");
+    writer.reply(&input_b, json!({"result":{}})).await.unwrap();
+    writing_b.await.unwrap();
+    writer
+        .reply(&request_a, json!({"result":{}}))
+        .await
+        .unwrap();
+    a.await.unwrap();
+    let input_a = read(&mut reader).await;
+    assert_eq!(input_a["params"]["processHandle"], "A");
+    writer.reply(&input_a, json!({"result":{}})).await.unwrap();
+    writing_a.await.unwrap();
     store.close().await.unwrap();
 }

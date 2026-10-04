@@ -2,7 +2,6 @@
 use crate::{
     client::{ClientExt, SessionImage},
     diagnostics::{ConnectionPerformance, ConnectionPhase as Phase},
-    models::ListQuery,
     peer::PeerError,
     state::{Event, Intent, Snapshot, operations as op, reduce},
 };
@@ -15,6 +14,15 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::{CancellationToken, DropGuard};
+
+const MAX_COMMANDS: usize = 256;
+const MAX_RPC_JOBS: usize = 32;
+const CONTROL_RESERVE: usize = 16;
+const MAX_TERMINAL_JOBS: usize = 16;
+const MAX_TERMINAL_QUEUE: usize = 128;
+const MAX_ITEM_READS: usize = 132;
+const MAX_ITEM_TRANSFERS: usize = 4;
+const MAX_WAITERS: usize = 128;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -121,8 +129,7 @@ impl Drop for Connection {
 }
 type CompletionSender = oneshot::Sender<Result<Outcome, PeerError>>;
 struct Dispatch {
-    effects: Vec<Effect>,
-    snapshot: Arc<Snapshot>,
+    effects: Vec<Scheduled>,
     complete: CompletionSender,
 }
 struct Applied {
@@ -138,13 +145,15 @@ impl Receipt {
     fn join(&self, other: Self) {
         if !Arc::ptr_eq(&self.0, &other.0) {
             let mut waiters = self.0.lock().unwrap();
-            if waiters.len() >= 128 {
-                drop(waiters);
-                other.send(Err(PeerError::InvalidMessage(
-                    "too many waiters for operation".into(),
-                )));
-            } else {
-                waiters.extend(other.0.lock().unwrap().drain(..));
+            let remaining = MAX_WAITERS.saturating_sub(waiters.len());
+            for (index, sender) in other.0.lock().unwrap().drain(..).enumerate() {
+                if index < remaining {
+                    waiters.push(sender);
+                } else {
+                    let _ = sender.send(Err(PeerError::InvalidMessage(
+                        "too many waiters for operation".into(),
+                    )));
+                }
             }
         }
     }
@@ -156,24 +165,105 @@ impl Receipt {
 }
 struct Completed {
     subscriptions: Vec<(uuid::Uuid, agent_transport::client::Updates)>,
-    item_read: Option<op::ReadItem>,
-    list_query: Option<ListQuery>,
+    scheduling: op::Scheduling,
     delivery_attempted: bool,
-    epoch: u64,
+    scope: Scope,
     result: Result<Applied, PeerError>,
+    rejection: Option<Box<dyn Application>>,
     failed_submission: Option<agent_protocol::ids::ClientInputId>,
-    terminal: Option<String>,
     complete: Option<Receipt>,
 }
 struct Scheduled {
     effect: Effect,
-    snapshot: Arc<Snapshot>,
+    scope: Scope,
     complete: Option<Receipt>,
+}
+struct Scope {
+    navigation: u64,
+    operation: Option<(op::OperationKey, u64)>,
+}
+impl Scope {
+    fn current(
+        &self,
+        navigation: u64,
+        operations: &BTreeMap<op::OperationKey, op::OperationState>,
+    ) -> bool {
+        self.navigation == navigation
+            && self.operation.as_ref().is_none_or(|(key, generation)| {
+                operations
+                    .get(key)
+                    .is_some_and(|state| state.generation == *generation)
+            })
+    }
+    fn finish(
+        &self,
+        operations: &mut Arc<BTreeMap<op::OperationKey, op::OperationState>>,
+        error: Option<&PeerError>,
+    ) {
+        if let Some((key, generation)) = &self.operation
+            && operations
+                .get(key)
+                .is_some_and(|state| state.generation == *generation)
+        {
+            match error {
+                None => {
+                    Arc::make_mut(operations).remove(key);
+                }
+                Some(error) => {
+                    Arc::make_mut(operations).get_mut(key).unwrap().phase =
+                        op::OperationPhase::Failed {
+                            message: error.to_string(),
+                        };
+                }
+            }
+        }
+    }
+}
+impl Scheduled {
+    fn new(mut effect: Effect, snapshot: &mut Snapshot, continuation: Option<&Scope>) -> Self {
+        let operation = effect.operation.key().map(|key| {
+            let generation = if (matches!(key, op::OperationKey::Item { .. })
+                || continuation
+                    .and_then(|scope| scope.operation.as_ref())
+                    .is_some_and(|(previous, generation)| {
+                        previous == &key
+                            && snapshot
+                                .operations
+                                .get(&key)
+                                .is_some_and(|state| state.generation == *generation)
+                    }))
+                && let Some(state) = snapshot.operations.get(&key)
+                && state.phase == op::OperationPhase::Running
+            {
+                state.generation
+            } else {
+                snapshot.operation_sequence += 1;
+                snapshot.operation_sequence
+            };
+            let state = op::OperationState {
+                generation,
+                phase: op::OperationPhase::Running,
+            };
+            if snapshot.operations.get(&key) != Some(&state) {
+                Arc::make_mut(&mut snapshot.operations).insert(key.clone(), state);
+            }
+            (key, generation)
+        });
+        effect.operation.capture(snapshot);
+        Self {
+            effect,
+            scope: Scope {
+                navigation: snapshot.epoch,
+                operation,
+            },
+            complete: None,
+        }
+    }
 }
 pub struct Store {
     updates: watch::Receiver<Arc<Snapshot>>,
     publications: Mutex<Option<watch::Sender<Arc<Snapshot>>>>,
-    commands: mpsc::UnboundedSender<Command>,
+    commands: mpsc::Sender<Command>,
     connection_attempt: Mutex<CancellationToken>,
     stop: CancellationToken,
     _close_on_drop: DropGuard,
@@ -199,7 +289,7 @@ impl Store {
                 apply(&writer, Event::Connected),
             )
         });
-        let (commands, mut incoming) = mpsc::unbounded_channel();
+        let (commands, mut incoming) = mpsc::channel(MAX_COMMANDS);
         let stop = CancellationToken::new();
         let (finished_tx, finished) = watch::channel(false);
         let publications = writer.clone();
@@ -245,7 +335,7 @@ impl Store {
                 ..Default::default()
             },
         );
-        let (commands, mut reports) = mpsc::unbounded_channel();
+        let (commands, mut reports) = mpsc::channel(MAX_COMMANDS);
         let worker = std::mem::replace(&mut store.commands, commands);
         (store, async move {
             // Keep the actual Store worker alive for shutdown, while the mock
@@ -285,12 +375,12 @@ impl Store {
         let setup = async {
             let (complete, receiver) = oneshot::channel();
             self.commands
-                .send(Command::ResumePeer {
+                .try_send(Command::ResumePeer {
                     endpoint: endpoint.clone(),
                     remote: ticket.node_id(),
                     complete,
                 })
-                .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
+                .map_err(command_error)?;
             let reusable = receiver.await.unwrap_or(None);
             let replacement = async {
                 let (connection, scope, performance) = Connection::open(
@@ -441,13 +531,13 @@ impl Store {
         trace.record(Phase::AttachStart, group, 0, 0);
         let (complete, result) = oneshot::channel();
         self.commands
-            .send(Command::Attach {
+            .try_send(Command::Attach {
                 connection: Box::new(connection),
                 attempt,
                 storage_scope,
                 complete,
             })
-            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
+            .map_err(command_error)?;
         result
             .await
             .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
@@ -468,8 +558,8 @@ impl Store {
     fn request_disconnect(&self) -> Result<oneshot::Receiver<Result<(), PeerError>>, PeerError> {
         let (complete, result) = oneshot::channel();
         self.commands
-            .send(Command::Disconnect(complete))
-            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
+            .try_send(Command::Disconnect(complete))
+            .map_err(command_error)?;
         Ok(result)
     }
     pub fn snapshot(&self) -> Arc<Snapshot> {
@@ -485,12 +575,14 @@ impl Store {
             id: id.clone(),
             _cancel: cancel.clone().drop_guard(),
         };
-        let _ = self.commands.send(Command::PrepareDictation { id, cancel });
+        let _ = self
+            .commands
+            .try_send(Command::PrepareDictation { id, cancel });
         preparation
     }
     /// Best-effort diagnostics use the owned connection without delaying recovery.
     pub fn record_connection_performance(&self, performance: ConnectionPerformance) {
-        let _ = self.commands.send(Command::ConnectionPerformance {
+        let _ = self.commands.try_send(Command::ConnectionPerformance {
             epoch: self.snapshot().epoch,
             performance,
         });
@@ -512,19 +604,21 @@ impl Store {
                     receipt = Err(PeerError::ConnectionClosed("store is closed".into()));
                     return false;
                 }
-                let (effects, changed) = apply_locked(current, Event::Intent(intent));
+                let mut candidate = current.clone();
+                let (effects, changed) = apply_locked(&mut candidate, Event::Intent(intent));
                 if !effects.is_empty() {
+                    let permit = match self.commands.try_reserve() {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            receipt = Err(command_error(error));
+                            return false;
+                        }
+                    };
                     let (complete, result) = oneshot::channel();
-                    receipt = self
-                        .commands
-                        .send(Command::Dispatch(Dispatch {
-                            effects,
-                            snapshot: current.clone(),
-                            complete,
-                        }))
-                        .map(|()| Some(result))
-                        .map_err(|_| PeerError::ConnectionClosed("store is closed".into()));
+                    permit.send(Command::Dispatch(Dispatch { effects, complete }));
+                    receipt = Ok(Some(result));
                 }
+                *current = candidate;
                 changed
             });
         }
@@ -545,8 +639,8 @@ impl Store {
         request.validate().map_err(PeerError::InvalidMessage)?;
         let (complete, result) = oneshot::channel();
         self.commands
-            .send(Command::Browser { request, complete })
-            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?;
+            .try_send(Command::Browser { request, complete })
+            .map_err(command_error)?;
         result
             .await
             .map_err(|_| PeerError::ConnectionClosed("browser connection ended".into()))?
@@ -582,29 +676,38 @@ fn apply(updates: &watch::Sender<Arc<Snapshot>>, event: Event) -> Vec<Scheduled>
     let mut effects = Vec::new();
     updates.send_if_modified(|current| {
         let (produced, changed) = apply_locked(current, event);
-        effects = produced
-            .into_iter()
-            .map(|effect| Scheduled {
-                effect,
-                snapshot: current.clone(),
-                complete: None,
-            })
-            .collect();
+        effects = produced;
         changed
     });
     effects
 }
-fn apply_locked(current: &mut Arc<Snapshot>, event: Event) -> (Vec<Effect>, bool) {
-    let (next, effects) = reduce(current, event);
-    publish_locked(current, next, effects)
+fn apply_locked(current: &mut Arc<Snapshot>, event: Event) -> (Vec<Scheduled>, bool) {
+    let (mut next, effects) = reduce(current, event);
+    if next.epoch != current.epoch {
+        Arc::make_mut(&mut next.operations).retain(|key, _| {
+            !matches!(
+                key,
+                op::OperationKey::Directory
+                    | op::OperationKey::File
+                    | op::OperationKey::WorkspaceReview
+                    | op::OperationKey::WorktreeSettings
+                    | op::OperationKey::Worktrees
+                    | op::OperationKey::Permissions { .. }
+            )
+        });
+    }
+    let scheduled = effects
+        .into_iter()
+        .map(|effect| Scheduled::new(effect, &mut next, None))
+        .collect();
+    let changed = publish_locked(current, next);
+    (scheduled, changed)
 }
-fn publish_locked(
-    current: &mut Arc<Snapshot>,
-    next: Snapshot,
-    effects: Vec<Effect>,
-) -> (Vec<Effect>, bool) {
+fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
     // No `..`: adding a Snapshot field must update the publication contract.
     let Snapshot {
+        operations,
+        operation_sequence,
         model_defaults,
         scoped_model_defaults,
         permission_settings,
@@ -636,7 +739,9 @@ fn publish_locked(
         (None, None) => true,
         _ => false,
     };
-    if current.model_defaults == *model_defaults
+    if Arc::ptr_eq(&current.operations, operations)
+        && current.operation_sequence == *operation_sequence
+        && current.model_defaults == *model_defaults
         && Arc::ptr_eq(&current.scoped_model_defaults, scoped_model_defaults)
         && current.host_name == *host_name
         && current.permission_settings == *permission_settings
@@ -662,10 +767,10 @@ fn publish_locked(
         && &current.connected == connected
         && &current.error == error
     {
-        return (effects, false);
+        return false;
     }
     *current = Arc::new(next);
-    (effects, true)
+    true
 }
 fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<Scheduled> {
     let mut effects = Vec::new();
@@ -674,8 +779,12 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
     updates.send_if_modified(|snapshot| {
         // Dispatch and completion share this lock. List results and failures
         // belong to their query; view work belongs to the navigation epoch.
-        let current = completed.list_query.as_ref().map_or_else(
-            || completed.epoch == snapshot.epoch,
+        let current = completed.scheduling.query().map_or_else(
+            || {
+                completed
+                    .scope
+                    .current(snapshot.epoch, &snapshot.operations)
+            },
             |query| query == snapshot.list_query.as_ref(),
         );
         let mut next = snapshot.as_ref().clone();
@@ -693,11 +802,27 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
                 }
             },
             Err(error) => {
-                if let Some(handle) = completed.terminal {
+                let error = match completed.rejection {
+                    Some(application) => match application.apply(&mut next, current) {
+                        Ok(next_effects) => {
+                            effects.extend(next_effects);
+                            error
+                        }
+                        Err(error) => error,
+                    },
+                    None => error,
+                };
+                if (completed.delivery_attempted
+                    || matches!(
+                        completed.scheduling,
+                        op::Scheduling::Terminal { starts: true, .. }
+                    ))
+                    && let Some(handle) = completed.scheduling.terminal()
+                {
                     next = reduce(
                         &next,
                         Event::TerminalFailed {
-                            handle,
+                            handle: handle.to_owned(),
                             reason: error.to_string(),
                         },
                     )
@@ -734,20 +859,39 @@ fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<S
             }
         };
         effects.extend(op::prefetch_composer_catalog(&mut next));
-        let changed = publish_locked(snapshot, next, Vec::new()).1;
+        let continues = completed.scope.operation.as_ref().is_some_and(|(key, _)| {
+            effects
+                .iter()
+                .any(|effect| effect.operation.key().as_ref() == Some(key))
+        });
+        if !continues {
+            completed
+                .scope
+                .finish(&mut next.operations, result.as_ref().err());
+        }
+        let superseded = completed
+            .scope
+            .operation
+            .as_ref()
+            .is_some_and(|(key, generation)| {
+                next.operations
+                    .get(key)
+                    .is_some_and(|state| state.generation != *generation)
+            });
         scheduled = effects
             .drain(..)
-            .map(|effect| Scheduled {
-                effect,
-                snapshot: snapshot.clone(),
-                complete: None,
+            .filter(|effect| {
+                !superseded
+                    || effect.operation.key().as_ref()
+                        != completed.scope.operation.as_ref().map(|(key, _)| key)
             })
+            .map(|effect| Scheduled::new(effect, &mut next, Some(&completed.scope)))
             .collect();
-        changed
+        publish_locked(snapshot, next)
     });
     let continuation = scheduled.iter().position(|scheduled| {
-        scheduled.effect.1 == ReceiptPolicy::Continue
-            || scheduled.effect.0.submission_id().is_some()
+        scheduled.effect.receipt == ReceiptPolicy::Continue
+            || scheduled.effect.operation.submission_id().is_some()
     });
     let mut complete = completed.complete;
     if continuation.is_none()
@@ -769,31 +913,28 @@ struct ItemReads {
     pending: VecDeque<Scheduled>,
 }
 impl ItemReads {
-    fn enqueue(&mut self, mut scheduled: Scheduled) -> Result<(), PeerError> {
-        let key = scheduled.effect.0.item_read().unwrap().clone();
+    fn enqueue(&mut self, mut scheduled: Scheduled) -> Result<(), Box<(Scheduled, PeerError)>> {
+        let key = scheduled.effect.scheduling.item().unwrap().clone();
         if let Some(receipt) = self.receipts.get(&key) {
             if let Some(complete) = scheduled.complete.take() {
                 receipt.join(complete);
             }
-            if scheduled.effect.1 != ReceiptPolicy::Continue {
+            if scheduled.effect.receipt != ReceiptPolicy::Continue {
                 return Ok(());
             }
             scheduled.complete = Some(receipt.clone());
         } else {
-            if self.receipts.len() >= 132 {
+            if self.receipts.len() >= MAX_ITEM_READS {
                 let error = PeerError::InvalidMessage(format!(
                     "too many pending item reads: {}",
                     key.item_id
                 ));
-                if let Some(complete) = scheduled.complete {
-                    complete.send(Err(error.clone()));
-                }
-                return Err(error);
+                return Err(Box::new((scheduled, error)));
             }
             let receipt = scheduled.complete.get_or_insert_default().clone();
             self.receipts.insert(key, receipt);
         }
-        if scheduled.effect.1 == ReceiptPolicy::Continue {
+        if scheduled.effect.receipt == ReceiptPolicy::Continue {
             // Continue the same item before issuing new grants. Its slot covers
             // the control response, body transfer, and final application.
             self.pending.push_front(scheduled);
@@ -804,12 +945,16 @@ impl ItemReads {
     }
     fn next(&mut self) -> Option<Scheduled> {
         let next = self.pending.front()?;
-        if self.running.len() >= 4 && !self.running.contains(next.effect.0.item_read().unwrap()) {
+        if self.running.len() >= MAX_ITEM_TRANSFERS
+            && !self
+                .running
+                .contains(next.effect.scheduling.item().unwrap())
+        {
             return None;
         }
         let scheduled = self.pending.pop_front().unwrap();
         self.running
-            .insert(scheduled.effect.0.item_read().unwrap().clone());
+            .insert(scheduled.effect.scheduling.item().unwrap().clone());
         Some(scheduled)
     }
     fn finish(
@@ -817,11 +962,12 @@ impl ItemReads {
         updates: &watch::Sender<Arc<Snapshot>>,
         completed: Completed,
     ) -> Vec<Scheduled> {
-        let key = completed.item_read.clone();
+        let key = completed.scheduling.item().cloned();
         let effects = finish(updates, completed);
         if let Some(key) = key
             && !effects.iter().any(|s| {
-                s.effect.1 == ReceiptPolicy::Continue && s.effect.0.item_read() == Some(&key)
+                s.effect.receipt == ReceiptPolicy::Continue
+                    && s.effect.scheduling.item() == Some(&key)
             })
         {
             self.running.remove(&key);
@@ -833,7 +979,7 @@ impl ItemReads {
 async fn run(
     mut connection: Connection,
     updates: watch::Sender<Arc<Snapshot>>,
-    commands: &mut mpsc::UnboundedReceiver<Command>,
+    commands: &mut mpsc::Receiver<Command>,
     stop: CancellationToken,
     mut effects: Vec<Scheduled>,
 ) {
@@ -847,9 +993,9 @@ async fn run(
     let mut subscriptions = tokio_stream::StreamMap::new();
     let mut terminal_commands = VecDeque::new();
     let mut item_reads = ItemReads::default();
-    let mut terminal_running = false;
+    let mut terminal_running = BTreeSet::new();
     let mut list_running = false;
-    let mut pending_list: Option<Receipt> = None;
+    let mut pending_list: Option<Scheduled> = None;
     let mut disconnected = None;
     let reason = loop {
         let unused: Vec<_> = subscriptions
@@ -866,81 +1012,70 @@ async fn run(
         for id in unused {
             subscriptions.remove(&id);
         }
-        for Scheduled {
-            effect,
-            snapshot: captured,
-            complete,
-        } in effects.drain(..)
-        {
-            if effect.0.list_query().is_some() {
-                if list_running {
-                    let receipt = pending_list.get_or_insert_default();
-                    if let Some(complete) = complete {
-                        receipt.join(complete);
+        for mut scheduled in std::mem::take(&mut effects) {
+            let limit = match &scheduled.effect.scheduling {
+                op::Scheduling::LatestList(_) if list_running => {
+                    if let Some(previous) = pending_list.take() {
+                        let receipt = scheduled.complete.get_or_insert_default();
+                        if let Some(complete) = previous.complete {
+                            receipt.join(complete);
+                        }
+                    }
+                    pending_list = Some(scheduled);
+                    continue;
+                }
+                op::Scheduling::Terminal { .. } => {
+                    if terminal_commands.len() >= MAX_TERMINAL_QUEUE {
+                        effects.extend(finish(&updates, rejected(scheduled, busy_error())));
+                    } else {
+                        terminal_commands.push_back(scheduled);
                     }
                     continue;
                 }
+                op::Scheduling::Item(_) => {
+                    if let Err(rejection) = item_reads.enqueue(scheduled) {
+                        let (scheduled, error) = *rejection;
+                        effects.extend(finish(&updates, rejected(scheduled, error)));
+                    }
+                    continue;
+                }
+                op::Scheduling::Control => MAX_RPC_JOBS + CONTROL_RESERVE,
+                op::Scheduling::Concurrent | op::Scheduling::LatestList(_) => MAX_RPC_JOBS,
+            };
+            if jobs.len() >= limit {
+                effects.extend(finish(&updates, rejected(scheduled, busy_error())));
+                continue;
+            }
+            if matches!(scheduled.effect.scheduling, op::Scheduling::LatestList(_)) {
                 list_running = true;
             }
-            if effect.0.terminal_handle().is_some() {
-                terminal_commands.push_back(Scheduled {
-                    effect,
-                    snapshot: captured,
-                    complete,
-                });
-                continue;
-            }
-            if effect.0.item_read().is_some() {
-                if let Err(error) = item_reads.enqueue(Scheduled {
-                    effect,
-                    snapshot: captured,
-                    complete,
-                }) {
-                    apply(&updates, Event::Failed(error.to_string()));
-                }
-                continue;
-            }
-            jobs.push(perform(
-                Some(peer),
-                session.as_ref(),
-                captured,
-                effect,
-                complete,
-            ));
+            jobs.push(perform(Some(peer), session.as_ref(), scheduled));
         }
-        while let Some(scheduled) = item_reads.next() {
-            jobs.push(perform(
-                Some(peer),
-                session.as_ref(),
-                scheduled.snapshot,
-                scheduled.effect,
-                scheduled.complete,
-            ));
+        while jobs.len() < MAX_RPC_JOBS {
+            let Some(scheduled) = item_reads.next() else {
+                break;
+            };
+            jobs.push(perform(Some(peer), session.as_ref(), scheduled));
         }
-        if !terminal_running
-            && let Some(Scheduled {
-                effect,
-                snapshot: captured,
-                complete,
-            }) = terminal_commands.pop_front()
-        {
-            terminal_running = true;
-            jobs.push(perform(
-                Some(peer),
-                session.as_ref(),
-                captured,
-                effect,
-                complete,
-            ));
+        while terminal_running.len() < MAX_TERMINAL_JOBS && jobs.len() < MAX_RPC_JOBS {
+            let Some(index) = terminal_commands.iter().position(|scheduled| {
+                !terminal_running.contains(scheduled.effect.scheduling.terminal().unwrap())
+            }) else {
+                break;
+            };
+            let scheduled = terminal_commands.remove(index).unwrap();
+            terminal_running.insert(scheduled.effect.scheduling.terminal().unwrap().to_owned());
+            jobs.push(perform(Some(peer), session.as_ref(), scheduled));
         }
         tokio::select! {
-            biased;
             _ = stop.cancelled() => break "store closed".into(),
             command = commands.recv() => {
                 let Some(command) = command else { break "store closed".into() };
                 let command = match command {
                     Command::PrepareDictation { id, cancel } => {
-                        preparation_jobs.push(crate::client::prepare_dictation(peer, id, cancel));
+                        if preparation_jobs.len() < MAX_RPC_JOBS {
+                            preparation_jobs.push(crate::client::prepare_dictation(peer, id, cancel));
+                        }
                         continue;
                     }
                     Command::ConnectionPerformance { epoch, performance } => {
@@ -978,9 +1113,9 @@ async fn run(
                     }
                 };
                 let mut complete = Some(Receipt::new(command.complete));
-                for effect in command.effects {
-                    let receipt = if effect.1 == ReceiptPolicy::Background { None } else { complete.take() };
-                    effects.push(Scheduled { effect, snapshot: command.snapshot.clone(), complete: receipt });
+                for mut scheduled in command.effects {
+                    scheduled.complete = if scheduled.effect.receipt == ReceiptPolicy::Background { None } else { complete.take() };
+                    effects.push(scheduled);
                 }
                 if let Some(complete) = complete {
                     complete.send(Ok(Outcome::Applied));
@@ -995,17 +1130,10 @@ async fn run(
                     }).chain(futures_util::stream::once(async {
                     Err(std::io::Error::other("subscription ended"))
                 })).boxed()); }
-                if result.terminal.is_some() { terminal_running = false; }
-                if result.list_query.is_some() {
+                if let Some(handle) = result.scheduling.terminal() { terminal_running.remove(handle); }
+                if result.scheduling.query().is_some() {
                     list_running = false;
-                    if let Some(complete) = pending_list.take() {
-                        let snapshot = updates.borrow().clone();
-                        effects.push(Scheduled {
-                            effect: Effect::execute(op::ListSessions::new((*snapshot.list_query).clone())),
-                            snapshot,
-                            complete: Some(complete),
-                        });
-                    }
+                    if let Some(scheduled) = pending_list.take() { effects.push(scheduled); }
                 }
                 effects.extend(item_reads.finish(&updates, result));
             }
@@ -1043,12 +1171,11 @@ async fn run(
 
 async fn run_offline(
     updates: &watch::Sender<Arc<Snapshot>>,
-    commands: &mut mpsc::UnboundedReceiver<Command>,
+    commands: &mut mpsc::Receiver<Command>,
     stop: &CancellationToken,
 ) -> Option<(Connection, Vec<Scheduled>)> {
     while !stop.is_cancelled() {
         let command = tokio::select! {
-            biased;
             _ = stop.cancelled() => break,
             command = commands.recv() => match command { Some(command) => command, None => break },
         };
@@ -1090,13 +1217,13 @@ async fn run_offline(
             }
         };
         let mut complete = Some(Receipt::new(command.complete));
-        for effect in command.effects {
-            let receipt = if effect.1 == ReceiptPolicy::Background {
+        for mut scheduled in command.effects {
+            scheduled.complete = if scheduled.effect.receipt == ReceiptPolicy::Background {
                 None
             } else {
                 complete.take()
             };
-            let result = perform(None, None, command.snapshot.clone(), effect, receipt).await;
+            let result = perform(None, None, scheduled).await;
             drop(finish(updates, result));
         }
         if let Some(complete) = complete {
@@ -1106,18 +1233,47 @@ async fn run_offline(
     None
 }
 
+fn busy_error() -> PeerError {
+    PeerError::InvalidMessage("操作が混み合っています。少し待って再試行してください。".into())
+}
+fn command_error<T>(error: mpsc::error::TrySendError<T>) -> PeerError {
+    match error {
+        mpsc::error::TrySendError::Full(_) => busy_error(),
+        mpsc::error::TrySendError::Closed(_) => {
+            PeerError::ConnectionClosed("store is closed".into())
+        }
+    }
+}
+fn rejected(scheduled: Scheduled, error: PeerError) -> Completed {
+    Completed {
+        scheduling: scheduled.effect.scheduling,
+        failed_submission: scheduled
+            .effect
+            .operation
+            .submission_id()
+            .map(agent_protocol::ids::ClientInputId::from),
+        subscriptions: Vec::new(),
+        delivery_attempted: false,
+        scope: scheduled.scope,
+        complete: scheduled.complete,
+        result: Err(error),
+        rejection: scheduled.effect.operation.rejected_output(),
+    }
+}
+
 async fn perform(
     client: Option<&Client>,
     session: Option<&crate::transport::Session>,
-    snapshot: Arc<Snapshot>,
-    effect: Effect,
-    complete: Option<Receipt>,
+    scheduled: Scheduled,
 ) -> Completed {
-    let item_read = effect.0.item_read().cloned();
-    let list_query = effect.0.list_query().cloned();
-    let terminal = effect.0.terminal_handle().map(str::to_owned);
+    let Scheduled {
+        effect,
+        scope,
+        complete,
+    } = scheduled;
+    let scheduling = effect.scheduling;
     let failed_submission = effect
-        .0
+        .operation
         .submission_id()
         .map(agent_protocol::ids::ClientInputId::from);
     let mut subscriptions = Vec::new();
@@ -1127,21 +1283,19 @@ async fn perform(
         let mut context = Execution {
             client,
             session,
-            snapshot: &snapshot,
             subscriptions: &mut subscriptions,
         };
-        effect.0.run(&mut context).await
+        effect.operation.run(&mut context).await
     }
     .await;
     Completed {
         subscriptions,
-        item_read,
-        list_query,
+        scheduling,
         delivery_attempted: client.is_some(),
-        epoch: snapshot.epoch,
+        scope,
         result,
+        rejection: None,
         failed_submission,
-        terminal,
         complete,
     }
 }
@@ -1157,6 +1311,7 @@ trait Application: Send + std::fmt::Debug {
 #[derive(Debug)]
 struct Completion<O: op::Operation> {
     operation: O,
+    input: Option<Result<O::Input, PeerError>>,
     output: Option<O::Output>,
 }
 impl<O: op::Operation> Application for Completion<O> {
@@ -1165,7 +1320,9 @@ impl<O: op::Operation> Application for Completion<O> {
         snapshot: &mut Snapshot,
         current: bool,
     ) -> Result<Vec<Effect>, PeerError> {
-        let Self { operation, output } = *self;
+        let Self {
+            operation, output, ..
+        } = *self;
         let output = output.expect("only completed operations are published");
         operation.complete(snapshot, output, current)
     }
@@ -1173,7 +1330,11 @@ impl<O: op::Operation> Application for Completion<O> {
 // Intent is replayable data. Only the effect queue erases an operation's type;
 // the same allocation carries its output until its result is applied.
 #[derive(Debug)]
-pub struct Effect(Box<dyn Pending>, ReceiptPolicy);
+pub struct Effect {
+    operation: Box<dyn Pending>,
+    scheduling: op::Scheduling,
+    receipt: ReceiptPolicy,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReceiptPolicy {
     First,
@@ -1184,52 +1345,61 @@ impl Effect {
     /// Continue the dispatch receipt after this step is applied.
     pub(crate) fn continuation<O: op::Operation>(operation: O) -> Self {
         let mut effect = Self::execute(operation);
-        effect.1 = ReceiptPolicy::Continue;
+        effect.receipt = ReceiptPolicy::Continue;
         effect
     }
     pub fn execute<O: op::Operation>(operation: O) -> Self {
-        Self(
-            Box::new(Completion {
+        Self {
+            scheduling: operation.scheduling(),
+            operation: Box::new(Completion {
                 operation,
+                input: None,
                 output: None,
             }),
-            if O::BACKGROUND {
+            receipt: if O::BACKGROUND {
                 ReceiptPolicy::Background
             } else {
                 ReceiptPolicy::First
             },
-        )
+        }
     }
 }
 trait Pending: Application {
-    fn item_read(&self) -> Option<&op::ReadItem>;
-    fn list_query(&self) -> Option<&ListQuery>;
+    fn key(&self) -> Option<op::OperationKey>;
+    fn capture(&mut self, snapshot: &Snapshot);
     fn submission_id(&self) -> Option<&str>;
-    fn terminal_handle(&self) -> Option<&str>;
+    fn rejected_output(self: Box<Self>) -> Option<Box<dyn Application>>;
     fn run<'a>(
         self: Box<Self>,
         context: &'a mut Execution<'_>,
     ) -> futures_util::future::BoxFuture<'a, Result<Applied, PeerError>>;
 }
 impl<O: op::Operation> Pending for Completion<O> {
-    fn item_read(&self) -> Option<&op::ReadItem> {
-        self.operation.item_read()
+    fn key(&self) -> Option<op::OperationKey> {
+        self.operation.key()
     }
-    fn list_query(&self) -> Option<&ListQuery> {
-        self.operation.list_query()
+    fn capture(&mut self, snapshot: &Snapshot) {
+        self.input = Some(self.operation.capture(snapshot));
     }
     fn submission_id(&self) -> Option<&str> {
         self.operation.submission_id()
     }
-    fn terminal_handle(&self) -> Option<&str> {
-        self.operation.terminal_handle()
+    fn rejected_output(mut self: Box<Self>) -> Option<Box<dyn Application>> {
+        let input = self.input.take()?.ok()?;
+        self.output = self.operation.rejected_output(input);
+        self.output.as_ref()?;
+        Some(self)
     }
     fn run<'a>(
         mut self: Box<Self>,
         context: &'a mut Execution<'_>,
     ) -> futures_util::future::BoxFuture<'a, Result<Applied, PeerError>> {
         Box::pin(async move {
-            let mut output = self.operation.run(context).await?;
+            let input = self
+                .input
+                .take()
+                .expect("effects capture inputs before execution")?;
+            let mut output = self.operation.run(input, context).await?;
             let outcome = O::outcome(&mut output);
             self.output = Some(output);
             Ok(Applied {
@@ -1242,7 +1412,6 @@ impl<O: op::Operation> Pending for Completion<O> {
 pub struct Execution<'a> {
     pub(crate) client: &'a Client,
     pub(crate) session: Option<&'a crate::transport::Session>,
-    pub(crate) snapshot: &'a Snapshot,
     subscriptions: &'a mut Vec<(uuid::Uuid, agent_transport::client::Updates)>,
 }
 impl Execution<'_> {
@@ -1263,10 +1432,51 @@ impl Execution<'_> {
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_full_command_queue_keeps_the_draft_and_all_submission_state() {
+        let store = Store::offline(Snapshot::default());
+        let draft_key = store.snapshot().navigation.draft_key.clone();
+        store
+            .dispatch(Intent::SetDraftText {
+                thread_id: draft_key,
+                text: "must not be lost".into(),
+            })
+            .await
+            .unwrap();
+        for index in 0..MAX_COMMANDS {
+            drop(store.dispatch(Intent::ReadFile(op::ReadFile {
+                path: format!("/queued/{index}"),
+                discard_draft: false,
+            })));
+        }
+        let before = store.snapshot();
+        let result = store
+            .dispatch(Intent::Submit {
+                thread_id: None,
+                client_user_message_id: "input".into(),
+            })
+            .await;
+        assert!(matches!(result, Err(PeerError::InvalidMessage(_))));
+        assert!(Arc::ptr_eq(&before, &store.snapshot()));
+        assert!(matches!(
+            store.disconnect().await,
+            Err(PeerError::InvalidMessage(_))
+        ));
+        store.close().await.unwrap();
+    }
     #[test]
     fn every_snapshot_field_notifies_subscribers_independently() {
         type Change = fn(&mut Snapshot);
         let changes: &[(&str, Change)] = &[
+            ("operations", |snapshot| {
+                snapshot.operations = Arc::default()
+            }),
+            ("operation_sequence", |snapshot| {
+                snapshot.operation_sequence += 1
+            }),
+            ("scoped_model_defaults", |snapshot| {
+                snapshot.scoped_model_defaults = Arc::default()
+            }),
             ("permission_settings", |snapshot| {
                 snapshot.permission_settings = Some(Arc::new(
                     crate::state::operations::PermissionSettingsState {
@@ -1319,16 +1529,14 @@ mod tests {
         for (name, change) in changes {
             let previous = Arc::new(Snapshot::default());
             let (writer, reader) = watch::channel(previous.clone());
-            writer.send_if_modified(|current| {
-                publish_locked(current, previous.as_ref().clone(), Vec::new()).1
-            });
+            writer.send_if_modified(|current| publish_locked(current, previous.as_ref().clone()));
             assert!(
                 !reader.has_changed().unwrap(),
                 "unchanged snapshot published"
             );
             let mut next = previous.as_ref().clone();
             change(&mut next);
-            writer.send_if_modified(|current| publish_locked(current, next, Vec::new()).1);
+            writer.send_if_modified(|current| publish_locked(current, next));
             assert!(reader.has_changed().unwrap(), "{name} update was dropped");
         }
     }

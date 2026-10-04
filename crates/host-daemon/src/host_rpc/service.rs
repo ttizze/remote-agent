@@ -184,16 +184,28 @@ impl HostRpcService {
             combined.error = (!errors.is_empty()).then(|| errors.join("\n"));
             return Ok(combined.into());
         }
-        let provider = match &request {
-            Call::StartAccountLogin(p) => p.provider,
-            Call::SelectAccount(p) => p.provider,
-            Call::LogoutAccount(p) => p.provider,
-            Call::ReadAccountLogin(p) => p.provider,
-            Call::CancelAccountLogin(p) => p.provider,
-            Call::SubmitAccountLogin(p) => p.provider,
+        use super::agent::{AccountCommand as Command, AccountReply};
+        let (provider, command) = match request {
+            Call::StartAccountLogin(p) => (p.provider, Command::StartLogin),
+            Call::SelectAccount(p) => (p.provider, Command::Select { id: p.id }),
+            Call::LogoutAccount(p) => (p.provider, Command::Logout { id: p.id }),
+            Call::ReadAccountLogin(p) => (p.provider, Command::ReadLogin { id: p.id }),
+            Call::CancelAccountLogin(p) => (p.provider, Command::CancelLogin { id: p.id }),
+            Call::SubmitAccountLogin(p) => (
+                p.provider,
+                Command::SubmitLogin {
+                    id: p.id,
+                    code: p.code,
+                },
+            ),
             _ => return Err(Failure::new("invalid_params", "not an account request")),
         };
-        self.agent(provider)?.login(request).await
+        Ok(match self.agent(provider)?.account(command).await? {
+            AccountReply::Selection(value) => value.into(),
+            AccountReply::Login(value) => value.into(),
+            AccountReply::Status(value) => value.into(),
+            AccountReply::Complete => agent_protocol::models::Empty {}.into(),
+        })
     }
 
     pub async fn enable_browser(&self, profile: std::path::PathBuf) -> Result<(), String> {
@@ -462,11 +474,14 @@ impl HostRpcService {
             .find(|t| {
                 t.status == agent_protocol::models::TurnStatus::Running && !t.id.trim().is_empty()
             })
-            .map(|t| t.id.clone());
-        let routing_state = agent.session_state(response.thread.status, running_turn);
-        let route =
-            super::submission::submission_target(&routing_state, response.thread.cwd.as_deref())
-                .map_err(|e| Failure::new("submission_unavailable", e))?;
+            .map(|t| t.id.as_str());
+        let route = super::submission::submission_target(
+            response.thread.status,
+            running_turn,
+            agent.running_input(),
+            response.thread.cwd.as_deref(),
+        )
+        .map_err(|e| Failure::new("submission_unavailable", e))?;
         let mut reload = state.needs_reload;
         if let super::submission::SubmissionTarget::Start { cwd } = route
             && let Some(directory) = self
@@ -498,7 +513,7 @@ impl HostRpcService {
         answer: agent_protocol::requests::Answer,
     ) -> Result<agent_protocol::models::Empty, Failure> {
         use agent_protocol::session::RequestDelivery;
-        let (origin, result) = self
+        let (origin, body) = self
             .inner
             .router
             .claim_response(session, &id, &answer)
@@ -507,8 +522,10 @@ impl HostRpcService {
         let mut delivery = scopeguard::guard((id, RequestDelivery::Awaiting), |(id, state)| {
             self.inner.router.response_delivery(&id, state)
         });
-        let provider = origin.provider();
-        let write = self.agent(provider)?.answer(origin, result).await?;
+        let write = origin
+            .source
+            .prepare(&origin.native_id, &body, &answer)
+            .await?;
         delivery.1 = RequestDelivery::Unknown;
         write.await?;
         delivery.1 = RequestDelivery::Sent;
@@ -596,11 +613,13 @@ impl HostRpcService {
             .router
             .current_turn(target, &params.turn_id)
             .and_then(|turn| {
-                turn.items?
-                    .into_iter()
+                turn.items
+                    .as_ref()?
+                    .iter()
                     .find(|item| item.id == params.item_id)
-            })
-            .filter(|item| !item.is_deferred());
+                    .filter(|item| !item.is_deferred())
+                    .cloned()
+            });
         let mut response = if let Some(item) = live {
             agent_protocol::operations::ItemResponse {
                 item: Arc::unwrap_or_clone(item),
@@ -1641,7 +1660,6 @@ mod tests {
 
     #[tokio::test]
     async fn answers_keep_delivery_evidence_until_the_source_resolves_them() {
-        use super::super::requests::{RequestDestination, RequestOrigin};
         use super::*;
         use agent_protocol::{
             requests::{Answer, ElicitationAnswer},
@@ -1683,14 +1701,13 @@ mod tests {
             router
                 .request(
                     target.clone(),
-                    RequestOrigin {
+                    crate::claude::request_origin(
                         instance,
-                        native_id: serde_json::json!(native),
-                        destination: RequestDestination::Claude {
-                            input: input.clone(),
-                        },
-                    },
-                    adapted,
+                        serde_json::json!(native),
+                        input.clone(),
+                        adapted.answers,
+                    ),
+                    adapted.request,
                 )
                 .unwrap();
             // Session-scoped elicitation works without a live turn and survives another turn's completion.
@@ -1754,7 +1771,6 @@ mod tests {
 
     #[tokio::test]
     async fn answer_preflight_failures_keep_awaiting_and_prove_non_delivery() {
-        use super::super::requests::{RequestDestination, RequestOrigin};
         use super::*;
         use agent_protocol::requests::{Answer, ElicitationAnswer};
         for case in [
@@ -1801,25 +1817,19 @@ mod tests {
             } else {
                 serde_json::json!("native-request")
             };
-            let destination = if claude {
-                RequestDestination::Claude { input }
+            let origin = if claude {
+                crate::claude::request_origin(instance, native_id.clone(), input, adapted.answers)
             } else {
-                RequestDestination::Codex {
-                    stopped: stopped.clone(),
-                }
+                super::super::requests::unavailable_origin(
+                    instance,
+                    native_id.clone(),
+                    stopped.clone(),
+                )
             };
             service
                 .inner
                 .router
-                .request(
-                    target.clone(),
-                    RequestOrigin {
-                        instance,
-                        native_id: native_id.clone(),
-                        destination,
-                    },
-                    adapted,
-                )
+                .request(target.clone(), origin, adapted.request)
                 .unwrap();
             if case == "closedClaude" {
                 receiver.close();

@@ -1,4 +1,4 @@
-use agent_protocol::protocol::{Body, Call};
+use crate::host_rpc::agent::{AccountCommand, AccountReply};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use agent_protocol::operations as op;
@@ -251,25 +251,25 @@ impl Accounts {
     pub(crate) async fn request(
         &mut self,
         primary: &CodexAppServer,
-        request: Call,
-    ) -> Result<Body, String> {
-        match request {
-            Call::SelectAccount(params) => {
-                self.select(primary, &params.id).await?;
+        command: AccountCommand,
+    ) -> Result<AccountReply, String> {
+        match command {
+            AccountCommand::Select { id } => {
+                self.select(primary, &id).await?;
                 Ok(op::AccountSelection {
                     provider: agent_protocol::session::ProviderKind::Codex,
-                    selected_id: params.id,
+                    selected_id: id,
                     persistence_error: self.save().await.err(),
                 }
                 .into())
             }
-            Call::LogoutAccount(params) => {
-                self.usage.remove(&params.id);
+            AccountCommand::Logout { id } => {
+                self.usage.remove(&id);
                 if !self
                     .registry
                     .accounts
                     .iter()
-                    .any(|account| account.id == params.id)
+                    .any(|account| account.id == id)
                 {
                     return Err("アカウントが見つかりません。".into());
                 }
@@ -278,7 +278,7 @@ impl Accounts {
                     .selected_id
                     .as_deref()
                     .or((!self.registry.signed_out).then_some("desktop"))
-                    == Some(params.id.as_str());
+                    == Some(id.as_str());
                 if selected {
                     // Persist the explicit signed-out state before touching credentials,
                     // so a restart cannot silently select another saved account.
@@ -293,29 +293,27 @@ impl Accounts {
                     rpc(primary, "account/logout", json!({})).await?;
                 }
                 rpc(
-                    self.helper(&params.id)?.server().await?,
+                    self.helper(&id)?.server().await?,
                     "account/logout",
                     json!({}),
                 )
                 .await?;
-                self.helpers.remove(&params.id);
+                self.helpers.remove(&id);
                 if self
                     .completed_login
                     .as_ref()
-                    .is_some_and(|(_, id)| id == &params.id)
+                    .is_some_and(|(_, account_id)| account_id == &id)
                 {
                     self.completed_login = None;
                 }
-                self.registry
-                    .accounts
-                    .retain(|account| account.id != params.id);
+                self.registry.accounts.retain(|account| account.id != id);
                 if selected {
                     self.registry.selected_id = None;
                 }
                 self.save().await?;
-                Ok(Body::from(Empty {}))
+                Ok(AccountReply::from(Empty {}))
             }
-            Call::StartAccountLogin(_) => {
+            AccountCommand::StartLogin => {
                 if self.login.is_some() {
                     self.cancel_login().await?;
                 }
@@ -355,32 +353,33 @@ impl Accounts {
                     completed: false,
                 });
                 self.completed_login = None;
-                Ok(Body::from(response))
+                Ok(AccountReply::from(response))
             }
-            Call::SubmitAccountLogin(_) => {
+            AccountCommand::SubmitLogin { .. } => {
                 Err("Codexのコードはブラウザで入力してください。".into())
             }
-            Call::ReadAccountLogin(params) => self.login_status(&params.id).await.map(Body::from),
-            Call::CancelAccountLogin(params) => {
+            AccountCommand::ReadLogin { id } => {
+                self.login_status(&id).await.map(AccountReply::from)
+            }
+            AccountCommand::CancelLogin { id } => {
                 if self
                     .completed_login
                     .as_ref()
-                    .is_some_and(|(id, _)| params.id == *id)
+                    .is_some_and(|(login_id, _)| id == *login_id)
                 {
-                    return Ok(Body::from(Empty {}));
+                    return Ok(AccountReply::from(Empty {}));
                 }
                 // A failed/expired status read may already have discarded the helper.
                 // Let clients dismiss that login and start again.
                 let Some(login) = self.login.as_ref() else {
-                    return Ok(Body::from(Empty {}));
+                    return Ok(AccountReply::from(Empty {}));
                 };
-                if params.id != login.id {
+                if id != login.id {
                     return Err("ログイン手続きが一致しません。".into());
                 }
                 self.cancel_login().await?;
-                Ok(Body::from(Empty {}))
+                Ok(AccountReply::from(Empty {}))
             }
-            _ => Err("not an account request".into()),
         }
     }
 

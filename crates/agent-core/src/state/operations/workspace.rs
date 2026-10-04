@@ -4,6 +4,9 @@ use crate::client::ClientExt;
 pub use agent_protocol::operations::ListFiles;
 
 impl Operation for ListFiles {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Directory)
+    }
     rpc_operation!(workspace.directory);
     fn prepare(&mut self, _: &mut Snapshot) -> Result<(), String> {
         if !std::path::Path::new(&self.path).is_absolute() {
@@ -11,7 +14,6 @@ impl Operation for ListFiles {
         }
         Ok(())
     }
-    const INVALIDATES: bool = true;
 }
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -32,6 +34,9 @@ impl rpc::RpcMethod for ReadFile {
 }
 
 impl Operation for ReadFile {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::File)
+    }
     rpc_operation!(workspace.file);
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         if self.discard_draft {
@@ -39,7 +44,6 @@ impl Operation for ReadFile {
         }
         Ok(())
     }
-    const INVALIDATES: bool = true;
 }
 
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -48,14 +52,25 @@ pub struct SaveFile {
     pub path: String,
 }
 impl Operation for SaveFile {
-    type Output = (Arc<FileDraft>, FileContent);
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        let submitted = context
-            .snapshot
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::SaveFile {
+            path: self.path.clone(),
+        })
+    }
+    type Input = Arc<FileDraft>;
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        snapshot
             .file_drafts
             .get(&self.path)
-            .ok_or_else(|| PeerError::InvalidMessage("file has no draft to save".into()))?
-            .clone();
+            .cloned()
+            .ok_or_else(|| PeerError::InvalidMessage("file has no draft to save".into()))
+    }
+    type Output = (Arc<FileDraft>, FileContent);
+    async fn run(
+        &self,
+        submitted: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         let file = context
             .call(&rpc::WriteFile {
                 path: self.path.clone(),
@@ -121,10 +136,10 @@ pub(in crate::state) fn review_workspace(snapshot: &mut Snapshot) -> Option<Effe
 }
 
 impl Operation for ReviewWorkspace {
-    rpc_operation!();
-    fn invalidates(&self, snapshot: &Snapshot) -> bool {
-        snapshot.workspace.review_cwd.as_ref() != Some(&self.cwd)
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::WorkspaceReview)
     }
+    rpc_operation!();
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         let workspace = Arc::make_mut(&mut snapshot.workspace);
         if workspace.review_cwd.as_ref() != Some(&self.cwd) {
@@ -147,6 +162,9 @@ rpc::rpc_method!(ReadWorktreeSettings, ReadWorktreeSettings, |self| {
 });
 
 impl Operation for ReadWorktreeSettings {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::WorktreeSettings)
+    }
     rpc_operation!(workspace.settings);
 }
 
@@ -161,6 +179,9 @@ rpc::rpc_method!(UpdateWorktreeSettings, UpdateWorktreeSettings, |self| self
     .clone());
 
 impl Operation for UpdateWorktreeSettings {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::WorktreeSettings)
+    }
     rpc_operation!(workspace.settings);
 }
 
@@ -171,9 +192,14 @@ pub struct DownloadFile {
     pub destination: String,
 }
 impl Operation for DownloadFile {
+    no_input!();
     type Output = ();
 
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         let session = context.session.ok_or_else(|| {
             PeerError::InvalidMessage("binary transfers require an iroh session".into())
         })?;
@@ -194,13 +220,18 @@ pub struct LoadSessionImages {
     pub thread_id: crate::session::SessionRef,
 }
 impl Operation for LoadSessionImages {
+    no_input!();
     type Output = Vec<crate::client::SessionImage>;
     fn outcome(output: &mut Self::Output) -> Outcome {
         Outcome::SessionImages {
             images: std::mem::take(output),
         }
     }
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         context
             .client
             .session_images(&self.thread_id, context.session)
@@ -213,6 +244,9 @@ impl Operation for LoadSessionImages {
 pub struct ListWorktrees {}
 rpc::rpc_method!(ListWorktrees, ListWorktrees, |self| crate::models::Empty {});
 impl Operation for ListWorktrees {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Worktrees)
+    }
     rpc_operation!();
     fn apply(self, snapshot: &mut Snapshot, worktrees: Self::Output) -> Vec<Effect> {
         Arc::make_mut(&mut snapshot.workspace).worktrees = Some(Arc::new(worktrees));

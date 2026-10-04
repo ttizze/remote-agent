@@ -3,11 +3,15 @@ use agent_protocol::models::Thread;
 
 #[derive(Default)]
 pub(super) struct SessionActor {
-    pub(super) live: Thread,
-    pub(super) pending_requests:
-        std::collections::BTreeMap<agent_protocol::ids::RequestId, super::requests::PendingRequest>,
+    pub(super) timeline: agent_protocol::session::Timeline,
+    pub(super) request_origins:
+        std::collections::BTreeMap<agent_protocol::ids::RequestId, super::requests::RequestOrigin>,
     pub(super) leases: usize,
     pub(super) submission_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    pub(super) subscriptions: std::collections::HashMap<
+        uuid::Uuid,
+        (super::routing::SessionId, super::routing::Outbound),
+    >,
 }
 impl SessionActor {
     /// Reads and submissions may race completion. Keep completed turns until leases finish,
@@ -19,12 +23,12 @@ impl SessionActor {
         // Retire evidence only once the provider has echoed the input in a
         // finished turn. Completion alone says nothing about a queued input or
         // an RPC still in flight on another client.
-        self.live.submissions.retain(|id, delivery| {
+        self.timeline.submissions.retain(|id, delivery| {
             matches!(
                 delivery,
                 agent_protocol::session::SubmissionDelivery::Sending
             ) || !self
-                .live
+                .timeline
                 .turns
                 .iter()
                 .flatten()
@@ -37,29 +41,24 @@ impl SessionActor {
                     ) && item.client_input_id.as_ref() == Some(id)
                 })
         });
-        if let Some(turns) = &mut self.live.turns {
-            turns.retain(|turn| turn.status == agent_protocol::execution::TurnStatus::Running || self.live.submissions.values().any(|delivery| matches!(delivery, agent_protocol::session::SubmissionDelivery::Accepted {turn_id:Some(id)} if id == &turn.id)));
+        if let Some(turns) = &mut self.timeline.turns {
+            turns.retain(|turn| turn.status == agent_protocol::execution::TurnStatus::Running || self.timeline.submissions.values().any(|delivery| matches!(delivery, agent_protocol::session::SubmissionDelivery::Accepted {turn_id:Some(id)} if id == &turn.id)));
         }
-        if self
-            .live
-            .turns
-            .as_ref()
-            .is_none_or(|turns| turns.is_empty())
-            && self.live.status != agent_protocol::models::SessionStatus::Running
+        if self.timeline.turns.as_ref().is_some_and(Vec::is_empty) {
+            self.timeline.turns = None;
+        }
+        if self.timeline.turns.is_none()
+            && self.timeline.status != agent_protocol::models::SessionStatus::Running
         {
-            self.live.status = agent_protocol::models::SessionStatus::Unknown;
+            self.timeline.status = agent_protocol::models::SessionStatus::Unknown;
         }
-        !self.live.submissions.is_empty()
-            || !self.pending_requests.is_empty()
-            || self
-                .live
-                .turns
-                .as_ref()
-                .is_some_and(|turns| !turns.is_empty())
+        !self.timeline.submissions.is_empty()
+            || !self.timeline.requests.is_empty()
+            || self.timeline.turns.is_some()
     }
 
     pub(super) fn overlay(&self, mut thread: Thread) -> Thread {
-        for turn in self.live.turns.iter().flatten() {
+        for turn in self.timeline.turns.iter().flatten() {
             // Native transcripts do not identify a still-running local process.
             // Its owned turn is authoritative, even if persisted messages look complete.
             let turns = thread.turns.get_or_insert_default();
@@ -69,15 +68,11 @@ impl SessionActor {
                 turns.push(turn.clone());
             }
         }
-        if self.live.status != agent_protocol::models::SessionStatus::Unknown {
-            thread.status = self.live.status;
+        if self.timeline.status != agent_protocol::models::SessionStatus::Unknown {
+            thread.status = self.timeline.status;
         }
-        thread.requests = self
-            .pending_requests
-            .iter()
-            .map(|(id, pending)| (id.clone(), std::sync::Arc::new(pending.request.clone())))
-            .collect();
-        thread.submissions = self.live.submissions.clone();
+        thread.requests = self.timeline.requests.clone();
+        thread.submissions = self.timeline.submissions.clone();
         thread
     }
 }
@@ -90,29 +85,33 @@ mod tests {
     #[test]
     fn finished_echo_retires_only_confirmed_input_and_stale_execution_status() {
         let mut actor = SessionActor {
-            live: serde_json::from_value(serde_json::json!({"status":"idle","turns":[{"id":"done","status":"completed","items":[{"id":"echo","status":"unknown","clientInputId":"accepted","body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}}]}]})).unwrap(),
+            timeline: agent_protocol::session::Timeline {
+                status: agent_protocol::models::SessionStatus::Idle,
+                turns: Some(serde_json::from_value(serde_json::json!([{"id":"done","status":"completed","items":[{"id":"echo","status":"unknown","clientInputId":"accepted","body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}}]}])).unwrap()),
+                ..Default::default()
+            },
             ..Default::default()
         };
-        actor.live.submissions.insert(
+        actor.timeline.submissions.insert(
             "accepted".into(),
             SubmissionDelivery::Accepted {
                 turn_id: Some("done".into()),
             },
         );
         actor
-            .live
+            .timeline
             .submissions
             .insert("waiting".into(), SubmissionDelivery::Sending);
         actor
-            .live
+            .timeline
             .submissions
             .insert("uncertain".into(), SubmissionDelivery::Unknown);
         assert!(actor.release());
-        assert!(!actor.live.submissions.contains_key("accepted"));
-        assert_eq!(actor.live.submissions.len(), 2);
-        assert!(actor.live.turns.as_ref().unwrap().is_empty());
+        assert!(!actor.timeline.submissions.contains_key("accepted"));
+        assert_eq!(actor.timeline.submissions.len(), 2);
+        assert!(actor.timeline.turns.is_none());
         assert!(
-            actor.live.status == agent_protocol::models::SessionStatus::Unknown,
+            actor.timeline.status == agent_protocol::models::SessionStatus::Unknown,
             "retained delivery evidence must not override newer provider execution state"
         );
     }

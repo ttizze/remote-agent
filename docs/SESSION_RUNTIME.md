@@ -6,13 +6,18 @@ Codex and Claude Code are the supported providers.
 
 - Provider native history is the only persistent conversation source. The Host
   stores only owned execution turns, unresolved requests and in-flight input IDs.
-  `SessionActor` never adopts a native history response. Completed turns are
+  `SessionActor` owns a `Timeline` with execution state, separate from thread
+  metadata and native history. It never adopts a native history response. Completed turns are
   released, even while clients remain subscribed.
+  Normalized requests and their delivery state live only in the Timeline; the
+  actor's request origins retain provider answer sources and native identities.
 - `SessionRef { provider, id }` preserves the complete native ID. The
   `claude:` prefix identifies Claude sessions in client thread keys.
 - `host/session/open` reads native history on every call, including reconnect.
   At response enqueue, the router overlays owned execution and registers the
-  subscription under one lock. An execution that completes during a read is
+  subscription under that conversation’s lock. The shared registry lock only
+  locates conversations, connections and request identities; encoding and
+  delivery never hold it. An execution that completes during a read is
   retained only until those readers finish; cancellation releases the reader.
 - `host/session/update` sends typed changes with a subscription UUID. The ordered
   transport carries the response before subsequent updates. There are no history
@@ -27,7 +32,7 @@ Codex and Claude Code are the supported providers.
   identity is shared by every client, with no per-device alias map. The first valid
   answer is claimed after checking connection, execution and content. Delivery can
   be awaiting, sending or unknown; unknown delivery is not automatically retried.
-- Input IDs prevent duplicate admission only while their execution is in flight.
+- Input IDs prevent duplicate admission while execution or delivery is unconfirmed.
   There is no completed receipt, fingerprint, 15-minute retention or repeated
   response delivery. After completion/restart, the Host does not guarantee input
   deduplication. Clients preserve uncertain drafts and never automatically resend.
@@ -42,8 +47,11 @@ Codex and Claude Code are the supported providers.
 
 Codex retains one shared app-server process. Native pagination, cursor use,
 item hydration, repeated turn IDs, details and response/event ordering belong
-to `host_rpc/codex.rs`. Clients request a larger window rather than merging
-native cursor pages. Accounts share this process and existing switch guards.
+to `host_rpc/codex.rs`. Clients request normalized history pages; core joins
+them to the current window without interpreting native cursors. Native request sources own their answer mappings and
+send resources; the Host validates normalized answers and arbitrates delivery.
+Accounts accept account commands and return account results, without a generic
+RPC request or response crossing that boundary. Accounts share this process and existing switch guards.
 The Codex adapter also owns native execution RPCs, input/reply conversion and
 browser MCP configuration encoding. The Host chooses the submission route,
 owns worktree preparation, browser scopes and delivery evidence, and passes
@@ -91,8 +99,8 @@ lifetime management, not an OS sandbox against deliberately detached processes.
 | History response | No Host snapshot cache or 4 MiB history budget; large items have explicit deferred bodies |
 | Inline items | Tool items above 512 bytes load details on expansion; deferred command headers omit output. Messages and images above 1 MiB load through item details |
 | Outbound connection queue | Shared 16 MiB budget including frame entries (no message-count cutoff for buffered bursts); slow queue overflow closes that connection, but an oversized single RPC returns `response_too_large` without disconnecting |
-| Unresolved requests | 32 per session, 64 KiB each; oversized requests cannot be approved |
-| In-flight input IDs | At most 128 per executing session; released when execution completes |
+| Unresolved requests | 256 total, 32 per session, 64 KiB each; oversized requests cannot be approved |
+| Unconfirmed input IDs | At most 128 per executing session; released after a finished turn echoes the input |
 | Claude live/idle processes | 8; idle retention 60 seconds, record capacity 128 |
 | Claude native reads | Transcript/output-file read budget 64 MiB, maximum JSONL row 8 MiB; incomplete range is explicit |
 | Claude native listing | 20,000 files; scan failure is a provider-specific partial result |
@@ -113,6 +121,39 @@ those bodies too, preserving every requested turn and item identity. Only an
 oversized metadata-only response returns `response_too_large`; it does not create
 a subscription or close the connection.
 
+## Client operations
+
+Store captures only the immutable inputs each effect needs before publishing
+its transition. Execution does not receive a Snapshot. Operation generations
+belong to their target: independent file, workspace, account and conversation
+work does not advance navigation epochs. A newer read of the same target wins;
+actual navigation still protects the selected view. Runtime operation progress
+and errors are available through core to Desktop, Swift and Kotlin and are not
+persisted. Successful operation records are released.
+
+The command queue holds 256 entries. Admission precedes publication, so a full
+queue cannot clear a draft or create an unconfirmed submission without queuing
+its work. Ordinary work shares a limit of 32 running core jobs, with 16 additional
+slots reserved for answers and interrupts. List bursts retain the newest prepared
+query and join receipts. Item work retains four transfer slots through final
+application, with at most 132 distinct reads and 128 waiters per coalesced receipt.
+Terminal work has a 128-entry queue and up to 16 independent handles running;
+commands for one handle retain their order. Bounded overload is reported as a
+pre-delivery failure, preserving submission recovery. Rejected input leaves a
+live terminal running; a rejected start ends its loading state with an error.
+Rejected catalog loads preserve existing candidates and finish loading so the
+composer can retry.
+
+Dictation preparation uses the same bounded command queue and retains at most
+32 preparation jobs. It is best effort: skipped preparation leaves the complete
+recording available for transcription with a fresh connection. History reads
+and cursor pages share core progress and errors; native clients subscribe to
+that state without keeping separate loading flags or completion callbacks.
+
+The same pure change operation accepts an owned Timeline on the Host and uses
+copy on write for client snapshots. Unique live turns and items append text
+without cloning accumulated bodies; shared readers keep their previous values.
+
 ## Local data
 
 Client persistence is scoped by Host public identity and a digest of configured
@@ -132,8 +173,8 @@ revision/permission protections.
 
 ## Verification
 
-The PR records the exact commit, workspace tests, Clippy, mandatory quality result
-and CI results. Regression coverage includes native file changes between opens,
+Verification records the exact commit, local unit and integration results and CI
+results. Regression coverage includes native file changes between opens,
 completion during read, live approvals after reconnect, cancellation cleanup,
 release of finished execution while subscribed, untrimmed responses above the old
 limits, duplicate in-flight input, and provider-scoped approval identity.

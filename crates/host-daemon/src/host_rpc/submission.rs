@@ -9,27 +9,24 @@ pub(crate) enum SubmissionTarget<'a> {
     Queue,
     Start { cwd: &'a str },
 }
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SessionState {
-    pub status: SessionStatus,
-    pub running_turn: Option<agent_protocol::ids::TurnId>,
-    pub accepts_steer: bool,
-    pub accepts_queue: bool,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum RunningInput {
+    SteerOrQueue,
+    Queue,
 }
 pub(super) fn submission_target<'a>(
-    state: &'a SessionState,
+    status: SessionStatus,
+    running_turn: Option<&'a str>,
+    running_input: RunningInput,
     cwd: Option<&'a str>,
 ) -> Result<SubmissionTarget<'a>, &'static str> {
-    if state.status == SessionStatus::Running {
-        if state.accepts_steer
-            && let Some(turn) = &state.running_turn
+    if status == SessionStatus::Running {
+        if running_input == RunningInput::SteerOrQueue
+            && let Some(turn) = running_turn
         {
             return Ok(SubmissionTarget::Steer(turn));
         }
-        if state.accepts_queue {
-            return Ok(SubmissionTarget::Queue);
-        }
-        return Err("this execution does not accept additional input");
+        return Ok(SubmissionTarget::Queue);
     }
     Ok(SubmissionTarget::Start {
         cwd: cwd
@@ -48,48 +45,39 @@ mod tests {
             SessionStatus::Unknown,
             SessionStatus::Unavailable,
         ] {
-            let state = SessionState {
-                status,
-                running_turn: Some("historical".into()),
-                accepts_steer: true,
-                accepts_queue: true,
-            };
-            assert_eq!(
-                submission_target(&state, Some("/project")).unwrap(),
-                SubmissionTarget::Start { cwd: "/project" }
-            );
-            assert!(submission_target(&state, Some(" ")).is_err());
+            for mode in [RunningInput::SteerOrQueue, RunningInput::Queue] {
+                assert_eq!(
+                    submission_target(status, Some("historical"), mode, Some("/project")).unwrap(),
+                    SubmissionTarget::Start { cwd: "/project" }
+                );
+                assert!(submission_target(status, Some("historical"), mode, Some(" ")).is_err());
+            }
         }
-        for (steer, queue, turn, expected) in [
+        for (mode, turn, expected) in [
             (
-                true,
-                true,
+                RunningInput::SteerOrQueue,
                 Some("live"),
-                Some(SubmissionTarget::Steer("live")),
+                SubmissionTarget::Steer("live"),
             ),
-            (true, true, None, Some(SubmissionTarget::Queue)),
-            (false, true, Some("live"), Some(SubmissionTarget::Queue)),
-            (false, false, Some("live"), None),
-            (true, false, None, None),
+            (RunningInput::SteerOrQueue, None, SubmissionTarget::Queue),
+            (RunningInput::Queue, Some("live"), SubmissionTarget::Queue),
+            (RunningInput::Queue, None, SubmissionTarget::Queue),
         ] {
-            let state = SessionState {
-                status: SessionStatus::Running,
-                running_turn: turn.map(Into::into),
-                accepts_steer: steer,
-                accepts_queue: queue,
-            };
-            assert_eq!(submission_target(&state, None).ok(), expected);
+            assert_eq!(
+                submission_target(SessionStatus::Running, turn, mode, None).unwrap(),
+                expected
+            );
         }
     }
     proptest::proptest! {
         #[test]
-        fn additional_input_never_starts_a_second_running_turn(steer in proptest::bool::ANY, queue in proptest::bool::ANY, turn in proptest::option::of("[a-z]{1,24}")) {
-            let state=SessionState {status:SessionStatus::Running,running_turn:turn.clone().map(Into::into),accepts_steer:steer,accepts_queue:queue};
-            let route=submission_target(&state,Some("/project"));
+        fn additional_input_never_starts_a_second_running_turn(steer in proptest::bool::ANY, turn in proptest::option::of("[a-z]{1,24}")) {
+            let mode = if steer { RunningInput::SteerOrQueue } else { RunningInput::Queue };
+            let route=submission_target(SessionStatus::Running,turn.as_deref(),mode,Some("/project"));
             match route {
                 Ok(SubmissionTarget::Steer(id))=>{proptest::prop_assert!(steer);proptest::prop_assert_eq!(Some(id),turn.as_deref());},
-                Ok(SubmissionTarget::Queue)=>{proptest::prop_assert!(queue);proptest::prop_assert!(!steer||turn.is_none());},
-                Err(_)=>proptest::prop_assert!(!queue&&(!steer||turn.is_none())),
+                Ok(SubmissionTarget::Queue)=>{proptest::prop_assert!(!steer||turn.is_none());},
+                Err(_)=>proptest::prop_assert!(false,"running execution accepts additional input"),
                 Ok(SubmissionTarget::Start {..})=>proptest::prop_assert!(false,"running execution must not start another turn"),
             }
         }

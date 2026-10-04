@@ -122,12 +122,14 @@ pub(super) fn session_update(
             // a failed read; a recoverable gap is not a persistent user error.
             return (
                 next,
-                vec![Effect::execute(
-                    op::ReadThread::new(id.clone()).with_history(
+                vec![Effect::execute(op::ReadThread {
+                    limit: op::ReadThread::history_limit(
+                        5,
                         current.history_limit,
                         current.turns.as_ref().map_or(0, Vec::len),
                     ),
-                )],
+                    ..op::ReadThread::new(id.clone())
+                })],
             );
         }
     };

@@ -44,13 +44,7 @@ enum OperationCompletion {
     Download,
     Composer(u64),
     Editor(u64),
-    History {
-        generation: u64,
-    },
-    Item {
-        generation: u64,
-        key: (TurnId, ItemId),
-    },
+    Item { generation: u64, turn_id: TurnId },
     WorktreeSettings,
     Request(RequestId),
     Dictation(uuid::Uuid),
@@ -149,10 +143,6 @@ struct MarkdownContent {
     rendered: SharedString,
     images: Rc<[String]>,
 }
-struct DetailLoad {
-    loading: bool,
-    error: Option<String>,
-}
 #[derive(Clone)]
 enum ConversationRow {
     Turn(Arc<agent_core::presentation::conversation::RenderedTurn>),
@@ -246,9 +236,6 @@ pub(crate) struct Desktop {
     list: ListState,
     hovered_conversation_marker: Option<usize>,
     rows: Vec<ConversationRow>,
-    history_loading: bool,
-    history_error: String,
-    item_details: HashMap<(TurnId, ItemId), DetailLoad>,
     rendered: Option<Arc<agent_core::presentation::conversation::RenderedConversation>>,
     diffs: HashMap<String, Entity<DiffView>>,
     images: HashMap<String, ImageState>,
@@ -537,9 +524,6 @@ impl Desktop {
             list,
             hovered_conversation_marker: None,
             rows: Vec::new(),
-            history_loading: false,
-            history_error: String::new(),
-            item_details: HashMap::new(),
             rendered: None,
             diffs: HashMap::new(),
             images: HashMap::new(),
@@ -782,30 +766,15 @@ impl Desktop {
             OperationCompletion::Busy => {
                 self.busy = self.busy.saturating_sub(1);
             }
-            OperationCompletion::History { generation } => {
+            OperationCompletion::Item {
+                generation,
+                turn_id,
+            } => {
                 if self.snapshot.epoch != generation {
                     return;
                 }
                 self.accept_snapshot(window, cx);
-                self.history_loading = false;
-                if let Err(error) = result {
-                    self.history_error = error;
-                }
-                return;
-            }
-            OperationCompletion::Item { generation, key } => {
-                if self.snapshot.epoch != generation {
-                    return;
-                }
-                self.item_details.insert(
-                    key.clone(),
-                    DetailLoad {
-                        loading: false,
-                        error: result.err(),
-                    },
-                );
-                self.accept_snapshot(window, cx);
-                self.remeasure_item(&key.0);
+                self.remeasure_item(&turn_id);
                 return;
             }
             OperationCompletion::WorktreeSettings => {
@@ -978,9 +947,6 @@ impl Desktop {
                 .update(cx, |selection, cx| selection.clear(cx));
             self.cancel_recording();
             self.composer_pending = None;
-            self.history_loading = false;
-            self.history_error.clear();
-            self.item_details.clear();
             self.rendered = None;
             self.diffs.clear();
             self.markdown_cache.clear();
@@ -1125,6 +1091,19 @@ impl Desktop {
     fn remote_key(&self) -> &str {
         self.remote.as_ref().map_or("local", |remote| &remote.id)
     }
+    fn history_key(&self) -> Option<op::OperationKey> {
+        self.selected()
+            .cloned()
+            .map(|session| op::OperationKey::History { session })
+    }
+    fn history_loading(&self) -> bool {
+        self.history_key()
+            .is_some_and(|key| self.snapshot.operation_running(key))
+    }
+    fn history_error(&self) -> Option<String> {
+        self.history_key()
+            .and_then(|key| self.snapshot.operation_error(key))
+    }
     fn has_older_history(&self) -> bool {
         self.thread()
             .is_some_and(|thread| thread.history_has_more == Some(true))
@@ -1208,10 +1187,7 @@ impl Desktop {
             }
         }
         self.rows = rows;
-        if self.history_loading
-            && !self.list.is_following_tail()
-            && let Some((id, old_height)) = preserve
-        {
+        if let Some((id, old_height)) = preserve {
             let generation = self.snapshot.epoch;
             let owner = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| { let _ = owner.update(cx, |view, cx| {
@@ -1268,56 +1244,50 @@ impl Desktop {
                 }));
         if agent_core::presentation::conversation::should_load_history(
             self.has_older_history(),
-            self.history_loading || !self.history_error.is_empty(),
+            self.history_loading() || self.history_error().is_some(),
             oldest_visible,
             self.list.is_scrolled_to_end() != Some(false),
             self.list.is_following_tail(),
         ) {
-            let generation = self.snapshot.epoch;
-            self.history_loading = true;
-            self.perform(
-                Intent::ReadOlder {
-                    thread_id: self.selected().expect("selected conversation").clone(),
-                },
-                OperationCompletion::History { generation },
-            );
+            self.dispatch(Intent::ReadOlder {
+                thread_id: self.selected().expect("selected conversation").clone(),
+            });
             cx.notify();
         }
     }
     fn detail(&mut self, turn_id: TurnId, item_id: ItemId) {
-        let key = (turn_id.clone(), item_id.clone());
+        let Some(thread_id) = self.selected().cloned() else {
+            return;
+        };
+        let read = op::ReadItem {
+            thread_id,
+            turn_id,
+            item_id,
+        };
         if self
-            .item_details
-            .get(&key)
-            .is_some_and(|detail| detail.loading)
+            .snapshot
+            .operation_running(op::OperationKey::Item { item: read.clone() })
         {
             return;
         }
         let needed = self
             .thread()
             .and_then(|thread| thread.turns.as_ref())
-            .and_then(|turns| turns.iter().find(|turn| turn.id == turn_id))
+            .and_then(|turns| turns.iter().find(|turn| turn.id == read.turn_id))
             .and_then(|turn| turn.items.as_ref())
-            .and_then(|items| items.iter().find(|item| item.id == item_id))
+            .and_then(|items| items.iter().find(|item| item.id == read.item_id))
             .is_some_and(|item| item.is_deferred());
         if !needed {
             return;
         }
-        self.item_details.insert(
-            key.clone(),
-            DetailLoad {
-                loading: true,
-                error: None,
-            },
-        );
         let generation = self.snapshot.epoch;
+        let turn_id = read.turn_id.clone();
         self.perform(
-            Intent::ReadItem(op::ReadItem {
-                thread_id: self.selected().expect("selected conversation").clone(),
+            Intent::ReadItem(read),
+            OperationCompletion::Item {
+                generation,
                 turn_id,
-                item_id,
-            }),
-            OperationCompletion::Item { generation, key },
+            },
         );
     }
     fn switch_host(
@@ -1364,7 +1334,6 @@ impl Desktop {
         self.rows.clear();
         self.list.reset(0);
         self.rendered = None;
-        self.item_details.clear();
         self.requests.clear();
         self.diffs.clear();
         self.markdown_cache.clear();
@@ -1982,7 +1951,6 @@ mod completion_tests {
             view.busy = 2;
             view.composer_pending = Some(9);
             view.editor_pending = Some(12);
-            view.history_loading = true;
             let deliver = |view: &mut Desktop,
                            host,
                            kind,
@@ -2019,26 +1987,6 @@ mod completion_tests {
             );
             assert_eq!(view.composer_pending, Some(9));
             assert_eq!(view.editor_pending, Some(12));
-            deliver(
-                view,
-                3,
-                OperationCompletion::History { generation: 4 },
-                Err("obsolete history".into()),
-                window,
-                cx,
-            );
-            assert!(view.history_loading);
-            assert!(view.history_error.is_empty());
-            deliver(
-                view,
-                3,
-                OperationCompletion::History { generation: 5 },
-                Err("history failed".into()),
-                window,
-                cx,
-            );
-            assert!(!view.history_loading);
-            assert_eq!(view.history_error, "history failed");
             deliver(
                 view,
                 3,

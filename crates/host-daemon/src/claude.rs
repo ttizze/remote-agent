@@ -794,7 +794,7 @@ impl Claude {
         let worker = Worker {
             record,
             events: self.events.clone(),
-            live: Thread {
+            live: agent_protocol::session::Timeline {
                 turns: Some(vec![Arc::new(turn)]),
                 ..Default::default()
             },
@@ -824,7 +824,7 @@ struct Worker {
     auth_revision: u64,
     record: Arc<AsyncMutex<Record>>,
     events: mpsc::Sender<AgentEvent>,
-    live: Thread,
+    live: agent_protocol::session::Timeline,
     session: SessionRef,
     turn_id: agent_protocol::ids::TurnId,
     input: mpsc::Sender<Command>,
@@ -845,7 +845,9 @@ impl Worker {
             .map(AsRef::as_ref)
     }
     async fn change(&mut self, change: SessionChange) -> Result<(), String> {
-        self.live = change.apply(&self.live).map_err(|e| e.to_string())?;
+        let (live, result) = change.apply_timeline(std::mem::take(&mut self.live));
+        self.live = live;
+        result.map_err(|e| e.to_string())?;
         emit(
             &self.events,
             AgentChange::Session {
@@ -1034,7 +1036,7 @@ impl Worker {
             .await;
         let retained = record.idle.is_some();
         drop(record);
-        self.live = Thread::default();
+        self.live = Default::default();
         self.stream = None;
         if retained {
             tokio::select! {
@@ -1073,14 +1075,13 @@ impl Worker {
             &self.events,
             AgentChange::Request {
                 session: self.session.clone(),
-                origin: crate::host_rpc::requests::RequestOrigin {
-                    instance: self.instance,
-                    native_id: request_id.into(),
-                    destination: crate::host_rpc::requests::RequestDestination::Claude {
-                        input: self.input.clone(),
-                    },
-                },
-                adapted,
+                origin: request_origin(
+                    self.instance,
+                    request_id.into(),
+                    self.input.clone(),
+                    adapted.answers,
+                ),
+                request: adapted.request,
             },
         )
         .await
@@ -1560,14 +1561,14 @@ impl crate::host_rpc::agent::Identity for Claude {
             error: None,
         })
     }
-    async fn login(
+    async fn account(
         &self,
-        request: agent_protocol::protocol::Call,
-    ) -> Result<agent_protocol::protocol::Body, crate::host_rpc::service::Failure> {
+        command: crate::host_rpc::agent::AccountCommand,
+    ) -> Result<crate::host_rpc::agent::AccountReply, crate::host_rpc::service::Failure> {
         self.accounts
             .lock()
             .await
-            .request(request)
+            .request(command)
             .await
             .map_err(|e| crate::host_rpc::service::Failure::new("account_operation_failed", e))
     }
@@ -1580,20 +1581,62 @@ impl crate::host_rpc::agent::Identity for Claude {
     }
 }
 
+struct RequestSource {
+    input: tokio::sync::mpsc::Sender<Command>,
+    answers: crate::host_rpc::requests::NativeAnswers,
+}
+pub(crate) fn request_origin(
+    instance: uuid::Uuid,
+    native_id: Value,
+    input: tokio::sync::mpsc::Sender<Command>,
+    answers: crate::host_rpc::requests::NativeAnswers,
+) -> crate::host_rpc::requests::RequestOrigin {
+    crate::host_rpc::requests::RequestOrigin {
+        instance,
+        native_id,
+        provider: ProviderKind::Claude,
+        source: std::sync::Arc::new(RequestSource { input, answers }),
+    }
+}
+#[async_trait::async_trait]
+impl crate::host_rpc::requests::AnswerSource for RequestSource {
+    fn is_alive(&self) -> bool {
+        !self.input.is_closed()
+    }
+    async fn prepare(
+        &self,
+        native_id: &Value,
+        body: &agent_protocol::requests::RequestBody,
+        answer: &agent_protocol::requests::Answer,
+    ) -> Result<AnswerWrite, Failure> {
+        let request_id = native_id
+            .as_str()
+            .ok_or_else(|| Failure::new("invalid_answer", "request ID must be a string"))?
+            .to_owned();
+        let result = self
+            .answers
+            .translate(body, answer)
+            .map_err(|e| Failure::new("invalid_answer", e))?;
+        let permit = self
+            .input
+            .clone()
+            .reserve_owned()
+            .await
+            .map_err(|_| Failure::new("answer_not_sent", "agent input is closed"))?;
+        Ok(async move {
+            let (delivered, receipt) = tokio::sync::oneshot::channel();
+            permit.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}), user: None, delivered: Some(delivered) });
+            tokio::time::timeout(std::time::Duration::from_secs(15), receipt).await.map_err(|_| Failure::unknown("answer_delivery_unknown", "answer delivery timed out"))?
+                .map_err(|_| Failure::unknown("answer_delivery_unknown", "agent exited before confirming the answer write"))?
+                .map_err(|e| Failure::unknown("answer_delivery_unknown", e))
+        }.boxed())
+    }
+}
+
 #[async_trait::async_trait]
 impl Agent for Claude {
-    fn session_state(
-        &self,
-        status: agent_protocol::models::SessionStatus,
-        running_turn: Option<agent_protocol::ids::TurnId>,
-    ) -> crate::host_rpc::submission::SessionState {
-        let running = status == agent_protocol::models::SessionStatus::Running;
-        crate::host_rpc::submission::SessionState {
-            status,
-            running_turn,
-            accepts_steer: false,
-            accepts_queue: running,
-        }
+    fn running_input(&self) -> crate::host_rpc::submission::RunningInput {
+        crate::host_rpc::submission::RunningInput::Queue
     }
     fn capabilities(&self) -> agent_protocol::session::Capabilities {
         agent_protocol::session::Capabilities {
@@ -1734,35 +1777,6 @@ impl Agent for Claude {
     ) -> Result<agent_protocol::models::Empty, Failure> {
         Claude::interrupt(self, id, turn).await?;
         Ok(agent_protocol::models::Empty {})
-    }
-    async fn answer(
-        &self,
-        origin: crate::host_rpc::requests::RequestOrigin,
-        result: Value,
-    ) -> Result<AnswerWrite, Failure> {
-        let crate::host_rpc::requests::RequestDestination::Claude { input } = origin.destination
-        else {
-            return Err(Failure::new(
-                "answer_not_sent",
-                "request source has changed",
-            ));
-        };
-        let request_id = origin
-            .native_id
-            .as_str()
-            .ok_or_else(|| Failure::new("invalid_answer", "request ID must be a string"))?
-            .to_owned();
-        let permit = input
-            .reserve_owned()
-            .await
-            .map_err(|_| Failure::new("answer_not_sent", "agent input is closed"))?;
-        Ok(async move {
-            let (delivered,receipt) = tokio::sync::oneshot::channel();
-            permit.send(Command {value:json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}),user:None,delivered:Some(delivered)});
-            tokio::time::timeout(std::time::Duration::from_secs(15),receipt).await.map_err(|_|Failure::unknown("answer_delivery_unknown","answer delivery timed out"))?
-                .map_err(|_|Failure::unknown("answer_delivery_unknown","agent exited before confirming the answer write"))?
-                .map_err(|e|Failure::unknown("answer_delivery_unknown",e))
-        }.boxed())
     }
     async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
         Ok(op::ModelPage {
@@ -2115,7 +2129,7 @@ mod execution_tests {
                 idle: None,
             })),
             events,
-            live: Thread {
+            live: agent_protocol::session::Timeline {
                 turns: Some(vec![Arc::new(Turn {
                     id: "turn".into(),
                     ..Default::default()
@@ -2174,7 +2188,7 @@ mod execution_tests {
         worker.message(json!({"type":"assistant","uuid":"envelope","message":{"id":"message","content":[{"type":"text","text":"answer"}]}})).await.unwrap();
         worker.stream_event(&json!({"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"abandoned"}})).await.unwrap();
         let turn = router.current_turn(&session, "turn").unwrap();
-        let items = turn.items.unwrap();
+        let items = turn.items.as_ref().unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].id.as_str(), "message:0");
         assert_eq!(items[0].status, ItemStatus::Completed);
@@ -2185,11 +2199,8 @@ mod execution_tests {
             .message(json!({"type":"system","subtype":"api_retry","attempt":1}))
             .await
             .unwrap();
-        let items = router
-            .current_turn(&session, "turn")
-            .unwrap()
-            .items
-            .unwrap();
+        let turn = router.current_turn(&session, "turn").unwrap();
+        let items = turn.items.as_ref().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id.as_str(), "message:0");
         assert!(worker.stream.is_none());

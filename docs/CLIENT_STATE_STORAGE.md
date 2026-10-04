@@ -8,7 +8,8 @@ and iOS/Android use the same encoder and decoder through the bindings.
 The current format stores only the Host storage identity, archived storage
 areas, drafts, attachments, unconfirmed submissions, unsaved file edits with
 revision, navigation and unread marks. It does not store native conversation
-history, lists, models, approvals, connections or other Host authority.
+history, lists, models, approvals, connections, operation generations or progress,
+or other Host authority.
 Returning to a different Host storage area preserves its own user data.
 
 Encoding takes immutable values. Decoding requires all user-owned fields and

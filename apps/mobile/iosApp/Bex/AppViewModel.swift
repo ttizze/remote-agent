@@ -12,16 +12,11 @@ final class BexAppViewModel: ObservableObject {
     @Published var isScanning = false
     @Published var transferError: String?
     @Published var transferring = false
-    @Published var sending = false
-    @Published var transcribing = false
     @Published var isConnecting = false
     @Published var pairingError: String?
     @Published private(set) var pairingInvitation: Invitation?
     @Published var connectionError: String?
     @Published var notice: String?
-    @Published var loadingThreads = false
-    @Published var loadingHistory = false
-    @Published var interruptingTurnId: String?
     @Published var profiles: [HostProfile] = []
     @Published private(set) var selectedProfileId: String?
     @Published private(set) var conversation: ConversationPresentation?

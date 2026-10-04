@@ -332,7 +332,8 @@ adapter に処理済みを返す。Claude の worker は native の断片を組�
 Claude の追加入力も、キュー受理後に書き込み確認を失った場合は Unknown を返す。
 キューへ渡す前の拒否だけを NotSent として扱う。
 
-Host は adapter の `SessionState` と cwd から start/steer/queue を決める。
+Host は会話の status、実行中 turn、cwd と adapter の `RunningInput` から
+start/steer/queue を決める。adapter は実行中の入力方式だけを返し、会話状態を再包装しない。
 送信前の読み取りは `SubmissionState` に会話と中立の `needs_reload` を返す。
 Host は自身の実行台帳を重ねて route を決め、workspace 再作成も合わせて reload を指示する。
 Codex は同じ読み取りの証拠を resume に使い、送信時の重複読み取りや新たな状態キャッシュを持たない。

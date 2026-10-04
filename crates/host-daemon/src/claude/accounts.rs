@@ -1,10 +1,10 @@
 //! Credentials stay in Claude Code's own storage. Only account labels and the
 //! selection are persisted here. Conversation settings and transcripts stay in
 //! the native home; only secure credential storage changes with the account.
+use crate::host_rpc::agent::{AccountCommand, AccountReply};
 use agent_protocol::{
     models::Empty,
     operations::{Account, AccountLogin, AccountLoginStatus, AccountSelection},
-    protocol::{Body, Call},
     session::ProviderKind,
 };
 use serde::{Deserialize, Serialize};
@@ -223,14 +223,17 @@ impl Accounts {
         })
     }
 
-    pub(crate) async fn request(&mut self, request: Call) -> Result<Body, String> {
-        match request {
-            Call::SelectAccount(params) => {
-                let home = self.account_home(&params.id)?;
-                self.info(&home, params.id.clone())
+    pub(crate) async fn request(
+        &mut self,
+        command: AccountCommand,
+    ) -> Result<AccountReply, String> {
+        match command {
+            AccountCommand::Select { id } => {
+                let home = self.account_home(&id)?;
+                self.info(&home, id.clone())
                     .await?
                     .ok_or("Claude に再ログインしてください。")?;
-                let previous = self.registry.selected_id.replace(params.id.clone());
+                let previous = self.registry.selected_id.replace(id.clone());
                 if let Err(error) = self.save().await {
                     self.registry.selected_id = previous;
                     return Err(error);
@@ -238,21 +241,21 @@ impl Accounts {
                 self.revision += 1;
                 Ok(AccountSelection {
                     provider: ProviderKind::Claude,
-                    selected_id: params.id,
+                    selected_id: id,
                     persistence_error: None,
                 }
                 .into())
             }
-            Call::LogoutAccount(params) => {
-                if params.id == "claude:desktop" {
+            AccountCommand::Logout { id } => {
+                if id == "claude:desktop" {
                     self.native_checked_at = None;
                 }
-                self.usage.remove(&params.id);
-                let home = self.account_home(&params.id)?;
-                if self.registry.selected_id.as_ref() == Some(&params.id) {
+                self.usage.remove(&id);
+                let home = self.account_home(&id)?;
+                if self.registry.selected_id.as_ref() == Some(&id) {
                     self.registry.selected_id = None;
                     if let Err(error) = self.save().await {
-                        self.registry.selected_id = Some(params.id);
+                        self.registry.selected_id = Some(id);
                         return Err(error);
                     }
                 }
@@ -261,13 +264,11 @@ impl Accounts {
                 if !process.finish().await?.0 {
                     return Err("Claude のログアウトに失敗しました。".into());
                 }
-                self.registry
-                    .accounts
-                    .retain(|account| account.id != params.id);
+                self.registry.accounts.retain(|account| account.id != id);
                 self.save().await?;
                 Ok(Empty {}.into())
             }
-            Call::StartAccountLogin(_) => {
+            AccountCommand::StartLogin => {
                 self.cancel().await?;
                 let id = format!("claude:{}", uuid::Uuid::new_v4());
                 let home = self.directory.join(id.strip_prefix("claude:").unwrap());
@@ -308,13 +309,13 @@ impl Accounts {
                 }
                 .into())
             }
-            Call::SubmitAccountLogin(params) => {
+            AccountCommand::SubmitLogin { id, code } => {
                 let login = self
                     .login
                     .as_mut()
-                    .filter(|login| login.id == params.id)
+                    .filter(|login| login.id == id)
                     .ok_or("ログイン手続きが一致しません。")?;
-                let code = zeroize::Zeroizing::new(params.code);
+                let code = zeroize::Zeroizing::new(code);
                 let code = code.trim();
                 if code.is_empty() || code.len() > 4096 || code.contains(['\r', '\n']) {
                     return Err("認証コードが無効です。".into());
@@ -338,23 +339,23 @@ impl Accounts {
                     .map_err(|_| "認証コードを送信できません。")?;
                 Ok(Empty {}.into())
             }
-            Call::ReadAccountLogin(params) => {
+            AccountCommand::ReadLogin { id } => {
                 if self
                     .registry
                     .accounts
                     .iter()
-                    .any(|account| account.id == params.id)
+                    .any(|account| account.id == id)
                 {
                     return Ok(AccountLoginStatus {
                         completed: true,
-                        account_id: Some(params.id),
+                        account_id: Some(id),
                     }
                     .into());
                 }
                 let login = self
                     .login
                     .as_mut()
-                    .filter(|login| login.id == params.id)
+                    .filter(|login| login.id == id)
                     .ok_or("ログイン手続きが一致しません。")?;
                 if login.started.elapsed() > Duration::from_secs(600) {
                     self.cancel().await?;
@@ -380,7 +381,7 @@ impl Accounts {
                 }
                 let home = login.home.clone();
                 let account = self
-                    .info(&home, params.id.clone())
+                    .info(&home, id.clone())
                     .await?
                     .ok_or("Claude のログインが完了していません。")?;
                 self.registry.accounts.push(account);
@@ -391,22 +392,17 @@ impl Accounts {
                 self.login = None;
                 Ok(AccountLoginStatus {
                     completed: true,
-                    account_id: Some(params.id),
+                    account_id: Some(id),
                 }
                 .into())
             }
-            Call::CancelAccountLogin(params) => {
-                if self
-                    .login
-                    .as_ref()
-                    .is_some_and(|login| login.id != params.id)
-                {
+            AccountCommand::CancelLogin { id } => {
+                if self.login.as_ref().is_some_and(|login| login.id != id) {
                     return Err("ログイン手続きが一致しません。".into());
                 }
                 self.cancel().await?;
                 Ok(Empty {}.into())
             }
-            _ => Err("not an account request".into()),
         }
     }
 
@@ -550,12 +546,9 @@ mod tests {
         accounts.native_checked_at = Some(Instant::now());
         assert!(
             accounts
-                .request(Call::LogoutAccount(
-                    agent_protocol::operations::LogoutAccount {
-                        provider: agent_protocol::session::ProviderKind::Claude,
-                        id: "claude:desktop".into(),
-                    }
-                ))
+                .request(AccountCommand::Logout {
+                    id: "claude:desktop".into()
+                })
                 .await
                 .is_err()
         );

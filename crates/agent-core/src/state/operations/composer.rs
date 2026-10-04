@@ -1,6 +1,6 @@
 use super::*;
 
-use agent_protocol::composer::ComposerCatalog;
+use agent_protocol::composer::{ComposerCandidate, ComposerCatalog};
 pub use agent_protocol::operations::LoadComposerCatalog;
 use agent_protocol::session::ProviderKind;
 
@@ -22,6 +22,13 @@ pub(crate) fn prefetch_composer_catalog(snapshot: &mut Snapshot) -> Option<Effec
 }
 
 impl Operation for LoadComposerCatalog {
+    type Input = Arc<ComposerCatalog>;
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        snapshot
+            .composer_catalog
+            .clone()
+            .ok_or_else(|| PeerError::InvalidMessage("catalog load is not prepared".into()))
+    }
     const BACKGROUND: bool = true;
     type Output = (Arc<ComposerCatalog>, ComposerCatalog);
     // Unrelated epoch changes do not invalidate metadata for the same catalog.
@@ -41,33 +48,20 @@ impl Operation for LoadComposerCatalog {
         }));
         Ok(())
     }
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        let source = context
-            .snapshot
-            .composer_catalog
-            .clone()
-            .expect("catalog load is prepared before execution");
+    async fn run(
+        &self,
+        source: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         let catalog = context
             .call(self)
             .await
-            .unwrap_or_else(|_| ComposerCatalog {
-                cwd: self.cwd.clone(),
-                candidates: source.candidates.clone(),
-                errors: [ProviderKind::Codex, ProviderKind::Claude]
-                    .into_iter()
-                    .map(|provider| {
-                        (
-                            provider,
-                            vec![
-                                "候補を取得できませんでした。再度 @ または / を入力してください。"
-                                    .into(),
-                            ],
-                        )
-                    })
-                    .collect(),
-                ..Default::default()
-            });
+            .unwrap_or_else(|_| unavailable_catalog(&self.cwd, &source.candidates));
         Ok((source, catalog))
+    }
+    fn rejected_output(&self, source: Self::Input) -> Option<Self::Output> {
+        let catalog = unavailable_catalog(&self.cwd, &source.candidates);
+        Some((source, catalog))
     }
     fn apply(self, snapshot: &mut Snapshot, (source, catalog): Self::Output) -> Vec<Effect> {
         if snapshot.navigation.cwd == self.cwd
@@ -79,6 +73,23 @@ impl Operation for LoadComposerCatalog {
             snapshot.composer_catalog = Some(Arc::new(catalog));
         }
         Vec::new()
+    }
+}
+
+fn unavailable_catalog(cwd: &str, candidates: &[ComposerCandidate]) -> ComposerCatalog {
+    ComposerCatalog {
+        cwd: cwd.into(),
+        candidates: candidates.to_vec(),
+        errors: [ProviderKind::Codex, ProviderKind::Claude]
+            .into_iter()
+            .map(|provider| {
+                (
+                    provider,
+                    vec!["候補を取得できませんでした。再度 @ または / を入力してください。".into()],
+                )
+            })
+            .collect(),
+        ..Default::default()
     }
 }
 

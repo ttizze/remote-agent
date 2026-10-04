@@ -52,9 +52,14 @@ impl Operation for RevokeDevice {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadHostManagement {}
 impl Operation for LoadHostManagement {
+    no_input!();
     type Output = (HostStatus, Vec<RemoteHost>);
 
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         let (status, remotes) = tokio::try_join!(
             context.client.call(&rpc::ReadHostStatus {}),
             context.client.call(&rpc::ListRemoteHosts {})
@@ -77,9 +82,14 @@ pub struct PairRemoteHost {
 }
 
 impl Operation for PairRemoteHost {
+    no_input!();
     type Output = RemoteHost;
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

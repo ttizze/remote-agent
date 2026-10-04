@@ -10,6 +10,28 @@ struct DraftIdentity: Hashable {
 typealias SnapshotRequest = (Intent, @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) -> Void
 
 extension BexAppViewModel {
+    var sending: Bool {
+        snapshot.operationRunning(key: .submission(draftKey: coreDraftKey))
+    }
+
+    var transcribing: Bool {
+        snapshot.operationRunning(key: .dictation(draftKey: coreDraftKey))
+    }
+
+    var loadingThreads: Bool {
+        snapshot.operationRunning(key: .sessionList)
+    }
+
+    var loadingHistory: Bool {
+        selectedThreadId.map { snapshot.operationRunning(key: .history(session: $0)) } ?? false
+    }
+
+    var interruptingTurnId: String? {
+        guard let session = selectedThreadId,
+              let turn = snapshot.conversation(id: session)?.activeTurnId() else { return nil }
+        return snapshot.operationRunning(key: .interrupt(session: session, turn: turn)) ? turn : nil
+    }
+
     func recordScene(_ value: UInt64) {
         store?.recordConnectionEvent(phase: .appScene, value: value)
     }
@@ -81,18 +103,12 @@ extension BexAppViewModel {
 
     func refreshTaskList() {
         guard !loadingThreads else { return }
-        loadingThreads = true
         notice = nil
-        perform(.listSessions(ListSessions(query: snapshot.listQuery()))) { [weak self] _ in
-            self?.loadingThreads = false
-        }
+        perform(.listSessions(ListSessions(query: snapshot.listQuery())))
     }
 
     func expandTaskList(projects: Bool = false, projectId: String? = nil) {
-        loadingThreads = true
-        perform(.expandThreadList(projectId: projectId, projects: projects)) { [weak self] _ in
-            self?.loadingThreads = false
-        }
+        perform(.expandThreadList(projectId: projectId, projects: projects))
     }
 
     func searchTaskList(_ term: String) {
@@ -120,20 +136,15 @@ extension BexAppViewModel {
 
     func loadOlderHistory() {
         guard !loadingHistory, let id = selectedThreadId else { return }
-        loadingHistory = true
-        perform(.readOlder(threadId: id)) { [weak self] _ in
-            self?.loadingHistory = false
-        }
+        perform(.readOlder(threadId: id))
     }
 
     func send() {
-        sending = true
         perform(.submit(
             threadId: snapshot.navigation().threadId,
             clientUserMessageId: UUID().uuidString
         )) { [weak self] _ in
             self?.persist()
-            self?.sending = false
         }
     }
 
@@ -152,7 +163,6 @@ extension BexAppViewModel {
     func transcribe(_ audio: Data, draftKey key: DraftIdentity, sendImmediately: Bool,
                     preparation: DictationPreparation?) {
         guard !transcribing, key == draftKey else { return }
-        transcribing = true
         perform(.transcribe(Dictate(
             draftKey: coreDraftKey,
             preparation: preparation?.id(),
@@ -162,17 +172,13 @@ extension BexAppViewModel {
         ))) { [weak self] _ in
             withExtendedLifetime(preparation) {
                 self?.persist()
-                self?.transcribing = false
             }
         }
     }
 
     func interrupt(_ turnId: String) {
         guard let threadId = snapshot.navigation().threadId else { return }
-        interruptingTurnId = turnId
-        perform(.interrupt(Interrupt(threadId: threadId, turnId: turnId))) { [weak self] _ in
-            self?.interruptingTurnId = nil
-        }
+        perform(.interrupt(Interrupt(threadId: threadId, turnId: turnId)))
     }
 
     func scanned(_ contents: String?) {

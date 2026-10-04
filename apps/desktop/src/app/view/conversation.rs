@@ -173,14 +173,26 @@ impl Desktop {
                 turn.map(|turn| turn.id.clone()).unwrap_or_default(),
                 item.id.clone(),
             );
-            let label = match self
-                .item_details
-                .get(&key)
-                .map(|state| state.error.as_deref())
+            let operation = self
+                .selected()
+                .cloned()
+                .map(|thread_id| op::OperationKey::Item {
+                    item: op::ReadItem {
+                        thread_id,
+                        turn_id: turn.map(|turn| turn.id.clone()).unwrap_or_default(),
+                        item_id: item.id.clone(),
+                    },
+                });
+            let label = if operation
+                .as_ref()
+                .is_some_and(|key| self.snapshot.operation_running(key.clone()))
             {
-                Some(None) => "詳細を読み込み中…".to_owned(),
-                Some(Some(error)) => format!("{error} · 再試行"),
-                None => "詳細を読み込む".to_owned(),
+                "詳細を読み込み中…".to_owned()
+            } else if let Some(error) = operation.and_then(|key| self.snapshot.operation_error(key))
+            {
+                format!("{error} · 再試行")
+            } else {
+                "詳細を読み込む".to_owned()
             };
             let title = title.expect("activity has a title");
             let toggle = id.clone();

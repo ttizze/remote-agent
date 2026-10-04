@@ -36,6 +36,7 @@ import dev.remoteagent.core.Connection
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.ListSessions
 import dev.remoteagent.core.LoadHostName
+import dev.remoteagent.core.OperationKey
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.ThreadList
@@ -90,7 +91,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var screen by mutableStateOf(Screen.Hosts)
     var busy by mutableStateOf(false)
     var notice by mutableStateOf<String?>(null)
-    var loadingHistory by mutableStateOf(false)
+    val loadingHistory: Boolean
+        get() = snapshot.navigation().threadId?.let { snapshot.operationRunning(OperationKey.History(it)) } ?: false
     var list by mutableStateOf<ThreadList?>(null)
         private set
 
@@ -413,8 +415,7 @@ internal fun AndroidAppModel.showHosts() {
 internal fun AndroidAppModel.older() {
     if (loadingHistory) return
     val id = snapshot.navigation().threadId ?: return
-    loadingHistory = true
-    perform(Intent.ReadOlder(id)) { loadingHistory = false }
+    perform(Intent.ReadOlder(id))
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

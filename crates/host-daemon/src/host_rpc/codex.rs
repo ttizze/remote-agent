@@ -34,7 +34,6 @@ use super::agent::{
     Agent, AgentChange, AgentEvent, AnswerWrite, Identity, SessionPage, SessionSummary,
     SubmissionState, emit, session_pages,
 };
-use agent_protocol::protocol::Call;
 use agent_transport::peer::PeerEvent;
 use futures_util::{FutureExt, TryStreamExt};
 use std::{path::PathBuf, sync::Arc};
@@ -445,10 +444,64 @@ struct NativeRequest {
     params: serde_json::Map<String, Value>,
 }
 
+struct RequestSource {
+    process: Arc<CodexAppServer>,
+    stopped: tokio_util::sync::CancellationToken,
+    answers: super::requests::NativeAnswers,
+}
+pub(crate) fn request_origin(
+    instance: uuid::Uuid,
+    native_id: Value,
+    stopped: tokio_util::sync::CancellationToken,
+    process: Arc<CodexAppServer>,
+    answers: super::requests::NativeAnswers,
+) -> super::requests::RequestOrigin {
+    super::requests::RequestOrigin {
+        instance,
+        native_id,
+        provider: ProviderKind::Codex,
+        source: Arc::new(RequestSource {
+            process,
+            stopped,
+            answers,
+        }),
+    }
+}
+#[async_trait::async_trait]
+impl super::requests::AnswerSource for RequestSource {
+    fn is_alive(&self) -> bool {
+        !self.stopped.is_cancelled()
+    }
+    async fn prepare(
+        &self,
+        native_id: &Value,
+        body: &agent_protocol::requests::RequestBody,
+        answer: &agent_protocol::requests::Answer,
+    ) -> Result<AnswerWrite, Failure> {
+        let process = self.process.clone();
+        if self.stopped.is_cancelled() {
+            return Err(Failure::new("answer_not_sent", "request source has ended"));
+        }
+        let result = self
+            .answers
+            .translate(body, answer)
+            .map_err(|e| Failure::new("invalid_answer", e))?;
+        let line = serde_json::json!({"id":native_id,"result":result}).to_string();
+        Ok(async move {
+            process
+                .send_raw(&line)
+                .await
+                .map_err(|e| Failure::unknown("answer_delivery_unknown", e))
+        }
+        .boxed())
+    }
+}
+
 fn request_change(
     instance: uuid::Uuid,
     stopped: tokio_util::sync::CancellationToken,
     native: NativeRequest,
+    process: Arc<CodexAppServer>,
 ) -> Result<AgentChange, String> {
     let params = Value::Object(native.params);
     let id = params["threadId"]
@@ -463,12 +516,8 @@ fn request_change(
     )?;
     Ok(AgentChange::Request {
         session,
-        origin: super::requests::RequestOrigin {
-            instance,
-            native_id: native.id,
-            destination: super::requests::RequestDestination::Codex { stopped },
-        },
-        adapted,
+        origin: request_origin(instance, native.id, stopped, process, adapted.answers),
+        request: adapted.request,
     })
 }
 
@@ -485,12 +534,15 @@ impl Identity for Codex {
             .await
             .map_err(|e| Failure::new("account_operation_failed", e))
     }
-    async fn login(&self, request: Call) -> Result<agent_protocol::protocol::Body, Failure> {
+    async fn account(
+        &self,
+        command: super::agent::AccountCommand,
+    ) -> Result<super::agent::AccountReply, Failure> {
         let mut accounts = self.accounts.lock().await;
         accounts
             .as_mut()
             .ok_or_else(|| Failure::new("account_unavailable", "アカウント管理が利用できません。"))?
-            .request(self.server()?, request)
+            .request(self.server()?, command)
             .await
             .map_err(|e| Failure::new("account_operation_failed", e))
     }
@@ -509,18 +561,8 @@ impl Identity for Codex {
 
 #[async_trait::async_trait]
 impl Agent for Codex {
-    fn session_state(
-        &self,
-        status: agent_protocol::models::SessionStatus,
-        running_turn: Option<agent_protocol::ids::TurnId>,
-    ) -> crate::host_rpc::submission::SessionState {
-        let running = status == agent_protocol::models::SessionStatus::Running;
-        crate::host_rpc::submission::SessionState {
-            status,
-            running_turn,
-            accepts_steer: running,
-            accepts_queue: running,
-        }
+    fn running_input(&self) -> super::submission::RunningInput {
+        super::submission::RunningInput::SteerOrQueue
     }
     fn capabilities(&self) -> agent_protocol::session::Capabilities {
         agent_protocol::session::Capabilities {
@@ -792,31 +834,6 @@ impl Agent for Codex {
         )
         .await
     }
-    async fn answer(
-        &self,
-        origin: super::requests::RequestOrigin,
-        result: Value,
-    ) -> Result<AnswerWrite, Failure> {
-        self.server().map_err(Failure::before_submission)?;
-        if origin.instance != self.instance {
-            return Err(Failure::new(
-                "answer_not_sent",
-                "request source has changed",
-            ));
-        }
-        let process = self
-            .process
-            .as_ref()
-            .map_err(|e| Failure::new("answer_not_sent", e))?
-            .clone();
-        Ok(async move {
-            process
-                .send_raw(&serde_json::json!({"id":origin.native_id,"result":result}).to_string())
-                .await
-                .map_err(|e| Failure::unknown("answer_delivery_unknown", e))
-        }
-        .boxed())
-    }
     async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
         let mut native: Value = self.request("model/list", params).await?;
         let data = native["data"]
@@ -958,7 +975,12 @@ impl Agent for Codex {
                             let admission = match serde_json::from_str(&line)
                                 .map_err(|e| e.to_string())
                                 .and_then(|request| {
-                                    request_change(instance, stopped.clone(), request)
+                                    request_change(
+                                        instance,
+                                        stopped.clone(),
+                                        request,
+                                        process.as_ref().map_err(|e| e.clone())?.clone(),
+                                    )
                                 }) {
                                 Ok(change) => emit(&output, change).await,
                                 Err(error) => Err(error),

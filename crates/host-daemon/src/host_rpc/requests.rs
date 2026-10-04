@@ -3,42 +3,55 @@ use agent_protocol::{ids::RequestId, requests::*, session::RequestDelivery};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The Host keeps normalized requests and source identity. The adapter owns
+/// answer mappings and the resource to which an answer can be written.
+#[async_trait::async_trait]
+pub(crate) trait AnswerSource: Send + Sync {
+    fn is_alive(&self) -> bool;
+    async fn prepare(
+        &self,
+        native_id: &Value,
+        body: &RequestBody,
+        answer: &Answer,
+    ) -> Result<super::agent::AnswerWrite, super::service::Failure>;
+}
 #[derive(Clone)]
 pub(crate) struct RequestOrigin {
     pub instance: uuid::Uuid,
     pub native_id: Value,
-    pub destination: RequestDestination,
+    pub provider: agent_protocol::session::ProviderKind,
+    pub source: std::sync::Arc<dyn AnswerSource>,
 }
-
-#[derive(Clone)]
-pub(crate) enum RequestDestination {
-    Codex {
-        stopped: tokio_util::sync::CancellationToken,
-    },
-    Claude {
-        input: tokio::sync::mpsc::Sender<crate::claude::Command>,
-    },
-}
-
-impl RequestOrigin {
-    pub(crate) fn provider(&self) -> agent_protocol::session::ProviderKind {
-        match self.destination {
-            RequestDestination::Codex { .. } => agent_protocol::session::ProviderKind::Codex,
-            RequestDestination::Claude { .. } => agent_protocol::session::ProviderKind::Claude,
+#[cfg(test)]
+pub(crate) fn unavailable_origin(
+    instance: uuid::Uuid,
+    native_id: Value,
+    stopped: tokio_util::sync::CancellationToken,
+) -> RequestOrigin {
+    struct UnavailableSource(tokio_util::sync::CancellationToken);
+    #[async_trait::async_trait]
+    impl AnswerSource for UnavailableSource {
+        fn is_alive(&self) -> bool {
+            !self.0.is_cancelled()
+        }
+        async fn prepare(
+            &self,
+            _: &Value,
+            _: &RequestBody,
+            _: &Answer,
+        ) -> Result<super::agent::AnswerWrite, super::service::Failure> {
+            Err(super::service::Failure::new(
+                "answer_not_sent",
+                "request source has changed",
+            ))
         }
     }
-    pub fn is_alive(&self) -> bool {
-        match &self.destination {
-            RequestDestination::Codex { stopped } => !stopped.is_cancelled(),
-            RequestDestination::Claude { input } => !input.is_closed(),
-        }
+    RequestOrigin {
+        instance,
+        native_id,
+        provider: agent_protocol::session::ProviderKind::Codex,
+        source: std::sync::Arc::new(UnavailableSource(stopped)),
     }
-}
-
-pub(crate) struct PendingRequest {
-    pub request: Request,
-    pub origin: RequestOrigin,
-    pub answers: NativeAnswers,
 }
 
 pub(crate) struct AdaptedRequest {

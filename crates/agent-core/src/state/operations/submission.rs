@@ -15,14 +15,25 @@ pub struct Dictate {
 }
 
 impl Operation for Dictate {
-    type Output = (Arc<Draft>, rpc::Transcription);
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        let draft = context
-            .snapshot
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Dictation {
+            draft_key: self.draft_key.clone(),
+        })
+    }
+    type Input = Arc<Draft>;
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        Ok(snapshot
             .drafts
             .get(&self.draft_key)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default())
+    }
+    type Output = (Arc<Draft>, rpc::Transcription);
+    async fn run(
+        &self,
+        draft: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         Ok((
             draft,
             context
@@ -80,13 +91,30 @@ pub struct Respond {
     pub answer: Answer,
 }
 impl Operation for Respond {
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::Control
+    }
+
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Request {
+            id: self.request_id.clone(),
+        })
+    }
+    type Input = Arc<Request>;
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        snapshot
+            .request(&self.request_id)
+            .cloned()
+            .ok_or_else(|| PeerError::InvalidMessage("server request is no longer pending".into()))
+    }
     type Output = ();
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        let request = context.snapshot.request(&self.request_id).ok_or_else(|| {
-            PeerError::InvalidMessage("server request is no longer pending".into())
-        })?;
-        context.client.respond(request, &self.answer).await
+    async fn run(
+        &self,
+        request: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        context.client.respond(&request, &self.answer).await
     }
 }
 
@@ -99,6 +127,12 @@ pub struct StartSubmission {
     pub draft: Arc<Draft>,
 }
 impl Operation for StartSubmission {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Submission {
+            draft_key: self.draft_key.clone(),
+        })
+    }
+    no_input!();
     fn submission_id(&self) -> Option<&str> {
         Some(&self.client_user_message_id)
     }
@@ -111,7 +145,11 @@ impl Operation for StartSubmission {
             id: output.thread.id.clone().expect("validated thread ID"),
         }
     }
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         context
             .call(&CreateSession {
                 provider: self.provider,
@@ -190,6 +228,26 @@ pub enum SubmissionProgress {
     Sent(Option<agent_protocol::ids::TurnId>),
 }
 impl Operation for SendSubmission {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Submission {
+            draft_key: self.thread_id.clone().into(),
+        })
+    }
+    type Input = Option<u32>;
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        let cached = snapshot.conversations.get(&self.thread_id);
+        Ok(
+            (!snapshot.subscriptions.contains_key(&self.thread_id)).then(|| {
+                ReadThread::history_limit(
+                    5,
+                    cached.and_then(|thread| thread.history_limit),
+                    cached
+                        .and_then(|thread| thread.turns.as_ref())
+                        .map_or(0, Vec::len),
+                )
+            }),
+        )
+    }
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn submission_id(&self) -> Option<&str> {
         Some(&self.client_user_message_id)
@@ -203,15 +261,16 @@ impl Operation for SendSubmission {
             },
         }
     }
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
-        if !context.snapshot.subscriptions.contains_key(&self.thread_id) {
-            let cached = context.snapshot.conversations.get(&self.thread_id);
-            let open = ReadThread::new(self.thread_id.clone()).with_history(
-                cached.and_then(|thread| thread.history_limit),
-                cached
-                    .and_then(|thread| thread.turns.as_ref())
-                    .map_or(0, Vec::len),
-            );
+    async fn run(
+        &self,
+        limit: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        if let Some(limit) = limit {
+            let open = ReadThread {
+                limit,
+                ..ReadThread::new(self.thread_id.clone())
+            };
             return context
                 .call(&open)
                 .await
@@ -295,13 +354,23 @@ pub struct UploadAttachment {
 }
 
 impl Operation for UploadAttachment {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Attachment {
+            draft_key: self.draft_key.clone(),
+        })
+    }
+    no_input!();
     type Output = String;
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         snapshot.error = None;
         Ok(())
     }
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         let session = context.session.ok_or_else(|| {
             PeerError::InvalidMessage("binary transfers require an iroh session".into())
         })?;

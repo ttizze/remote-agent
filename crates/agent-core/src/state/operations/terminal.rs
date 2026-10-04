@@ -4,8 +4,11 @@ pub use agent_protocol::operations::StartTerminal;
 
 impl Operation for StartTerminal {
     rpc_operation!();
-    fn terminal_handle(&self) -> Option<&str> {
-        Some(&self.handle)
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::Terminal {
+            handle: self.handle.clone(),
+            starts: true,
+        }
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         if snapshot
@@ -60,8 +63,11 @@ impl Operation for ResizeTerminal {
         }
         Vec::new()
     }
-    fn terminal_handle(&self) -> Option<&str> {
-        Some(&self.handle)
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::Terminal {
+            handle: self.handle.clone(),
+            starts: false,
+        }
     }
 }
 
@@ -84,12 +90,20 @@ impl rpc::RpcMethod for WriteTerminal {
 }
 
 impl Operation for WriteTerminal {
-    fn terminal_handle(&self) -> Option<&str> {
-        Some(&self.handle)
+    no_input!();
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::Terminal {
+            handle: self.handle.clone(),
+            starts: false,
+        }
     }
     type Output = ();
 
-    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
         // The actor sends each paste chunk in order.
         for chunk in self.data.chunks(16 * 1024) {
             context
@@ -107,8 +121,11 @@ pub use agent_protocol::operations::DetachTerminal;
 
 impl Operation for DetachTerminal {
     rpc_operation!();
-    fn terminal_handle(&self) -> Option<&str> {
-        Some(&self.handle)
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::Terminal {
+            handle: self.handle.clone(),
+            starts: false,
+        }
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         if let Some(terminal) = shared_mut(&mut snapshot.terminals, &self.handle)
@@ -133,7 +150,10 @@ rpc::rpc_method!(KillTerminal, KillTerminal, |self| rpc::TerminalKill {
 });
 impl Operation for KillTerminal {
     rpc_operation!();
-    fn terminal_handle(&self) -> Option<&str> {
-        Some(&self.handle)
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::Terminal {
+            handle: self.handle.clone(),
+            starts: false,
+        }
     }
 }
