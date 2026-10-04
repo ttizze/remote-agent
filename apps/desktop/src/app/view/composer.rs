@@ -299,7 +299,6 @@ impl Desktop {
                 },
             )
             .xsmall()
-            .size(px(28.))
             .rounded_full();
             files = files.child(if file.is_image {
                 let group = SharedString::from(format!("draft-image-{i}"));
@@ -336,7 +335,7 @@ impl Desktop {
                 h_flex()
                     .gap_2()
                     .child(file.name.clone())
-                    .child(remove.bg(rgb(0x222222)))
+                    .child(remove.size(px(28.)).bg(rgb(0x222222)))
                     .into_any_element()
             });
         }
