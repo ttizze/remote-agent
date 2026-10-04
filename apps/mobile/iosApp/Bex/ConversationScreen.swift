@@ -134,7 +134,6 @@ struct ThreadScreen: View {
                         ForEach(rows) { row in
                             conversationRow(row)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(row.id)
                         }
                     }
                     .scrollTargetLayout()
