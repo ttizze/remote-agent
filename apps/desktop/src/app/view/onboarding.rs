@@ -210,7 +210,7 @@ impl Desktop {
                                     .child("セットアップ"),
                             )
                             .child(
-                                self.icon_button(
+                                Self::icon_button(
                                     "onboarding-refresh",
                                     IconName::RotateCw,
                                     "接続とAIの状態を再確認",

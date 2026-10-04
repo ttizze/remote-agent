@@ -30,7 +30,7 @@ impl Desktop {
             .px_2()
             .gap_3()
             .child(
-                self.icon_button(
+                Self::icon_button(
                     "cancel-dictation",
                     IconName::Close,
                     "録音を取り消す (Esc)",
@@ -72,7 +72,7 @@ impl Desktop {
                     .into_any_element()
             })
             .child(
-                self.icon_button(
+                Self::icon_button(
                     "stop-dictation",
                     IconName::Pause,
                     "録音を終了して文字起こし",
@@ -83,7 +83,7 @@ impl Desktop {
                 .disabled(!recording),
             )
             .child(
-                self.icon_button(
+                Self::icon_button(
                     "send-dictation",
                     IconName::ArrowUp,
                     "文字起こしして送信",

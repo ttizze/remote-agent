@@ -481,8 +481,174 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
             .any(|thread| thread.id.as_ref() == Some(&session))
     );
     assert_eq!(
+        listing.data.len(),
+        101,
+        "keep the earlier healthy Codex page"
+    );
+    assert_eq!(
         listing.provider_errors.unwrap()["codex"]["code"],
         "invalid_session_list"
+    );
+    local.close().await;
+    host.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(directory.path()).unwrap();
+    let threads: Vec<_> = (0..2000)
+        .map(|index| {
+            serde_json::json!({
+                "id":format!("page-{index:04}"),"cwd":root,
+                "name":format!("Conversation {index:04}"),"updatedAt":index,
+            })
+        })
+        .collect();
+    let fixture = root.join("list-fixture.json");
+    std::fs::write(&fixture, serde_json::to_vec(&threads).unwrap()).unwrap();
+    let host = start(&root, Arc::new(Memory::default())).await;
+    let local = host.local().await.unwrap();
+    let session = create(&local.peer, ProviderKind::Claude, &root).await;
+    let (_, mut events) = open(&local.peer, &session).await;
+    local
+        .peer
+        .call(&submission(&session, "saved conversation"))
+        .await
+        .unwrap();
+    assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
+    let page_reads = || {
+        std::fs::read_to_string(root.join("rpc-trace.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|entry| entry["method"] == "thread/list")
+            .count()
+    };
+    let listing = local
+        .peer
+        .call(&op::ListSessions::new(Default::default()))
+        .await
+        .unwrap();
+    assert_eq!(listing.data[0].id.as_ref(), Some(&session));
+    assert_eq!(listing.data.len(), 5);
+    assert_eq!(listing.data[1].id.as_ref().unwrap().id, "page-1999");
+    assert_eq!(listing.data[4].id.as_ref().unwrap().id, "page-1996");
+    assert!(listing.has_more_chats);
+    assert!(listing.provider_errors.is_none());
+    assert_eq!(page_reads(), 1, "initial list must not fetch all 20 pages");
+
+    let expanded = local
+        .peer
+        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+            chat_limit: 150,
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(expanded.data.len(), 150);
+    assert_eq!(expanded.data[0].id.as_ref(), Some(&session));
+    assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "page-1851");
+    assert!(expanded.has_more_chats);
+    assert_eq!(
+        page_reads(),
+        3,
+        "expansion needs only two additional page reads"
+    );
+
+    let found = local
+        .peer
+        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+            search_term: "Conversation 1900".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(found.data.len(), 1);
+    assert_eq!(found.data[0].id.as_ref().unwrap().id, "page-1900");
+    assert!(!found.has_more_chats);
+    assert_eq!(page_reads(), 4);
+
+    let tied: Vec<_> = (0..250).rev().map(|index| serde_json::json!({
+        "id":format!("equal-{index:03}"),"cwd":root,"name":"Equal timestamps","updatedAt":100,
+    })).collect();
+    std::fs::write(&fixture, serde_json::to_vec(&tied).unwrap()).unwrap();
+    let listing = local
+        .peer
+        .call(&op::ListSessions::new(Default::default()))
+        .await
+        .unwrap();
+    assert_eq!(listing.data[0].id.as_ref(), Some(&session));
+    assert_eq!(
+        listing
+            .data
+            .iter()
+            .skip(1)
+            .map(|thread| thread.id.as_ref().unwrap().id.as_str())
+            .collect::<Vec<_>>(),
+        ["equal-000", "equal-001", "equal-002", "equal-003"]
+    );
+    assert!(listing.has_more_chats);
+    assert_eq!(
+        page_reads(),
+        7,
+        "finish timestamp ties across native page boundaries"
+    );
+
+    let projects: Vec<_> = (0..3)
+        .map(|index| {
+            serde_json::json!({
+                "id":format!("project-{index}"), "name":format!("Project {index}"),
+                "roots":[{"path":root.join(format!("project-{index}"))}],
+            })
+        })
+        .collect();
+    std::fs::write(
+        root.join("bex-projects.json"),
+        serde_json::to_vec(&projects).unwrap(),
+    )
+    .unwrap();
+    let scoped: Vec<_> = (0..2000).map(|index| serde_json::json!({
+        "id":format!("scoped-{index:04}"), "name":"Scoped conversation", "updatedAt":index,
+        "cwd":if index % 4 == 3 { root.clone() } else { root.join(format!("project-{}", index % 4)) },
+    })).collect();
+    std::fs::write(&fixture, serde_json::to_vec(&scoped).unwrap()).unwrap();
+    let listing = local
+        .peer
+        .call(&op::ListSessions::new(Default::default()))
+        .await
+        .unwrap();
+    assert_eq!(
+        listing
+            .projects
+            .iter()
+            .map(|project| project.id.as_str())
+            .collect::<Vec<_>>(),
+        ["project-2", "project-1", "project-0"]
+    );
+    assert_eq!(listing.data.len(), 20);
+    assert_eq!(listing.more_project_ids.len(), 3);
+    assert!(listing.has_more_chats);
+    assert_eq!(
+        page_reads(),
+        8,
+        "stop when all visible sections have their lookahead"
+    );
+    let expanded = local
+        .peer
+        .call(&op::ListSessions::new(agent_protocol::models::ListQuery {
+            project_thread_limits: [("project-0".into(), 150)].into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(expanded.data.len(), 165);
+    assert_eq!(expanded.data[159].id.as_ref().unwrap().id, "scoped-1400");
+    assert_eq!(expanded.data[160].id.as_ref(), Some(&session));
+    assert_eq!(
+        page_reads(),
+        15,
+        "expand only the requested project before stopping"
     );
     local.close().await;
     host.close().await.unwrap();
