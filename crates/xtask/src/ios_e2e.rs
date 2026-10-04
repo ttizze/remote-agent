@@ -56,7 +56,15 @@ fn check_summary(summary: &Value, expected: usize) -> Result<()> {
         || summary.get("failedTests").and_then(Value::as_u64) != Some(0)
         || summary.get("skippedTests").and_then(Value::as_u64) != Some(0)
     {
-        return Err("iOS tests did not pass completely".into());
+        return Err(format!(
+            "iOS tests did not pass completely: expected {expected} passed, 0 failed, 0 skipped; \
+             observed passed={}, failed={}, skipped={}; failures: {}",
+            summary["passedTests"],
+            summary["failedTests"],
+            summary["skippedTests"],
+            summary["testFailures"]
+        )
+        .into());
     }
     Ok(())
 }
@@ -117,6 +125,7 @@ use tokio::{process::Command, sync::watch, task::JoinSet};
 
 const BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(300);
+const SIMULATOR_DEVICE_TYPE: &str = "com.apple.CoreSimulator.SimDeviceType.iPhone-17";
 
 #[derive(Serialize)]
 struct WorkerResult {
@@ -125,6 +134,12 @@ struct WorkerResult {
     #[serde(rename = "setupSeconds")]
     setup_seconds: f64,
     bundle: PathBuf,
+}
+
+#[derive(Clone)]
+enum SimulatorSource {
+    Template(String),
+    Runtime(String),
 }
 
 fn named_devices<'a>(devices: &'a Value, name: &str) -> Result<Vec<&'a Value>> {
@@ -225,7 +240,7 @@ async fn template(
                 "simctl",
                 "create",
                 &preparing,
-                "com.apple.CoreSimulator.SimDeviceType.iPhone-17",
+                SIMULATOR_DEVICE_TYPE,
                 runtime
             ],
             cwd,
@@ -257,7 +272,7 @@ async fn worker(
     tests: Vec<String>,
     target: PathBuf,
     source: PathBuf,
-    template: String,
+    simulator_source: SimulatorSource,
     prefix: PathBuf,
     without_codex: bool,
     cancel: watch::Receiver<bool>,
@@ -306,7 +321,11 @@ async fn worker(
                 if Instant::now() >= deadline { return Err(format!("{label}: UI fixture timed out").into()); }
                 tokio::select! { _ = tokio::time::sleep(Duration::from_millis(100)) => {}, _ = supervision::cancelled(cancel.clone()) => return Err(supervision::interrupted()) }
             }
-            let simulator = supervision::run(&args!["xcrun", "simctl", "clone", &template, &name], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
+            let create = match simulator_source {
+                SimulatorSource::Template(template) => args![vec; "xcrun", "simctl", "clone", template, &name],
+                SimulatorSource::Runtime(runtime) => args![vec; "xcrun", "simctl", "create", &name, SIMULATOR_DEVICE_TYPE, runtime],
+            };
+            let simulator = supervision::run(&create, &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
             let simulator = std::str::from_utf8(&simulator.stdout)?.trim();
             for arguments in [
                 args![vec; "xcrun", "simctl", "boot", simulator],
@@ -340,7 +359,7 @@ async fn worker(
     // Stop the Host before potentially slow Simulator cleanup.
     let shutdown = host.stop(true, Duration::from_secs(10)).await;
     // Cleanup ignores cancellation, and recovers devices by this run's
-    // unique name even if simctl clone was cancelled before returning an ID.
+    // unique name even if simctl create/clone was cancelled before returning an ID.
     let cleanup: Result<()> = async {
         match fs::remove_file(&run) {
             Ok(()) => {}
@@ -527,7 +546,13 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
     .await?;
     let runtime = runtime(&serde_json::from_slice(&runtimes.stdout)?)?;
     let template_started = Instant::now();
-    let template = template(&state, &runtime, &records, &cwd, &log, &cancel).await?;
+    // Hosted CI devices disappear with the runner. Migrate the worker's own
+    // device once instead of migrating, shutting down, cloning and booting again.
+    let simulator_source = if std::env::var("CI").as_deref() == Ok("true") {
+        SimulatorSource::Runtime(runtime)
+    } else {
+        SimulatorSource::Template(template(&state, &runtime, &records, &cwd, &log, &cancel).await?)
+    };
     let template_seconds = template_started.elapsed().as_secs_f64();
     let runs = fs::read_dir(&products)?
         .map(|entry| entry.map(|entry| entry.path()))
@@ -552,7 +577,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
             tests,
             target.clone(),
             runs[0].clone(),
-            template.clone(),
+            simulator_source.clone(),
             records.join(format!("worker-{}", index + 1)),
             without_codex,
             cancel.clone(),
@@ -704,5 +729,14 @@ mod tests {
         ] {
             assert!(check_summary(&summary, 2).is_err());
         }
+        let failure = check_summary(
+            &json!({"passedTests": 1, "failedTests": 1, "skippedTests": 0,
+                "testFailures": [{"testName": "testSimulatorBrowser", "failureText": "startup timed out"}]}),
+            2,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(failure.contains("testSimulatorBrowser"));
+        assert!(failure.contains("startup timed out"));
     }
 }

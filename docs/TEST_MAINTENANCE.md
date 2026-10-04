@@ -186,8 +186,17 @@ transfer server just to delete that check would reverse A14.
   They partition the same maintained test list with `BEX_IOS_TEST_SHARDS=4`
   and zero-based `BEX_IOS_TEST_SHARD` values 0 through 3. Each runs one isolated
   Simulator/Host pair; an omitted shard setting selects the complete list.
+  The maintained list interleaves long and short tests based on CI durations
+  so equal test counts do not leave one runner with all the slow cases.
   Each runner has separate processes,
-  memory and logs. Logs and Xcode result bundles are
+  memory and logs. Mac and iPhone Rust dependency caches are separate; only
+  shard zero saves each cache. All iPhone shards restore the Swift bindings,
+  headless Markdown build and Xcode DerivedData cache, with one shard saving
+  it even when acceptance fails. Builders check the current source/toolchain
+  hashes before reusing Swift outputs, and still rebuild and exercise current
+  Rust code. Hosted CI creates each disposable Simulator directly from the
+  runtime, avoiding a template migration followed by a second worker boot.
+  Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.
 - `scripts/dev-env.sh just unit-tests` runs every Rust workspace library
@@ -230,9 +239,10 @@ transfer server just to delete that check would reverse A14.
   conversation contracts on one fresh isolated Simulator/Host pair.
   Each pair owns its history, failure controls and app storage.
   Set `BEX_IOS_TEST_WORKERS=1` for a serial audit, or 2–10 for parallel runs.
-  An initialized, app-free Simulator template is kept shut down for this
-  repository and runtime. Each worker clones it into its own disposable device, then
-  installs the current app and fixtures. Initial OS migration runs only when
+  On persistent development machines, an initialized, app-free Simulator template
+  is kept shut down for this repository and runtime. Each worker clones it into
+  its own disposable device, then installs the current app and fixtures.
+  Initial OS migration runs only when
   preparing the template; test devices and Hosts are still removed after each run.
   The runner retains Xcode derived data under the Cargo target's
   `qa/ios-derived-data`, always builds the current revision, and holds a

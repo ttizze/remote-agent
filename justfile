@@ -67,42 +67,42 @@ android-e2e:
     ./gradlew :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest --console=plain
     nix develop .#android-test --command bash scripts/android-e2e.sh
 
-# Native conversation acceptance used by Apple CI and manual checks.
+# Native conversation acceptance; interleaved shards balance measured CI durations.
 conversation-ui:
     scripts/ios-e2e.sh \
-        testSimulatorNativeTerminalRetainsShellAfterReopening \
-        testSimulatorNativeTerminalPastesMultilineText \
-        testSimulatorNativeTerminalDoesNotDuplicateQueryResponses \
-        testSimulatorBrowserIsSeparateFromConversationAndPreservesPage \
-        testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
-        testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \
-        testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
-        testSimulatorUsesNativeHostNavigationAndPairingDismissal \
-        testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
-        testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
-        testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
-        testSimulatorFillsInitialHistoryViewportWithoutScrolling \
-        testSimulatorReopensRunningLongHistoryWithoutBlankViewport \
-        testSimulatorKeepsLatestVisibleAcrossRepeatedLongHistorySubmissions \
-        testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
-        testSimulatorRendersMarkdownTableAndReopensIt \
-        testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
-        testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
-        testSimulatorOpensOnlyTheTappedImageAndSavesIt \
-        testSimulatorCopiesOnlySelectedMessageText \
-        testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
-        testSimulatorOpensSideChatWithoutLosingOriginalDraft \
-        testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
-        testSimulatorCanStartAConversationInAProject \
-        testSimulatorModelDefaultsPersistAndApplyOnlyToNewConversations \
         testSimulatorModelDefaultsInheritAndPersistAcrossScopes \
-        testSimulatorModelPickerUsesAgentRailAndCompactControls \
-        testSimulatorOpensTasksBeforeHistoryReadFinishes \
-        testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
-        testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
+        testSimulatorNativeTerminalRetainsShellAfterReopening \
+        testSimulatorModelDefaultsPersistAndApplyOnlyToNewConversations \
         testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
+        testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
+        testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
+        testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
+        testSimulatorBrowserIsSeparateFromConversationAndPreservesPage \
+        testSimulatorUsesNativeHostNavigationAndPairingDismissal \
+        testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
+        testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
+        testSimulatorKeepsLatestVisibleAcrossRepeatedLongHistorySubmissions \
+        testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
+        testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
+        testSimulatorCopiesOnlySelectedMessageText \
+        testSimulatorCanStartAConversationInAProject \
+        testSimulatorReopensCompletedHistoryCollapsed \
+        testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
+        testSimulatorReopensRunningLongHistoryWithoutBlankViewport \
+        testSimulatorOpensSideChatWithoutLosingOriginalDraft \
+        testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \
+        testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
+        testSimulatorOpensOnlyTheTappedImageAndSavesIt \
+        testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
+        testSimulatorRendersMarkdownTableAndReopensIt \
+        testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
         testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
-        testSimulatorReopensCompletedHistoryCollapsed
+        testSimulatorModelPickerUsesAgentRailAndCompactControls \
+        testSimulatorNativeTerminalPastesMultilineText \
+        testSimulatorOpensTasksBeforeHistoryReadFinishes \
+        testSimulatorNativeTerminalDoesNotDuplicateQueryResponses \
+        testSimulatorFillsInitialHistoryViewportWithoutScrolling \
+        testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft
 
 # Exercise the real iroh Host through the headless client.
 iroh-e2e:
