@@ -766,7 +766,7 @@ impl Desktop {
                 .gap_2()
                 .h(px(44.))
                 .child(
-                    self.icon_button(
+                    Self::icon_button(
                         "model-panel-back",
                         IconName::ArrowLeft,
                         "戻る",
@@ -1046,7 +1046,7 @@ impl Desktop {
         } else {
             "Fast：オフ"
         };
-        self.icon_button(id, fast_icon(controls.fast), label, cx, move |s, _, _| {
+        Self::icon_button(id, fast_icon(controls.fast), label, cx, move |s, _, _| {
             s.dispatch(Intent::SelectServiceTier {
                 thread_id: s.draft_key().clone(),
                 service_tier: next.clone(),

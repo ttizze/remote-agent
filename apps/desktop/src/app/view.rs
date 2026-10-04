@@ -224,7 +224,7 @@ impl Desktop {
                 .child(title),
         );
         header = header.child(
-            self.icon_button(
+            Self::icon_button(
                 "panel-toggle",
                 if self.panel_open {
                     IconName::PanelRightClose
@@ -296,7 +296,7 @@ impl Desktop {
                                 .text_color(rgb(0xff8e86))
                                 .child(error_message(&self.error)),
                         )
-                        .child(self.icon_button(
+                        .child(Self::icon_button(
                             "dismiss-error",
                             IconName::Close,
                             "エラーを閉じる",
@@ -337,18 +337,18 @@ impl Desktop {
             }))
     }
     pub(super) fn icon_button(
-        &self,
-        id: &'static str,
+        id: impl Into<SharedString>,
         icon: impl Into<Icon>,
-        label: &'static str,
+        label: impl Into<SharedString>,
         cx: &Context<Self>,
         action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Button {
-        Button::new(id)
+        let label = label.into();
+        Button::new(id.into())
             .icon(icon.into())
             .small()
             .ghost()
-            .tooltip(label)
+            .tooltip(label.clone())
             .accessibility_label(label)
             .on_click(cx.listener(move |s, _, w, cx| {
                 action(s, w, cx);

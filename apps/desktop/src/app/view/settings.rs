@@ -125,7 +125,7 @@ impl Desktop {
                             .text_color(rgb(0xff8e86))
                             .child(error_message(&self.error)),
                     )
-                    .child(self.icon_button(
+                    .child(Self::icon_button(
                         "settings-dismiss-error",
                         IconName::Close,
                         "エラーを閉じる",
@@ -354,7 +354,7 @@ impl Desktop {
                                     .child("ワークスペース"),
                             )
                             .child(
-                                self.icon_button(
+                                Self::icon_button(
                                     "refresh-context",
                                     IconName::RotateCw,
                                     "変更を更新",
@@ -439,7 +439,7 @@ impl Desktop {
                                     .child("ソース"),
                             )
                             .child(
-                                self.icon_button(
+                                Self::icon_button(
                                     "context-attach",
                                     IconName::Plus,
                                     "ソースを追加",
@@ -475,7 +475,7 @@ impl Desktop {
                         .child("作成済みのワークツリー"),
                 )
                 .child(
-                    self.icon_button(
+                    Self::icon_button(
                         "refresh-worktrees",
                         IconName::RotateCw,
                         "ワークツリー一覧を更新",

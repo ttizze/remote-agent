@@ -216,7 +216,7 @@ impl Desktop {
                                 ),
                             )
                             .child(
-                                self.icon_button(
+                                Self::icon_button(
                                     "new-chat",
                                     new_chat_icon(),
                                     "新しいチャット",
@@ -247,7 +247,7 @@ impl Desktop {
                     .justify_between()
                     .py_2()
                     .child(
-                        self.icon_button(
+                        Self::icon_button(
                             "sidebar-settings",
                             IconName::Settings,
                             "設定を開く",
@@ -261,7 +261,7 @@ impl Desktop {
                         )
                         .debug_selector(|| "sidebar-settings".into()),
                     )
-                    .child(self.icon_button(
+                    .child(Self::icon_button(
                         "refresh-threads",
                         IconName::RotateCw,
                         "会話を更新",
