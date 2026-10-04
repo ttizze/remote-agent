@@ -75,7 +75,7 @@
             '';
           };
           android-test = pkgs.mkShell {
-            packages = [ androidTestSdk pkgs.jdk21 rustToolchain ];
+            packages = [ androidTestSdk pkgs.jdk21 rustToolchain pkgs.coreutils ];
             JAVA_HOME = pkgs.jdk21.home;
             ANDROID_HOME = "${androidTestSdk}/libexec/android-sdk";
             ANDROID_SDK_ROOT = "${androidTestSdk}/libexec/android-sdk";
