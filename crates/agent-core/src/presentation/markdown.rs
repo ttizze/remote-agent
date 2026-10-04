@@ -89,6 +89,11 @@ fn image<'a>(node: &'a Node, definitions: &HashMap<&str, &'a str>) -> Option<(&'
 
 /// Separate images for Host-backed desktop loading without interpreting Markdown again in the client.
 pub fn markdown_without_images(source: &str) -> (Cow<'_, str>, Vec<String>) {
+    // Inline and reference images both start with `![`. Most streamed text has
+    // no image opener, so leave parsing to the desktop renderer in that case.
+    if !source.contains("![") {
+        return (Cow::Borrowed(source), Vec::new());
+    }
     fn visit(
         node: &Node,
         definitions: &HashMap<&str, &str>,
@@ -497,6 +502,56 @@ mod tests {
                     .iter()
                     .any(|run| run.link.as_deref() == Some("https://example.com/reference"))
             );
+        }
+    }
+
+    #[test]
+    fn desktop_image_extraction_borrows_image_free_markdown() {
+        for source in [
+            "",
+            "Hello! **日本語** [link](target)",
+            r"!\[escaped](image.png)",
+            "# Heading\n\n> quoted\n\n- list\n\n`code`",
+            "[picture]: image.png\n\n[picture]",
+            "&#33;[alt](image.png)",
+            "!&#91;alt](image.png)",
+            TABLE,
+        ] {
+            let (rendered, images) = markdown_without_images(source);
+            assert!(matches!(rendered, Cow::Borrowed(_)));
+            assert_eq!(rendered, source);
+            assert!(images.is_empty());
+        }
+    }
+
+    #[test]
+    fn desktop_image_extraction_preserves_literal_image_openers() {
+        for source in [
+            r"\![escaped](image.png)",
+            "`![inline code](image.png)`",
+            "```markdown\n![fenced code](image.png)\n```",
+            "![unfinished](",
+            "![undefined reference]",
+        ] {
+            let (rendered, images) = markdown_without_images(source);
+            assert!(matches!(rendered, Cow::Borrowed(_)));
+            assert_eq!(rendered, source);
+            assert!(images.is_empty());
+        }
+    }
+
+    #[test]
+    fn desktop_image_extraction_handles_every_reference_form() {
+        for image in [
+            "![alt](image.png)",
+            "![alt][picture]",
+            "![picture][]",
+            "![picture]",
+        ] {
+            let source = format!("前 {image} 後\n\n[picture]: image.png");
+            let (rendered, images) = markdown_without_images(&source);
+            assert_eq!(rendered, "前  後\n\n[picture]: image.png");
+            assert_eq!(images, ["image.png"]);
         }
     }
 
