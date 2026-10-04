@@ -231,6 +231,66 @@ async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_nav
 }
 
 #[tokio::test]
+async fn workspace_refresh_bursts_keep_the_latest_directory_and_leave_lists_available() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let first = store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+        cwd: "/old".into(),
+    }));
+    let first_request = read(&mut reader).await;
+    assert_eq!(first_request["method"], "host/workspace/review");
+    let mut receipts = Vec::new();
+    for index in 0..40 {
+        receipts.push(store.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
+            cwd: format!("/latest/{index}"),
+        })));
+    }
+    let listing = store.dispatch(Intent::ListSessions(op::ListSessions::new(
+        Default::default(),
+    )));
+    let list_request = read(&mut reader).await;
+    assert_eq!(
+        list_request["method"], "host/session/list",
+        "workspace refreshes must not fan out or block independent reads"
+    );
+    writer.reply(&list_request, json!({"result":{"data":[],"projects":[],"moreProjectIds":[],"hasMoreProjects":false,"hasMoreChats":false}})).await.unwrap();
+    listing.await.unwrap();
+    writer
+        .reply(&first_request, json!({"result":review()}))
+        .await
+        .unwrap();
+    first.await.unwrap();
+    assert!(
+        store.snapshot().workspace.review.is_none(),
+        "an obsolete directory must not publish its diff"
+    );
+    let latest = read(&mut reader).await;
+    assert_eq!(latest["method"], "host/workspace/review");
+    assert_eq!(latest["params"], json!({"cwd":"/latest/39"}));
+    let mut current_review = review();
+    current_review["branch"] = "latest".into();
+    writer
+        .reply(&latest, json!({"result":current_review}))
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        futures_util::future::try_join_all(receipts),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        store.snapshot().workspace.review_cwd.as_deref(),
+        Some("/latest/39")
+    );
+    assert_eq!(
+        store.snapshot().workspace.review.as_ref().unwrap().branch,
+        "latest"
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn failed_list_refresh_releases_the_next_request_and_close_releases_its_waiters() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let refresh = || {
@@ -3161,10 +3221,10 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
             json!({"accounts":[],"selected":{},"error":null}),
         ),
     ] {
-        let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+        let (store, mut reader, writer) = setup(Snapshot::default()).await;
         let loading = store.dispatch(intent);
         let request = read(&mut reader).await;
-        new_chat(&store, &mut reader, &mut writer, "/new").await;
+        let navigation = store.dispatch(Intent::NewChat { cwd: "/new".into() });
         let navigated = store.snapshot();
         writer
             .reply(&request, json!({"result":output}))
@@ -3177,6 +3237,14 @@ async fn navigation_invalidates_all_view_reads_and_their_errors() {
             "old {} updated the new view",
             request["method"]
         );
+        let request = read(&mut reader).await;
+        assert_eq!(request["method"], "host/workspace/review");
+        assert_eq!(request["params"], json!({"cwd":"/new"}));
+        writer
+            .reply(&request, json!({"result":review()}))
+            .await
+            .unwrap();
+        navigation.await.unwrap();
         store.close().await.unwrap();
     }
     let (store, mut reader, mut writer) = setup(Snapshot::default()).await;

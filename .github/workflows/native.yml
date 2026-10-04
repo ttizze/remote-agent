@@ -105,6 +105,8 @@ jobs:
     name: ${{ matrix.client }}
     strategy:
       fail-fast: false
+      # Optional PRs retain every check without occupying all five Apple slots.
+      max-parallel: ${{ github.event_name == 'pull_request' && 1 || 5 }}
       matrix:
         include:
           - client: Mac

@@ -136,6 +136,9 @@ pub(in crate::state) fn review_workspace(snapshot: &mut Snapshot) -> Option<Effe
 }
 
 impl Operation for ReviewWorkspace {
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::LatestReview
+    }
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::WorkspaceReview)
     }
