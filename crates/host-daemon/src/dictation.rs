@@ -943,7 +943,8 @@ mod tests {
         pending_preparation: bool,
     ) -> Result<String, String> {
         tokio::time::timeout(Duration::from_secs(if pending_preparation { 25 } else { 3 }), async {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            // Keep IPv4 port-discovery probes out of the isolated provider.
+            let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let token = format!("local.{}.signature", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
                 br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"isolated-test-account"}}"#));
