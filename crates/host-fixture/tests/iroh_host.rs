@@ -2692,7 +2692,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             ("deleted-branch", None),
         ] {
             match step {
-                "deleted-merged" => { git(&repo, &["merge", "--ff-only", "task"]); }
+                "deleted-merged" => { git(&repo, &["merge", "--no-ff", "-m", "merge remaining work", "task"]); }
                 "missing-metadata" => {
                     native_rows[1]["gitInfo"] = Value::Null;
                     std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&native_rows).unwrap()).unwrap();
