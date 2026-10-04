@@ -65,8 +65,14 @@ test_status=0
 cargo xtask android-network-permission "$serial" "$log.network.log" "$server_port" || test_status=$?
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission.png "$log.permission.png" || test_status=1
 if [[ $test_status != 0 ]]; then
+    for extension in png xml txt; do
+        failure_file="/sdcard/Android/data/dev.remoteagent.mobile/files/network-permission-failure.$extension"
+        if adb -P "$server_port" -s "$serial" shell test -f "$failure_file"; then
+            adb -P "$server_port" -s "$serial" pull "$failure_file" "$log.permission-failure.$extension" || true
+        fi
+    done
     adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.startup-failure.png" || true
-    adb -P "$server_port" -s "$serial" logcat -d -t 150 -s AndroidRuntime ActivityManager >"$log.startup-failure.log" || true
+    adb -P "$server_port" -s "$serial" logcat -b main -b system -b crash -d -v threadtime -t 2000 >"$log.startup-failure.log" || true
     exit "$test_status"
 fi
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission-granted.png "$log.granted.png"

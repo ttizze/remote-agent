@@ -43,11 +43,37 @@ class NetworkPermissionTest {
             device.findObject(deny).click()
             assertTrue(device.wait(Until.hasObject(By.text("アプリの設定を開く")), 10_000))
             assertFalse(device.hasObject(By.text("PCとペアリング")))
-            assertThrows(IOException::class.java) { readLocalHost() }
+            val deniedSocketException = assertThrows(IOException::class.java) { readLocalHost() }
             val settingsButton = device.wait(Until.findObject(By.text("アプリの設定を開く")), 10_000)
             if (settingsButton == null) {
-                device.dumpWindowHierarchy(System.out)
-                throw AssertionError("App settings button did not reappear after the denied local-network probe")
+                val state =
+                    "permission=${context.checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK)}\n" +
+                        "activityState=${activity.state}\n" +
+                        "currentPackage=${device.currentPackageName}\n" +
+                        "deniedSocketException=${deniedSocketException.stackTraceToString()}"
+                val failure =
+                    AssertionError("App settings button did not reappear after the denied local-network probe\n$state")
+                runCatching {
+                        check(
+                            device.takeScreenshot(
+                                File(context.getExternalFilesDir(null), "network-permission-failure.png")
+                            )
+                        ) {
+                            "Could not capture the permission failure screenshot"
+                        }
+                    }
+                    .onFailure { failure.addSuppressed(it) }
+                runCatching {
+                        device.dumpWindowHierarchy(
+                            File(context.getExternalFilesDir(null), "network-permission-failure.xml")
+                        )
+                    }
+                    .onFailure { failure.addSuppressed(it) }
+                runCatching {
+                        File(context.getExternalFilesDir(null), "network-permission-failure.txt").writeText(state)
+                    }
+                    .onFailure { failure.addSuppressed(it) }
+                throw failure
             }
             settingsButton.click()
             assertTrue(device.wait(Until.hasObject(By.pkg("com.android.settings")), 10_000))

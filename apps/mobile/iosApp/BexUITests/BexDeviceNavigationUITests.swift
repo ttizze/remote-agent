@@ -226,13 +226,14 @@ extension BexLaunchUITests {
     }
 
     private func replaceFieldText(_ app: XCUIApplication, field: XCUIElement, text: String) {
-        field.tap()
         if let value = field.value as? String, !value.isEmpty, value != field.placeholderValue {
-            field.doubleTap()
+            field.press(forDuration: 1.2)
             let selectAll = app.descendants(matching: .any)
                 .matching(NSPredicate(format: "label == 'Select All' OR label == 'すべてを選択'")).firstMatch
             XCTAssertTrue(selectAll.waitForExistence(timeout: 5))
             selectAll.tap()
+        } else {
+            field.tap()
         }
         field.typeText(XCUIKeyboardKey.delete.rawValue)
         XCTAssertEqual(field.value as? String, field.placeholderValue)

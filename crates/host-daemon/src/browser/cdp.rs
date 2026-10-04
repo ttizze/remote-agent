@@ -29,7 +29,14 @@ pub(super) struct Chrome {
 
 impl Chrome {
     pub async fn launch(profile: &Path, executable: &Path) -> Result<Self, String> {
+        let diagnostics = std::env::var_os("BEX_BROWSER_LOG_DIR").is_some();
+        let log = |message: &str| {
+            if diagnostics {
+                eprintln!("[bex-browser-launch] {message}");
+            }
+        };
         crate::platform::create_state_directory(profile).map_err(|e| e.to_string())?;
+        log("profile_ready");
         let port_file = profile.join("DevToolsActivePort");
         match tokio::fs::remove_file(&port_file).await {
             Ok(()) => {}
@@ -54,6 +61,9 @@ impl Chrome {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("BEXブラウザを起動できません: {e}"))?;
+        log("supervisor_spawned");
+        let mut phase = "wait_port";
+        log(phase);
         let result = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 if child.try_wait().map_err(|e| e.to_string())?.is_some() {
@@ -68,6 +78,8 @@ impl Chrome {
                         && path.starts_with("/devtools/browser/")
                         && !path.contains(['\r', '\n', '?', '#'])
                     {
+                        phase = "connect_websocket";
+                        log(phase);
                         let url = format!("ws://127.0.0.1:{port}{path}");
                         let (socket, _) = async_tungstenite::tokio::connect_async(url)
                             .await
@@ -79,19 +91,29 @@ impl Chrome {
             }
         })
         .await
-        .unwrap_or_else(|_| Err("BEXブラウザの起動がタイムアウトしました。".into()));
+        .unwrap_or_else(|_| {
+            log(&format!("timeout phase={phase}"));
+            Err("BEXブラウザの起動がタイムアウトしました。".into())
+        });
         match result {
-            Ok(socket) => Ok(Self {
-                child,
-                socket,
-                next_id: 0,
-                sessions: HashMap::new(),
-                dialogs: HashMap::new(),
-                broken: false,
-            }),
+            Ok(socket) => {
+                log("ready");
+                Ok(Self {
+                    child,
+                    socket,
+                    next_id: 0,
+                    sessions: HashMap::new(),
+                    dialogs: HashMap::new(),
+                    broken: false,
+                })
+            }
             Err(error) => {
+                log(&format!("failed phase={phase}"));
                 child.stdin.take();
-                let _ = child.wait().await;
+                match child.wait().await {
+                    Ok(status) => log(&format!("cleanup status={status}")),
+                    Err(_) => log("cleanup wait_failed"),
+                }
                 Err(error)
             }
         }

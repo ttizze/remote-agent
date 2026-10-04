@@ -20,6 +20,10 @@ extension BexLaunchUITests {
         let visible = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: latest)
         wait(for: [visible], timeout: 5)
         captureScreen(app, named: "Long interrupted history at latest message")
+        XCTAssertEqual(
+            detail.value as? String, "turns=5;items=8",
+            "The scrollable initial summary must leave an older page to load"
+        )
         let initialItems = loadedItems(in: detail)
         XCTAssertGreaterThan(initialItems, 0)
         for _ in 0 ..< 40 {

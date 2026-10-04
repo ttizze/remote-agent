@@ -146,7 +146,8 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           log=$(mktemp "${BEX_BROWSER_LOG_DIR:?}/chrome.XXXXXX")
-          exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "$@" 2>"$log"
+          printf 'Chrome startup pid=%s ppid=%s\n' "$$" "$PPID" > "$log"
+          exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --enable-logging=stderr --v=1 "$@" 2>>"$log"
           CHROME
           chmod u+x "$BEX_BROWSER_EXECUTABLE"
           printf 'BEX_BROWSER_EXECUTABLE=%s\n' "$BEX_BROWSER_EXECUTABLE" >> "$GITHUB_ENV"
