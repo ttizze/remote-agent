@@ -48,7 +48,9 @@ final class SideChatRequest: ObservableObject {
         }
         error = nil
         do {
-            if threadId == nil {
+            if let threadId {
+                _ = try await model.outcome(for: .readThread(ReadThread(threadId: threadId, open: true)))
+            } else {
                 let result = try await model.outcome(for: .createSession(CreateSession(
                     provider: model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey),
                     cwd: cwd,
