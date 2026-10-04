@@ -1103,27 +1103,17 @@ impl HostRpcService {
         query: ListQuery,
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
         let search = query.search_term.as_str();
-        let (snapshot, listings) = tokio::join!(
+        let agents = self.agents();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let (snapshot, mut listings) = tokio::join!(
             self.project_snapshot(),
-            futures_util::future::join_all(self.agents().into_iter().map(|(provider, agent)| {
-                async move {
-                    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                        session_pages(agent.as_ref(), search)
-                            .try_fold(Vec::new(), |mut threads, page| async move {
-                                threads.extend(page);
-                                Ok(threads)
-                            })
-                            .await
-                    })
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(Failure::new(
-                            "provider_timeout",
-                            "session listing timed out; results are partial",
-                        ))
-                    });
-                    (provider, agent.capabilities(), result)
-                }
+            futures_util::future::join_all(agents.iter().map(|(provider, agent)| async move {
+                let mut threads = session_pages(agent.as_ref(), search)
+                    .map_ok(|page| futures_util::stream::iter(page.into_iter().map(Ok)))
+                    .try_flatten()
+                    .boxed();
+                let head = next_title(&mut threads, deadline).await;
+                (*provider, agent.capabilities(), threads, head)
             }))
         );
         let snapshot = snapshot?;
@@ -1133,39 +1123,49 @@ impl HostRpcService {
             .as_object()
             .cloned()
             .unwrap_or_default();
-        let mut successful = 0;
-        let mut threads = Vec::new();
-        for (provider, capabilities, result) in listings {
-            match result {
-                Ok(data) => {
-                    successful += 1;
-                    threads.extend(data.into_iter().map(|mut t| {
-                        describe_thread(&mut t, capabilities, &snapshot);
-                        t
-                    }));
-                }
-                Err(error) => {
-                    provider_errors.insert(provider_key(provider), serde_json::to_value(error)?);
+        let successful = listings.iter().any(|(_, _, _, head)| head.is_ok());
+        while let Some(newest) = listings
+            .iter()
+            .filter_map(|(_, _, _, head)| head.as_ref().ok()?.as_ref())
+            .map(|thread| thread.updated_at.unwrap_or_default())
+            .max_by(f64::total_cmp)
+        {
+            // Native pages guarantee descending timestamps, but equal timestamps
+            // can span pages. Finish each tie before applying the stable ID order.
+            let mut group = Vec::new();
+            for (_, capabilities, threads, head) in &mut listings {
+                while head.as_ref().is_ok_and(|thread| {
+                    thread.as_ref().is_some_and(|thread| {
+                        thread.updated_at.unwrap_or_default().total_cmp(&newest)
+                            == std::cmp::Ordering::Equal
+                    })
+                }) {
+                    group.push((head.as_mut().unwrap().take().unwrap(), *capabilities));
+                    *head = next_title(threads, deadline).await;
                 }
             }
+            group.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
+            for (mut thread, capabilities) in group {
+                describe_thread(&mut thread, capabilities, &snapshot);
+                titles.push(thread);
+                if titles.complete() {
+                    break;
+                }
+            }
+            if titles.complete() {
+                break;
+            }
         }
-        if successful == 0 && !provider_errors.is_empty() {
+        for (provider, _, _, head) in listings {
+            if let Err(error) = head {
+                provider_errors.insert(provider_key(provider), serde_json::to_value(error)?);
+            }
+        }
+        if !successful && !provider_errors.is_empty() {
             return Err(Failure::new(
                 "sessions_unavailable",
                 serde_json::to_value(provider_errors)?,
             ));
-        }
-        threads.sort_by(|a, b| {
-            b.updated_at
-                .unwrap_or_default()
-                .total_cmp(&a.updated_at.unwrap_or_default())
-                .then(a.id.cmp(&b.id))
-        });
-        for thread in threads {
-            titles.push(thread);
-            if titles.complete() {
-                break;
-            }
         }
         let mut page = titles.finish();
         let statuses = crate::worktrees::directory_statuses(
@@ -1331,6 +1331,20 @@ fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRe
     }
 }
 
+async fn next_title(
+    threads: &mut futures_util::stream::BoxStream<'_, Result<Thread, Failure>>,
+    deadline: tokio::time::Instant,
+) -> Result<Option<Thread>, Failure> {
+    tokio::time::timeout_at(deadline, threads.try_next())
+        .await
+        .unwrap_or_else(|_| {
+            Err(Failure::new(
+                "provider_timeout",
+                "session listing timed out; results are partial",
+            ))
+        })
+}
+
 fn provider_key(provider: ProviderKind) -> String {
     serde_json::to_value(provider)
         .expect("provider serializes")
@@ -1351,6 +1365,29 @@ fn describe_thread(
 #[cfg(test)]
 mod tests {
     use agent_protocol::session::ProviderKind;
+
+    #[tokio::test(start_paused = true)]
+    async fn title_reads_share_one_deadline_across_pages() {
+        use super::*;
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(5);
+        let mut threads = futures_util::stream::iter([4, 2])
+            .then(|seconds| async move {
+                tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+                Ok(Thread::default())
+            })
+            .boxed();
+        assert!(next_title(&mut threads, deadline).await.unwrap().is_some());
+        assert_eq!(
+            next_title(&mut threads, deadline).await.unwrap_err().code,
+            "provider_timeout"
+        );
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            std::time::Duration::from_secs(5)
+        );
+    }
+
     #[tokio::test]
     async fn successful_configuration_clears_the_provider_startup_error() {
         use super::*;
