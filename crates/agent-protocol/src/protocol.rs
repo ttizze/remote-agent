@@ -94,6 +94,7 @@ macro_rules! results {
 results! {
     Browser(crate::browser::BrowserFrame),
     Opened(crate::session::OpenedSession), Item(crate::operations::ItemResponse),
+    History(crate::session::HistoryPage),
     Thread(crate::models::ThreadResponse), Threads(crate::models::ThreadList),
     ComposerCatalog(crate::composer::ComposerCatalog),
     PermissionSettings(crate::permissions::PermissionSettings),

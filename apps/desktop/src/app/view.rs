@@ -160,6 +160,16 @@ impl Render for Desktop {
         if self.onboarding && self.tab == Tab::Chat {
             return self.onboarding_view(window, cx);
         }
+        if composer_visible
+            && self.has_older_history()
+            && !self.history_loading
+            && self.history_error.is_empty()
+        {
+            let entity = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = entity.update(cx, |view, cx| view.load_visible_history(cx));
+            });
+        }
         let main = match self.tab {
             Tab::Chat => self.conversation_content(window.viewport_size().width, cx),
             Tab::Settings => self.settings(cx),

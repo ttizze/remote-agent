@@ -3,6 +3,11 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct ConversationViewport: Equatable {
+    let oldestVisible: Bool
+    let latestVisible: Bool
+}
+
 struct ThreadScreen: View {
     @ObservedObject var model: BexAppViewModel
     let conversation: ConversationPresentation?
@@ -16,20 +21,20 @@ struct ThreadScreen: View {
     @State var showingCamera = false
     @State var preparingMedia = false
     @State var showingModelSettings = false
-    @State var scrollViewportHeight: CGFloat = 0
+    @State var isVisible = false
     @State var isFollowingLatest = true
-    @State private var isNearLatest = true
-    @State var scrollingToOlder = false
+    @State var historyViewport = ConversationViewport(oldestVisible: false, latestVisible: false)
     @State private var scrollToTopRequest = 0
-    @State var historyBoundaries = [String: CGFloat]()
-    @State var historyRequestPending = false
     @State var expandedItemIds = Set<String>()
     @State var activityExpansionOverrides = [String: ActivityExpansion]()
     @FocusState var composerFocused: Bool
 
     var body: some View {
         chatContent
-            .onDisappear { dictation.cancel() }
+            .onDisappear {
+                isVisible = false
+                dictation.cancel()
+            }
             .onChange(of: model.composerFocusRequest) { _ in
                 if model.isShowingSideChat == isSideChat {
                     composerFocused = true
@@ -73,9 +78,11 @@ struct ThreadScreen: View {
             }
             .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
             .onAppear {
+                isVisible = true
                 if model.isNewThread {
                     composerFocused = true
                 }
+                loadVisibleHistory()
             }
             .onChange(of: model.isNewThread) {
                 if $0 {
@@ -134,7 +141,6 @@ struct ThreadScreen: View {
                         .padding(.vertical, 6)
                         .background(ConversationScrollToTop {
                             isFollowingLatest = false
-                            scrollingToOlder = false
                         })
                     }
                     .accessibilityIdentifier("task.detail")
@@ -143,24 +149,27 @@ struct ThreadScreen: View {
                     .simultaneousGesture(DragGesture(minimumDistance: 1).onChanged { gesture in
                         guard abs(gesture.translation.height) > abs(gesture.translation.width) else { return }
                         isFollowingLatest = false
-                        scrollingToOlder = gesture.translation.height > 0
                         loadVisibleHistory()
                     }.onEnded { gesture in
-                        if gesture.translation.height <= 0, isNearLatest {
+                        if gesture.translation.height <= 0, historyViewport.latestVisible {
                             isFollowingLatest = true
                         }
                     })
                     .onChange(of: scrollToTopRequest) {
                         isFollowingLatest = false
-                        scrollingToOlder = false
                         if let first = rows.first {
                             withAnimation { proxy.scrollTo(first.id, anchor: .top) }
                         }
                     }
-                    .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                        geometry.contentSize.height - geometry.visibleRect.maxY
-                    } action: { _, remaining in
-                        isNearLatest = remaining <= 80
+                    .onScrollGeometryChange(for: ConversationViewport.self) { geometry in
+                        ConversationViewport(
+                            oldestVisible: geometry.containerSize.height > 0 &&
+                                geometry.visibleRect.minY < geometry.containerSize.height * 0.6,
+                            latestVisible: geometry.contentSize.height - geometry.visibleRect.maxY <= 80
+                        )
+                    } action: { _, viewport in
+                        historyViewport = viewport
+                        loadVisibleHistory()
                     }
                     // Offset changes must not request another scroll. Follow only content
                     // growth; lazy row measurement can otherwise keep re-entering layout.
@@ -170,10 +179,9 @@ struct ThreadScreen: View {
                         }
                     }
                     .overlay(alignment: .bottom) {
-                        if !isNearLatest {
+                        if !historyViewport.latestVisible {
                             Button {
                                 isFollowingLatest = true
-                                scrollingToOlder = false
                                 if let latestRowId {
                                     withAnimation { proxy.scrollTo(latestRowId, anchor: .bottom) }
                                 }
@@ -189,18 +197,12 @@ struct ThreadScreen: View {
                             .padding(.bottom, 6)
                         }
                     }
-                    .coordinateSpace(name: "thread-scroll")
-                    .onPreferenceChange(HistoryBoundaryPreferenceKey.self) { boundaries in
-                        historyBoundaries = boundaries
-                        loadVisibleHistory()
-                    }
                     .onChange(of: model.loadingHistory) {
                         if !$0 {
-                            historyRequestPending = false
+                            loadVisibleHistory()
                         }
                     }
-                    .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { _, height in
-                        scrollViewportHeight = height
+                    .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { _, _ in
                         if isFollowingLatest, let latestRowId {
                             proxy.scrollTo(latestRowId, anchor: .bottom)
                         }
@@ -211,9 +213,6 @@ struct ThreadScreen: View {
                         }
                     }
                     .onChange(of: thread.id) { _ in
-                        scrollingToOlder = false
-                        historyRequestPending = false
-                        historyBoundaries.removeAll()
                         expandedItemIds.removeAll()
                         activityExpansionOverrides.removeAll()
                         isFollowingLatest = true

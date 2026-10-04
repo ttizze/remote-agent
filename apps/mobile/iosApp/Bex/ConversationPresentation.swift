@@ -30,9 +30,6 @@ struct ConversationPresentation: Sendable {
         if let notice = source.historyNotice() {
             rows.append(.init(id: "history-read-state", content: .historyNotice(notice)))
         }
-        if source.hasMoreHistory() {
-            rows.append(.init(id: "history-older-turns", content: .olderTurns))
-        }
         for turn in rendered.turns() {
             let id = turn.id()
             if let cached = previous?.turns[id], turn.unchanged(other: cached.source) {

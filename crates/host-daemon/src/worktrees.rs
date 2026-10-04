@@ -54,7 +54,7 @@ impl Worktrees {
         .await?
     }
 
-    pub(crate) async fn remove(&self, target: String) -> Result<()> {
+    pub(crate) async fn remove(&self, target: String, require_merged: bool) -> Result<()> {
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
@@ -67,6 +67,15 @@ impl Worktrees {
                 let (_, blocked) = inspect(&target, root)?;
                 if let Some(reason) = blocked {
                     return Err(anyhow!(reason));
+                }
+                // Recheck both the preference and HEAD after the activity scan.
+                // A new commit or a disabled preference cancels automatic removal.
+                if require_merged
+                    && (!state.settings.delete_merged
+                        || directory_status(Path::new(&target), None, None, None)?
+                            != Some(agent_protocol::models::WorktreeStatus::Merged))
+                {
+                    return Ok(());
                 }
                 // Git rechecks tracked/untracked changes and locks at removal time.
                 // Keep the branch so commits remain reachable even if not merged.
@@ -746,7 +755,10 @@ mod tests {
             let branch = crate::git::text(&cwd, &["branch", "--show-current"]).unwrap();
             let head = crate::git::text(&cwd, &["rev-parse", "HEAD"]).unwrap();
             match removal {
-                "managed" => store.remove(cwd.to_str().unwrap().into()).await.unwrap(),
+                "managed" => store
+                    .remove(cwd.to_str().unwrap().into(), false)
+                    .await
+                    .unwrap(),
                 "git" => {
                     crate::git::text(&root, &["worktree", "remove", cwd.to_str().unwrap()])
                         .unwrap();
@@ -870,6 +882,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automatic_removal_rechecks_merge_and_opt_in_before_removing_checkout() {
+        let repository = repository();
+        let root = dunce::canonicalize(repository.path()).unwrap();
+        let store = Worktrees::new(&root.join("projects.json"));
+        let mut settings = WorktreeSettings {
+            create_on_new_session: true,
+            delete_merged: true,
+            ..Default::default()
+        };
+        store.settings(Some(settings.clone())).await.unwrap();
+        let cwd = store.prepare(root.to_str()).await.unwrap().unwrap();
+        let target = cwd.to_str().unwrap().to_owned();
+        let branch = crate::git::text(&cwd, &["branch", "--show-current"])
+            .unwrap()
+            .trim()
+            .to_owned();
+        let commit = |message: &str| {
+            crate::git::text(
+                &cwd,
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    message,
+                ],
+            )
+            .unwrap()
+        };
+        let merge = || crate::git::text(&root, &["merge", "--ff-only", &branch]).unwrap();
+        store.remove(target.clone(), true).await.unwrap();
+        assert!(cwd.is_dir(), "a fresh branch is not completed work");
+        commit("work");
+        store.remove(target.clone(), true).await.unwrap();
+        assert!(cwd.is_dir(), "unmerged work must stay");
+        merge();
+        settings.delete_merged = false;
+        store.settings(Some(settings.clone())).await.unwrap();
+        store.remove(target.clone(), true).await.unwrap();
+        assert!(
+            cwd.is_dir(),
+            "disabling cleanup cancels an earlier eligibility decision"
+        );
+        settings.delete_merged = true;
+        store.settings(Some(settings)).await.unwrap();
+        commit("after merge");
+        store.remove(target.clone(), true).await.unwrap();
+        assert!(cwd.is_dir(), "a commit after merge cancels removal");
+        merge();
+        let head = crate::git::text(&cwd, &["rev-parse", "HEAD"]).unwrap();
+        store.remove(target, true).await.unwrap();
+        assert!(!cwd.exists());
+        assert_eq!(
+            crate::git::text(&root, &["rev-parse", &branch]).unwrap(),
+            head
+        );
+    }
+
+    #[tokio::test]
     async fn managed_removal_rechecks_changes_locks_and_ownership_and_preserves_commits() {
         let repository = repository();
         let root = dunce::canonicalize(repository.path()).unwrap();
@@ -893,7 +969,7 @@ mod tests {
         assert_eq!(Worktrees::new(&state).list().await.unwrap().len(), 2);
         assert!(
             worktrees
-                .remove(root.to_str().unwrap().into())
+                .remove(root.to_str().unwrap().into(), false)
                 .await
                 .is_err()
         );
@@ -911,7 +987,7 @@ mod tests {
                     .blocked_reason
                     .is_some()
             );
-            assert!(worktrees.remove(first_path.clone()).await.is_err());
+            assert!(worktrees.remove(first_path.clone(), false).await.is_err());
             assert_eq!(
                 fs::read_to_string(first.join(file)).unwrap(),
                 "preserve this local data\n"
@@ -923,12 +999,12 @@ mod tests {
             }
         }
         crate::git::text(&root, &["worktree", "lock", &first_path]).unwrap();
-        assert!(worktrees.remove(first_path.clone()).await.is_err());
+        assert!(worktrees.remove(first_path.clone(), false).await.is_err());
         crate::git::text(&root, &["worktree", "unlock", &first_path]).unwrap();
         crate::git::text(&first, &["checkout", "--detach", "HEAD"]).unwrap();
-        assert!(worktrees.remove(first_path.clone()).await.is_err());
+        assert!(worktrees.remove(first_path.clone(), false).await.is_err());
         crate::git::text(&first, &["checkout", &branch]).unwrap();
-        worktrees.remove(first_path.clone()).await.unwrap();
+        worktrees.remove(first_path.clone(), false).await.unwrap();
         assert!(!first.exists());
         assert!(!first.parent().unwrap().exists());
         assert!(other.join("tracked.txt").exists());
@@ -959,7 +1035,7 @@ mod tests {
         assert!(restarted.list().await.unwrap()[0].blocked_reason.is_none());
         let unrelated = other.parent().unwrap().join("keep.txt");
         fs::write(&unrelated, "preserve").unwrap();
-        restarted.remove(other_path.into()).await.unwrap();
+        restarted.remove(other_path.into(), false).await.unwrap();
         assert_eq!(Worktrees::new(&state).list().await.unwrap().len(), 2);
         assert_eq!(fs::read_to_string(unrelated).unwrap(), "preserve");
     }
@@ -978,7 +1054,7 @@ mod tests {
         fs::set_permissions(root.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
         fs::create_dir(root.join("local")).unwrap();
         fs::write(root.join("local/value"), "local data").unwrap();
-        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env","local","missing","config.txt"],"worktreeDirectory":""});
+        let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env","local","missing","config.txt"],"worktreeDirectory":"","deleteMerged":false});
         store.configure(Some(settings.clone())).await.unwrap();
         let loaded = Worktrees::new(&projects);
         assert_eq!(loaded.configure(None).await.unwrap(), settings);
@@ -1092,7 +1168,7 @@ mod tests {
     async fn invalid_settings_never_replace_saved_preferences() {
         let directory = repository();
         let store = Worktrees::new(&directory.path().join("projects.json"));
-        let valid = json!({"createOnNewSession":true,"copyOnCreate":false,"copyPaths":[".env"],"worktreeDirectory":""});
+        let valid = json!({"createOnNewSession":true,"copyOnCreate":false,"copyPaths":[".env"],"worktreeDirectory":"","deleteMerged":false});
         store.configure(Some(valid.clone())).await.unwrap();
         for path in [
             "",
@@ -1273,7 +1349,10 @@ mod tests {
                     .is_empty()
             );
             if registered {
-                store.remove(legacy.to_str().unwrap().into()).await.unwrap();
+                store
+                    .remove(legacy.to_str().unwrap().into(), false)
+                    .await
+                    .unwrap();
                 assert!(!legacy.exists());
                 assert!(root.join(".git/bex-worktrees").is_dir());
             }

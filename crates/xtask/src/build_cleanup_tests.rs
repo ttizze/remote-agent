@@ -162,14 +162,14 @@ async fn real_cargo_waits_for_the_same_cleanup_lock_inode() {
     let fixture = Fixture::new().await;
     let root = fixture.project("locked").await;
     let locks = profile_locks(&root.join("target/debug")).unwrap().unwrap();
-    let stderr = tempfile::NamedTempFile::new().unwrap();
+    let log = root.join("lock-wait.log");
     let mut command = fixture.cargo(&root, &root.join("target"));
-    command.stderr(stderr.reopen().unwrap());
+    command.stderr(fs::File::create(&log).unwrap());
     let mut process = Child::spawn(command).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         assert!(process.try_wait().unwrap().is_none());
-        let observed = fs::read_to_string(stderr.path()).unwrap();
+        let observed = fs::read_to_string(&log).unwrap();
         if observed.contains("Blocking waiting for file lock on build directory") {
             break;
         }
