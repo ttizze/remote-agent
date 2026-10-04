@@ -1563,6 +1563,9 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
 
     for (prompt, idle_before_result) in [("background", false), ("background-settled", true)] {
         let root = tempfile::tempdir().unwrap();
+        if prompt == "background" {
+            std::fs::write(root.path().join("background-paused"), "").unwrap();
+        }
         std::fs::write(
             root.path().join("claude-fixture.json"),
             json!({"idleBeforeResult":idle_before_result}).to_string(),
@@ -1638,12 +1641,39 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
             }))
             .await
             .unwrap();
+        if prompt == "background" {
+            let snapshot = until(&store, |snapshot| {
+                snapshot.conversations[&id].turns.as_ref().unwrap()[0]
+                    .items.as_ref().unwrap().iter().any(|item|
+                        item.status == agent_protocol::execution::ItemStatus::Completed
+                        && item.is_deferred()
+                        && matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution {output, exit_code:None, ..} if output == "background done"))
+            }).await;
+            let turn = &snapshot.conversations[&id].turns.as_ref().unwrap()[0];
+            assert_eq!(turn.status, TurnStatus::Running);
+            store
+                .dispatch(Intent::ReadItem(op::ReadItem {
+                    thread_id: id.clone(),
+                    turn_id: turn.id.clone(),
+                    item_id: "tool-1".into(),
+                }))
+                .await
+                .unwrap();
+            let snapshot = store.snapshot();
+            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
+            assert!(snapshot.conversations[&id].turns.as_ref().unwrap()[0].items.as_ref().unwrap().iter().any(|item|
+                item.status == agent_protocol::execution::ItemStatus::Completed
+                && !item.is_deferred()
+                && matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution {output, exit_code:None, ..} if output == "background stdout\n")
+            ), "expanded background work must recover native output while its turn is still running");
+            std::fs::remove_file(root.path().join("background-paused")).unwrap();
+        }
         let snapshot = completed(&store, &id, 1, "completed").await;
         let thread = &snapshot.conversations[&id];
         let items = thread.turns.as_ref().unwrap()[0].items.as_ref().unwrap();
         assert!(items.iter().any(|item| item.status == agent_protocol::execution::ItemStatus::Completed
             && matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution {exit_code, output, ..}
-                if if prompt == "background" {exit_code.is_none() && output == "background done"} else {*exit_code == Some(0) && output == "approved"})
+                if if prompt == "background" {exit_code.is_none()} else {*exit_code == Some(0) && output == "approved"})
         ), "live outcomes must update the originating tool");
         assert!(!items.iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::Attachment {content, ..} if content["commandMode"] == "task-notification")));
         assert!(
@@ -1662,22 +1692,6 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
         assert!(!projected.turns[0].rows.iter().any(|row| matches!(
             &row.content, ConversationRowContent::ActivityHeader { activity } if activity.is_in_progress
         )));
-        if prompt == "background" {
-            store
-                .dispatch(Intent::ReadItem(op::ReadItem {
-                    thread_id: id.clone(),
-                    turn_id: thread.turns.as_ref().unwrap()[0].id.clone(),
-                    item_id: "tool-1".into(),
-                }))
-                .await
-                .unwrap();
-            let snapshot = store.snapshot();
-            assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
-            assert!(snapshot.conversations[&id].turns.as_ref().unwrap()[0].items.as_ref().unwrap().iter().any(|item|
-                item.status == agent_protocol::execution::ItemStatus::Completed
-                && matches!(item.body(), agent_protocol::items::ItemBody::CommandExecution {output, exit_code:None, ..} if output == "background stdout\n")
-            ), "expanded background work must retain its native output");
-        }
         send(&store, "next turn", "after-background").await;
         completed(&store, &id, 2, "completed").await;
         send(&store, prompt, "stop-background").await;

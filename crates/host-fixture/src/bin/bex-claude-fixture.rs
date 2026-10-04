@@ -417,6 +417,9 @@ fn main() {
                     emit(
                         json!({"type":"system","subtype":"task_notification","task_id":"background-1","tool_use_id":"tool-1","output_file":output_file,"status":"completed","summary":"background done","session_id":session}),
                     );
+                    while Path::new("background-paused").exists() {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
                 }
                 reply(
                     &session,
