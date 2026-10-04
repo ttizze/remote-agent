@@ -438,7 +438,6 @@ impl SessionRouter {
                 "response_too_large",
                 &"Session metadata exceeds the RPC limit; request fewer turns",
             )
-            .map_err(|e| e.to_string())?
             .into());
         }
         let id = uuid::Uuid::new_v4();

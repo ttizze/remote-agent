@@ -124,26 +124,7 @@ impl Operation for ReadHistory {
             return Vec::new();
         }
         let details = item_details(&self.session, &page.turns);
-        let thread = shared_mut(&mut snapshot.conversations, &self.session).unwrap();
-        thread.turns = Some(crate::session::prepend_history(
-            &page.turns,
-            thread.turns.as_deref().unwrap_or_default(),
-        ));
-        thread.history_cursor = page.next_cursor;
-        thread.history_has_more = Some(thread.history_cursor.is_some());
-        if thread.history_cursor.is_none()
-            && let Some(first) = thread.turns.as_mut().and_then(|turns| turns.first_mut())
-        {
-            Arc::make_mut(first).items_has_more = Some(false);
-        }
-        thread.history_read_state = Some(crate::session::HistoryReadState::new(
-            if thread.history_cursor.is_some() {
-                crate::session::HistoryReadKind::Partial
-            } else {
-                crate::session::HistoryReadKind::Complete
-            },
-            Vec::new(),
-        ));
+        page.prepend_to(shared_mut(&mut snapshot.conversations, &self.session).unwrap());
         snapshot.error = None;
         reconcile_pending(snapshot, &self.session);
         details

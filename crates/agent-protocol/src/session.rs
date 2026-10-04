@@ -447,6 +447,31 @@ pub struct HistoryPage {
     pub next_cursor: Option<String>,
 }
 
+impl HistoryPage {
+    /// Join this older page before the thread's turns and advance its cursor.
+    pub fn prepend_to(&self, thread: &mut crate::models::Thread) {
+        thread.turns = Some(prepend_history(
+            &self.turns,
+            thread.turns.as_deref().unwrap_or_default(),
+        ));
+        thread.history_cursor = self.next_cursor.clone();
+        thread.history_has_more = Some(thread.history_cursor.is_some());
+        if thread.history_cursor.is_none()
+            && let Some(first) = thread.turns.as_mut().and_then(|turns| turns.first_mut())
+        {
+            Arc::make_mut(first).items_has_more = Some(false);
+        }
+        thread.history_read_state = Some(HistoryReadState::new(
+            if thread.history_cursor.is_some() {
+                HistoryReadKind::Partial
+            } else {
+                HistoryReadKind::Complete
+            },
+            Vec::new(),
+        ));
+    }
+}
+
 /// The opaque cursor proves adjacency. Join only a turn split at that boundary;
 /// a repeated native ID in a complete turn denotes a separate occurrence.
 pub fn prepend_history(older: &[Arc<Turn>], current: &[Arc<Turn>]) -> Vec<Arc<Turn>> {

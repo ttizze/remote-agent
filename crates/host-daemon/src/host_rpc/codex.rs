@@ -1129,9 +1129,8 @@ mod tests {
     fn native_error_fields_never_prove_non_delivery() {
         let native = serde_json::json!({"code":123,"message":"not sent","delivery":"notSent","details":{"kept":true}});
         let response = super::native_failure(&serde_json::value::to_raw_value(&native).unwrap());
-        let response = agent_protocol::protocol::Response::from_result::<(), _>(Err(response))
-            .unwrap()
-            .into_value();
+        let response =
+            agent_protocol::protocol::Response::from_result::<(), _>(Err(response)).into_value();
         assert_eq!(response["error"]["delivery"], "unknown");
         assert!(response["error"].get("providerError").is_none());
         assert_eq!(response["error"]["execution"]["providerCode"], "123");

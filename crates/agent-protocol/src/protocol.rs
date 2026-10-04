@@ -119,20 +119,17 @@ pub enum Response<T = Body> {
 impl Response {
     pub fn from_result<T: Into<Body>, E: Into<crate::error::RpcFailure>>(
         result: Result<T, E>,
-    ) -> Result<Response, crate::message::RpcMessageError> {
-        Ok(match result {
+    ) -> Response {
+        match result {
             Ok(result) => Response::Success {
                 result: result.into(),
             },
             Err(error) => Response::Failure {
                 error: error.into(),
             },
-        })
+        }
     }
-    pub fn error(
-        code: impl ToString,
-        message: &impl std::fmt::Display,
-    ) -> Result<Response, crate::message::RpcMessageError> {
+    pub fn error(code: impl ToString, message: &impl std::fmt::Display) -> Response {
         Self::from_result::<(), _>(Err(crate::error::RpcFailure {
             code: code.to_string(),
             message: message.to_string(),

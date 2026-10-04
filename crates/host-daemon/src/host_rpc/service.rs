@@ -429,9 +429,7 @@ impl HostRpcService {
                 &serde_json::value::to_raw_value(error).map_err(invalid_message)?,
             );
         }
-        Ok(Response::from_result(result)
-            .map_err(invalid_message)?
-            .into())
+        Ok(Response::from_result(result).into())
     }
 
     async fn submit_input(
@@ -590,9 +588,7 @@ impl HostRpcService {
             Err(error) => {
                 let message = format!("{error:#}");
                 tracing::error!(target: "bex", operation = "history.open", message);
-                Ok(Response::error("session_open_failed", &message)
-                    .map_err(invalid_message)?
-                    .into())
+                Ok(Response::error("session_open_failed", &message).into())
             }
         }
     }

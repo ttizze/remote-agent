@@ -169,24 +169,12 @@ impl ClientExt for Client {
             if !seen.insert(cursor.clone()) {
                 return Err(PeerError::InvalidMessage("history cursor repeated".into()));
             }
-            let page = self
-                .call(&crate::session::ReadHistory {
-                    session: thread_id.clone(),
-                    cursor,
-                })
-                .await?;
-            thread.turns = Some(crate::session::prepend_history(
-                &page.turns,
-                thread.turns.as_deref().unwrap_or_default(),
-            ));
-            thread.history_cursor = page.next_cursor;
-            thread.history_has_more = Some(thread.history_cursor.is_some());
-            if thread.history_cursor.is_none() {
-                thread.history_read_state = Some(crate::session::HistoryReadState::new(
-                    crate::session::HistoryReadKind::Complete,
-                    Vec::new(),
-                ));
-            }
+            self.call(&crate::session::ReadHistory {
+                session: thread_id.clone(),
+                cursor,
+            })
+            .await?
+            .prepend_to(&mut thread);
         }
         let mut images = Vec::new();
         let mut sources = std::collections::HashSet::new();
