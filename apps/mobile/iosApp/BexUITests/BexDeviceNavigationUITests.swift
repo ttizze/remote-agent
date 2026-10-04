@@ -136,7 +136,12 @@ extension BexLaunchUITests {
         XCTAssertTrue(navigationBar.waitForExistence(timeout: 5))
         let start = navigationBar.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 1))
             .withOffset(CGVector(dx: 0, dy: 100))
-        start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 280, dy: 0)))
+        start.press(
+            forDuration: 0.1,
+            thenDragTo: start.withOffset(CGVector(dx: navigationBar.frame.width * 0.9, dy: 0)),
+            withVelocity: .fast,
+            thenHoldForDuration: 0
+        )
         XCTAssertTrue(app.buttons["file.hello.txt"].waitForExistence(timeout: 10))
         XCTAssertFalse(child.exists)
         try verifyAbsoluteDirectoryNavigation(app, child: child)
