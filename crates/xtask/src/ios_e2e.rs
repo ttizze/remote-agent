@@ -363,7 +363,7 @@ async fn worker(
             let pairing_url = format!("http://127.0.0.1:{}/pairing", fs::read_to_string(root.join("pairing.port"))?.trim());
             let probe = std::env::current_exe()?;
             configure_run(Plist::from_file(&source)?, &pairing_url, probe.to_str().ok_or("non-UTF-8 terminal probe path")?)?.to_file_xml(&run)?;
-            let mut arguments = args![vec; "xcodebuild", "-xctestrun", &run, "-destination", format!("platform=iOS Simulator,id={simulator}"), "-parallel-testing-enabled", "NO", "-resultBundlePath", &bundle];
+            let mut arguments = args![vec; "xcodebuild", "-xctestrun", &run, "-destination", format!("platform=iOS Simulator,id={simulator}"), "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "on-failure", "-resultBundlePath", &bundle];
             arguments.extend(tests.iter().map(|test| format!("-only-testing:BexUITests/BexLaunchUITests/{test}").into()));
             arguments.push("test-without-building".into());
             let setup_seconds = started.elapsed().as_secs_f64();

@@ -198,8 +198,10 @@ jobs:
           (
             sleep 6
             if [[ -n "$chrome_profile" && ! -s "$chrome_profile/DevToolsActivePort" ]]; then
-              vm_stat > "${BEX_BROWSER_LOG%.log}-startup-${chrome_pid}-memory.txt"
-              sample "$chrome_pid" 3 -file "${BEX_BROWSER_LOG%.log}-startup-${chrome_pid}-sample.txt" >/dev/null 2>&1
+              startup_log="${BEX_BROWSER_LOG%.log}-startup-${chrome_pid}"
+              /usr/bin/vm_stat > "$startup_log-memory.txt"
+              /bin/ps -axo pid,ppid,rss,pcpu,comm -m > "$startup_log-processes.txt"
+              /usr/bin/sample "$chrome_pid" 3 -file "$startup_log-sample.txt" > "$startup_log-sample-output.txt" 2>&1
             fi
           ) </dev/null &
           exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "$@" 2>> "$BEX_BROWSER_LOG"

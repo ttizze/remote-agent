@@ -228,9 +228,9 @@ extension BexLaunchUITests {
         field.tap()
         if let value = field.value as? String, !value.isEmpty, value != field.placeholderValue {
             field.tap(withNumberOfTaps: 3, numberOfTouches: 1)
+            field.typeText(XCUIKeyboardKey.delete.rawValue)
+            XCTAssertEqual(field.value as? String, field.placeholderValue)
         }
-        field.typeText(XCUIKeyboardKey.delete.rawValue)
-        XCTAssertEqual(field.value as? String, field.placeholderValue)
         field.typeText(text)
     }
 

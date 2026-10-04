@@ -209,7 +209,9 @@ transfer server just to delete that check would reverse A14.
   alongside Chrome stderr. Browser diagnostics record startup phases and slow
   or interrupted CDP methods without page URLs, input or image payloads.
   If Chrome has not published its endpoint after six seconds, CI retains a
-  bounded startup stack sample and memory counters under `qa/chrome-startup-*`.
+  bounded startup stack sample, sampler output, memory counters, and process
+  memory usage under `qa/chrome-startup-*`. Process arguments are not recorded.
+  Xcode collects verbose diagnostics on test failure in the retained result bundle.
   Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.
