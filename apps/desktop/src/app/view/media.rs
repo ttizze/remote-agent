@@ -9,12 +9,7 @@ impl Desktop {
         clickable: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let key = format!(
-            "{}:{}:{encoded}:{}",
-            self.remote_key(),
-            self.snapshot.navigation.cwd,
-            source
-        );
+        let key = self.image_key(source, encoded);
         if !self.images.contains_key(&key) {
             let source = Arc::new(source.to_owned());
             self.images.insert(
@@ -274,12 +269,7 @@ impl Desktop {
             false,
             cx,
         );
-        let key = format!(
-            "{}:{}:{encoded}:{}",
-            self.remote_key(),
-            self.snapshot.navigation.cwd,
-            source
-        );
+        let key = self.image_key(&source, encoded);
         let ready = self
             .images
             .get(&key)
@@ -392,27 +382,21 @@ impl Desktop {
     }
 
     pub(super) fn save_gallery_image(&mut self, cx: &mut Context<Self>) {
-        let Some(gallery) = self
+        let Some((source, encoded)) = self
             .image_gallery
-            .as_mut()
+            .as_ref()
             .filter(|gallery| !gallery.saving)
+            .map(|gallery| gallery.current_image())
         else {
             return;
         };
-        let (source, encoded) = gallery.current_image();
-        let key = format!(
-            "{}:{}:{encoded}:{}",
-            self.remote
-                .as_ref()
-                .map_or("local", |remote| remote.id.as_str()),
-            self.snapshot.navigation.cwd,
-            source
-        );
+        let key = self.image_key(source, *encoded);
         let Some(ImageSource::Resource(resource)) =
             self.images.get(&key).and_then(|image| image.path.clone())
         else {
             return;
         };
+        let gallery = self.image_gallery.as_mut().expect("gallery checked above");
         gallery.saving = true;
         gallery.error.clear();
         let id = gallery.id;

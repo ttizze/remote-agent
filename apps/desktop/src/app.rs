@@ -41,7 +41,6 @@ use std::{
 
 enum OperationCompletion {
     Busy,
-    Download,
     Composer(u64),
     Editor(u64),
     Item { generation: u64, turn_id: TurnId },
@@ -801,13 +800,6 @@ impl Desktop {
                 self.list.remeasure();
                 return;
             }
-            OperationCompletion::Download => {
-                self.busy = self.busy.saturating_sub(1);
-                if let Err(error) = result {
-                    self.set_error(error);
-                }
-                return;
-            }
             OperationCompletion::Account => {
                 self.account_busy = false;
                 if let Err(error) = result {
@@ -852,13 +844,9 @@ impl Desktop {
                 match result {
                     Ok(Outcome::SessionImages { images }) => {
                         let initial = gallery.current_image().clone();
-                        let mut seen = HashSet::new();
                         let entries: Vec<_> = images
                             .into_iter()
-                            .filter_map(|image| {
-                                let entry = (Arc::new(image.source), image.encoded);
-                                seen.insert(entry.clone()).then_some(entry)
-                            })
+                            .map(|image| (Arc::new(image.source), image.encoded))
                             .collect();
                         gallery.selected = entries.iter().position(|entry| entry == &initial);
                         gallery
@@ -1090,6 +1078,13 @@ impl Desktop {
     }
     fn remote_key(&self) -> &str {
         self.remote.as_ref().map_or("local", |remote| &remote.id)
+    }
+    fn image_key(&self, source: &str, encoded: bool) -> String {
+        format!(
+            "{}:{}:{encoded}:{source}",
+            self.remote_key(),
+            self.snapshot.navigation.cwd
+        )
     }
     fn history_key(&self) -> Option<op::OperationKey> {
         self.selected()
@@ -1660,7 +1655,7 @@ impl Desktop {
                 }
                 Ok(Outcome::Applied)
             },
-            |result| Update::Completed(OperationCompletion::Download, result),
+            |result| Update::Completed(OperationCompletion::Busy, result),
         );
     }
     fn browse(&mut self, path: String) {

@@ -1389,12 +1389,7 @@ mod rendering_tests {
                     let view = ConversationView::new(snapshot, source, window, cx);
                     view.desktop.update(cx, |desktop, _| {
                         let source = "/fixture/image.png".to_owned();
-                        let key = format!(
-                            "{}:{}:false:{}",
-                            desktop.remote_key(),
-                            desktop.snapshot.navigation.cwd,
-                            source
-                        );
+                        let key = desktop.image_key(&source, false);
                         desktop.images.insert(
                             key,
                             ImageState {
