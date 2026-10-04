@@ -1,0 +1,53 @@
+name: BEX browser startup diagnostic
+on:
+  push:
+    branches: [bex/session-3cc712a6-3fd7-4819-84ca-dabf6082937e]
+permissions:
+  contents: read
+jobs:
+  startup:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Diagnose isolated headless Chrome startup
+        run: |
+          nix develop . --command python3 - <<'PY'
+          import json, os, signal, subprocess, tempfile, time
+          from pathlib import Path
+          chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+          policy = subprocess.run(['defaults', 'read', 'com.google.Chrome', 'RemoteDebuggingAllowed'], capture_output=True, text=True)
+          print(json.dumps({'remoteDebuggingAllowed': policy.stdout.strip() if policy.returncode == 0 else None}))
+          with tempfile.TemporaryDirectory(prefix='bex-ios-') as directory:
+              profile = Path(directory) / 'host/browser'
+              stderr = Path(directory) / 'chrome-stderr.log'
+              command = [chrome, '--user-data-dir=' + str(profile), '--headless=new',
+                         '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+                         '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
+                         '--window-size=1024,768', 'about:blank']
+              with stderr.open('w') as error:
+                  process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                             stderr=error, start_new_session=True)
+                  started = time.monotonic()
+                  try:
+                      while time.monotonic() - started < 15 and process.poll() is None and not (profile / 'DevToolsActivePort').exists():
+                          time.sleep(0.1)
+                      ready = (profile / 'DevToolsActivePort').exists()
+                      print(json.dumps({'portFileCreated': ready, 'exitCode': process.poll(), 'seconds': round(time.monotonic() - started, 2)}))
+                      print(stderr.read_text()[-4000:])
+                  finally:
+                      process.stdin.close()
+                      try:
+                          os.killpg(process.pid, signal.SIGTERM)
+                      except ProcessLookupError:
+                          pass
+                      try:
+                          process.wait(timeout=5)
+                      except subprocess.TimeoutExpired:
+                          os.killpg(process.pid, signal.SIGKILL)
+                          process.wait()
+                  assert ready, 'Chrome did not publish its DevTools port'
+          PY

@@ -63,7 +63,7 @@ extension BexLaunchUITests {
             assertTerminalReady(app)
         }
         let composer = app.textFields["task.message"]
-        replaceFieldText(app, field: composer, text: "Keep my draft")
+        replaceFieldText(composer, text: "Keep my draft")
         let chat = app.descendants(matching: .any)["task.empty"]
         XCTAssertTrue(chat.waitForExistence(timeout: 10))
         let edge = app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0))
@@ -141,7 +141,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(child.exists)
         try verifyAbsoluteDirectoryNavigation(app, child: child)
         let path = app.textFields["絶対パス"]
-        replaceFieldText(app, field: path, text: "relative-path")
+        replaceFieldText(path, text: "relative-path")
         app.buttons["files.open-path"].tap()
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "絶対パスを入力"))
             .firstMatch.waitForExistence(timeout: 10))
@@ -154,7 +154,7 @@ extension BexLaunchUITests {
         let path = app.textFields["絶対パス"]
         let root = try XCTUnwrap(path.value as? String)
         XCTAssertTrue(root.hasPrefix("/"))
-        replaceFieldText(app, field: path, text: root + "/nested")
+        replaceFieldText(path, text: root + "/nested")
         for _ in 0 ..< 2 {
             XCTAssertEqual(path.value as? String, root + "/nested")
             app.buttons["files.open-path"].tap()
@@ -188,12 +188,12 @@ extension BexLaunchUITests {
         assertBrowserStartup(open, notice: app.staticTexts["notice"])
         XCTAssertFalse(app.buttons["browser.take"].exists)
         XCTAssertFalse(app.buttons["browser.release"].exists)
-        replaceFieldText(app, field: address, text: "file:///etc/passwd")
+        replaceFieldText(address, text: "file:///etc/passwd")
         app.buttons["browser.open"].tap()
         XCTAssertTrue(app.staticTexts["http または https の URL を入力してください"].waitForExistence(timeout: 5))
         let pairing = try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])
         let url = try XCTUnwrap(URL(string: pairing)).deletingLastPathComponent().appendingPathComponent("browser-test")
-        replaceFieldText(app, field: address, text: url.absoluteString)
+        replaceFieldText(address, text: url.absoluteString)
         let recovered = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: open)
         wait(for: [recovered], timeout: 10)
         open.tap()
@@ -225,14 +225,10 @@ extension BexLaunchUITests {
         XCTAssertFalse(address.exists)
     }
 
-    private func replaceFieldText(_ app: XCUIApplication, field: XCUIElement, text: String) {
+    private func replaceFieldText(_ field: XCUIElement, text: String) {
         field.tap()
         if let value = field.value as? String, !value.isEmpty, value != field.placeholderValue {
-            field.doubleTap()
-            let selectAll = app.descendants(matching: .any)
-                .matching(NSPredicate(format: "label == 'Select All' OR label == 'すべてを選択'")).firstMatch
-            XCTAssertTrue(selectAll.waitForExistence(timeout: 5))
-            selectAll.tap()
+            field.tap(withNumberOfTaps: 3, numberOfTouches: 1)
         }
         field.typeText(XCUIKeyboardKey.delete.rawValue)
         XCTAssertEqual(field.value as? String, field.placeholderValue)

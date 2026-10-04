@@ -127,6 +127,7 @@ struct ThreadScreen: View {
             }
             if let thread = conversation {
                 let rows = conversationRows(thread, expansion: activityExpansionOverrides)
+                let firstRowId = rows.first?.id
                 let latestRowId = rows.last?.id
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -137,6 +138,7 @@ struct ThreadScreen: View {
                                     .id(row.id)
                             }
                         }
+                        .scrollTargetLayout()
                         .padding(.horizontal, 16)
                         .padding(.vertical, 6)
                         .background(ConversationScrollToTop {
@@ -162,15 +164,11 @@ struct ThreadScreen: View {
                             withAnimation { proxy.scrollTo(first.id, anchor: .top) }
                         }
                     }
-                    .onScrollGeometryChange(for: ConversationViewport.self) { geometry in
-                        ConversationViewport(
-                            oldestVisible: geometry.containerSize.height > 0 &&
-                                geometry.contentSize.height > 0 &&
-                                geometry.visibleRect.minY < geometry.containerSize.height * 0.6,
-                            latestVisible: geometry.contentSize.height - geometry.visibleRect.maxY <= 80
+                    .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
+                        historyViewport = ConversationViewport(
+                            oldestVisible: firstRowId.map { visible.contains($0) } ?? false,
+                            latestVisible: latestRowId.map { visible.contains($0) } ?? false
                         )
-                    } action: { _, viewport in
-                        historyViewport = viewport
                         loadVisibleHistory()
                     }
                     // Offset changes must not request another scroll. Follow only content
