@@ -298,6 +298,11 @@ extension BexLaunchUITests {
         app.buttons["tasks.new.project.simulator-project"].tap()
         chooseFixtureModel(app)
         chooseFixtureEffort(app, "medium")
+        let fast = app.buttons["model.fast"]
+        if fast.value as? String == "オン" {
+            fast.tap()
+        }
+        XCTAssertEqual(fast.value as? String, "オフ")
         let prompt = app.textFields["task.message"]
         prompt.tap(); prompt.typeText("Keep this existing draft")
         app.navigationBars.buttons.element(boundBy: 0).tap()

@@ -143,6 +143,7 @@ struct ThreadScreen: View {
                             isFollowingLatest = false
                         })
                     }
+                    .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .accessibilityIdentifier("task.detail")
                     .accessibilityValue(threadAccessibilityValue(thread))
                     .buttonStyle(.plain)
@@ -164,6 +165,7 @@ struct ThreadScreen: View {
                     .onScrollGeometryChange(for: ConversationViewport.self) { geometry in
                         ConversationViewport(
                             oldestVisible: geometry.containerSize.height > 0 &&
+                                geometry.contentSize.height > 0 &&
                                 geometry.visibleRect.minY < geometry.containerSize.height * 0.6,
                             latestVisible: geometry.contentSize.height - geometry.visibleRect.maxY <= 80
                         )
