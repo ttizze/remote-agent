@@ -11,9 +11,8 @@ use std::{collections::BTreeMap, sync::Arc};
 /// an empty draft. Runtime Snapshot fields cannot change the storage contract.
 #[derive(Serialize, Deserialize)]
 pub struct PersistedState {
-    #[serde(default)]
     model_defaults: ModelDefaults,
-    #[serde(default, with = "entries")]
+    #[serde(with = "entries")]
     scoped_model_defaults: Arc<BTreeMap<ModelDefaultsScope, ModelDefaults>>,
     storage_scope: String,
     archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
@@ -50,7 +49,7 @@ pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
 pub struct ModelPreferences {
     #[serde(flatten)]
     defaults: ModelDefaults,
-    #[serde(default, with = "entries")]
+    #[serde(with = "entries")]
     scoped: Arc<BTreeMap<ModelDefaultsScope, ModelDefaults>>,
 }
 impl ModelPreferences {

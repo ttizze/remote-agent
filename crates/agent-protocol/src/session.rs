@@ -405,7 +405,6 @@ fn merge_fields(previous: &Turn, incoming: &Turn) -> Turn {
     field!(
         items_has_more,
         started_at,
-        completed_at,
         duration_ms,
         error,
         started_at_ms,
@@ -570,8 +569,6 @@ pub enum HistoryReadKind {
     Partial,
     Incomplete,
     Unavailable,
-    #[serde(other)]
-    Other,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryReadState {

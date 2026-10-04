@@ -149,7 +149,6 @@ pub(crate) trait Agent: Identity {
         &self,
         id: &str,
         turn: &str,
-        exclude: bool,
         browser: Option<Value>,
     ) -> Result<ThreadResponse, Failure>;
     async fn rename(&self, id: &str, name: &str) -> Result<Empty, Failure>;

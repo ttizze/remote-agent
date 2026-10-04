@@ -34,7 +34,9 @@ pub enum PeerEvent {
     /// Notifications and server requests retain their complete envelopes.
     Message(Reply<Arc<str>>),
     /// Provider adapters can wait until preceding stdio events have been processed.
-    Response { sequence: u64 },
+    Response {
+        sequence: u64,
+    },
     Closed(String),
 }
 struct PreparedRequest {

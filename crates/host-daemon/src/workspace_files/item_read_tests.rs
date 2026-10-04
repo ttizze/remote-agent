@@ -52,7 +52,7 @@ fn item(id: usize, complete: bool) -> Value {
     json!({"id":format!("item-{id}"),"status":"unknown","clientInputId":null,"body":if complete {json!({"inline":{"body":body}})} else {json!({"deferred":{"summary":body}})}})
 }
 fn command(output: &str) -> Value {
-    json!({"id":"item-0","status":"running","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":output,"exitCode":null,"durationMs":null}}}}})
+    json!({"id":"item-0","status":"running","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":output,"exitCode":null}}}}})
 }
 fn deferred_command(output: &str) -> Value {
     let mut item = command(output);
@@ -218,7 +218,7 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
         let mut changed: agent_protocol::items::Item = serde_json::from_value(item(0, false)).unwrap();
         if let agent_protocol::items::ItemBody::AssistantText {text, ..} = changed.body_mut() {*text = "live update".into();}
         fixture.update(SessionChange::Item {turn_id:"turn".into(), item: changed.into()}).await;
-        fixture.update(SessionChange::Request { request: serde_json::from_value(json!({"id": "approval", "target": {"turn": {"turnId": "turn", "itemId": "item-0"}}, "delivery": "awaiting", "body": {"approval": {"kind": "command", "description": "", "details": "", "choices": [{"id": "choice-0", "label": "承認", "description": "", "meaning": "allow", "scope": "once"}, {"id": "choice-1", "label": "このセッションで承認", "description": "", "meaning": "allow", "scope": "session"}, {"id": "choice-2", "label": "拒否", "description": "", "meaning": "deny", "scope": "once"}, {"id": "choice-3", "label": "キャンセル", "description": "", "meaning": "cancel", "scope": "once"}]}}})).unwrap() }).await;
+        fixture.update(SessionChange::Request { request: serde_json::from_value(json!({"id": "approval", "target": {"turn": {"turnId": "turn", "itemId": "item-0"}}, "delivery": "awaiting", "body": {"approval": {"kind": "command", "description": "", "details": "", "choices": [{"id": "choice-0", "label": "承認", "description": ""}, {"id": "choice-1", "label": "このセッションで承認", "description": ""}, {"id": "choice-2", "label": "拒否", "description": ""}, {"id": "choice-3", "label": "キャンセル", "description": ""}]}}})).unwrap() }).await;
         wait_for(&fixture.store, |s| s.request("approval").is_some() && matches!(s.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "live update")).await;
         for intent in [
             Intent::Respond(op::Respond {request_id: "approval".into(),answer:Answer::Approval {choice_id: "choice-2".into()}}),

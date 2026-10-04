@@ -154,20 +154,11 @@ fn string(value: &Value, name: &str) -> String {
 fn detail(value: &Value) -> String {
     serde_json::to_string_pretty(value).expect("native value serializes")
 }
-fn choice(
-    id: &RequestId,
-    index: usize,
-    label: &str,
-    description: String,
-    meaning: ChoiceMeaning,
-    scope: ChoiceScope,
-) -> Choice {
+fn choice(id: &RequestId, index: usize, label: &str, description: String) -> Choice {
     Choice {
         id: format!("{id}/choice/{index}"),
         label: label.into(),
         description,
-        meaning,
-        scope,
     }
 }
 
@@ -196,8 +187,8 @@ pub(crate) fn codex(id: RequestId, method: &str, params: &Value) -> Result<Adapt
             let mut choices = Vec::new();
             let mut mapping = BTreeMap::new();
             for (index, decision) in decisions.iter().enumerate() {
-                let (label, meaning, scope, description) = approval_choice(decision)?;
-                if meaning == ChoiceMeaning::Allow
+                let (label, allows, description) = approval_choice(decision)?;
+                if allows
                     && params
                         .get("additionalPermissions")
                         .is_some_and(|permissions| {
@@ -210,7 +201,7 @@ pub(crate) fn codex(id: RequestId, method: &str, params: &Value) -> Result<Adapt
                 {
                     continue;
                 }
-                let choice = choice(&id, index, label, description, meaning, scope);
+                let choice = choice(&id, index, label, description);
                 mapping.insert(choice.id.clone(), json!({"decision":decision}));
                 choices.push(choice);
             }
@@ -262,29 +253,18 @@ pub(crate) fn codex(id: RequestId, method: &str, params: &Value) -> Result<Adapt
             let description = permission_description(permissions);
             if let Some(description) = &description {
                 for (index, scope, label) in [
-                    (0, ChoiceScope::Turn, "このターンで許可"),
-                    (1, ChoiceScope::Session, "このセッションで許可"),
+                    (0, "turn", "このターンで許可"),
+                    (1, "session", "このセッションで許可"),
                 ] {
-                    let choice = choice(
-                        &id,
-                        index,
-                        label,
-                        description.clone(),
-                        ChoiceMeaning::Allow,
-                        scope,
+                    let choice = choice(&id, index, label, description.clone());
+                    mapping.insert(
+                        choice.id.clone(),
+                        json!({"permissions":permissions,"scope":scope}),
                     );
-                    mapping.insert(choice.id.clone(), json!({"permissions":permissions,"scope":if scope == ChoiceScope::Turn { "turn" } else { "session" }}));
                     choices.push(choice);
                 }
             }
-            let deny = choice(
-                &id,
-                2,
-                "拒否",
-                String::new(),
-                ChoiceMeaning::Deny,
-                ChoiceScope::Turn,
-            );
+            let deny = choice(&id, 2, "拒否", String::new());
             mapping.insert(deny.id.clone(), json!({"permissions":{},"scope":"turn"}));
             choices.push(deny);
             (
@@ -344,22 +324,8 @@ pub(crate) fn claude(
                 let (body, answers) = questions(&id, &input["questions"], Some(input.clone()))?;
                 (target, body, answers)
             } else {
-                let allow = choice(
-                    &id,
-                    0,
-                    "承認",
-                    String::new(),
-                    ChoiceMeaning::Allow,
-                    ChoiceScope::Once,
-                );
-                let deny = choice(
-                    &id,
-                    1,
-                    "拒否",
-                    String::new(),
-                    ChoiceMeaning::Deny,
-                    ChoiceScope::Once,
-                );
+                let allow = choice(&id, 0, "承認", String::new());
+                let deny = choice(&id, 1, "拒否", String::new());
                 let mapping = [
                     (
                         allow.id.clone(),
@@ -482,18 +448,13 @@ fn questions(
     ))
 }
 
-fn approval_choice(
-    decision: &Value,
-) -> Result<(&'static str, ChoiceMeaning, ChoiceScope, String), String> {
-    let (label, meaning, scope) = match decision.as_str() {
-        Some("accept") => ("承認", ChoiceMeaning::Allow, ChoiceScope::Once),
-        Some("acceptForSession") => (
-            "このセッションで承認",
-            ChoiceMeaning::Allow,
-            ChoiceScope::Session,
-        ),
-        Some("decline") => ("拒否", ChoiceMeaning::Deny, ChoiceScope::Once),
-        Some("cancel") => ("キャンセル", ChoiceMeaning::Cancel, ChoiceScope::Once),
+/// Returns the label, whether the choice grants the request, and its description.
+fn approval_choice(decision: &Value) -> Result<(&'static str, bool, String), String> {
+    let (label, allows) = match decision.as_str() {
+        Some("accept") => ("承認", true),
+        Some("acceptForSession") => ("このセッションで承認", true),
+        Some("decline") => ("拒否", false),
+        Some("cancel") => ("キャンセル", false),
         _ => {
             let fields = decision
                 .as_object()
@@ -511,8 +472,7 @@ fn approval_choice(
                     .ok_or("execution rule arguments are missing")?;
                 return Ok((
                     "実行ルールを追加して承認",
-                    ChoiceMeaning::Allow,
-                    ChoiceScope::Persistent,
+                    true,
                     format!(
                         "今後、次の引数のコマンドを許可します: {}",
                         detail(&json!(arguments))
@@ -536,8 +496,7 @@ fn approval_choice(
                 return match rule.get("action").and_then(Value::as_str) {
                     Some("allow") => Ok((
                         "ネットワーク許可ルールを追加",
-                        ChoiceMeaning::Allow,
-                        ChoiceScope::Persistent,
+                        true,
                         format!(
                             "今後、次のホストへの接続を許可します: {}",
                             detail(&json!(host))
@@ -545,8 +504,7 @@ fn approval_choice(
                     )),
                     Some("deny") => Ok((
                         "ネットワーク拒否ルールを追加",
-                        ChoiceMeaning::Deny,
-                        ChoiceScope::Persistent,
+                        false,
                         format!(
                             "今後、次のホストへの接続を拒否します: {}",
                             detail(&json!(host))
@@ -558,7 +516,7 @@ fn approval_choice(
             return Err("unsupported native approval choice".into());
         }
     };
-    Ok((label, meaning, scope, String::new()))
+    Ok((label, allows, String::new()))
 }
 
 fn permission_description(permissions: &serde_json::Map<String, Value>) -> Option<String> {
@@ -995,18 +953,9 @@ mod tests {
             );
             assert_ne!(choice.id, choice.label);
         }
-        assert_eq!(
-            adapted.request.body.choices()[1].scope,
-            ChoiceScope::Session
-        );
         for choice in &adapted.request.body.choices()[4..] {
-            assert_eq!(choice.scope, ChoiceScope::Persistent);
             assert!(!choice.description.contains("Amendment"));
         }
-        assert_eq!(
-            adapted.request.body.choices()[6].meaning,
-            ChoiceMeaning::Deny
-        );
         let default = codex(
             "request".into(),
             "item/fileChange/requestApproval",
@@ -1078,13 +1027,19 @@ mod tests {
                 &json!({"turnId":"turn","permissions":permissions}),
             )
             .unwrap();
-            assert!(
+            let choices = adapted.request.body.choices();
+            assert_eq!(choices.len(), 1);
+            assert_eq!(
                 adapted
-                    .request
-                    .body
-                    .choices()
-                    .iter()
-                    .all(|choice| choice.meaning == ChoiceMeaning::Deny)
+                    .answers
+                    .translate(
+                        &adapted.request.body,
+                        &Answer::Permission {
+                            choice_id: choices[0].id.clone()
+                        }
+                    )
+                    .unwrap(),
+                json!({"permissions":{},"scope":"turn"})
             );
         }
     }

@@ -105,7 +105,6 @@ pub(super) fn summary(path: &Path) -> Result<crate::host_rpc::agent::SessionSumm
             provider: ProviderKind::Claude,
             id: id.into(),
         }),
-        path: Some(path.to_string_lossy().into()),
         updated_at: metadata
             .modified()
             .ok()
@@ -199,7 +198,6 @@ pub(super) fn read_related(
             provider: ProviderKind::Claude,
             id: session_id.to_string(),
         }),
-        path: Some(path.to_string_lossy().into()),
         ..Default::default()
     };
     thread.agent_id = Some(agent_id.into());

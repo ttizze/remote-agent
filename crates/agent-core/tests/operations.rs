@@ -170,7 +170,6 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         "forkThread" => call!(ForkSession {
             thread_id: serde_json::from_value(command["threadId"].clone()).unwrap(),
             last_turn_id: text(command, "lastTurnId").into(),
-            exclude_turns: true
         }),
         kind => panic!("unknown operation {kind}"),
     };

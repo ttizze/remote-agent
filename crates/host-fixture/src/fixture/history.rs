@@ -182,13 +182,7 @@ pub(super) fn page(
         let start = end.saturating_sub(count);
         let data: Vec<_> = entries[start..end].iter().collect();
         let next_cursor = (start > 0).then(|| format!("timeline:{}", offset + data.len()));
-        context.respond(
-            id,
-            &Page {
-                data,
-                next_cursor,
-            },
-        )
+        context.respond(id, &Page { data, next_cursor })
     } else {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]

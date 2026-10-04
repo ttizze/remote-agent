@@ -370,7 +370,6 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
             id.into(),
             ItemStatus::Unknown,
             ItemBody::AssistantText {
-                citation: None,
                 text: "before".into(),
                 phase: AssistantPhase::Unknown,
             },
@@ -553,8 +552,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
     use agent_core::state::{FileDraft, Intent, Navigation, Workspace};
     let file: Arc<agent_protocol::models::FileContent> = Arc::new(
         serde_json::from_value(json!({
-            "path":"/old/file", "revision":"r1", "text":"saved", "bom":false,
-            "lineEnding":"lf", "size":5
+            "path":"/old/file", "revision":"r1", "text":"saved", "size":5
         }))
         .unwrap(),
     );
@@ -933,7 +931,7 @@ fn completed_commands_refresh_session_metadata_without_waiting_for_the_turn() {
         snapshot.connected = connected;
         let (next, effects) = fixture_change(
             &snapshot,
-            json!({"session":{"provider":"codex","id":"task"},"change":{"item":{"turnId":"turn","item":{"id":"merge","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"git merge task","cwd":null,"output":"","exitCode":0,"durationMs":null}}}}}}}}),
+            json!({"session":{"provider":"codex","id":"task"},"change":{"item":{"turnId":"turn","item":{"id":"merge","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"git merge task","cwd":null,"output":"","exitCode":0}}}}}}}}),
         );
         assert_eq!(effects.len(), usize::from(connected));
         assert_eq!(

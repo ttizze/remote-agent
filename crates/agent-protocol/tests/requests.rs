@@ -8,7 +8,7 @@ fn body(value: Value) -> RequestBody {
 
 #[test]
 fn choices_are_ids_and_answers_must_match_the_request_family() {
-    let choice = json!({"id":"opaque","label":"Allow","description":"turn permission","meaning":"allow","scope":"turn"});
+    let choice = json!({"id":"opaque","label":"Allow","description":"turn permission"});
     let approval = body(
         json!({"approval":{"kind":"command","description":"run","details":"pwd","choices":[choice]}}),
     );

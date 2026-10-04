@@ -129,12 +129,8 @@ pub struct RenameSession {
     pub name: String,
 }
 
-fn model_limit() -> usize {
-    100
-}
 #[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct ListModels {
-    #[serde(default = "model_limit")]
     pub limit: usize,
     pub cursor: Option<String>,
 }
@@ -428,9 +424,6 @@ pub fn validate_output<O: RpcMethod>(operation: &O, output: &O::Output) -> Resul
 pub struct ForkSession {
     pub thread_id: crate::session::SessionRef,
     pub last_turn_id: crate::ids::TurnId,
-
-    #[serde(default)]
-    pub exclude_turns: bool,
 }
 
 impl ForkSession {
@@ -438,7 +431,6 @@ impl ForkSession {
         Self {
             thread_id,
             last_turn_id,
-            exclude_turns: false,
         }
     }
     pub(crate) fn validate(

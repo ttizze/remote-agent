@@ -107,7 +107,7 @@ fn thread_updates_publish_status_requests_and_delivery_without_changing_metadata
     .unwrap();
     assert_eq!(submitted.submissions["input"], SubmissionDelivery::Sending);
     assert_eq!(submitted.status, SessionStatus::Running);
-    let request: Request = serde_json::from_value(json!({"id":"request","target":"session","delivery":"awaiting","body":{"approval":{"kind":"command","description":"","details":"","choices":[{"id":"allow","label":"Allow","description":"","meaning":"allow","scope":"once"}]}}})).unwrap();
+    let request: Request = serde_json::from_value(json!({"id":"request","target":"session","delivery":"awaiting","body":{"approval":{"kind":"command","description":"","details":"","choices":[{"id":"allow","label":"Allow","description":""}]}}})).unwrap();
     let requested = SessionChange::Request {
         request: request.clone(),
     }

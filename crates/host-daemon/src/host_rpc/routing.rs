@@ -976,7 +976,6 @@ mod tests {
                     agent_protocol::items::ItemBody::AssistantText {
                         text: "kept".into(),
                         phase: agent_protocol::items::AssistantPhase::Unknown,
-                        citation: None,
                     },
                 )),
             },
@@ -1102,13 +1101,9 @@ mod tests {
                         status,
                         agent_protocol::items::ItemBody::CommandExecution {
                             command: "true".into(),
-                            actions: Vec::new(),
-                            source: Default::default(),
-                            process_id: None,
                             cwd: None,
                             output: String::new(),
                             exit_code: None,
-                            duration_ms: None,
                         },
                     )),
                 },
@@ -1238,7 +1233,7 @@ mod tests {
         let connection = router.open_session();
         let mut items: Vec<_> = (0..40).map(|id| json!({"id":id.to_string(),"status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"x".repeat(512 * 1024),"phase":"unknown"}}}}})).collect();
         items.push(
-            json!({"id":"tool","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"z".repeat(8192),"exitCode":null,"durationMs":null}}}}}),
+            json!({"id":"tool","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"z".repeat(8192),"exitCode":null}}}}}),
         );
         let response = serde_json::from_value(
             json!({"thread":{"id":{"provider":"codex","id":"native"},"turns":[{"id":"turn","items":items,"status":"unknown"}]}}),
@@ -1307,7 +1302,6 @@ mod tests {
                     "answer".into(),
                     agent_protocol::execution::ItemStatus::Running,
                     agent_protocol::items::ItemBody::AssistantText {
-                        citation: None,
                         text: "start".into(),
                         phase: agent_protocol::items::AssistantPhase::Unknown,
                     },

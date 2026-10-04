@@ -242,22 +242,18 @@ impl HostRpcService {
         directory: std::path::PathBuf,
         native_home: Option<std::path::PathBuf>,
     ) -> anyhow::Result<()> {
-        let claude = crate::claude::Claude::load(
-            program,
-            directory,
-            native_home,
-        )
-        .await
-        .inspect_err(|error| {
-            self.inner
-                .startup_errors
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(
-                    ProviderKind::Claude,
-                    Failure::new("provider_unavailable", error),
-                );
-        })?;
+        let claude = crate::claude::Claude::load(program, directory, native_home)
+            .await
+            .inspect_err(|error| {
+                self.inner
+                    .startup_errors
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(
+                        ProviderKind::Claude,
+                        Failure::new("provider_unavailable", error),
+                    );
+            })?;
         {
             let mut agents = self.inner.agents.write().unwrap_or_else(|e| e.into_inner());
             anyhow::ensure!(
@@ -949,7 +945,6 @@ impl HostRpcService {
                     .fork(
                         &target.id,
                         &params.last_turn_id,
-                        params.exclude_turns,
                         self.browser_config(&scope)?,
                     )
                     .await?;
@@ -1917,7 +1912,7 @@ mod tests {
             ("host/session/rename", "unsupported_operation"),
             ("host/session/submit", "provider_unavailable"),
         ] {
-            let call = agent_protocol::protocol::json_boundary::call(method, serde_json::json!({"threadId":{"provider":"claude","id":"native"},"clientUserMessageId":method,"lastTurnId":"turn","excludeTurns":false,"name":"Renamed","input":[],"expectedTurnId":"turn"})).unwrap();
+            let call = agent_protocol::protocol::json_boundary::call(method, serde_json::json!({"threadId":{"provider":"claude","id":"native"},"clientUserMessageId":method,"lastTurnId":"turn","name":"Renamed","input":[],"expectedTurnId":"turn"})).unwrap();
             let response = service.dispatch(session.id(), &call).await.unwrap();
             let response = agent_protocol::protocol::decode::<
                 agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,

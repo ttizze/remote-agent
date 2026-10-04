@@ -1639,8 +1639,7 @@ async fn file_edits_preserve_encoding_and_reject_stale_revisions() {
             .await
             .map(|output| serde_json::to_value(output).unwrap())
             .unwrap();
-        assert_eq!(original["bom"], true);
-        assert_eq!(original["lineEnding"], "crlf");
+        assert_eq!(original["text"], "first\r\n");
         let saved = client
             .peer
             .call(

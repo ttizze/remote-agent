@@ -268,7 +268,6 @@ impl Claude {
                 cwd: Some(cwd.to_string_lossy().into_owned()),
                 status: SessionStatus::Idle,
                 turns: Some(Vec::new()),
-                created_at: Some(now() as f64),
                 updated_at: Some(now() as f64),
                 ..Default::default()
             },
@@ -984,7 +983,6 @@ impl Worker {
         } else {
             TurnStatus::Failed
         };
-        turn.completed_at = Some(now() as f64);
         if let Some(items) = &mut turn.items {
             for item in items
                 .iter_mut()
@@ -1382,7 +1380,6 @@ fn usage_limit_error(info: &Value) -> Option<ExecutionError> {
         category: ErrorCategory::UsageLimit,
         message: "Claudeの利用上限に達しました。".into(),
         provider_code: info["rateLimitType"].as_str().map(str::to_owned),
-        resets_at_seconds: info["resetsAt"].as_u64(),
         ..Default::default()
     })
 }
@@ -1443,17 +1440,10 @@ fn execution_error(message: &Value, retrying: bool) -> ExecutionError {
         category,
         message: text,
         provider_code: code.map(str::to_owned),
-        http_status: status.and_then(|v| v.try_into().ok()),
-        retry: retrying.then(|| RetryEvidence {
+        retry: retrying.then_some(RetryEvidence {
             retrying,
             overloaded,
-            attempt: message["attempt"].as_u64().and_then(|v| v.try_into().ok()),
-            max_attempts: message["max_retries"]
-                .as_u64()
-                .and_then(|v| v.checked_add(1))
-                .and_then(|v| v.try_into().ok()),
         }),
-        retry_delay_ms: message["retry_delay_ms"].as_u64(),
         ..Default::default()
     }
 }
@@ -1903,7 +1893,6 @@ impl Agent for Claude {
         &self,
         _id: &str,
         _turn: &str,
-        _exclude: bool,
         _browser: Option<Value>,
     ) -> Result<ThreadResponse, Failure> {
         Err(Failure::new(
@@ -2005,7 +1994,6 @@ mod execution_tests {
                 ItemBody::AssistantText {
                     text: value.into(),
                     phase: AssistantPhase::Unknown,
-                    citation: None,
                 },
             ))
         };
@@ -2322,19 +2310,12 @@ mod execution_tests {
         ] {
             assert_eq!(execution_error(&message, false).category, category);
         }
-        let retry = execution_error(
-            &json!({"error":"overloaded","attempt":2,"max_retries":4,"retry_delay_ms":1500,"error_status":503}),
-            true,
-        );
-        assert_eq!(retry.http_status, Some(503));
-        assert_eq!(retry.retry_delay_ms, Some(1500));
+        let retry = execution_error(&json!({"error":"overloaded","error_status":503}), true);
         assert_eq!(
             retry.retry,
             Some(RetryEvidence {
                 retrying: true,
                 overloaded: true,
-                attempt: Some(2),
-                max_attempts: Some(5)
             })
         );
         for status in ["allowed", "allowed_warning"] {
@@ -2350,7 +2331,7 @@ mod execution_tests {
         )
         .unwrap();
         assert_eq!(limit.category, ErrorCategory::UsageLimit);
-        assert_eq!(limit.resets_at_seconds, Some(123456));
+        assert_eq!(limit.provider_code.as_deref(), Some("five_hour"));
         let future = json!({"code":"future_failure","httpStatus":null});
         assert_eq!(
             execution_error(&json!({"error":"future_failure"}), false).category,

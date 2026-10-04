@@ -257,7 +257,6 @@ pub(super) fn content_item(
     let mut status = ItemStatus::Completed;
     let body = match block["type"].as_str() {
         Some("text") => ItemBody::AssistantText {
-            citation: None,
             text: text("text"),
             phase: AssistantPhase::Unknown,
         },
@@ -272,14 +271,10 @@ pub(super) fn content_item(
             let string = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
             match block["name"].as_str() {
                 Some("Bash") => ItemBody::CommandExecution {
-                    actions: vec![],
-                    source: agent_protocol::items::CommandSource::Unknown,
-                    process_id: None,
                     command: string("command"),
                     cwd: cwd.map(str::to_owned),
                     output: String::new(),
                     exit_code: None,
-                    duration_ms: None,
                 },
                 Some("Write" | "Edit" | "NotebookEdit") => {
                     let proposal = match block["name"].as_str() {
