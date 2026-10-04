@@ -143,7 +143,8 @@ struct ThreadScreen: View {
                         scrollPosition = ScrollPosition(idType: String.self)
                     })
                 }
-                .scrollPosition($scrollPosition)
+                .scrollPosition($scrollPosition, anchor: .bottom)
+                .defaultScrollAnchor(.bottom, for: .alignment)
                 .accessibilityIdentifier("task.detail")
                 .accessibilityValue(threadAccessibilityValue(thread))
                 .buttonStyle(.plain)
