@@ -18,7 +18,7 @@ struct ThreadScreen: View {
     @State var showingModelSettings = false
     @State var isVisible = false
     @State var isFollowingLatest = true
-    @State var visibleHistoryRows: (threadId: String, rowIds: Set<String>)?
+    @State var visibleHistoryRows: (threadId: SessionRef?, rowIds: Set<String>)?
     @State var latestHistoryRowVisible = false
     @State var expandedItemIds = Set<String>()
     @State var activityExpansionOverrides = [String: ActivityExpansion]()
