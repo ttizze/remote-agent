@@ -654,6 +654,7 @@ mod tests {
         let items = turns[0].items.as_ref().unwrap();
         assert_eq!(items.len(), 2);
         assert_eq!(items[1].status, ItemStatus::Failed);
+        assert!(items[1].is_deferred());
         assert!(
             matches!(items[1].body(), ItemBody::CommandExecution {output, exit_code:None, ..} if output == "work failed")
         );

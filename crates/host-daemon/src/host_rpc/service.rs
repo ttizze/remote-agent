@@ -599,7 +599,8 @@ impl HostRpcService {
                 turn.items?
                     .into_iter()
                     .find(|item| item.id == params.item_id)
-            });
+            })
+            .filter(|item| !item.is_deferred());
         let mut response = if let Some(item) = live {
             agent_protocol::operations::ItemResponse {
                 item: Arc::unwrap_or_clone(item),

@@ -163,11 +163,17 @@ impl TaskOutcome<'_> {
         ) {
             return None;
         }
-        Some(Item::new(
+        let body = Box::new(tool_result_body(body, &json!(self.summary), &Value::Null));
+        Some(Item {
             id,
-            self.status,
-            tool_result_body(body, &json!(self.summary), &Value::Null),
-        ))
+            status: self.status,
+            client_input_id: None,
+            body: if self.output_path.is_some() {
+                ItemContent::Deferred { summary: body }
+            } else {
+                ItemContent::Inline { body }
+            },
+        })
     }
 }
 
@@ -474,6 +480,7 @@ mod tests {
             prop_assert_eq!(live.output_path, output_available.then_some("/work/result.output"));
             let expected = match status {"completed"=>ItemStatus::Completed, "failed"=>ItemStatus::Failed, _=>ItemStatus::Interrupted};
             let result = live.item(launched.id.clone(), launched.body()).unwrap();
+            prop_assert_eq!(result.is_deferred(), output_available);
             prop_assert_eq!(result.status, expected);
             prop_assert_eq!(saved.item(launched.id.clone(), launched.body()), Some(result.clone()));
             prop_assert_eq!(live.item(result.id.clone(), result.body()), Some(result));
