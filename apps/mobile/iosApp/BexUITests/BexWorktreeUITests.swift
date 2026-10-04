@@ -4,11 +4,7 @@ extension BexLaunchUITests {
     func testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus() throws {
         let app = try connectedSimulatorApp(expandProject: false)
         try useSimulatorListFixture("merge-worktree/fresh")
-        func refresh() {
-            app.buttons["tasks.menu"].tap()
-            app.buttons["tasks.refresh"].tap()
-        }
-        refresh()
+        refreshSimulatorTaskList(app)
         let project = app.buttons["tasks.project.simulator-project"]
         XCTAssertTrue(project.waitForExistence(timeout: 10))
         project.tap()
@@ -18,13 +14,13 @@ extension BexLaunchUITests {
         let unmerged = app.descendants(matching: .any)["tasks.unmerged.codex:merge-active"]
         XCTAssertFalse(merged.exists || unmerged.exists)
         try simulatorFixture("merge-worktree/dirty")
-        refresh()
+        refreshSimulatorTaskList(app)
         XCTAssertTrue(unmerged.waitForExistence(timeout: 10))
         XCTAssertTrue(running.exists)
         XCTAssertGreaterThan(unmerged.frame.minX, running.frame.maxX)
         try simulatorFixture("merge-worktree/clean")
         try simulatorFixture("merge-worktree/merged")
-        refresh()
+        refreshSimulatorTaskList(app)
         XCTAssertTrue(merged.waitForExistence(timeout: 10))
         XCTAssertFalse(unmerged.exists)
         XCTAssertTrue(running.exists)
@@ -39,19 +35,30 @@ extension BexLaunchUITests {
         expandSimulatorProject(app)
         XCTAssertTrue(merged.waitForExistence(timeout: 10))
         try simulatorFixture("merge-worktree/dirty")
-        refresh()
+        refreshSimulatorTaskList(app)
         XCTAssertTrue(unmerged.waitForExistence(timeout: 10))
         XCTAssertFalse(merged.exists)
         try simulatorFixture("merge-worktree/clean")
-        refresh()
+        refreshSimulatorTaskList(app)
         XCTAssertTrue(merged.waitForExistence(timeout: 10))
         try simulatorFixture("merge-worktree/new-work")
-        refresh()
+        refreshSimulatorTaskList(app)
         let removed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: merged)
         wait(for: [removed], timeout: 10)
         XCTAssertTrue(unmerged.exists)
         XCTAssertTrue(app.descendants(matching: .any)["tasks.unmerged.codex:merge-idle"].exists)
         XCTAssertTrue(running.exists)
+    }
+
+    private func refreshSimulatorTaskList(_ app: XCUIApplication) {
+        let progress = app.descendants(matching: .any)["connection.progress"]
+        let idle = NSPredicate(format: "exists == false")
+        wait(for: [expectation(for: idle, evaluatedWith: progress)], timeout: 10)
+        app.buttons["tasks.menu"].tap()
+        let refresh = app.buttons["tasks.refresh"]
+        XCTAssertTrue(refresh.isEnabled)
+        refresh.tap()
+        wait(for: [expectation(for: idle, evaluatedWith: progress)], timeout: 10)
     }
 
     func useAutomaticWorktrees(_ app: XCUIApplication) throws {
