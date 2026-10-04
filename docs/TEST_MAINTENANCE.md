@@ -180,8 +180,6 @@ transfer server just to delete that check would reverse A14.
   debugging. Apple CI uses five Apple Silicon `macos-26` runners with Xcode 26.6.
   It selects the image's preinstalled Xcode directly.
   iPhone browser acceptance uses the image's preinstalled Chrome for Testing.
-  It verifies a headless launch with software rendering before starting the
-  Simulator, using a separate disposable profile from the acceptance Host.
   The Mac runner uses `nix develop . --command just quality rust` for Rust
   contracts and Mac Browser E2E. Four iPhone runners use
   `nix develop . --command just quality swift` for Swift checks and acceptance.
