@@ -76,15 +76,19 @@ fn sidebar_header(expanded: bool, cx: &Context<Desktop>) -> Div {
         )
 }
 
-fn fitted_image(source: ImageSource, height: f32) -> Img {
-    img(source)
+fn image_skeleton(height: f32, background: Hsla) -> Div {
+    div()
         .w_full()
         .min_w_0()
+        .max_w(px(height))
         .h(px(height))
-        .min_h(px(height))
-        .max_h(px(height))
-        .object_fit(ObjectFit::Contain)
-        .debug_selector(|| "chat-image".into())
+        .flex_shrink_0()
+        .child(
+            skeleton::Skeleton::new()
+                .size_full()
+                .rounded_lg()
+                .bg(background),
+        )
 }
 
 fn user_message_bubble() -> Div {

@@ -223,14 +223,7 @@ impl Desktop {
             agent_protocol::items::ItemBody::ImageGeneration { .. } => {
                 let mut body = v_flex().gap_2().w_full();
                 if projected.data.image_placeholder {
-                    body = body.child(
-                        skeleton::Skeleton::new()
-                            .w_full()
-                            .max_w(px(320.))
-                            .h(px(320.))
-                            .rounded_lg()
-                            .bg(cx.theme().secondary),
-                    );
+                    body = body.child(image_skeleton(320., cx.theme().secondary));
                 }
                 for source in &projected.data.image_sources {
                     body = body.child(self.image(source, false, 320., true, cx));

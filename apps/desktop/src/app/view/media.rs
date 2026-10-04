@@ -80,11 +80,29 @@ impl Desktop {
         }
         let state = &self.images[&key];
         if let Some(path) = &state.path {
-            let image = fitted_image(path.clone(), height);
+            let background = cx.theme().secondary;
+            let id = SharedString::from(key);
+            let image = img(path.clone())
+                .id(id.clone())
+                .w_full()
+                .min_w_0()
+                .h(px(height))
+                .min_h(px(height))
+                .max_h(px(height))
+                .object_fit(ObjectFit::Contain)
+                .debug_selector(|| "chat-image".into())
+                .with_loading(move || image_skeleton(height, background).into_any_element())
+                .with_fallback(|| {
+                    div()
+                        .text_sm()
+                        .text_color(rgb(0xaaaaaa))
+                        .child("画像を表示できません")
+                        .into_any_element()
+                });
             if clickable {
                 let source = state.source.clone();
                 div()
-                    .id(SharedString::from(key))
+                    .id(id)
                     .w_full()
                     .h(px(height))
                     .flex_shrink_0()
@@ -100,17 +118,14 @@ impl Desktop {
             } else {
                 image.into_any_element()
             }
-        } else {
+        } else if let Some(error) = &state.error {
             div()
                 .text_sm()
                 .text_color(rgb(0xaaaaaa))
-                .child(
-                    state
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "画像を読み込み中…".into()),
-                )
+                .child(error.clone())
                 .into_any_element()
+        } else {
+            image_skeleton(height, cx.theme().secondary).into_any_element()
         }
     }
 

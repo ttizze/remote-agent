@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,7 +13,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Card
 import androidx.compose.material3.HorizontalDivider
@@ -30,8 +28,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -43,8 +39,6 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import com.revenuecat.placeholder.PlaceholderDefaults
-import com.revenuecat.placeholder.placeholder
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.MarkdownAlignment
 import dev.remoteagent.core.MarkdownBlock
@@ -68,17 +62,7 @@ internal fun ThreadMessageCard(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (content.imagePlaceholder) {
-            Box(
-                imageFrame
-                    .placeholder(
-                        enabled = true,
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = RoundedCornerShape(10.dp),
-                        highlight = PlaceholderDefaults.pulse,
-                    )
-                    .semantics { contentDescription = "画像を生成中" }
-                    .testTag("image.generation.skeleton")
-            )
+            ImageSkeleton(imageFrame, "画像を生成中", "image.generation.skeleton")
         }
         if (isUser && content.imageSources.isNotEmpty()) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
