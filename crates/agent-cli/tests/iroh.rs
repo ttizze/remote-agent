@@ -85,7 +85,7 @@ async fn exercise(command: &[&str], expected: Value) {
                     );
                     let mut thread = json!({"id":{"provider":"codex","id":"fixture-thread"},"cwd":"/fixture","status":"idle","turns":[]});
                     if let Some(id) = &approval {
-                        thread["requests"] = json!({id.as_str().unwrap():{"id":id,"target":"session","delivery":"awaiting","body":{"approval":{"kind":"command","description":"fixture","details":"","choices":[{"id":"accept-choice","label":"承認","description":"","meaning":"allow","scope":"once"},{"id":"session-choice","label":"セッション中","description":"","meaning":"allow","scope":"session"},{"id":"decline-choice","label":"拒否","description":"","meaning":"deny","scope":"once"}]}}}});
+                        thread["requests"] = json!({id.as_str().unwrap():{"id":id,"target":"session","delivery":"awaiting","body":{"approval":{"kind":"command","description":"fixture","details":"","choices":[{"id":"accept-choice","label":"承認","description":""},{"id":"session-choice","label":"セッション中","description":""},{"id":"decline-choice","label":"拒否","description":""}]}}}});
                     }
                     json!({"session":request["params"]["session"],"subscriptionId":"00000000-0000-0000-0000-000000000001","revision":0,"response":{"thread":thread}})
                 }

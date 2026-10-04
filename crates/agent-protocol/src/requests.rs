@@ -68,24 +68,6 @@ pub struct Choice {
     pub id: String,
     pub label: String,
     pub description: String,
-    pub meaning: ChoiceMeaning,
-    pub scope: ChoiceScope,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum ChoiceMeaning {
-    Allow,
-    Deny,
-    Cancel,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum ChoiceScope {
-    Once,
-    Turn,
-    Session,
-    Persistent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

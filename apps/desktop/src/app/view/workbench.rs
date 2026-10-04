@@ -475,36 +475,9 @@ impl Desktop {
                     )),
                 )
                 .into_any_element(),
-            Panel::SideChat => self
-                .side_chat
-                .as_ref()
-                .map(|v| v.clone().into_any_element())
-                .unwrap_or_else(|| {
-                    div()
-                        .p_4()
-                        .child("パネルを開けませんでした。ツールを選び直してください。")
-                        .into_any_element()
-                }),
-            Panel::Terminal => self
-                .terminal
-                .as_ref()
-                .map(|v| v.clone().into_any_element())
-                .unwrap_or_else(|| {
-                    div()
-                        .p_4()
-                        .child("パネルを開けませんでした。ツールを選び直してください。")
-                        .into_any_element()
-                }),
-            Panel::Browser => self
-                .browser
-                .as_ref()
-                .map(|v| v.clone().into_any_element())
-                .unwrap_or_else(|| {
-                    div()
-                        .p_4()
-                        .child("パネルを開けませんでした。ツールを選び直してください。")
-                        .into_any_element()
-                }),
+            Panel::SideChat => tool_view(self.side_chat.as_ref()),
+            Panel::Terminal => tool_view(self.terminal.as_ref()),
+            Panel::Browser => tool_view(self.browser.as_ref()),
         };
         v_flex()
             .size_full()
@@ -550,4 +523,14 @@ impl Desktop {
             })
             .into_any_element()
     }
+}
+
+fn tool_view<V: Render>(view: Option<&Entity<V>>) -> AnyElement {
+    view.map(|view| view.clone().into_any_element())
+        .unwrap_or_else(|| {
+            div()
+                .p_4()
+                .child("パネルを開けませんでした。ツールを選び直してください。")
+                .into_any_element()
+        })
 }

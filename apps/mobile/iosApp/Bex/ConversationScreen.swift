@@ -241,14 +241,6 @@ struct ThreadScreen: View {
 
 /// Conversation navigation
 extension ThreadScreen {
-    var review: WorkspaceReviewSummary? {
-        model.snapshot.review().map { WorkspaceReviewSummary(
-            files: Int($0.fileCount()),
-            additions: Int($0.additions()),
-            deletions: Int($0.deletions())
-        ) }
-    }
-
     private var project: Project? {
         let directory = model.selectedDirectory
         return model.list?.projects.first { $0.roots.contains { $0.path == directory } }
@@ -360,10 +352,4 @@ extension ThreadScreen {
         .frame(minHeight: 44)
         .padding(.horizontal, 8)
     }
-}
-
-struct WorkspaceReviewSummary {
-    let files: Int
-    let additions: Int
-    let deletions: Int
 }

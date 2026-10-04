@@ -340,12 +340,7 @@ private struct BexQrScannerSheet: View {
 
     var body: some View {
         NavigationStack {
-            BexQrScannerController { result in
-                switch result {
-                case let .success(contents): completion(contents)
-                case .failure: completion(nil)
-                }
-            }
+            BexQrScannerController(completion: completion)
             .navigationTitle("QRコードを読み取る")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -360,7 +355,7 @@ private struct BexQrScannerSheet: View {
 }
 
 private struct BexQrScannerController: UIViewControllerRepresentable {
-    let completion: (Result<String, BexQrCaptureError>) -> Void
+    let completion: (String?) -> Void
 
     func makeUIViewController(context _: Context) -> BexQrCaptureViewController {
         BexQrCaptureViewController(completion: completion)

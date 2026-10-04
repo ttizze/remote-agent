@@ -438,7 +438,6 @@ fn tool_title(body: &ItemBody) -> String {
             "レビューを終了しました"
         }
         .into(),
-        ItemBody::Error { .. } => "エラー".into(),
         ItemBody::Custom { provider, kind, .. } => {
             format!("{provider:?} item ({})", compact_title(kind))
         }
@@ -481,7 +480,7 @@ mod presentation_tests {
     }
     #[test]
     fn completed_turn_projects_user_work_and_final() {
-        let turn = turn!({"id":"turn","status":"completed","durationMs":40000,"items":[{"id":"u","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"r","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":[]}}}}},{"id":"c","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"a","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"f","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"final"}}}}}]});
+        let turn = turn!({"id":"turn","status":"completed","durationMs":40000,"items":[{"id":"u","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"r","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":[]}}}}},{"id":"c","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null}}}}},{"id":"a","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"f","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"final"}}}}}]});
         let p = project(&turn).next().unwrap();
         assert_eq!(rows(&p, &turn, Role::User).count(), 1);
         assert_eq!(
@@ -526,7 +525,7 @@ mod presentation_tests {
         #[case] status: &str,
         #[case] command_status: &str,
     ) {
-        let turn = turn!({"id":"turn","status":status,"items":[{"id":"u","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":"Inspect","content":[]}}}}},{"id":"c","status":command_status,"clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"a","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"Result","phase":"unknown"}}}}}]});
+        let turn = turn!({"id":"turn","status":status,"items":[{"id":"u","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":"Inspect","content":[]}}}}},{"id":"c","status":command_status,"clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null}}}}},{"id":"a","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"Result","phase":"unknown"}}}}}]});
         let group = project(&turn).find(|part| part.collapsible).unwrap();
         assert!(
             !group.initially_expanded,
@@ -541,7 +540,7 @@ mod presentation_tests {
 
     #[test]
     fn live_commentary_separates_activity_groups_without_reordering() {
-        let turn = turn!({"id":"turn","status":"running","items":[{"id":"u","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"intro","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"c1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"c2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"progress","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"tool","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"toolCall":{"kind":"mcp","tool":"","server":null,"namespace":null,"arguments":null,"result":null,"error":null,"content":[],"success":null,"durationMs":null}}}}},{"id":"followup","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"r","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":[]}}}}}]});
+        let turn = turn!({"id":"turn","status":"running","items":[{"id":"u","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"intro","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"c1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null}}}}},{"id":"c2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null}}}}},{"id":"progress","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"tool","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"toolCall":{"kind":"mcp","tool":"","server":null,"namespace":null,"arguments":null,"result":null,"error":null,"content":[],"success":null,"durationMs":null}}}}},{"id":"followup","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"r","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":[]}}}}}]});
         assert_eq!(
             order(&turn),
             ["u", "intro", "c1", "c2", "progress", "tool", "followup"]
@@ -557,7 +556,7 @@ mod presentation_tests {
     fn completed_exchanges_keep_each_answer_beside_its_question(
         #[values(AssistantPhase::Unknown, AssistantPhase::Final)] phase: AssistantPhase,
     ) {
-        let turn = turn!({"id":"turn","status":"completed","durationMs":1459000,"items":[{"id":"u1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"progress","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"f1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":phase}}}}},{"id":"u2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"c","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"f2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":phase}}}}}]});
+        let turn = turn!({"id":"turn","status":"completed","durationMs":1459000,"items":[{"id":"u1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"progress","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"f1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":phase}}}}},{"id":"u2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"c","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null}}}}},{"id":"f2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":phase}}}}}]});
         assert_eq!(order(&turn), ["u1", "progress", "f1", "u2", "c", "f2"]);
         let parts: Vec<_> = project(&turn).collect();
         assert_eq!(parts.len(), 2);
@@ -574,7 +573,7 @@ mod presentation_tests {
     }
     #[test]
     fn later_answer_does_not_hide_earlier_unanswered_commentary() {
-        let turn = turn!({"id":"turn","status":"completed","items":[{"id":"u1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"a1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"c","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}},{"id":"a2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"u2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"final"}}}}}]});
+        let turn = turn!({"id":"turn","status":"completed","items":[{"id":"u1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"a1","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"c","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"","exitCode":null}}}}},{"id":"a2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"commentary"}}}}},{"id":"u2","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[]}}}}},{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"final"}}}}}]});
         assert_eq!(order(&turn), ["u1", "a1", "c", "a2", "u2", "answer"]);
         let responses: Vec<_> = project(&turn)
             .flat_map(|part| {
@@ -641,7 +640,7 @@ mod projection_tests {
     }
     #[test]
     fn pending_metadata_preserves_source_positions() {
-        let turn = turn!({"id":"t","status":"running","items":[{"id":"a","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"private body","phase":"commentary"}}}}},{"id":"b","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"private output","exitCode":null,"durationMs":null}}}}}]});
+        let turn = turn!({"id":"t","status":"running","items":[{"id":"a","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"private body","phase":"commentary"}}}}},{"id":"b","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"private output","exitCode":null}}}}}]});
         let items = turn.items.as_ref().unwrap();
         let order = source_order(items.len(), |i| &items[i].id, [Some("a")]);
         let item = |index: usize| {
@@ -669,7 +668,7 @@ mod projection_tests {
     }
     #[test]
     fn titles_keep_one_bounded_unicode_line() {
-        let command: Item = serde_json::from_value(json!({"id":"command","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"  cargo test\nsecret second line","cwd":null,"output":"","exitCode":null,"durationMs":null}}}}})).unwrap();
+        let command: Item = serde_json::from_value(json!({"id":"command","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"  cargo test\nsecret second line","cwd":null,"output":"","exitCode":null}}}}})).unwrap();
         assert_eq!(
             item_presentation(&command, Some(crate::session::ProviderKind::Codex))
                 .title
@@ -677,7 +676,7 @@ mod projection_tests {
             Some("cargo test")
         );
         let command: Item = serde_json::from_value(
-            json!({"id":"command","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"日".repeat(121),"cwd":null,"output":"","exitCode":null,"durationMs":null}}}}}),
+            json!({"id":"command","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"日".repeat(121),"cwd":null,"output":"","exitCode":null}}}}}),
         )
         .unwrap();
         let title = item_presentation(&command, Some(crate::session::ProviderKind::Codex))
@@ -702,14 +701,10 @@ mod deferred_item_tests {
                 "command".into(),
                 ItemStatus::Completed,
                 ItemBody::CommandExecution {
-                    actions: vec![],
-                    source: agent_protocol::items::CommandSource::Unknown,
-                    process_id: None,
                     command,
                     cwd: None,
                     output: "hidden output".repeat(100),
                     exit_code: None,
-                    duration_ms: None,
                 },
             );
             let title = crate::presentation::item_presentation(

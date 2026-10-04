@@ -796,10 +796,7 @@ impl Desktop {
                 )
                 .into_any_element();
         }
-        let provider = self.model_provider.unwrap_or_else(|| {
-            self.snapshot
-                .model_provider_for_draft(self.draft_key().clone())
-        });
+        let provider = self.account_provider();
         let disabled = self.account_busy
             || self.busy > 0
             || !self.snapshot.connected

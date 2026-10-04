@@ -90,7 +90,6 @@ impl From<&str> for OperationError {
 }
 
 pub(crate) struct Claude {
-    browser: Option<Arc<crate::browser::Browser>>,
     program: PathBuf,
     directory: PathBuf,
     native_home: PathBuf,
@@ -143,7 +142,6 @@ impl Claude {
         program: PathBuf,
         directory: PathBuf,
         native_home: Option<PathBuf>,
-        browser: Option<Arc<crate::browser::Browser>>,
     ) -> anyhow::Result<Self> {
         crate::platform::create_state_directory(&directory)?;
         let native_home = native_home.map(Ok).unwrap_or_else(history::home)?;
@@ -155,7 +153,6 @@ impl Claude {
         .await?;
         let (events, event_receiver) = mpsc::channel(256);
         Ok(Self {
-            browser,
             accounts: AsyncMutex::new(accounts),
             program,
             directory,
@@ -271,7 +268,6 @@ impl Claude {
                 cwd: Some(cwd.to_string_lossy().into_owned()),
                 status: SessionStatus::Idle,
                 turns: Some(Vec::new()),
-                created_at: Some(now() as f64),
                 updated_at: Some(now() as f64),
                 ..Default::default()
             },
@@ -497,7 +493,7 @@ impl Claude {
         let home = self.native_home.clone();
         let native_history = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native)?;
-            history::read_details(&path, usize::MAX)
+            history::read_details(&path)
         })
         .await
         .map_err(|error| error.to_string())?
@@ -546,7 +542,7 @@ impl Claude {
             let home = self.native_home.clone();
             let agent_id = agent_id.to_owned();
             let related = tokio::task::spawn_blocking(move || {
-                history::read_related(&home, native, &agent_id, usize::MAX)
+                history::read_related(&home, native, &agent_id)
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -668,6 +664,7 @@ impl Claude {
     async fn start_turn(
         &self,
         params: &op::Submission,
+        browser: Option<Value>,
     ) -> Result<agent_protocol::ids::TurnId, OperationError> {
         let record = self.record(&params.thread_id.id).await?;
         if self.stop.is_cancelled() {
@@ -728,18 +725,7 @@ impl Claude {
                 Path::new(&cwd),
                 Some((&session, state.resumable)),
                 Some((&model, effort)),
-                self.browser
-                    .as_ref()
-                    .map(|browser| {
-                        browser.provider_config(
-                            &SessionRef {
-                                provider: ProviderKind::Claude,
-                                id: session.to_string(),
-                            }
-                            .to_string(),
-                        )
-                    })
-                    .transpose()?,
+                browser,
             )
             .await?;
             process.retain_capacity(permit);
@@ -997,7 +983,6 @@ impl Worker {
         } else {
             TurnStatus::Failed
         };
-        turn.completed_at = Some(now() as f64);
         if let Some(items) = &mut turn.items {
             for item in items
                 .iter_mut()
@@ -1152,10 +1137,10 @@ impl Worker {
                 message["summary"].as_str(),
                 message["output_file"].as_str(),
             )
-        } else if kind == "attachment" && message["attachment"]["type"] == "queued_command" {
-            native::queued_task_outcome(
-                message["attachment"]["commandMode"].as_str(),
-                &message["attachment"]["prompt"],
+        } else if kind == "user" {
+            native::notification_outcome(
+                message["origin"]["kind"].as_str(),
+                &message["message"]["content"],
             )
         } else {
             None
@@ -1176,6 +1161,24 @@ impl Worker {
                 item: Arc::new(item),
             })
             .await?;
+            return Ok(());
+        }
+        if kind == "user" && message["origin"]["kind"] == "task-notification" {
+            if let Some(item) = native::user_item(
+                message["uuid"]
+                    .as_str()
+                    .ok_or("Claude notification ID is missing")?,
+                &message["message"]["content"],
+                message["isMeta"] == true,
+                message["origin"]["kind"].as_str(),
+                message["promptSource"].as_str(),
+            ) {
+                self.change(SessionChange::Item {
+                    turn_id: self.turn_id.clone(),
+                    item: Arc::new(item),
+                })
+                .await?;
+            }
             return Ok(());
         }
         if kind == "attachment" {
@@ -1395,7 +1398,6 @@ fn usage_limit_error(info: &Value) -> Option<ExecutionError> {
         category: ErrorCategory::UsageLimit,
         message: "Claudeの利用上限に達しました。".into(),
         provider_code: info["rateLimitType"].as_str().map(str::to_owned),
-        resets_at_seconds: info["resetsAt"].as_u64(),
         ..Default::default()
     })
 }
@@ -1456,17 +1458,10 @@ fn execution_error(message: &Value, retrying: bool) -> ExecutionError {
         category,
         message: text,
         provider_code: code.map(str::to_owned),
-        http_status: status.and_then(|v| v.try_into().ok()),
-        retry: retrying.then(|| RetryEvidence {
+        retry: retrying.then_some(RetryEvidence {
             retrying,
             overloaded,
-            attempt: message["attempt"].as_u64().and_then(|v| v.try_into().ok()),
-            max_attempts: message["max_retries"]
-                .as_u64()
-                .and_then(|v| v.checked_add(1))
-                .and_then(|v| v.try_into().ok()),
         }),
-        retry_delay_ms: message["retry_delay_ms"].as_u64(),
         ..Default::default()
     }
 }
@@ -1748,7 +1743,7 @@ impl Agent for Claude {
         input: &op::Submission,
         route: crate::host_rpc::submission::SubmissionTarget<'_>,
         _reload: bool,
-        _browser: Option<Value>,
+        browser: Option<Value>,
     ) -> Result<op::SubmissionReceipt, Failure> {
         use crate::host_rpc::submission::SubmissionTarget;
         let turn_id = match route {
@@ -1766,7 +1761,7 @@ impl Agent for Claude {
                 )
                 .await?,
             ),
-            SubmissionTarget::Start { .. } => Some(self.start_turn(input).await?),
+            SubmissionTarget::Start { .. } => Some(self.start_turn(input, browser).await?),
         };
         Ok(op::SubmissionReceipt { turn_id })
     }
@@ -1916,7 +1911,6 @@ impl Agent for Claude {
         &self,
         _id: &str,
         _turn: &str,
-        _exclude: bool,
         _browser: Option<Value>,
     ) -> Result<ThreadResponse, Failure> {
         Err(Failure::new(
@@ -1964,7 +1958,6 @@ mod execution_tests {
             root.join("unused"),
             root.join("adapter"),
             Some(root.join("native")),
-            None,
         )
         .await
         .unwrap();
@@ -2019,7 +2012,6 @@ mod execution_tests {
                 ItemBody::AssistantText {
                     text: value.into(),
                     phase: AssistantPhase::Unknown,
-                    citation: None,
                 },
             ))
         };
@@ -2280,10 +2272,18 @@ mod execution_tests {
                 .unwrap();
             rows.push(saved_result);
             parent = format!("notice-{id}");
-            rows.push(json!({"type":"attachment","uuid":parent,"parentUuid":format!("result-{id}"),
-                "attachment":{"type":"queued_command","commandMode":"task-notification",
-                    "prompt":format!("<task-notification><tool-use-id>{id}</tool-use-id><status>{status}</status><summary>work & result <details></summary></task-notification>")}}));
+            let native_notice = json!({"type":"user","uuid":parent,"parentUuid":format!("result-{id}"),
+                "origin":{"kind":"task-notification"},"promptSource":"system",
+                "turnOrigin":"task_notification","queueSkipAttachments":true,
+                "message":{"role":"user","content":format!("<task-notification><tool-use-id>{id}</tool-use-id><status>{status}</status><summary>work & result <details></summary></task-notification>")}});
+            worker.message(native_notice.clone()).await.unwrap();
+            rows.push(native_notice);
         }
+        let unmatched = json!({"type":"user","uuid":"unmatched-notice","parentUuid":parent,
+            "origin":{"kind":"task-notification"},"promptSource":"system",
+            "message":{"role":"user","content":"<task-notification><tool-use-id>missing</tool-use-id><status>completed</status><summary>done</summary></task-notification>"}});
+        worker.message(unmatched.clone()).await.unwrap();
+        rows.push(unmatched);
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join(format!("{uuid}.jsonl"));
         std::fs::write(
@@ -2300,12 +2300,13 @@ mod execution_tests {
         let live = router.current_turn(&session, "turn").unwrap();
         assert_eq!(live.items, saved[0].items);
         let items = live.items.as_ref().unwrap();
-        assert_eq!(items.len(), 8);
+        assert_eq!(items.len(), 9);
+        assert!(matches!(items[8].body(), ItemBody::Attachment { .. }));
         assert_eq!(items[4].status, ItemStatus::Failed);
         assert!(
             matches!(items[4].body(), ItemBody::CommandExecution {output, exit_code: Some(7), ..} if output == "failed")
         );
-        for (item, status) in items[5..].iter().zip([
+        for (item, status) in items[5..8].iter().zip([
             ItemStatus::Completed,
             ItemStatus::Failed,
             ItemStatus::Interrupted,
@@ -2336,19 +2337,12 @@ mod execution_tests {
         ] {
             assert_eq!(execution_error(&message, false).category, category);
         }
-        let retry = execution_error(
-            &json!({"error":"overloaded","attempt":2,"max_retries":4,"retry_delay_ms":1500,"error_status":503}),
-            true,
-        );
-        assert_eq!(retry.http_status, Some(503));
-        assert_eq!(retry.retry_delay_ms, Some(1500));
+        let retry = execution_error(&json!({"error":"overloaded","error_status":503}), true);
         assert_eq!(
             retry.retry,
             Some(RetryEvidence {
                 retrying: true,
                 overloaded: true,
-                attempt: Some(2),
-                max_attempts: Some(5)
             })
         );
         for status in ["allowed", "allowed_warning"] {
@@ -2364,7 +2358,7 @@ mod execution_tests {
         )
         .unwrap();
         assert_eq!(limit.category, ErrorCategory::UsageLimit);
-        assert_eq!(limit.resets_at_seconds, Some(123456));
+        assert_eq!(limit.provider_code.as_deref(), Some("five_hour"));
         let future = json!({"code":"future_failure","httpStatus":null});
         assert_eq!(
             execution_error(&json!({"error":"future_failure"}), false).category,

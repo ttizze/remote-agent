@@ -430,8 +430,6 @@ fn read_editable(path: &Path) -> Result<FileContent> {
         path: path.to_str().context("file path is not UTF-8")?.into(),
         revision: hash(&bytes),
         text: text.into(),
-        bom,
-        line_ending: line_ending(text).into(),
         size: bytes.len() as u64,
     })
 }

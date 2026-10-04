@@ -12,7 +12,9 @@ stable block ID, so thinking cannot overwrite text and final text is not
 duplicated. Approvals and questions remain actionable after reconnect. Failed
 submission retains the draft; retry clears the previous submission notice.
 Claude live events and native history use one content translation boundary.
-Only human-origin, non-meta prompt-mode queued commands become user messages. Task notifications update
+User records with a non-human origin or system prompt source remain activity;
+meta records do not become user messages. Only human-origin, non-meta prompt-mode
+queued commands become user messages. Task notifications in user records update
 the originating tool's outcome and retain its native output for detail reads;
 unmatched native notifications remain inspectable
 activity in the same turn. Text and image input echoes do not add

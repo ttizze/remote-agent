@@ -6,7 +6,7 @@ use agent_protocol::{
     models::{Empty, Turn, WorktreeSettings},
     operations as op,
     protocol::Call,
-    requests::{Answer, ChoiceMeaning, QuestionAnswer, RequestBody},
+    requests::{Answer, QuestionAnswer, RequestBody},
     session::{OpenSession, OpenedSession, ProviderKind, SessionChange, SessionRef},
 };
 use agent_transport::{client::Client, framing::Reader};
@@ -351,7 +351,7 @@ async fn scenarios(provider: ProviderKind) {
             RequestBody::Approval { choices, .. } => Answer::Approval {
                 choice_id: choices
                     .iter()
-                    .find(|c| c.meaning == ChoiceMeaning::Allow)
+                    .find(|c| c.label == "承認")
                     .unwrap()
                     .id
                     .clone(),

@@ -15,7 +15,6 @@ final class BexAppViewModel: ObservableObject {
     @Published var isConnecting = false
     @Published var pairingError: String?
     @Published private(set) var pairingInvitation: Invitation?
-    @Published var connectionError: String?
     @Published var notice: String?
     @Published var profiles: [HostProfile] = []
     @Published private(set) var selectedProfileId: String?
@@ -81,7 +80,6 @@ final class BexAppViewModel: ObservableObject {
                 UserDefaults.standard.removeObject(forKey: "bex.selected-host")
                 isConnecting = false
                 notice = nil
-                connectionError = nil
                 publish(AgentCore.Snapshot.empty())
                 Task { [weak self] in
                     do { try await old?.shutdown() } catch { self?.notice = error.localizedDescription }
@@ -137,7 +135,6 @@ final class BexAppViewModel: ObservableObject {
             connect()
         } catch {
             guard !Task.isCancelled, selectedProfileId == id else { return }
-            connectionError = error.localizedDescription
             initialization = nil
             let queued = pending
             pending.removeAll()
@@ -255,7 +252,6 @@ extension BexAppViewModel {
               !isConnecting || afterForeground else { return }
         connection?.cancel()
         isConnecting = true
-        connectionError = nil
         notice = nil
         connection = Task { [weak self] in
             let started = ProcessInfo.processInfo.systemUptime
@@ -285,7 +281,6 @@ extension BexAppViewModel {
                 )
                 guard self?.selectedProfileId == profile.id, !Task.isCancelled else { return }
                 self?.isConnecting = false
-                self?.connectionError = error.localizedDescription
                 self?.notice = error.localizedDescription
             }
         }

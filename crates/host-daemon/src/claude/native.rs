@@ -63,6 +63,34 @@ pub(super) fn input_item(id: &str, blocks: &[Value], is_meta: bool) -> Option<It
     Some(item)
 }
 
+pub(super) fn is_human_input(is_meta: bool, origin: Option<&str>, source: Option<&str>) -> bool {
+    !is_meta && origin.is_none_or(|kind| kind == "human") && source != Some("system")
+}
+
+pub(super) fn user_item(
+    id: &str,
+    content: &Value,
+    is_meta: bool,
+    origin: Option<&str>,
+    source: Option<&str>,
+) -> Option<Item> {
+    if is_meta {
+        return None;
+    }
+    if is_human_input(is_meta, origin, source) {
+        input_item(id, &message_blocks(content)?, false)
+    } else {
+        Some(Item::new(
+            id.into(),
+            ItemStatus::Unknown,
+            ItemBody::Attachment {
+                kind: AttachmentKind::Other,
+                content: json!({"type":origin.unwrap_or("system"),"promptSource":source,"content":content}),
+            },
+        ))
+    }
+}
+
 pub(super) fn attachment_item(id: &str, attachment: &Value) -> anyhow::Result<Option<Item>> {
     anyhow::ensure!(
         attachment.is_object(),
@@ -207,11 +235,11 @@ pub(super) fn task_outcome<'a>(
     })
 }
 
-pub(super) fn queued_task_outcome<'a>(
-    mode: Option<&str>,
+pub(super) fn notification_outcome<'a>(
+    origin: Option<&str>,
     prompt: &'a Value,
 ) -> Option<TaskOutcome<'a>> {
-    if mode != Some("task-notification") {
+    if origin != Some("task-notification") {
         return None;
     }
     let text = prompt
@@ -257,7 +285,6 @@ pub(super) fn content_item(
     let mut status = ItemStatus::Completed;
     let body = match block["type"].as_str() {
         Some("text") => ItemBody::AssistantText {
-            citation: None,
             text: text("text"),
             phase: AssistantPhase::Unknown,
         },
@@ -272,14 +299,10 @@ pub(super) fn content_item(
             let string = |key: &str| input[key].as_str().unwrap_or_default().to_owned();
             match block["name"].as_str() {
                 Some("Bash") => ItemBody::CommandExecution {
-                    actions: vec![],
-                    source: agent_protocol::items::CommandSource::Unknown,
-                    process_id: None,
                     command: string("command"),
                     cwd: cwd.map(str::to_owned),
                     output: String::new(),
                     exit_code: None,
-                    duration_ms: None,
                 },
                 Some("Write" | "Edit" | "NotebookEdit") => {
                     let proposal = match block["name"].as_str() {
@@ -483,7 +506,7 @@ mod tests {
             let output = if output_available {"/work/result.output"} else {""};
             let prompt = json!(format!("<task-notification>\n<task-id>task</task-id><tool-use-id>work</tool-use-id><output-file>{output}</output-file>\n<status>{status}</status><summary>{summary}</summary>\n</task-notification>"));
             let live = task_outcome(Some("work"), Some(status), Some(summary), Some(output)).unwrap();
-            let saved = queued_task_outcome(Some("task-notification"), &prompt).unwrap();
+            let saved = notification_outcome(Some("task-notification"), &prompt).unwrap();
             prop_assert_eq!(saved.tool_id, "work");
             prop_assert_eq!(saved.output_path, live.output_path);
             prop_assert_eq!(live.output_path, output_available.then_some("/work/result.output"));
@@ -493,7 +516,7 @@ mod tests {
             prop_assert_eq!(result.status, expected);
             prop_assert_eq!(saved.item(launched.id.clone(), launched.body()), Some(result.clone()));
             prop_assert_eq!(live.item(result.id.clone(), result.body()), Some(result));
-            prop_assert!(queued_task_outcome(Some("prompt"), &prompt).is_none());
+            prop_assert!(notification_outcome(Some("prompt"), &prompt).is_none());
         }
 
         #[test]
@@ -537,6 +560,27 @@ mod tests {
         }
     }
 
+    proptest! {
+        #[test]
+        fn current_native_user_records_distinguish_humans_from_system_activity(
+            (origin, human_origin) in prop_oneof![Just((None,true)),Just((Some("human"),true)),Just((Some("task-notification"),false)),Just((Some("agent"),false))],
+            (source, system_source) in prop_oneof![Just((None,false)),Just((Some("sdk"),false)),Just((Some("system"),true))],
+            is_meta in any::<bool>(),
+        ) {
+            let content = json!("<task-notification><tool-use-id>work</tool-use-id><status>completed</status><summary>done</summary></task-notification>");
+            let item = user_item("record", &content, is_meta, origin, source);
+            if is_meta {
+                prop_assert!(item.is_none());
+            } else if human_origin && !system_source {
+                prop_assert!(matches!(item.unwrap().body(),ItemBody::UserMessage {..}), "human input must remain a user message");
+            } else {
+                let item = item.unwrap();
+                prop_assert!(matches!(item.body(),ItemBody::Attachment {content:value,..} if value["content"] == content), "system activity must retain its content");
+                prop_assert!(matches!(agent_core::presentation::ItemMetadata::from(&item).kind,agent_core::presentation::GroupKind::Activity));
+            }
+        }
+    }
+
     #[test]
     fn invalid_task_notifications_cannot_change_unrelated_content() {
         for fields in [
@@ -552,7 +596,7 @@ mod tests {
                 "<task-notification>{fields}<summary>result</summary></task-notification>"
             ));
             assert!(
-                queued_task_outcome(Some("task-notification"), &prompt).is_none(),
+                notification_outcome(Some("task-notification"), &prompt).is_none(),
                 "{fields}"
             );
         }
@@ -566,7 +610,7 @@ mod tests {
                 "<tool-use-id>work</tool-use-id><status>failed</status><summary>result</summary>"
             ),
         ] {
-            assert!(queued_task_outcome(Some("task-notification"), &prompt).is_none());
+            assert!(notification_outcome(Some("task-notification"), &prompt).is_none());
         }
         for (tool, status, summary) in [
             (None, Some("failed"), Some("result")),

@@ -890,13 +890,12 @@ impl Agent for Codex {
         &self,
         id: &str,
         last_turn_id: &str,
-        exclude_turns: bool,
         browser_config: Option<Value>,
     ) -> Result<ThreadResponse, Failure> {
         self.thread_response(
             "thread/fork",
             &with_browser_config(
-                serde_json::json!({"threadId":id,"lastTurnId":last_turn_id,"excludeTurns":exclude_turns}),
+                serde_json::json!({"threadId":id,"lastTurnId":last_turn_id,"excludeTurns":false}),
                 browser_config,
             ),
         )
@@ -1081,12 +1080,8 @@ mod tests {
                 agent_protocol::execution::TurnStatus::Failed
             );
             assert_eq!(
-                (
-                    turns[1].started_at,
-                    turns[1].completed_at,
-                    turns[1].duration_ms
-                ),
-                (Some(1.5), Some(3.5), Some(2000))
+                (turns[1].started_at, turns[1].duration_ms),
+                (Some(1.5), Some(2000))
             );
             assert_eq!(turns[1].error.as_ref().unwrap().message, "saved failure");
             assert_eq!(turns[1].items_has_more, Some(false));

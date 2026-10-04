@@ -1,9 +1,8 @@
 //! RPC correlation and ordering for external provider JSONL processes.
 mod jsonl;
 pub use agent_protocol::message::{RpcMessage, RpcMessageError, RpcMessageKind, RpcResponse};
-pub use jsonl::{DEFAULT_MAX_MESSAGE_BYTES, JsonlError, JsonlReader, JsonlWriter};
+pub use jsonl::{JsonlError, JsonlReader, JsonlWriter};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::value::RawValue;
 use std::{
     collections::HashMap,
     future::Future,
@@ -37,8 +36,6 @@ pub enum PeerEvent {
     /// Provider adapters can wait until preceding stdio events have been processed.
     Response {
         sequence: u64,
-        request_id: Option<u64>,
-        method: Option<Arc<str>>,
     },
     Closed(String),
 }
@@ -380,14 +377,6 @@ impl RpcPeer {
         }
         self.enqueue(line).await
     }
-    pub async fn respond_raw(
-        &self,
-        id: &str,
-        field: &'static str,
-        payload: &str,
-    ) -> Result<(), PeerError> {
-        self.send_raw(&response_line(id, field, payload)?).await
-    }
     async fn enqueue(&self, line: String) -> Result<(), PeerError> {
         if self.stop.is_cancelled() {
             return Err(self.closed_error());
@@ -434,32 +423,6 @@ fn request_line_with_id<P: Serialize>(
     }
     serde_json::to_string(&Request { id, method, params }).map_err(invalid)
 }
-pub fn response_line(id: &str, field: &'static str, payload: &str) -> Result<String, PeerError> {
-    if !matches!(field, "result" | "error") {
-        return Err(invalid("response field must be result or error"));
-    }
-    let id: &RawValue = serde_json::from_str(id).map_err(invalid)?;
-    let payload: &RawValue = serde_json::from_str(payload).map_err(invalid)?;
-    #[derive(Serialize)]
-    struct ResultResponse<'a> {
-        id: &'a RawValue,
-        result: &'a RawValue,
-    }
-    #[derive(Serialize)]
-    struct ErrorResponse<'a> {
-        id: &'a RawValue,
-        error: &'a RawValue,
-    }
-    if field == "result" {
-        serde_json::to_string(&ResultResponse {
-            id,
-            result: payload,
-        })
-        .map_err(invalid)
-    } else {
-        serde_json::to_string(&ErrorResponse { id, error: payload }).map_err(invalid)
-    }
-}
 fn invalid(error: impl std::fmt::Display) -> PeerError {
     PeerError::InvalidMessage(error.to_string())
 }
@@ -497,11 +460,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             let pending = {
                 let pending = id.and_then(|id| received.pending.remove(&id));
                 if let Some(events) = &received.events {
-                    let _ = events.send(PeerEvent::Response {
-                        sequence,
-                        request_id: id,
-                        method: pending.as_ref().map(|pending| pending.method.clone()),
-                    });
+                    let _ = events.send(PeerEvent::Response { sequence });
                 }
                 pending
             };
@@ -796,17 +755,13 @@ mod tests {
         let (reply, _writer) = tokio::join!(peer.request::<_, Value>("read", &params), server);
         let reply = reply.unwrap();
         assert_eq!(reply.value["text"], "base");
-        let PeerEvent::Response {
-            sequence, method, ..
-        } = events.recv().await.unwrap()
-        else {
+        let PeerEvent::Response { sequence } = events.recv().await.unwrap() else {
             panic!("expected response")
         };
         let PeerEvent::Message(delta) = events.recv().await.unwrap() else {
             panic!("closed")
         };
         assert_eq!(sequence, reply.sequence);
-        assert_eq!(method.as_deref(), Some("read"));
         assert_eq!(delta.sequence, reply.sequence + 1);
         assert_eq!(
             serde_json::from_str::<Value>(&delta.value).unwrap()["method"],
@@ -978,8 +933,9 @@ mod tests {
 #[cfg(test)]
 mod envelope_tests {
     use super::*;
+    use serde_json::value::RawValue;
     #[test]
-    fn typed_envelopes_keep_raw_params_and_response_payloads() {
+    fn typed_envelopes_keep_raw_params() {
         let params = r#"{"future": {"id": "nested"}, "text": "hello"}"#;
         let raw: &RawValue = serde_json::from_str(params).unwrap();
         let method = "custom/\"日本語\\method";
@@ -991,14 +947,5 @@ mod envelope_tests {
             serde_json::from_str::<String>(object["method"].get()).unwrap(),
             method
         );
-        let error = r#"{ "code": -1, "message": "失敗", "data": [null,{"id":7}] }"#;
-        let response = response_line(r#""request-7""#, "error", error).unwrap();
-        let object: std::collections::BTreeMap<String, &RawValue> =
-            serde_json::from_str(&response).unwrap();
-        assert_eq!(object["id"].get(), r#""request-7""#);
-        assert_eq!(object["error"].get(), error);
-        assert!(response_line("7 8", "result", "null").is_err());
-        assert!(response_line("7", "error", "{").is_err());
-        assert!(response_line("7", "params", "{}").is_err());
     }
 }

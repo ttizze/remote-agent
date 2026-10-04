@@ -194,9 +194,6 @@ impl Endpoint {
                 .map(|addr| TransportAddr::Ip((std::net::Ipv4Addr::LOCALHOST, addr.port()).into())),
         )))
     }
-    pub async fn online(&self) {
-        self.0.online().await;
-    }
     pub async fn connect(&self, ticket: &Ticket) -> Result<Session, TransportError> {
         self.1.activate();
         let group = identifier();

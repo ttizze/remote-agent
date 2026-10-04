@@ -1,27 +1,13 @@
 import AVFoundation
 import UIKit
 
-enum BexQrCaptureError: LocalizedError {
-    case cameraUnavailable
-    case permissionDenied
-    case sessionConfigurationFailed
-
-    var errorDescription: String? {
-        switch self {
-        case .cameraUnavailable: "This device has no camera available for QR scanning."
-        case .permissionDenied: "Camera access is required to scan the pairing QR code."
-        case .sessionConfigurationFailed: "The QR scanner could not be configured."
-        }
-    }
-}
-
 final class BexQrCaptureViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
-    private let completion: (Result<String, BexQrCaptureError>) -> Void
+    private let completion: (String?) -> Void
     private let session = AVCaptureSession()
     private let previewLayer = AVCaptureVideoPreviewLayer()
     private var hasCompleted = false
 
-    init(completion: @escaping (Result<String, BexQrCaptureError>) -> Void) {
+    init(completion: @escaping (String?) -> Void) {
         self.completion = completion
         super.init(nibName: nil, bundle: nil)
     }
@@ -60,38 +46,35 @@ final class BexQrCaptureViewController: UIViewController, AVCaptureMetadataOutpu
                     if granted {
                         self.configureAndStart()
                     } else {
-                        self.finish(.failure(.permissionDenied))
+                        self.finish(nil)
                     }
                 }
             }
-        case .denied, .restricted:
-            finish(.failure(.permissionDenied))
-        @unknown default:
-            finish(.failure(.permissionDenied))
+        default:
+            finish(nil)
         }
     }
 
     private func configureAndStart() {
         guard let camera = AVCaptureDevice.default(for: .video) else {
-            finish(.failure(.cameraUnavailable))
+            finish(nil)
             return
         }
         session.beginConfiguration()
-        do {
-            let input = try AVCaptureDeviceInput(device: camera)
-            guard session.canAddInput(input) else { throw BexQrCaptureError.sessionConfigurationFailed }
-            let output = AVCaptureMetadataOutput()
-            guard session.canAddOutput(output) else { throw BexQrCaptureError.sessionConfigurationFailed }
-            session.addInput(input)
-            session.addOutput(output)
-            output.setMetadataObjectsDelegate(self, queue: .main)
-            output.metadataObjectTypes = [.qr]
+        let output = AVCaptureMetadataOutput()
+        guard let input = try? AVCaptureDeviceInput(device: camera),
+              session.canAddInput(input), session.canAddOutput(output)
+        else {
             session.commitConfiguration()
-            DispatchQueue.global(qos: .userInitiated).async { [weak session] in session?.startRunning() }
-        } catch {
-            session.commitConfiguration()
-            finish(.failure(.sessionConfigurationFailed))
+            finish(nil)
+            return
         }
+        session.addInput(input)
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: .main)
+        output.metadataObjectTypes = [.qr]
+        session.commitConfiguration()
+        DispatchQueue.global(qos: .userInitiated).async { [weak session] in session?.startRunning() }
     }
 
     func metadataOutput(
@@ -105,10 +88,10 @@ final class BexQrCaptureViewController: UIViewController, AVCaptureMetadataOutpu
             .first?.stringValue,
             !code.isEmpty
         else { return }
-        finish(.success(code))
+        finish(code)
     }
 
-    private func finish(_ result: Result<String, BexQrCaptureError>) {
+    private func finish(_ result: String?) {
         guard !hasCompleted else { return }
         hasCompleted = true
         session.stopRunning()

@@ -105,7 +105,6 @@ pub(super) fn summary(path: &Path) -> Result<crate::host_rpc::agent::SessionSumm
             provider: ProviderKind::Claude,
             id: id.into(),
         }),
-        path: Some(path.to_string_lossy().into()),
         updated_at: metadata
             .modified()
             .ok()
@@ -138,7 +137,14 @@ pub(super) fn summary(path: &Path) -> Result<crate::host_rpc::agent::SessionSumm
         if let Some(title) = value["customTitle"].as_str().or(value["aiTitle"].as_str()) {
             thread.name = Some(title.into());
         }
-        if thread.preview.is_none() && value["type"] == "user" && value["isMeta"] != true {
+        if thread.preview.is_none()
+            && value["type"] == "user"
+            && native::is_human_input(
+                value["isMeta"] == true,
+                value["origin"]["kind"].as_str(),
+                value["promptSource"].as_str(),
+            )
+        {
             thread.preview = input_text(&value["message"]["content"]);
         }
     }
@@ -163,8 +169,8 @@ pub(super) struct NativeHistory {
     pub response: ThreadResponse,
     pub output_paths: BTreeMap<ItemId, String>,
 }
-pub(super) fn read_details(path: &Path, limit: usize) -> Result<NativeHistory> {
-    read_with_summary(path, summary(path)?.thread, limit)
+pub(super) fn read_details(path: &Path) -> Result<NativeHistory> {
+    read_with_summary(path, summary(path)?.thread, usize::MAX)
 }
 
 pub(super) fn read(path: &Path, limit: usize) -> Result<ThreadResponse> {
@@ -175,7 +181,6 @@ pub(super) fn read_related(
     home: &Path,
     session_id: Uuid,
     agent_id: &str,
-    limit: usize,
 ) -> Result<ThreadResponse> {
     if agent_id.is_empty()
         || !agent_id
@@ -200,11 +205,10 @@ pub(super) fn read_related(
             provider: ProviderKind::Claude,
             id: session_id.to_string(),
         }),
-        path: Some(path.to_string_lossy().into()),
         ..Default::default()
     };
     thread.agent_id = Some(agent_id.into());
-    read_with_summary(&path, thread, limit).map(|history| history.response)
+    read_with_summary(&path, thread, usize::MAX).map(|history| history.response)
 }
 
 fn read_with_summary(path: &Path, thread: Thread, limit: usize) -> Result<NativeHistory> {
@@ -314,11 +318,10 @@ fn convert(
         if let Some(cwd) = node["cwd"].as_str() {
             thread.cwd = Some(cwd.into());
         }
-        if kind == "attachment"
-            && node["attachment"]["type"] == "queued_command"
-            && let Some(outcome) = native::queued_task_outcome(
-                node["attachment"]["commandMode"].as_str(),
-                &node["attachment"]["prompt"],
+        if kind == "user"
+            && let Some(outcome) = native::notification_outcome(
+                node["origin"]["kind"].as_str(),
+                &node["message"]["content"],
             )
             && let Some((turn_index, item_index, item)) =
                 turns
@@ -362,7 +365,13 @@ fn convert(
                     continue;
                 };
                 let input = if kind == "user" {
-                    native::input_item(id, &blocks, node["isMeta"] == true)
+                    native::user_item(
+                        id,
+                        &node["message"]["content"],
+                        node["isMeta"] == true,
+                        node["origin"]["kind"].as_str(),
+                        node["promptSource"].as_str(),
+                    )
                 } else {
                     None
                 };
@@ -387,7 +396,15 @@ fn convert(
         }
         // Queued human input and task activity stay in the running turn.
         // Only a standalone user message starts another persisted turn.
-        if (kind == "user" && initial_item.is_some()) || turns.is_empty() {
+        if (kind == "user"
+            && initial_item.as_ref().is_some_and(|item| {
+                matches!(
+                    item.body(),
+                    agent_protocol::items::ItemBody::UserMessage { .. }
+                )
+            }))
+            || turns.is_empty()
+        {
             turns.push(Arc::new(Turn {
                 id: initial_item
                     .as_ref()
@@ -621,7 +638,7 @@ mod tests {
             json!({"type":"assistant","uuid":"call","parentUuid":"first","message":{"id":"message","content":[{"type":"tool_use","id":"work","name":"Bash","input":{"command":"work"}}]}}),
             json!({"type":"user","uuid":"launch","parentUuid":"call","message":{"content":[{"type":"tool_result","tool_use_id":"work","content":"launched"}]},"toolUseResult":{"backgroundTaskId":"task"}}),
             json!({"type":"user","uuid":"second","parentUuid":"launch","message":{"content":"second input"}}),
-            json!({"type":"attachment","uuid":"notice","parentUuid":"second","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification><tool-use-id>work</tool-use-id><output-file>/work/result.output</output-file><status>failed</status><summary>work failed</summary></task-notification>"}}),
+            json!({"type":"user","uuid":"notice","parentUuid":"second","origin":{"kind":"task-notification"},"promptSource":"system","turnOrigin":"task_notification","queueSkipAttachments":true,"message":{"content":"<task-notification><tool-use-id>work</tool-use-id><output-file>/work/result.output</output-file><status>failed</status><summary>work failed</summary></task-notification>"}}),
         ];
         let history = convert(
             Thread {
@@ -710,6 +727,27 @@ mod tests {
     }
 
     #[test]
+    fn current_user_notification_stays_in_activity_and_does_not_become_the_preview() {
+        let notice = json!({"type":"user","uuid":"notice","parentUuid":null,
+            "version":"2.1.281","origin":{"kind":"task-notification"},"promptSource":"system",
+            "turnOrigin":"task_notification","queueSkipAttachments":true,
+            "message":{"role":"user","content":"<task-notification><tool-use-id>missing</tool-use-id><status>completed</status><summary>done</summary></task-notification>"}});
+        let source = [notice, json!({"type":"user","uuid":"human","parentUuid":"notice","message":{"content":"real question"}})]
+            .iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+        let (_root, path) = fixture(&source);
+        let response = read(&path, 100).unwrap();
+        assert_eq!(response.thread.preview.as_deref(), Some("real question"));
+        let turns = response.thread.turns.unwrap();
+        assert_eq!(turns.len(), 2);
+        let item = &turns[0].items.as_ref().unwrap()[0];
+        assert!(matches!(item.body(), ItemBody::Attachment { .. }));
+        assert!(matches!(
+            agent_core::presentation::ItemMetadata::from(item.as_ref()).kind,
+            agent_core::presentation::GroupKind::Activity
+        ));
+    }
+
+    #[test]
     fn native_cli_fixture_is_read_without_modification_or_execution() {
         let (root, path) = fixture(NATIVE);
         assert_eq!(
@@ -788,7 +826,7 @@ mod tests {
             + "\n";
         let path = directory.join("agent-agent-fixture.jsonl");
         fs::write(&path, &source).unwrap();
-        let related = read_related(root.path(), session, "agent-fixture", 1000).unwrap();
+        let related = read_related(root.path(), session, "agent-fixture").unwrap();
         assert_eq!(related.thread.agent_id.as_deref(), Some("agent-fixture"));
         assert!(
             related
@@ -799,8 +837,8 @@ mod tests {
                 .any(|turn| turn.items.as_ref().is_some_and(|items| !items.is_empty()))
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), source);
-        assert!(read_related(root.path(), session, "../elsewhere", 5).is_err());
-        assert!(read_related(root.path(), session, "missing", 5).is_err());
+        assert!(read_related(root.path(), session, "../elsewhere").is_err());
+        assert!(read_related(root.path(), session, "missing").is_err());
         assert_eq!(fs::read_to_string(parent).unwrap(), NATIVE);
     }
     #[test]

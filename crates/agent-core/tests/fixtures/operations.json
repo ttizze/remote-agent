@@ -287,8 +287,7 @@
                                 "command": "cat log",
                                 "cwd": null,
                                 "output": "",
-                                "exitCode": null,
-                                "durationMs": null
+                                "exitCode": null
                               }
                             }
                           }
@@ -333,8 +332,7 @@
                         "command": "cat log",
                         "cwd": null,
                         "output": "",
-                        "exitCode": null,
-                        "durationMs": null
+                        "exitCode": null
                       }
                     }
                   }
@@ -740,8 +738,7 @@
                       "command": "cat log",
                       "cwd": null,
                       "output": "first\nlast",
-                      "exitCode": null,
-                      "durationMs": null
+                      "exitCode": null
                     }
                   }
                 }
@@ -763,8 +760,7 @@
                 "command": "cat log",
                 "cwd": null,
                 "output": "first\nlast",
-                "exitCode": null,
-                "durationMs": null
+                "exitCode": null
               }
             }
           }
@@ -1878,30 +1874,22 @@
               {
                 "id": "choice-0",
                 "label": "承認",
-                "description": "",
-                "meaning": "allow",
-                "scope": "once"
+                "description": ""
               },
               {
                 "id": "choice-1",
                 "label": "このセッションで承認",
-                "description": "",
-                "meaning": "allow",
-                "scope": "session"
+                "description": ""
               },
               {
                 "id": "choice-2",
                 "label": "拒否",
-                "description": "",
-                "meaning": "deny",
-                "scope": "once"
+                "description": ""
               },
               {
                 "id": "choice-3",
                 "label": "キャンセル",
-                "description": "",
-                "meaning": "cancel",
-                "scope": "once"
+                "description": ""
               }
             ]
           }
@@ -1948,16 +1936,12 @@
               {
                 "id": "choice-0",
                 "label": "実行ルールを追加して承認",
-                "description": "",
-                "meaning": "allow",
-                "scope": "persistent"
+                "description": ""
               },
               {
                 "id": "choice-1",
                 "label": "キャンセル",
-                "description": "",
-                "meaning": "cancel",
-                "scope": "once"
+                "description": ""
               }
             ]
           }
@@ -2004,16 +1988,12 @@
               {
                 "id": "choice-0",
                 "label": "実行ルールを追加して承認",
-                "description": "",
-                "meaning": "allow",
-                "scope": "persistent"
+                "description": ""
               },
               {
                 "id": "choice-1",
                 "label": "キャンセル",
-                "description": "",
-                "meaning": "cancel",
-                "scope": "once"
+                "description": ""
               }
             ]
           }
@@ -2045,16 +2025,12 @@
               {
                 "id": "choice-allow",
                 "label": "このターンで許可",
-                "description": "",
-                "meaning": "allow",
-                "scope": "turn"
+                "description": ""
               },
               {
                 "id": "choice-deny",
                 "label": "拒否",
-                "description": "",
-                "meaning": "deny",
-                "scope": "turn"
+                "description": ""
               }
             ]
           }
@@ -2100,16 +2076,12 @@
               {
                 "id": "choice-allow",
                 "label": "このターンで許可",
-                "description": "",
-                "meaning": "allow",
-                "scope": "turn"
+                "description": ""
               },
               {
                 "id": "choice-deny",
                 "label": "拒否",
-                "description": "",
-                "meaning": "deny",
-                "scope": "turn"
+                "description": ""
               }
             ]
           }

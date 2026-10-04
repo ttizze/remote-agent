@@ -23,8 +23,7 @@ struct ConversationVisualization: View {
         .task(id: "\(media.host ?? ""):\(media.cwd):\(path)") {
             html = nil; error = nil
             do {
-                guard let load = media.visualization else { throw URLError(.unsupportedURL) }
-                let document = try await load(path)
+                let document = try await media.visualization(path)
                 try Task.checkCancellation()
                 html = document
             } catch {

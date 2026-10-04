@@ -42,7 +42,7 @@ struct ConversationMediaAccess {
     let host: String?
     let cwd: String
     let download: @MainActor (String) async throws -> URL
-    var visualization: (@MainActor (String) async throws -> String)?
+    let visualization: @MainActor (String) async throws -> String
 }
 
 struct ConversationImage: View {
@@ -109,11 +109,7 @@ struct ConversationImage: View {
         .task(id: LoadID(host: media.host, source: source)) {
             image = nil; original = nil; error = nil
             do {
-                let loaded = try await loadConversationImage(
-                    source,
-                    media: media,
-                    maxPixelSize: 1600
-                )
+                let loaded = try await loadConversationImage(source, media: media)
                 try Task.checkCancellation()
                 image = loaded.0
                 original = loaded.1
@@ -159,15 +155,15 @@ struct ConversationImage: View {
     return data
 }
 
-@MainActor private func loadConversationImage(_ source: SessionImage, media: ConversationMediaAccess,
-                                              maxPixelSize: Int = 1600) async throws -> (UIImage, Data) {
+@MainActor private func loadConversationImage(_ source: SessionImage,
+                                              media: ConversationMediaAccess) async throws -> (UIImage, Data) {
     let data = try await conversationImageData(source, media: media)
     return try await Task.detached(priority: .userInitiated) {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                   kCGImageSourceCreateThumbnailFromImageAlways: true,
                   kCGImageSourceCreateThumbnailWithTransform: true,
-                  kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+                  kCGImageSourceThumbnailMaxPixelSize: 1600
               ] as CFDictionary) else { throw CocoaError(.fileReadCorruptFile) }
         return (UIImage(cgImage: thumbnail), data)
     }.value

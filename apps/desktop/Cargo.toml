@@ -10,9 +10,8 @@ agent-protocol = { path = "../../crates/agent-protocol" }
 agent-transport = { path = "../../crates/agent-transport" }
 tracing.workspace = true
 anyhow.workspace = true
-serde.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["fs"] }
 tokio-util = { workspace = true, features = ["rt"] }
 agent-core = { path = "../../crates/agent-core" }
 host-daemon = { path = "../../crates/host-daemon" }

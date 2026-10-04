@@ -343,13 +343,18 @@ impl Desktop {
         let empty = self.composer.read(cx).value().trim().is_empty() && attachments.is_empty();
         let phase = self.dictation.as_ref().map(|d| d.phase);
         let send = if let Some(id) = running.filter(|_| empty) {
-            Self::icon_button("stop", IconName::Pause, "停止", cx, move |s, _, _| {
-                s.dispatch(Intent::Interrupt(op::Interrupt {
-                    thread_id: s.selected().expect("selected conversation").clone(),
-                    turn_id: id.clone(),
-                }));
-            })
-            .icon(Icon::default().path("bex/stop.svg"))
+            Self::icon_button(
+                "stop",
+                Icon::default().path("bex/stop.svg"),
+                "停止",
+                cx,
+                move |s, _, _| {
+                    s.dispatch(Intent::Interrupt(op::Interrupt {
+                        thread_id: s.selected().expect("selected conversation").clone(),
+                        turn_id: id.clone(),
+                    }));
+                },
+            )
             .disabled(!self.snapshot.connected || self.busy > 0)
         } else {
             Self::icon_button("send", IconName::ArrowUp, "送信", cx, |s, _, cx| {

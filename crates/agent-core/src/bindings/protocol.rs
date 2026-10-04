@@ -24,9 +24,6 @@ struct Project {
     pub id: String,
     pub name: String,
     pub roots: Vec<ProjectRoot>,
-    pub position: Option<u64>,
-    pub created_at: Option<u64>,
-    pub updated_at: Option<u64>,
 }
 #[uniffi::remote(Record)]
 struct ProjectRoot {
@@ -82,8 +79,6 @@ struct FileContent {
     pub path: String,
     pub revision: String,
     pub text: String,
-    pub bom: bool,
-    pub line_ending: String,
     pub size: u64,
 }
 #[uniffi::remote(Record)]
@@ -367,23 +362,6 @@ struct Choice {
     pub id: String,
     pub label: String,
     pub description: String,
-    pub meaning: ChoiceMeaning,
-    pub scope: ChoiceScope,
-}
-
-#[uniffi::remote(Enum)]
-enum ChoiceMeaning {
-    Allow,
-    Deny,
-    Cancel,
-}
-
-#[uniffi::remote(Enum)]
-enum ChoiceScope {
-    Once,
-    Turn,
-    Session,
-    Persistent,
 }
 
 #[uniffi::remote(Record)]
@@ -562,8 +540,6 @@ struct LoadVisualization {
 struct ForkSession {
     pub thread_id: SessionRef,
     pub last_turn_id: agent_protocol::ids::TurnId,
-    #[uniffi(default = false)]
-    pub exclude_turns: bool,
 }
 #[uniffi::remote(Record)]
 struct CreateSession {

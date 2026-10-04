@@ -98,9 +98,7 @@ pub struct Thread {
     pub turns: Option<Vec<Arc<Turn>>>,
     #[serde(default, deserialize_with = "project_membership")]
     pub project_id: ProjectMembership,
-    pub path: Option<String>,
     pub preview: Option<String>,
-    pub created_at: Option<f64>,
     pub updated_at: Option<f64>,
     pub history_has_more: Option<bool>,
     pub history_cursor: Option<String>,
@@ -117,7 +115,6 @@ pub struct Turn {
     pub items: Option<Vec<Arc<Item>>>,
     pub items_has_more: Option<bool>,
     pub started_at: Option<f64>,
-    pub completed_at: Option<f64>,
     pub duration_ms: Option<u64>,
     pub error: Option<ExecutionError>,
     pub started_at_ms: Option<u64>,
@@ -197,9 +194,6 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub roots: Vec<ProjectRoot>,
-    pub position: Option<u64>,
-    pub created_at: Option<u64>,
-    pub updated_at: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectRoot {
@@ -292,8 +286,6 @@ pub struct FileContent {
     pub path: String,
     pub revision: String,
     pub text: String,
-    pub bom: bool,
-    pub line_ending: String,
     pub size: u64,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -363,7 +355,7 @@ mod tests {
     #[test]
     fn deferred_read_keeps_conversation_and_activity_headers() {
         let text = "会話".repeat(4096);
-        let result = json!({"thread":{"turns":[{"id":"turn","items":[{"id":"user","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[{"text":{"text":text}}]}}}}},{"id":"agent","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}},{"id":"command","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"日本語".repeat(1000),"cwd":null,"output":text,"exitCode":null,"durationMs":null}}}}},{"id":"files","status":"completed","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[{"path":"a.txt","kind":{"update":{"movePath":null}},"diff":text,"proposal":null}],"output":""}}}}},{"id":"future","status":"completed","clientInputId":null,"body":{"inline":{"body":{"custom":{"provider":"codex","kind":"futureTool","value":{"id":"future","type":"futureTool","tool":"inspect","status":"completed","result":{"content":text}}}}}}},{"id":"small","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":["short"]}}}}}],"status":"unknown"}]}});
+        let result = json!({"thread":{"turns":[{"id":"turn","items":[{"id":"user","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[{"text":{"text":text}}]}}}}},{"id":"agent","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}},{"id":"command","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"日本語".repeat(1000),"cwd":null,"output":text,"exitCode":null}}}}},{"id":"files","status":"completed","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[{"path":"a.txt","kind":{"update":{"movePath":null}},"diff":text,"proposal":null}],"output":""}}}}},{"id":"future","status":"completed","clientInputId":null,"body":{"inline":{"body":{"custom":{"provider":"codex","kind":"futureTool","value":{"id":"future","type":"futureTool","tool":"inspect","status":"completed","result":{"content":text}}}}}}},{"id":"small","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":["short"]}}}}}],"status":"unknown"}]}});
         let mut typed: ThreadResponse = serde_json::from_value(result).unwrap();
         typed.thread.defer_item_details(MAX_INLINE_ITEM_BYTES);
         let items = typed.thread.turns.as_ref().unwrap()[0]

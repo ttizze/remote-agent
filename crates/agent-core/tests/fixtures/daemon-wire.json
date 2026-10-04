@@ -1,7 +1,6 @@
 {
   "history": {
     "thread": {
-      "createdAt": 1,
       "cwd": "/fixture/workspace",
       "historyHasMore": false,
       "historyLimit": 5,
@@ -14,13 +13,11 @@
       },
       "model": null,
       "name": "Simulator conversation",
-      "path": "/fixture/workspace/fixture-thread-1.jsonl",
       "preview": "",
       "projectId": "workspace",
       "status": "idle",
       "turns": [
         {
-          "completedAt": 4,
           "durationMs": 3000,
           "id": "fixture-turn-1-1",
           "itemsHasMore": false,
@@ -91,8 +88,7 @@
                       "command": "./gradlew test",
                       "cwd": "/fixture/workspace",
                       "output": "passed",
-                      "exitCode": 0,
-                      "durationMs": null
+                      "exitCode": 0
                     }
                   }
                 }
@@ -328,7 +324,6 @@
   "list": {
     "data": [
       {
-        "createdAt": 1,
         "cwd": "/fixture/workspace",
         "id": {
           "provider": "codex",
@@ -356,17 +351,14 @@
     "moreProjectIds": [],
     "projects": [
       {
-        "createdAt": 0,
         "id": "workspace",
         "name": "Workspace",
-        "position": 0,
         "roots": [
           {
             "path": "/fixture/workspace"
           }
         ],
-        "metadata": {},
-        "updatedAt": 0
+        "metadata": {}
       }
     ]
   }

@@ -103,21 +103,10 @@ pub(crate) fn codex_error(value: &Value, retrying: bool) -> ExecutionError {
             .unwrap_or_else(|| "native execution failed without a message".into()),
         details: value["additionalDetails"].as_str().map(str::to_owned),
         provider_code: code.map(str::to_owned),
-        http_status,
-        resets_at_seconds: None,
-        retry: retrying.then(|| RetryEvidence {
+        retry: retrying.then_some(RetryEvidence {
             retrying,
             overloaded,
-            attempt: code
-                .and_then(|code| info[code]["attempt"].as_u64())
-                .and_then(|v| v.try_into().ok()),
-            max_attempts: code
-                .and_then(|code| info[code]["maxAttempts"].as_u64())
-                .and_then(|v| v.try_into().ok()),
         }),
-        retry_delay_ms: value["retryAfterSeconds"]
-            .as_u64()
-            .and_then(|seconds| seconds.checked_mul(1000)),
     }
 }
 
@@ -182,20 +171,6 @@ pub(crate) fn codex_item(mut value: Value) -> Result<Item, serde_json::Error> {
             content: message_parts(&value["content"]),
         },
         "agentMessage" => ItemBody::AssistantText {
-            citation: if value["memoryCitation"].is_null() {
-                None
-            } else {
-                Some(MemoryCitation {
-                    entries: field(&value["memoryCitation"], "entries")?,
-                    sessions: field::<Vec<String>>(&value["memoryCitation"], "threadIds")?
-                        .into_iter()
-                        .map(|id| {
-                            SessionRef::new(ProviderKind::Codex, id)
-                                .map_err(<serde_json::Error as serde::de::Error>::custom)
-                        })
-                        .collect::<Result<_, _>>()?,
-                })
-            },
             text: take_string(&mut value, "text"),
             phase: match value["phase"].as_str() {
                 Some("commentary") => AssistantPhase::Commentary,
@@ -212,43 +187,10 @@ pub(crate) fn codex_item(mut value: Value) -> Result<Item, serde_json::Error> {
             summary: parts(&value["summary"]),
         },
         "commandExecution" => ItemBody::CommandExecution {
-            actions: value["commandActions"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|action| match action["type"].as_str() {
-                    Some("read") => CommandAction::Read {
-                        command: string(action, "command"),
-                        name: string(action, "name"),
-                        path: string(action, "path"),
-                    },
-                    Some("listFiles") => CommandAction::ListFiles {
-                        command: string(action, "command"),
-                        path: action["path"].as_str().map(str::to_owned),
-                    },
-                    Some("search") => CommandAction::Search {
-                        command: string(action, "command"),
-                        path: action["path"].as_str().map(str::to_owned),
-                        query: action["query"].as_str().map(str::to_owned),
-                    },
-                    _ => CommandAction::Unknown {
-                        command: string(action, "command"),
-                    },
-                })
-                .collect(),
-            source: match value["source"].as_str() {
-                Some("agent") => CommandSource::Agent,
-                Some("userShell") => CommandSource::User,
-                Some("unifiedExecStartup") => CommandSource::Startup,
-                Some("unifiedExecInteraction") => CommandSource::Interaction,
-                _ => CommandSource::Unknown,
-            },
-            process_id: field(&value, "processId")?,
             command: take_string(&mut value, "command"),
             cwd: field(&value, "cwd")?,
             output: take_string(&mut value, "aggregatedOutput"),
             exit_code: field(&value, "exitCode")?,
-            duration_ms: field(&value, "durationMs")?,
         },
         "fileChange" => ItemBody::FileChange {
             changes: value["changes"]
@@ -480,7 +422,6 @@ pub(crate) fn codex_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
             .transpose()?,
         items_has_more: field(&value, "itemsHasMore")?,
         started_at: field(&value, "startedAt")?,
-        completed_at: field(&value, "completedAt")?,
         duration_ms: field(&value, "durationMs")?,
         error: value
             .get("error")
@@ -517,9 +458,7 @@ pub(crate) fn codex_thread(mut value: Value) -> Result<Thread, serde_json::Error
                     .collect()
             })
             .transpose()?,
-        path: field(&value, "path")?,
         preview: field(&value, "preview")?,
-        created_at: field(&value, "createdAt")?,
         updated_at: field(&value, "updatedAt")?,
         history_has_more: field(&value, "historyHasMore")?,
         history_limit: field(&value, "historyLimit")?,
@@ -569,10 +508,17 @@ mod tests {
     use serde_json::json;
     #[test]
     fn codex_items_keep_phase_indexes_tool_metadata_and_scoped_subagents() {
-        let assistant = codex_item(json!({"id":"a","type":"agentMessage","text":"answer","phase":"final_answer","memoryCitation":{"entries":[{"path":"m","lineStart":1,"lineEnd":2,"note":"memory"}],"threadIds":["claude:same"]}})).unwrap();
-        assert!(
-            matches!(assistant.body(),ItemBody::AssistantText {phase:AssistantPhase::Final,citation:Some(citation),..} if citation.sessions[0].provider == ProviderKind::Codex && citation.sessions[0].id == "claude:same")
-        );
+        let assistant = codex_item(
+            json!({"id":"a","type":"agentMessage","text":"answer","phase":"final_answer"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            assistant.body(),
+            ItemBody::AssistantText {
+                phase: AssistantPhase::Final,
+                ..
+            }
+        ));
         let reasoning = codex_item(
             json!({"id":"r","type":"reasoning","content":["first","second"],"summary":["summary"]}),
         )
@@ -580,10 +526,10 @@ mod tests {
         assert!(
             matches!(reasoning.body(),ItemBody::Reasoning {content,summary} if content == &vec!["first","second"] && summary == &vec!["summary"])
         );
-        let command = codex_item(json!({"id":"c","type":"commandExecution","command":"cat file","cwd":"/work","status":"completed","processId":"p","source":"userShell","commandActions":[{"type":"read","command":"cat file","path":"/work/file","name":"file"}],"exitCode":3})).unwrap();
+        let command = codex_item(json!({"id":"c","type":"commandExecution","command":"cat file","cwd":"/work","status":"completed","exitCode":3})).unwrap();
         assert_eq!(command.status, ItemStatus::Completed);
         assert!(
-            matches!(command.body(),ItemBody::CommandExecution {source:CommandSource::User,process_id:Some(id),actions,exit_code:Some(3),..} if id == "p" && matches!(actions[0],CommandAction::Read {..}))
+            matches!(command.body(),ItemBody::CommandExecution {cwd:Some(cwd),exit_code:Some(3),..} if cwd == "/work")
         );
         let tool = codex_item(json!({"id":"t","type":"mcpToolCall","tool":"read","server":"server","arguments":{},"mcpAppResourceUri":"ui://tool","pluginId":"plugin","result":{"content":[{"type":"text","text":"result"}]}})).unwrap();
         assert!(
@@ -615,8 +561,7 @@ mod tests {
             true,
         );
         assert_eq!(error.category, ErrorCategory::RateLimited);
-        assert_eq!(error.http_status, Some(429));
-        assert_eq!(error.retry.unwrap().attempt, None);
+        assert!(error.retry.unwrap().overloaded);
         let future = json!({"futureFailure":{"detail":[1,{"unknown":true}]}});
         assert_eq!(
             codex_error(

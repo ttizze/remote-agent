@@ -10,7 +10,7 @@ use tokio::{
 pub(super) struct Process {
     capacity: Option<tokio::sync::OwnedSemaphorePermit>,
     child: Child,
-    input: Option<JsonlWriter<ChildStdin>>,
+    input: JsonlWriter<ChildStdin>,
     output: JsonlReader<ChildStdout>,
     stderr: tokio::task::JoinHandle<String>,
 }
@@ -91,9 +91,7 @@ impl Process {
         });
         let mut process = Self {
             capacity: None,
-            input: Some(JsonlWriter::new(
-                child.stdin.take().ok_or("Claude Code stdin is missing")?,
-            )),
+            input: JsonlWriter::new(child.stdin.take().ok_or("Claude Code stdin is missing")?),
             output: JsonlReader::new(child.stdout.take().ok_or("Claude Code stdout is missing")?),
             child,
             stderr,
@@ -125,8 +123,6 @@ impl Process {
 
     pub(super) async fn write(&mut self, value: &Value) -> Result<(), String> {
         self.input
-            .as_mut()
-            .ok_or("Claude Code input is closed")?
             .write_line(&value.to_string())
             .await
             .map_err(|error| error.to_string())

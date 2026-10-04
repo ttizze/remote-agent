@@ -227,7 +227,7 @@ mod tests {
         "詳細を表示", "reasoning text", &[]
     )]
     #[case::command(
-        json!({"id":"cmd","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":"/fixture","output":"done","exitCode":null,"durationMs":null}}}}}),
+        json!({"id":"cmd","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":"/fixture","output":"done","exitCode":null}}}}}),
         "詳細を表示", "cwd: /fixture\ndone", &[]
     )]
     #[case::file_change(

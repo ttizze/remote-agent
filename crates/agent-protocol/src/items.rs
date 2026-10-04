@@ -60,7 +60,6 @@ pub enum ItemBody {
     AssistantText {
         text: String,
         phase: AssistantPhase,
-        citation: Option<MemoryCitation>,
     },
     Reasoning {
         content: Vec<String>,
@@ -85,15 +84,9 @@ pub enum ItemBody {
     },
     CommandExecution {
         command: String,
-        #[serde(default)]
-        actions: Vec<CommandAction>,
-        #[serde(default)]
-        source: CommandSource,
-        process_id: Option<String>,
         cwd: Option<String>,
         output: String,
         exit_code: Option<i32>,
-        duration_ms: Option<u64>,
     },
     FileChange {
         changes: Vec<FileChange>,
@@ -151,9 +144,6 @@ pub enum ItemBody {
         content: Value,
     },
     Sleep {},
-    Error {
-        error: ExecutionError,
-    },
     Custom {
         provider: ProviderKind,
         kind: String,
@@ -283,24 +273,17 @@ impl Item {
                     }
                 }
             }
-            ItemBody::AssistantText { text, citation, .. } => {
-                truncate(text);
-                *citation = None;
-            }
+            ItemBody::AssistantText { text, .. } => truncate(text),
             ItemBody::Plan { text } | ItemBody::Review { text, .. } => truncate(text),
             ItemBody::Reasoning { content, summary } => {
                 content.clear();
                 summary.clear();
             }
             ItemBody::CommandExecution {
-                command,
-                output,
-                actions,
-                ..
+                command, output, ..
             } => {
                 *command = crate::models::compact_title(command);
                 output.clear();
-                actions.clear();
             }
             ItemBody::FileChange { changes, output } => {
                 for change in changes {
@@ -360,50 +343,4 @@ fn truncate(text: &mut String) {
         end -= 1;
     }
     text.truncate(end);
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum CommandSource {
-    Agent,
-    User,
-    Startup,
-    Interaction,
-    #[default]
-    Unknown,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum CommandAction {
-    Read {
-        command: String,
-        name: String,
-        path: String,
-    },
-    ListFiles {
-        command: String,
-        path: Option<String>,
-    },
-    Search {
-        command: String,
-        path: Option<String>,
-        query: Option<String>,
-    },
-    Unknown {
-        command: String,
-    },
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryCitation {
-    pub entries: Vec<MemoryCitationEntry>,
-    pub sessions: Vec<SessionRef>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryCitationEntry {
-    pub line_start: u32,
-    pub line_end: u32,
-    pub note: String,
-    pub path: String,
 }

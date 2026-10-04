@@ -382,7 +382,8 @@ fn list_fixture(root: &Path, path: &str) -> Result<()> {
     for number in 1..=16 {
         let id = format!("pagination-project-{number}");
         let cwd = root.join(&id);
-        projects.push(json!({"id":id,"name":format!("Project {number:02}"),"roots":[{"path":cwd}],"createdAt":1,"updatedAt":1}));
+        projects
+            .push(json!({"id":id,"name":format!("Project {number:02}"),"roots":[{"path":cwd}]}));
         if path == "/title-fixture" {
             for conversation in 1..=16 {
                 threads.push(json!({"id":format!("pagination-project-thread-{number}-{conversation}"),"cwd":cwd,

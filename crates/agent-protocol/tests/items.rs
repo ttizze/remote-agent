@@ -44,12 +44,8 @@ fn turn_completion_keeps_independent_items_for_late_output() {
     let original = conversation(ItemBody::CommandExecution {
         command: "fixture command".into(),
         output: "before".into(),
-        actions: Vec::new(),
-        source: CommandSource::Unknown,
-        process_id: None,
         cwd: None,
         exit_code: None,
-        duration_ms: None,
     });
     let final_answer = Arc::new(Item::new(
         "answer".into(),
@@ -57,7 +53,6 @@ fn turn_completion_keeps_independent_items_for_late_output() {
         ItemBody::AssistantText {
             text: "done".into(),
             phase: AssistantPhase::Final,
-            citation: None,
         },
     ));
     let completed = SessionChange::Turn {
@@ -110,7 +105,6 @@ fn invalid_appends_report_the_boundary_and_preserve_the_input() {
     let original = conversation(ItemBody::AssistantText {
         text: "original".into(),
         phase: AssistantPhase::Final,
-        citation: None,
     });
     let before = original.clone();
     for (turn, item, field, expected) in [
@@ -180,16 +174,14 @@ proptest! {
         completed in any::<bool>(),
     ) {
         let original = conversation(ItemBody::AssistantText {
-            text: "original".into(), phase: AssistantPhase::Unknown, citation: None,
-        });
+            text: "original".into(), phase: AssistantPhase::Unknown, });
         let mut expected = std::collections::BTreeMap::from([("item".to_string(), "original".to_string())]);
         let mut items = Vec::new();
         for (index, text) in updates {
             let id = if index == 0 { "item".into() } else { format!("item-{index}") };
             expected.insert(id.clone(), text.clone());
             items.push(Arc::new(Item::new(id.into(), ItemStatus::Completed, ItemBody::AssistantText {
-                text, phase: AssistantPhase::Final, citation: None,
-            })));
+                text, phase: AssistantPhase::Final, })));
         }
         let changed = SessionChange::Turn {
             turn: Turn { id: "turn".into(), items: Some(items), ..Default::default() },

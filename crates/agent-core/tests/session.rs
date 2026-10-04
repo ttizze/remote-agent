@@ -61,8 +61,6 @@ fn session_error_survives_binary_transport_and_updates_the_turn() {
             retry: Some(RetryEvidence {
                 retrying,
                 overloaded: false,
-                attempt: Some(2),
-                max_attempts: Some(4),
             }),
             ..Default::default()
         };
@@ -187,7 +185,6 @@ fn a_final_item_replaces_streamed_text_without_mutating_the_input() {
             "answer".into(),
             ItemStatus::Unknown,
             ItemBody::AssistantText {
-                citation: None,
                 text: "final answer".into(),
                 phase: AssistantPhase::Final,
             },
@@ -212,8 +209,6 @@ fn completion_preserves_tool_relationships_and_missing_timing_fields() {
         retry: Some(RetryEvidence {
             retrying: true,
             overloaded: false,
-            attempt: None,
-            max_attempts: None,
         }),
         ..Default::default()
     });
@@ -579,7 +574,7 @@ proptest::proptest! {
             id: Some(session.clone()),
             turns: Some(vec![Arc::new(Turn {
                 id: "same-turn".into(),
-                items: Some(vec![Arc::new(Item::new("same-item".into(), ItemStatus::Unknown, ItemBody::AssistantText {citation: None, text: text.into(), phase: AssistantPhase::Unknown }))]), ..Default::default()
+                items: Some(vec![Arc::new(Item::new("same-item".into(), ItemStatus::Unknown, ItemBody::AssistantText {text: text.into(), phase: AssistantPhase::Unknown }))]), ..Default::default()
             })]), ..Default::default()
         });
         let original = Snapshot {

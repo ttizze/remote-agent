@@ -75,10 +75,7 @@ pub struct ExecutionError {
     pub message: String,
     pub details: Option<String>,
     pub provider_code: Option<String>,
-    pub http_status: Option<u16>,
-    pub resets_at_seconds: Option<u64>,
     pub retry: Option<RetryEvidence>,
-    pub retry_delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,8 +83,6 @@ pub struct ExecutionError {
 pub struct RetryEvidence {
     pub retrying: bool,
     pub overloaded: bool,
-    pub attempt: Option<u32>,
-    pub max_attempts: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -83,13 +83,13 @@ impl DiffView {
         }
         self.list.reset(self.visible.len());
     }
-    pub(crate) fn reveal_path(&mut self, path: &str, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn reveal_path(&mut self, path: &str, cx: &mut Context<Self>) {
         let Some(file) = self
             .file_names
             .iter()
             .find_map(|(file, name)| (name.as_ref() == path).then_some(*file))
         else {
-            return false;
+            return;
         };
         if self.folded.remove(&file) {
             self.rebuild();
@@ -105,7 +105,6 @@ impl DiffView {
             });
             cx.notify();
         }
-        true
     }
     fn row(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
         let row = &self.rows[self.visible[ix]];

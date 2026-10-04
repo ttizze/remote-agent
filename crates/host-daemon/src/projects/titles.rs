@@ -92,7 +92,6 @@ impl<'a> TitleList<'a> {
             thread.name = (!title.is_empty()).then_some(title);
         }
         thread.turns = None;
-        thread.path = None;
         thread.preview = None;
         thread.history_has_more = None;
         thread.history_limit = None;
@@ -151,15 +150,7 @@ impl<'a> TitleList<'a> {
         ThreadList {
             provider_errors: None,
             data,
-            projects: projects
-                .into_iter()
-                .enumerate()
-                .map(|(position, project)| {
-                    let mut project = project.clone();
-                    project.position = Some(position as u64);
-                    project
-                })
-                .collect(),
+            projects: projects.into_iter().cloned().collect(),
             more_project_ids,
             has_more_projects: more_projects,
             has_more_chats: more_chats,
@@ -179,7 +170,6 @@ mod tests {
             id: id.into(),
             name: id.into(),
             roots: vec![],
-            ..Default::default()
         }
     }
 

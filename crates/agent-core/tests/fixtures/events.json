@@ -305,7 +305,6 @@
             }
           ],
           "startedAt": 1,
-          "completedAt": 6,
           "durationMs": 5000
         }
       ]
@@ -324,7 +323,6 @@
               "status": "running",
               "items": [],
               "startedAt": null,
-              "completedAt": null,
               "durationMs": null
             },
             "completed": false
@@ -359,7 +357,6 @@
             }
           ],
           "startedAt": 1,
-          "completedAt": 6,
           "durationMs": 5000
         }
       ]
@@ -400,9 +397,7 @@
             "providerCode": null,
             "retry": {
               "retrying": true,
-              "overloaded": false,
-              "attempt": null,
-              "maxAttempts": null
+              "overloaded": false
             },
             "retryAfterSeconds": null
           }

@@ -423,7 +423,7 @@ internal fun AndroidAppModel.older() {
 internal fun RemoteAgentApp(
     activity: ComponentActivity,
     model: AndroidAppModel,
-    requestQrScan: ((onContents: (String) -> Unit) -> Unit)?,
+    requestQrScan: (onContents: (String) -> Unit) -> Unit,
 ) {
     DisposableEffect(model, activity) {
         val observer = AndroidConnectionLifecycle(model::connect, model::persist)
@@ -471,13 +471,13 @@ private fun PairingScreen(
     busy: Boolean,
     pair: (String) -> Unit,
     showHosts: () -> Unit,
-    scan: ((onContents: (String) -> Unit) -> Unit)?,
+    scan: (onContents: (String) -> Unit) -> Unit,
 ) {
     var contents by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("PCとペアリング", style = MaterialTheme.typography.headlineMedium)
         Text("PC Host ManagerのQRコードを読み取ります。QRの内容はこの端末に保存しません。")
-        scan?.let { Button(onClick = { it { value -> contents = value } }) { Text("QRコードを読み取る") } }
+        Button(onClick = { scan { value -> contents = value } }) { Text("QRコードを読み取る") }
         OutlinedTextField(
             contents,
             { contents = it },

@@ -39,9 +39,9 @@ fn scoped_fixture() -> Snapshot {
         models: Arc::new(catalog()),
         threads: Some(Arc::new(serde_json::from_value(json!({
             "data": [], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false, "projects": [
-                {"id":"outer", "name":"Outer", "roots":[{"path":"/repo/"}], "position":0, "createdAt":0},
-                {"id":"inner", "name":"Inner", "roots":[{"path":"/repo/nested"}], "position":1, "createdAt":0},
-                {"id":"windows", "name":"Windows", "roots":[{"path":"C:\\repo"}], "position":2, "createdAt":0}
+                {"id":"outer", "name":"Outer", "roots":[{"path":"/repo/"}]},
+                {"id":"inner", "name":"Inner", "roots":[{"path":"/repo/nested"}]},
+                {"id":"windows", "name":"Windows", "roots":[{"path":"C:\\repo"}]}
             ]
         })).unwrap())),
         ..Default::default()
