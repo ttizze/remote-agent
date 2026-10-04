@@ -388,7 +388,12 @@ async fn worker(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        delete_devices(&name, &cwd, &log).await
+        delete_devices(&name, &cwd, &log).await?;
+        let diagnostics = root.join("host/logs/host.jsonl");
+        if diagnostics.is_file() {
+            fs::copy(diagnostics, prefix.with_extension("host-diagnostics.jsonl"))?;
+        }
+        Ok(())
     }
     .await;
     let result = result?;

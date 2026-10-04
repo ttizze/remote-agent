@@ -4,7 +4,12 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::Path, process::Stdio, time::Duration};
+use std::{
+    collections::HashMap,
+    path::Path,
+    process::Stdio,
+    time::{Duration, Instant},
+};
 use tokio::process::Child;
 
 #[derive(Deserialize)]
@@ -36,6 +41,8 @@ impl Chrome {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.to_string()),
         }
+        let started = Instant::now();
+        tracing::info!(target: "bex", operation = "browser.launch", message = "Chrome starting");
         let mut child = bex_process::command(executable)
             .map_err(|e| e.to_string())?
             .arg(format!("--user-data-dir={}", profile.display()))
@@ -69,6 +76,8 @@ impl Chrome {
                         && !path.contains(['\r', '\n', '?', '#'])
                     {
                         let url = format!("ws://127.0.0.1:{port}{path}");
+                        tracing::info!(target: "bex", operation = "browser.launch",
+                            message = %format_args!("DevTools endpoint published after {} ms", started.elapsed().as_millis()));
                         let (socket, _) = async_tungstenite::tokio::connect_async(url)
                             .await
                             .map_err(|_| "BEXブラウザに接続できません。".to_owned())?;
@@ -81,15 +90,21 @@ impl Chrome {
         .await
         .unwrap_or_else(|_| Err("BEXブラウザの起動がタイムアウトしました。".into()));
         match result {
-            Ok(socket) => Ok(Self {
-                child,
-                socket,
-                next_id: 0,
-                sessions: HashMap::new(),
-                dialogs: HashMap::new(),
-                broken: false,
-            }),
+            Ok(socket) => {
+                tracing::info!(target: "bex", operation = "browser.launch",
+                    message = %format_args!("Chrome connected after {} ms", started.elapsed().as_millis()));
+                Ok(Self {
+                    child,
+                    socket,
+                    next_id: 0,
+                    sessions: HashMap::new(),
+                    dialogs: HashMap::new(),
+                    broken: false,
+                })
+            }
             Err(error) => {
+                tracing::warn!(target: "bex", operation = "browser.launch",
+                    message = %format_args!("Chrome launch failed after {} ms: {error}", started.elapsed().as_millis()));
                 child.stdin.take();
                 let _ = child.wait().await;
                 Err(error)
@@ -118,6 +133,7 @@ impl Chrome {
         if let Some(session) = session {
             request["sessionId"] = session.into();
         }
+        let started = Instant::now();
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             self.socket
                 .send(Message::Text(request.to_string().into()))
@@ -157,11 +173,19 @@ impl Chrome {
         })
         .await;
         match result {
-            Ok(Ok(value)) if value.get("error").is_none() => Ok(value["result"].clone()),
+            Ok(Ok(value)) if value.get("error").is_none() => {
+                if started.elapsed() >= Duration::from_secs(1) {
+                    tracing::info!(target: "bex", operation = "browser.cdp",
+                        message = %format_args!("{method} completed after {} ms", started.elapsed().as_millis()));
+                }
+                Ok(value["result"].clone())
+            }
             Ok(Ok(_)) => Err(format!(
                 "ブラウザ操作を完了できません（{method}）。画面を確認して再試行してください。"
             )),
             _ => {
+                tracing::warn!(target: "bex", operation = "browser.cdp",
+                    message = %format_args!("{method} interrupted after {} ms", started.elapsed().as_millis()));
                 self.broken = true;
                 Err("BEXブラウザとの通信が中断しました。再接続してください。".into())
             }

@@ -203,6 +203,9 @@ transfer server just to delete that check would reverse A14.
   photos and video, only the image-saving test grants Photos add permission, and
   only the file-upload test writes its document fixture. Preparation logs name
   boot, media import, installation and permission operations and their failures.
+  UI fixture Hosts use the production diagnostic log; iPhone bundles retain it
+  alongside Chrome stderr. Browser diagnostics record startup phases and slow
+  or interrupted CDP methods without page URLs, input or image payloads.
   Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.
