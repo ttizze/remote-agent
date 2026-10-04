@@ -4,8 +4,9 @@ import UIKit
 
 /// History and row presentation
 extension ThreadScreen {
-    func activityIsExpanded(_ activity: ActivityPresentation) -> Bool {
-        AgentCore.activityIsExpanded(activity: activity, choice: activityExpansionOverrides[activity.id])
+    func followLatest(to id: String?) {
+        guard isFollowingLatest, let id else { return }
+        scrollPosition.scrollTo(id: id, anchor: .bottom)
     }
 
     @ViewBuilder
@@ -61,6 +62,7 @@ extension ThreadScreen {
             selection: selectionActions,
             isExpanded: expandedItemIds.contains(item.data.id),
             toggleExpanded: {
+                isFollowingLatest = false
                 scrollPosition.isPositionedByUser = true
                 if expandedItemIds.contains(item.data.id) {
                     expandedItemIds.remove(item.data.id)
@@ -80,9 +82,10 @@ extension ThreadScreen {
 
     @ViewBuilder
     func activityHeader(_ turn: ActivityPresentation) -> some View {
-        let expanded = activityIsExpanded(turn)
+        let expanded = AgentCore.activityIsExpanded(activity: turn, choice: activityExpansionOverrides[turn.id])
         if turn.activityCanCollapse {
             Button {
+                isFollowingLatest = false
                 scrollPosition.isPositionedByUser = true
                 activityExpansionOverrides[turn.id] = ActivityExpansion(status: turn.status, expanded: !expanded)
                 if !expanded, let params = turn.loadItems {
@@ -105,7 +108,7 @@ extension ThreadScreen {
                   loading: model.loadingHistory,
                   oldestVisible: oldestHistoryRowVisible,
                   latestVisible: latestHistoryRowVisible,
-                  followingLatest: scrollPosition.edge == .bottom
+                  followingLatest: isFollowingLatest
               ) else { return }
         model.loadOlderHistory()
     }
@@ -122,10 +125,16 @@ extension ThreadScreen {
     }
 }
 
-func conversationRows(_ thread: ConversationPresentation,
+struct ConversationScrollMetrics: Equatable {
+    let content: CGSize
+    let container: CGSize
+    let latestVisible: Bool
+}
+
+func conversationRows(_ rows: [ThreadConversationRow],
                       expansion: [String: ActivityExpansion]) -> [ThreadConversationRow] {
     var expanded = false
-    return thread.rows.filter { row in
+    return rows.filter { row in
         guard case let .native(native, _) = row.content else { return true }
         switch native.content {
         case let .activityHeader(activity):

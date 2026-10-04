@@ -54,7 +54,7 @@ impl Chrome {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("BEXブラウザを起動できません: {e}"))?;
-        let result = tokio::time::timeout(Duration::from_secs(15), async {
+        let result = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 if child.try_wait().map_err(|e| e.to_string())?.is_some() {
                     return Err("BEXブラウザが起動中に終了しました。".into());

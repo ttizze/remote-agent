@@ -230,6 +230,8 @@ extension BexLaunchUITests {
         let fullCopy = app.buttons["コピー"]
         XCTAssertTrue(fullCopy.waitForExistence(timeout: 10)); fullCopy.tap()
         let composer = app.textFields["task.message"]
+        composer.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         composer.press(forDuration: 1.2)
         let fullPaste = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Paste", "ペースト"])).firstMatch
         XCTAssertTrue(fullPaste.waitForExistence(timeout: 5)); fullPaste.tap()
@@ -248,6 +250,8 @@ extension BexLaunchUITests {
         let copy = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Copy", "コピー"])).firstMatch
         XCTAssertTrue(copy.waitForExistence(timeout: 5)); copy.tap()
         app.buttons["完了"].tap()
+        composer.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         composer.press(forDuration: 1.2)
         let paste = app.menuItems.matching(NSPredicate(format: "label IN %@", ["Paste", "ペースト"])).firstMatch
         XCTAssertTrue(paste.waitForExistence(timeout: 5)); paste.tap()

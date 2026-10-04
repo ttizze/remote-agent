@@ -17,7 +17,8 @@ struct ThreadScreen: View {
     @State var preparingMedia = false
     @State var showingModelSettings = false
     @State var isVisible = false
-    @State var scrollPosition = ScrollPosition(idType: String.self, edge: .bottom)
+    @State var scrollPosition = ScrollPosition(idType: String.self)
+    @State var isFollowingLatest = true
     @State var oldestHistoryRowVisible = false
     @State var latestHistoryRowVisible = false
     @State var expandedItemIds = Set<String>()
@@ -34,11 +35,6 @@ struct ThreadScreen: View {
                 if model.isShowingSideChat == isSideChat {
                     composerFocused = true
                 }
-            }
-            .onChange(of: conversation?.id) {
-                expandedItemIds.removeAll()
-                activityExpansionOverrides.removeAll()
-                scrollPosition.scrollTo(edge: .bottom)
             }
             .onChange(of: model.draftKey) { _ in dictation.cancel() }
             .onChange(of: model.isConnected) {
@@ -95,7 +91,8 @@ struct ThreadScreen: View {
                     if !isSideChat, !model.isNewThread {
                         Button {
                             if let thread = conversation,
-                               let first = conversationRows(thread, expansion: activityExpansionOverrides).first {
+                               let first = conversationRows(thread.rows, expansion: activityExpansionOverrides).first {
+                                isFollowingLatest = false
                                 withAnimation { scrollPosition.scrollTo(id: first.id, anchor: .top) }
                             }
                         } label: {
@@ -129,8 +126,9 @@ struct ThreadScreen: View {
                 BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
             }
             if let thread = conversation {
-                let rows = conversationRows(thread, expansion: activityExpansionOverrides)
+                let rows = conversationRows(thread.rows, expansion: activityExpansionOverrides)
                 let firstRowId = rows.first?.id
+                let lastRowId = rows.last?.id
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(rows) { row in
@@ -142,40 +140,59 @@ struct ThreadScreen: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 6)
                     .background(ConversationScrollToTop {
+                        isFollowingLatest = false
                         scrollPosition.isPositionedByUser = true
                     })
                 }
                 .scrollPosition($scrollPosition)
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
                 .defaultScrollAnchor(.bottom, for: .alignment)
                 .accessibilityIdentifier("task.detail")
                 .accessibilityValue(threadAccessibilityValue(thread))
                 .buttonStyle(.plain)
                 .simultaneousGesture(DragGesture(minimumDistance: 1).onChanged { gesture in
                     guard abs(gesture.translation.height) > abs(gesture.translation.width) else { return }
-                    if scrollPosition.edge == .bottom {
+                    if isFollowingLatest {
+                        isFollowingLatest = false
                         scrollPosition.isPositionedByUser = true
                     }
                     loadVisibleHistory()
                 }.onEnded { gesture in
                     if gesture.translation.height <= 0, latestHistoryRowVisible {
-                        scrollPosition.scrollTo(edge: .bottom)
+                        isFollowingLatest = true
+                        followLatest(to: lastRowId)
                     }
                 })
                 .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
                     oldestHistoryRowVisible = firstRowId.map { visible.contains($0) } ?? false
                     loadVisibleHistory()
                 }
-                .onScrollGeometryChange(for: Bool.self) { geometry in
-                    geometry.containerSize.height > 0 && geometry.contentSize.height > 0 &&
-                        geometry.contentSize.height - geometry.visibleRect.maxY <= 80
-                } action: { _, latestVisible in
-                    latestHistoryRowVisible = latestVisible
+                .onScrollGeometryChange(for: ConversationScrollMetrics.self) { geometry in
+                    ConversationScrollMetrics(
+                        content: geometry.contentSize,
+                        container: geometry.containerSize,
+                        latestVisible: geometry.containerSize.height > 0 && geometry.contentSize.height > 0 &&
+                            geometry.contentSize.height - geometry.visibleRect.maxY <= 80
+                    )
+                } action: { old, new in
+                    latestHistoryRowVisible = new.latestVisible
+                    if old.content != new.content || old.container != new.container {
+                        followLatest(to: lastRowId)
+                    }
                     loadVisibleHistory()
                 }
+                .onChange(of: thread.id, initial: true) {
+                    expandedItemIds.removeAll()
+                    activityExpansionOverrides.removeAll()
+                    isFollowingLatest = true
+                    followLatest(to: lastRowId)
+                }
+                .onChange(of: lastRowId) { followLatest(to: lastRowId) }
                 .overlay(alignment: .bottom) {
                     if !latestHistoryRowVisible {
                         Button {
-                            withAnimation { scrollPosition.scrollTo(edge: .bottom) }
+                            isFollowingLatest = true
+                            withAnimation { followLatest(to: lastRowId) }
                         } label: {
                             Image(systemName: "arrow.down").font(.title3.weight(.medium))
                                 .foregroundStyle(.white)

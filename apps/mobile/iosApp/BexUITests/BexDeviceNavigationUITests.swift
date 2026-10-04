@@ -171,16 +171,6 @@ extension BexLaunchUITests {
         }
     }
 
-    private func assertBrowserStartup(_ open: XCUIElement, notice: XCUIElement) {
-        let ready = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: open)
-        let startup = XCTWaiter.wait(for: [ready], timeout: 20)
-        if startup != .completed {
-            _ = notice.waitForExistence(timeout: 15)
-        }
-        XCTAssertEqual(startup, .completed,
-                       "Browser startup: \(notice.exists ? notice.label : "no error"); enabled=\(open.isEnabled)")
-    }
-
     func testSimulatorBrowserIsSeparateFromConversationAndPreservesPage() throws {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "Browser sharing fixture")
@@ -190,7 +180,9 @@ extension BexLaunchUITests {
         let address = app.textFields["browser.address"]
         XCTAssertTrue(address.waitForExistence(timeout: 10))
         let open = app.buttons["browser.open"]
-        assertBrowserStartup(open, notice: app.staticTexts["notice"])
+        let ready = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: open)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 20), .completed,
+                       "Browser startup must enable input")
         XCTAssertFalse(app.buttons["browser.take"].exists)
         XCTAssertFalse(app.buttons["browser.release"].exists)
         replaceFieldText(address, text: "file:///etc/passwd")
