@@ -245,7 +245,7 @@
 /* End PBXNativeTarget section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-        D60000000000000000000003 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/CSolanaM/SkeletonUI.git"; requirement = {kind = exactVersion; version = 2.0.0; }; };
+        D60000000000000000000003 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/CSolanaM/SkeletonUI.git"; requirement = {kind = exactVersion; version = 2.0.2; }; };
         C30000000000000000000005 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git"; requirement = {kind = revision; revision = 233c6ba11aa9b2b9ffbd6b90467b079402f3c264; }; };
 /* End XCRemoteSwiftPackageReference section */
 /* Begin XCSwiftPackageProductDependency section */
