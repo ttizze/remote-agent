@@ -303,7 +303,7 @@ impl Desktop {
                     .child(div().flex_1().child(label))
                     .when(loading, |row| row.child("画像一覧を読み込み中…"))
                     .child(
-                        self.icon_button(
+                        Self::icon_button(
                             "gallery-save",
                             if saved {
                                 Icon::new(IconName::Check)
@@ -317,7 +317,7 @@ impl Desktop {
                         .disabled(!ready || saving || saved),
                     )
                     .child(
-                        self.icon_button(
+                        Self::icon_button(
                             "gallery-close",
                             IconName::Close,
                             "閉じる",

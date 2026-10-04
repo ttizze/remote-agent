@@ -1,4 +1,5 @@
 use super::*;
+use gpui_kit::component::button::ButtonCustomVariant;
 
 impl Desktop {
     fn composer_context(&self, cx: &Context<Self>) -> AnyElement {
@@ -262,7 +263,7 @@ impl Desktop {
                         .w_full()
                         .justify_center()
                         .child(
-                            self.icon_button(
+                            Self::icon_button(
                                 "conversation-latest",
                                 IconName::ArrowDown,
                                 "最新のメッセージへ",
@@ -285,21 +286,21 @@ impl Desktop {
         let mut files = h_flex().gap_3().p_2().flex_wrap();
         for (i, file) in attachments.iter().enumerate() {
             let key = key.clone();
-            let remove = Button::new(format!("attachment-{i}"))
-                .icon(IconName::Close)
-                .xsmall()
-                .ghost()
-                .on_click(cx.listener(move |s, _, _, cx| {
+            let remove = Self::icon_button(
+                format!("attachment-{i}"),
+                IconName::Close,
+                format!("{}を外す", file.name),
+                cx,
+                move |s, _, _| {
                     s.dispatch(Intent::RemoveAttachment {
                         draft_key: key.clone(),
                         index: i as u32,
                     });
-                    cx.notify();
-                }))
-                .accessibility_label(format!("{}を外す", file.name))
-                .size(px(28.))
-                .rounded_full()
-                .bg(rgb(0x222222));
+                },
+            )
+            .xsmall()
+            .size(px(28.))
+            .rounded_full();
             files = files.child(if file.is_image {
                 let group = SharedString::from(format!("draft-image-{i}"));
                 div()
@@ -315,25 +316,27 @@ impl Desktop {
                             .child(self.image(&file.path, false, 120., true, cx)),
                     )
                     .child(
-                        div()
+                        remove
                             .absolute()
                             .top(px(-4.))
                             .right(px(-4.))
                             .invisible()
                             .group_hover(group, |style| style.visible())
-                            .child(
-                                remove
-                                    .size(px(18.))
-                                    .bg(rgb(0xffffff))
-                                    .text_color(rgb(0x222222)),
-                            ),
+                            .size(px(18.))
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .foreground(rgb(0x222222).into())
+                                    .hover(rgb(0xe6e6e6).into())
+                                    .active(rgb(0xd4d4d4).into()),
+                            )
+                            .bg(rgb(0xffffff)),
                     )
                     .into_any_element()
             } else {
                 h_flex()
                     .gap_2()
                     .child(file.name.clone())
-                    .child(remove)
+                    .child(remove.bg(rgb(0x222222)))
                     .into_any_element()
             });
         }
@@ -341,7 +344,7 @@ impl Desktop {
         let empty = self.composer.read(cx).value().trim().is_empty() && attachments.is_empty();
         let phase = self.dictation.as_ref().map(|d| d.phase);
         let send = if let Some(id) = running.filter(|_| empty) {
-            self.icon_button("stop", IconName::Pause, "停止", cx, move |s, _, _| {
+            Self::icon_button("stop", IconName::Pause, "停止", cx, move |s, _, _| {
                 s.dispatch(Intent::Interrupt(op::Interrupt {
                     thread_id: s.selected().expect("selected conversation").clone(),
                     turn_id: id.clone(),
@@ -350,7 +353,7 @@ impl Desktop {
             .icon(Icon::default().path("bex/stop.svg"))
             .disabled(!self.snapshot.connected || self.busy > 0)
         } else {
-            self.icon_button("send", IconName::ArrowUp, "送信", cx, |s, _, cx| {
+            Self::icon_button("send", IconName::ArrowUp, "送信", cx, |s, _, cx| {
                 s.send(cx)
             })
             .disabled(
@@ -437,7 +440,7 @@ impl Desktop {
                 composer.child(
                     h_flex()
                         .child(
-                            self.icon_button(
+                            Self::icon_button(
                                 "attach",
                                 IconName::Plus,
                                 "ファイルを添付",
