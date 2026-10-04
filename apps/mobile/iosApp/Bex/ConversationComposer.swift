@@ -12,12 +12,12 @@ extension ThreadScreen {
             if model.isNewThread {
                 newThreadContext
             }
-            if !isSideChat, !model.isNewThread, let review, review.files > 0 {
+            if !isSideChat, !model.isNewThread, let review = model.snapshot.review(), review.fileCount() > 0 {
                 Button { openTools?(.files, true) } label: {
                     HStack(spacing: 10) {
-                        Text("\(review.files)件のファイル")
-                        Text("+\(review.additions)").foregroundColor(.green)
-                        Text("−\(review.deletions)").foregroundColor(.red)
+                        Text("\(review.fileCount())件のファイル")
+                        Text("+\(review.additions())").foregroundColor(.green)
+                        Text("−\(review.deletions())").foregroundColor(.red)
                     }
                     .font(.subheadline.monospacedDigit())
                 }
