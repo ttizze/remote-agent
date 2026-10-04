@@ -67,15 +67,15 @@ private struct UsageWindowView: View {
     var compact = false
 
     var body: some View {
-        let tint: Color = window.remainingPercent <= 20 ? .orange
-            : compact ? Color(red: 0.54, green: 0.81, blue: 0.67) : .green
+        let tint: Color = window.remainingPercent <= 20 ? .orange : compact ? .accentColor : .green
         if compact {
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
+                Text("週間残量")
                 ProgressView(value: Double(window.remainingPercent), total: 100)
                     .tint(tint)
-                Text("週間残量 \(window.remainingPercent)%").monospacedDigit()
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("\(window.remainingPercent)%").monospacedDigit()
             }
+            .font(.caption2).foregroundStyle(.secondary)
         } else {
             VStack(alignment: .leading, spacing: 5) {
                 HStack {

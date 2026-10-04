@@ -99,8 +99,8 @@ jobs:
     timeout-minutes: 120
     env:
       BEX_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      # Share this 7 GiB Apple Silicon runner with the concurrent Mac WebView E2E.
-      BEX_IOS_TEST_WORKERS: 2
+      # Keep every test, but avoid two Simulators competing on this 7 GiB runner.
+      BEX_IOS_TEST_WORKERS: 1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

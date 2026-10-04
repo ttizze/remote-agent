@@ -32,7 +32,8 @@ if [[ $# == 0 ]]; then
         testSimulatorStartsOnListAndPreservesDetailOnForeground \
         testSimulatorOpensAccountManagementFromSettingsAndModelPicker \
         testSimulatorModelDefaultsPersistAndApplyOnlyToNewConversations \
-        testSimulatorSelectsModelScopeAndShowsUsageBeforeManagingAccounts \
+        testSimulatorModelDefaultsInheritAndPersistAcrossScopes \
+        testSimulatorModelPickerUsesAgentRailAndCompactControls \
         testSimulatorSignsInDirectlyFromModelSettings \
         testSimulatorGoesBackFromAccountLoginAndCanStartAgain \
         testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone \

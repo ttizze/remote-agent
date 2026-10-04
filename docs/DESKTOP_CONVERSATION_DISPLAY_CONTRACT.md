@@ -559,6 +559,13 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
   quick controls. Both clients use core capability and weekly-usage projections.
   Selecting an account fetches its current catalog and retains supported draft
   choices. A catalog refresh must not silently switch to another provider.
+- The model picker has a left vertical Codex/Claude icon rail and no title or
+  close button. New conversations can switch agents; an existing conversation's
+  agent stays fixed. Account identity and weekly remaining quota appear above
+  the model list in the right column. Reasoning and speed sit below it on one
+  line, with icons and values instead of visible headings; accessible labels
+  retain their meaning. iPhone dismisses the sheet by swiping down; desktop
+  retains native popover dismissal.
 - Composer model text uses its natural width; compact spacing retains
   44-point quick-control touch targets.
 - Account choices use provider, email and plan; no invented 個人/仕事 labels.
@@ -583,6 +590,7 @@ Acceptance: account picker desktop interaction test, Host account integration
 checks for both providers, and iOS
 `testSimulatorOpensAccountManagementFromSettingsAndModelPicker`,
 `testSimulatorComposerOffersFastModelAndEffortBeforeMicrophone`,
+`testSimulatorModelPickerUsesAgentRailAndCompactControls`,
 `testSimulatorSwitchesCodexAccountsAndForksConversation`, and
 `testSimulatorAddsClaudeAccountAndKeepsCodexSelected`.
 

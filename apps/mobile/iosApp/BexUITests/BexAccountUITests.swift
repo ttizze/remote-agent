@@ -12,7 +12,7 @@ extension BexLaunchUITests {
         selectFixtureProvider(app, "Codex")
         openModelChoices(app)
         app.buttons["model.choice.fixture-model"].tap()
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         let prompt = app.textFields["task.message"]
         prompt.tap(); prompt.typeText("[success] Inherit this question")
         app.buttons["task.send"].tap()
@@ -66,7 +66,7 @@ extension BexLaunchUITests {
         selectFixtureProvider(app, "Codex")
         openAccountManagement(app)
         XCTAssertEqual(app.buttons["model.account.desktop"].value as? String, "選択中")
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
     }
 
     func testSimulatorGoesBackFromAccountLoginAndCanStartAgain() throws {
@@ -104,7 +104,7 @@ extension BexLaunchUITests {
                 )).allElementsBoundByIndex.map(\.identifier).sorted(), originalAccounts)
             }
         }
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         XCTAssertTrue(app.textFields["task.message"].waitForExistence(timeout: 10))
     }
 
@@ -133,9 +133,8 @@ extension BexLaunchUITests {
 
     func selectFixtureProvider(_ app: XCUIApplication, _ name: String) {
         openModelChoices(app)
-        let picker = app.buttons["model.provider"]
-        XCTAssertTrue(picker.waitForExistence(timeout: 10))
-        picker.tap(); app.buttons[name == "Codex" ? "Codex" : "Claude Code"].tap()
+        let provider = app.buttons["model.provider." + (name == "Codex" ? "codex" : "claude")]
+        XCTAssertTrue(provider.waitForExistence(timeout: 10)); provider.tap()
     }
 
     func openAccountManagement(_ app: XCUIApplication) {
@@ -193,7 +192,7 @@ extension BexLaunchUITests {
         app.buttons["tasks.new.project.simulator-project"].tap()
         chooseFixtureModel(app)
         app.buttons["model.settings"].tap()
-        XCTAssertTrue(app.buttons["model.provider"].isEnabled)
+        XCTAssertTrue(app.buttons["model.provider.codex"].isEnabled)
         XCTAssertFalse(app.buttons["settings.scope.projects"].exists || app.buttons["settings.scope.environment"]
             .exists)
         XCTAssertFalse(app.buttons["model.account.desktop"].exists)
@@ -204,13 +203,13 @@ extension BexLaunchUITests {
         openModelChoices(app)
         XCTAssertEqual(app.buttons["model.choice.fixture-model"].value as? String, "選択中",
                        "Browsing agent settings must not change the draft model")
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         let prompt = app.textFields["task.message"]
         prompt.tap(); prompt.typeText("[success] Keep the conversation agent")
         app.buttons["task.send"].tap()
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
         app.buttons["model.settings"].tap()
-        XCTAssertFalse(app.buttons["model.provider"].isEnabled)
+        XCTAssertFalse(app.buttons["model.provider.codex"].isEnabled)
         XCTAssertTrue(app.buttons["model.choice.fixture-model"].exists)
         XCTAssertFalse(app.buttons["model.choice.default"].exists)
         captureScreen(app, named: "Existing conversation fixes the agent")
@@ -241,7 +240,7 @@ extension BexLaunchUITests {
         let selected = app.buttons["model.choice.fixture-model"]
         XCTAssertTrue(selected.waitForExistence(timeout: 10))
         XCTAssertEqual(selected.value as? String, "選択中")
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         try simulatorFixture("release-inputs")
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 25))
     }
@@ -273,7 +272,7 @@ extension BexLaunchUITests {
         openModelChoices(app)
         XCTAssertFalse(app.buttons["model.choice.fixture-model"].exists)
         app.buttons["model.choice.default"].tap()
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         XCTAssertFalse(fast.exists)
         XCTAssertEqual(effort.value as? String, "high")
         effort.tap()
@@ -282,7 +281,7 @@ extension BexLaunchUITests {
         app.buttons["model.effort.high"].tap()
         model.tap()
         app.buttons["model.choice.haiku"].tap()
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         XCTAssertFalse(effort.exists)
         model.tap()
         selectFixtureProvider(app, "Codex")
@@ -290,7 +289,7 @@ extension BexLaunchUITests {
         let search = app.textFields["model.search"]
         search.tap(); search.typeText("no matching model")
         XCTAssertFalse(app.buttons["model.choice.fixture-model"].exists)
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         XCTAssertTrue(fast.exists && effort.exists)
     }
 
@@ -317,7 +316,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(speed.exists); speed.tap()
         app.buttons["高速"].tap()
         captureScreen(app, named: "Default model effort and speed for new conversations")
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         app.buttons["tasks.new.project.simulator-project"].tap()
         XCTAssertEqual(app.textFields["task.message"].value as? String, "Keep this existing draft")
         XCTAssertEqual(app.buttons["model.effort"].value as? String, "medium")
@@ -329,7 +328,7 @@ extension BexLaunchUITests {
         app.buttons["model.settings"].tap()
         XCTAssertEqual(app.buttons["model.choice.fixture-model"].value as? String, "選択中")
         XCTAssertFalse(app.descendants(matching: .any)["model.error"].exists)
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         app.terminate(); app.launch()
         XCTAssertTrue(app.buttons["tasks.menu"].waitForExistence(timeout: 20))
         app.buttons["tasks.menu"].tap()
@@ -364,7 +363,7 @@ extension BexLaunchUITests {
         choice.tap()
         openModelChoices(app)
         app.buttons["model.choice.fixture-model"].tap()
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         chooseFixtureEffort(app, "high")
         captureScreen(app, named: "Account switches preserve conversation and quick controls")
     }
