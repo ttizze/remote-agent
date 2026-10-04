@@ -45,9 +45,9 @@ impl Chrome {
                 "--remote-debugging-port=0",
                 "--no-first-run",
                 "--no-default-browser-check",
+                "--no-startup-window",
                 "--disable-background-networking",
                 "--window-size=1024,768",
-                "about:blank",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())

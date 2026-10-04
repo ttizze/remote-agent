@@ -4,9 +4,9 @@ import UIKit
 
 /// History and row presentation
 extension ThreadScreen {
-    func followLatest(to id: String?) {
+    func followLatest(to id: String?, using proxy: ScrollViewProxy) {
         guard isFollowingLatest, let id else { return }
-        scrollPosition.scrollTo(id: id, anchor: .bottom)
+        proxy.scrollTo(id, anchor: .bottom)
     }
 
     @ViewBuilder
@@ -63,7 +63,6 @@ extension ThreadScreen {
             isExpanded: expandedItemIds.contains(item.data.id),
             toggleExpanded: {
                 isFollowingLatest = false
-                scrollPosition.isPositionedByUser = true
                 if expandedItemIds.contains(item.data.id) {
                     expandedItemIds.remove(item.data.id)
                 } else {
@@ -86,7 +85,6 @@ extension ThreadScreen {
         if turn.activityCanCollapse {
             Button {
                 isFollowingLatest = false
-                scrollPosition.isPositionedByUser = true
                 activityExpansionOverrides[turn.id] = ActivityExpansion(status: turn.status, expanded: !expanded)
                 if !expanded, let params = turn.loadItems {
                     model.perform(.loadTurnItems(params))
