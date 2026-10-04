@@ -199,6 +199,10 @@ transfer server just to delete that check would reverse A14.
   hashes before reusing Swift outputs, and still rebuild and exercise current
   Rust code. Hosted CI creates each disposable Simulator directly from the
   runtime, avoiding a template migration followed by a second worker boot.
+  Simulator fixtures follow the selected tests: only photo-picker tests seed
+  photos and video, only the image-saving test grants Photos add permission, and
+  only the file-upload test writes its document fixture. Preparation logs name
+  boot, media import, installation and permission operations and their failures.
   Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.

@@ -76,6 +76,17 @@ fn partition_tests(tests: &[String], index: usize, count: usize) -> Result<Vec<S
     Ok(tests.iter().skip(index).step_by(count).cloned().collect())
 }
 
+fn needs_media_fixtures(tests: &[String]) -> bool {
+    tests.iter().any(|test| {
+        matches!(
+            test.as_str(),
+            "testSimulatorCanAddASecondPhoto"
+                | "testSimulatorCanAttachPhotosAndVideos"
+                | "testSimulatorRetriesPhotoUploadAfterWorkspaceRecovery"
+        )
+    })
+}
+
 fn runtime(runtimes: &Value) -> Result<String> {
     let mut selected = None;
     for entry in runtimes["runtimes"]
@@ -327,17 +338,28 @@ async fn worker(
             };
             let simulator = supervision::run(&create, &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
             let simulator = std::str::from_utf8(&simulator.stdout)?.trim();
-            for arguments in [
-                args![vec; "xcrun", "simctl", "boot", simulator],
-                args![vec; "xcrun", "simctl", "bootstatus", simulator, "-b"],
-                args![vec; "xcrun", "simctl", "addmedia", simulator, "apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png", records.join("attachment-video.mov")],
-                args![vec; "xcrun", "simctl", "install", simulator, products.join("Debug-iphonesimulator/Bex.app")],
-                args![vec; "xcrun", "simctl", "privacy", simulator, "grant", "photos-add", "com.ttizze.b-codex"],
-            ] { supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT).await?; }
-            let container = supervision::run(&args!["xcrun", "simctl", "get_app_container", simulator, "com.ttizze.b-codex", "data"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
-            let documents = Path::new(std::str::from_utf8(&container.stdout)?.trim()).join("Documents");
-            fs::create_dir_all(&documents)?;
-            fs::write(documents.join("attachment-fixture.txt"), "Isolated attachment upload fixture.\n")?;
+            let mut preparation = vec![
+                ("boot", args![vec; "xcrun", "simctl", "boot", simulator]),
+                ("bootstatus", args![vec; "xcrun", "simctl", "bootstatus", simulator, "-b"]),
+            ];
+            if needs_media_fixtures(&tests) {
+                preparation.push(("addmedia", args![vec; "xcrun", "simctl", "addmedia", simulator, "apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png", records.join("attachment-video.mov")]));
+            }
+            preparation.push(("install", args![vec; "xcrun", "simctl", "install", simulator, products.join("Debug-iphonesimulator/Bex.app")]));
+            if tests.iter().any(|test| test == "testSimulatorOpensOnlyTheTappedImageAndSavesIt") {
+                preparation.push(("photos-add permission", args![vec; "xcrun", "simctl", "privacy", simulator, "grant", "photos-add", "com.ttizze.b-codex"]));
+            }
+            for (phase, arguments) in preparation {
+                println!("{label}: {phase}");
+                supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT).await
+                    .map_err(|error| format!("{label}: {phase} failed: {error}"))?;
+            }
+            if tests.iter().any(|test| test == "testSimulatorCanAttachDownloadAndPrepareAIEdit") {
+                let container = supervision::run(&args!["xcrun", "simctl", "get_app_container", simulator, "com.ttizze.b-codex", "data"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
+                let documents = Path::new(std::str::from_utf8(&container.stdout)?.trim()).join("Documents");
+                fs::create_dir_all(&documents)?;
+                fs::write(documents.join("attachment-fixture.txt"), "Isolated attachment upload fixture.\n")?;
+            }
             let pairing_url = format!("http://127.0.0.1:{}/pairing", fs::read_to_string(root.join("pairing.port"))?.trim());
             let probe = std::env::current_exe()?;
             configure_run(Plist::from_file(&source)?, &pairing_url, probe.to_str().ok_or("non-UTF-8 terminal probe path")?)?.to_file_xml(&run)?;
@@ -525,19 +547,21 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
     )
     .await?;
     let build_seconds = build_started.elapsed().as_secs_f64();
-    supervision::run(
-        &args![
-            "xcrun",
-            "swift",
-            "apps/mobile/iosApp/BexUITests/Fixtures/create-video.swift",
-            records.join("attachment-video.mov")
-        ],
-        &cwd,
-        Io::Log(&log),
-        &cancel,
-        SETUP_TIMEOUT,
-    )
-    .await?;
+    if needs_media_fixtures(&tests) {
+        supervision::run(
+            &args![
+                "xcrun",
+                "swift",
+                "apps/mobile/iosApp/BexUITests/Fixtures/create-video.swift",
+                records.join("attachment-video.mov")
+            ],
+            &cwd,
+            Io::Log(&log),
+            &cancel,
+            SETUP_TIMEOUT,
+        )
+        .await?;
+    }
     let runtimes = supervision::run(
         &args!["xcrun", "simctl", "list", "runtimes", "-j"],
         &cwd,
@@ -715,6 +739,25 @@ mod tests {
         let entry = |version, platform, available| json!({"version": version, "platform": platform, "isAvailable": available, "identifier": version});
         assert_eq!(runtime(&json!({"runtimes": [entry("26.9", "iOS", true), entry("26.10", "iOS", true), entry("26.11", "iOS", false), entry("27.1", "iOS", true), entry("26.12", "tvOS", true)]})).unwrap(), "26.10");
         assert!(runtime(&json!({"runtimes": [entry("26.1", "iOS", false)]})).is_err());
+    }
+
+    #[test]
+    fn only_photo_picker_tests_need_seeded_media() {
+        let conversation = vec![
+            "testSimulatorOpensLongInterruptedHistoryAtLatestMessage".to_owned(),
+            "testSimulatorOpensOnlyTheTappedImageAndSavesIt".to_owned(),
+            "testSimulatorCanAttachDownloadAndPrepareAIEdit".to_owned(),
+        ];
+        assert!(!needs_media_fixtures(&conversation));
+        for test in [
+            "testSimulatorCanAddASecondPhoto",
+            "testSimulatorCanAttachPhotosAndVideos",
+            "testSimulatorRetriesPhotoUploadAfterWorkspaceRecovery",
+        ] {
+            let mut mixed = conversation.clone();
+            mixed.push(test.to_owned());
+            assert!(needs_media_fixtures(&mixed));
+        }
     }
 
     #[test]
