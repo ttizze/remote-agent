@@ -3,7 +3,7 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct ConversationViewport: Equatable {
+struct ConversationViewport {
     let oldestVisible: Bool
     let latestVisible: Bool
 }
@@ -165,10 +165,14 @@ struct ThreadScreen: View {
                         }
                     }
                     .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
-                        historyViewport = ConversationViewport(
-                            oldestVisible: firstRowId.map { visible.contains($0) } ?? false,
-                            latestVisible: latestRowId.map { visible.contains($0) } ?? false
-                        )
+                        historyViewport.oldestVisible = firstRowId.map { visible.contains($0) } ?? false
+                        loadVisibleHistory()
+                    }
+                    .onScrollGeometryChange(for: Bool.self) { geometry in
+                        geometry.containerSize.height > 0 && geometry.contentSize.height > 0 &&
+                            geometry.contentSize.height - geometry.visibleRect.maxY <= 80
+                    } action: { _, latestVisible in
+                        historyViewport.latestVisible = latestVisible
                         loadVisibleHistory()
                     }
                     // Offset changes must not request another scroll. Follow only content
