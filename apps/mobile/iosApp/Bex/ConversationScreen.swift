@@ -17,7 +17,7 @@ struct ThreadScreen: View {
     @State var preparingMedia = false
     @State var showingModelSettings = false
     @State var isVisible = false
-    @State var isFollowingLatest = true
+    @State var scrollPosition = ScrollPosition(idType: String.self, edge: .bottom)
     @State var oldestHistoryRowVisible = false
     @State var latestHistoryRowVisible = false
     @State private var scrollToTopRequest = 0
@@ -35,6 +35,11 @@ struct ThreadScreen: View {
                 if model.isShowingSideChat == isSideChat {
                     composerFocused = true
                 }
+            }
+            .onChange(of: conversation?.id) {
+                expandedItemIds.removeAll()
+                activityExpansionOverrides.removeAll()
+                scrollPosition.scrollTo(edge: .bottom)
             }
             .onChange(of: model.draftKey) { _ in dictation.cancel() }
             .onChange(of: model.isConnected) {
@@ -124,87 +129,71 @@ struct ThreadScreen: View {
             if let thread = conversation {
                 let rows = conversationRows(thread, expansion: activityExpansionOverrides)
                 let firstRowId = rows.first?.id
-                let latestRowId = rows.last?.id
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(rows) { row in
-                                conversationRow(row)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .id(row.id)
-                            }
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(rows) { row in
+                            conversationRow(row)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(row.id)
                         }
-                        .scrollTargetLayout()
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 6)
-                        .background(ConversationScrollToTop {
-                            isFollowingLatest = false
-                        })
                     }
-                    .defaultScrollAnchor(.bottom, for: .initialOffset)
-                    // Keep resizing in the scroll view's layout pass. Scrolling to a
-                    // lazy row after every size change can invalidate its measurements.
-                    .defaultScrollAnchor(isFollowingLatest ? .bottom : nil, for: .sizeChanges)
-                    .accessibilityIdentifier("task.detail")
-                    .accessibilityValue(threadAccessibilityValue(thread))
-                    .buttonStyle(.plain)
-                    .simultaneousGesture(DragGesture(minimumDistance: 1).onChanged { gesture in
-                        guard abs(gesture.translation.height) > abs(gesture.translation.width) else { return }
-                        isFollowingLatest = false
-                        loadVisibleHistory()
-                    }.onEnded { gesture in
-                        if gesture.translation.height <= 0, latestHistoryRowVisible {
-                            isFollowingLatest = true
-                        }
+                    .scrollTargetLayout()
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 6)
+                    .background(ConversationScrollToTop {
+                        scrollPosition = ScrollPosition(idType: String.self)
                     })
-                    .onChange(of: scrollToTopRequest) {
-                        isFollowingLatest = false
-                        if let first = rows.first {
-                            withAnimation { proxy.scrollTo(first.id, anchor: .top) }
-                        }
+                }
+                .scrollPosition($scrollPosition)
+                .accessibilityIdentifier("task.detail")
+                .accessibilityValue(threadAccessibilityValue(thread))
+                .buttonStyle(.plain)
+                .simultaneousGesture(DragGesture(minimumDistance: 1).onChanged { gesture in
+                    guard abs(gesture.translation.height) > abs(gesture.translation.width) else { return }
+                    if scrollPosition.edge == .bottom {
+                        scrollPosition = ScrollPosition(idType: String.self)
                     }
-                    .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
-                        oldestHistoryRowVisible = firstRowId.map { visible.contains($0) } ?? false
+                    loadVisibleHistory()
+                }.onEnded { gesture in
+                    if gesture.translation.height <= 0, latestHistoryRowVisible {
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
+                })
+                .onChange(of: scrollToTopRequest) {
+                    if let first = rows.first {
+                        withAnimation { scrollPosition.scrollTo(id: first.id, anchor: .top) }
+                    }
+                }
+                .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
+                    oldestHistoryRowVisible = firstRowId.map { visible.contains($0) } ?? false
+                    loadVisibleHistory()
+                }
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.containerSize.height > 0 && geometry.contentSize.height > 0 &&
+                        geometry.contentSize.height - geometry.visibleRect.maxY <= 80
+                } action: { _, latestVisible in
+                    latestHistoryRowVisible = latestVisible
+                    loadVisibleHistory()
+                }
+                .overlay(alignment: .bottom) {
+                    if !latestHistoryRowVisible {
+                        Button {
+                            withAnimation { scrollPosition.scrollTo(edge: .bottom) }
+                        } label: {
+                            Image(systemName: "arrow.down").font(.title3.weight(.medium))
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
+                                .background(Color(white: 0.19), in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("最新のメッセージへ")
+                        .accessibilityIdentifier("task.latest")
+                        .padding(.bottom, 6)
+                    }
+                }
+                .onChange(of: model.loadingHistory) {
+                    if !$0 {
                         loadVisibleHistory()
-                    }
-                    .onScrollGeometryChange(for: Bool.self) { geometry in
-                        geometry.containerSize.height > 0 && geometry.contentSize.height > 0 &&
-                            geometry.contentSize.height - geometry.visibleRect.maxY <= 80
-                    } action: { _, latestVisible in
-                        latestHistoryRowVisible = latestVisible
-                        loadVisibleHistory()
-                    }
-                    .overlay(alignment: .bottom) {
-                        if !latestHistoryRowVisible {
-                            Button {
-                                isFollowingLatest = true
-                                if let latestRowId {
-                                    withAnimation { proxy.scrollTo(latestRowId, anchor: .bottom) }
-                                }
-                            } label: {
-                                Image(systemName: "arrow.down").font(.title3.weight(.medium))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 44, height: 44)
-                                    .background(Color(white: 0.19), in: Circle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("最新のメッセージへ")
-                            .accessibilityIdentifier("task.latest")
-                            .padding(.bottom, 6)
-                        }
-                    }
-                    .onChange(of: model.loadingHistory) {
-                        if !$0 {
-                            loadVisibleHistory()
-                        }
-                    }
-                    .onChange(of: thread.id) { _ in
-                        expandedItemIds.removeAll()
-                        activityExpansionOverrides.removeAll()
-                        isFollowingLatest = true
-                        if let latestRowId {
-                            proxy.scrollTo(latestRowId, anchor: .bottom)
-                        }
                     }
                 }
             } else if model.isNewThread {
