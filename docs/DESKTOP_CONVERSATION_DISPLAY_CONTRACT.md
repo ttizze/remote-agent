@@ -180,6 +180,14 @@ matching are covered by `projects` tests.
 
 ## Workspace folder labels
 
+Desktop shows the selected folder, execution Host and current Git branch in one
+compact row immediately above the composer, for new and existing conversations.
+Each has an icon; Host and branch have menu chevrons. Local execution is labeled
+`Local`, and remote execution uses the registered Host name. Folder selection
+retains its new-chat behavior. The branch comes from the shared workspace review,
+is hidden when unavailable, and offers the existing changes view and refresh.
+Long labels truncate within the row while tooltips expose the full values.
+
 New managed worktrees use `<original-repository>/.worktree/session-XXXXX/<repository-name>`.
 A custom storage root replaces `<original-repository>/.worktree`. The folder label
 therefore retains the repository name while the selected execution directory stays

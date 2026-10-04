@@ -75,6 +75,9 @@ impl Desktop {
                         hosts,
                         "settings-scope-environment",
                         self.remote.as_ref().map(|host| host.id.as_str()),
+                        self.remote
+                            .as_ref()
+                            .map_or("Local", |host| host.name.as_str()),
                         self.busy > 0
                             || self.worktree_dirty
                             || self.worktree_saving
