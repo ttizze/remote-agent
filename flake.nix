@@ -36,6 +36,13 @@
               "x86_64-linux-android"
             ];
           };
+          sccacheHook = ''
+            # CI already restores Cargo outputs.
+            if [ -z "''${CI:-}" ]; then
+              export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+              export SCCACHE_DIR="''${SCCACHE_DIR:-$HOME/${if pkgs.stdenv.hostPlatform.isDarwin then "Library/Caches/Mozilla.sccache" else ".cache/sccache"}}"
+            fi
+          '';
           androidSdk = (pkgs.androidenv.composeAndroidPackages {
             platformVersions = [ "37.0" ];
             buildToolsVersions = [ "36.0.0" ];
@@ -61,7 +68,7 @@
           };
           native = pkgs.mkShell {
             RUST_TOOLCHAIN_VERSION = rustToolchain.version;
-            packages = with pkgs; [ rustToolchain cargo-mutants cargo-nextest just jq git pkg-config cmake clang ]
+            packages = with pkgs; [ rustToolchain sccache cargo-mutants cargo-nextest just jq git pkg-config cmake clang ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 lsof
                 alsa-lib fontconfig freetype libxkbcommon wayland libGL vulkan-loader
@@ -70,7 +77,7 @@
               ];
             LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux
               (pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader pkgs.libGL pkgs.libxkbcommon pkgs.wayland ]);
-            shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+            shellHook = sccacheHook + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
               export PATH="/usr/sbin:$PATH"
             '';
           };
@@ -87,6 +94,7 @@
               shellcheck
               actionlint
               rustToolchain
+              sccache
               cargo-mutants
               cargo-nextest
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
@@ -101,7 +109,7 @@
               pkgs.swiftformat
             ];
 
-            shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+            shellHook = sccacheHook + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
               # Use macOS's kernel-matched process inspector. The Nix lsof
               # build scans this host much more slowly under Simulator load.
               export PATH="/usr/sbin:$PATH"
