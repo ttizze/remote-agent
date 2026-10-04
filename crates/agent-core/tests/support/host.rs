@@ -223,9 +223,19 @@ impl Writer {
                 {
                     state.threads.insert(id, response.clone());
                 }
-                if request.is_some_and(|request| request["method"] == "host/session/open") {
-                    let target: SessionRef =
-                        serde_json::from_value(request.unwrap()["params"]["session"].clone())?;
+                if request.is_some_and(|request| {
+                    matches!(
+                        request.call.method(),
+                        "host/session/open" | "host/session/create"
+                    )
+                }) {
+                    let target: SessionRef = serde_json::from_value(
+                        if request.unwrap().call.method() == "host/session/create" {
+                            response["thread"]["id"].clone()
+                        } else {
+                            request.unwrap()["params"]["session"].clone()
+                        },
+                    )?;
                     let subscription = uuid::Uuid::new_v4();
                     state.sessions.insert(target.clone(), subscription);
                     let mut response = response;
@@ -282,8 +292,10 @@ impl Writer {
             .take()
             .expect("request already answered");
         agent_transport::framing::write(&mut send, response).await?;
-        if request.call.method() == "host/session/open"
-            && let Some(id) = value["result"]["subscriptionId"].as_str()
+        if matches!(
+            request.call.method(),
+            "host/session/open" | "host/session/create"
+        ) && let Some(id) = value["result"]["subscriptionId"].as_str()
         {
             self.streams.lock().await.insert(id.parse().unwrap(), send);
         }

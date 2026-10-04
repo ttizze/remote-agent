@@ -50,6 +50,7 @@ struct ConversationImage: View {
     let label: String
     let identifier: String
     let media: ConversationMediaAccess
+    var contentMode: ContentMode = .fit
     @State private var image: UIImage?
     @State private var original: Data?
     @State private var previewURL: URL?
@@ -63,7 +64,7 @@ struct ConversationImage: View {
     var body: some View {
         Group {
             if let image {
-                Image(uiImage: image).resizable().scaledToFit()
+                Image(uiImage: image).resizable().aspectRatio(contentMode: contentMode)
                     .frame(maxWidth: .infinity, maxHeight: 420)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .accessibilityLabel(label.isEmpty ? "画像" : label)
@@ -171,21 +172,13 @@ struct ConversationImage: View {
 private func writeConversationImage(_ data: Data) async throws -> URL {
     try Task.checkCancellation()
     let local = try await Task.detached(priority: .userInitiated) {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            UUID().uuidString,
-            isDirectory: true
-        )
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        do {
+        try inTemporaryDirectory { directory in
             let image = CGImageSourceCreateWithData(data as CFData, nil)
             let type = image.flatMap { CGImageSourceGetType($0) }.flatMap { UTType($0 as String) }
             let local = directory.appendingPathComponent("image")
                 .appendingPathExtension(type?.preferredFilenameExtension ?? "png")
             try data.write(to: local)
             return local
-        } catch {
-            try? FileManager.default.removeItem(at: directory)
-            throw error
         }
     }.value
     if Task.isCancelled {

@@ -318,7 +318,7 @@ impl HostRuntime {
             } else {
                 self.manage(message).await
             };
-            return Response::from_result(result.map_err(|message| {
+            return Ok(Response::from_result(result.map_err(|message| {
                 agent_protocol::error::RpcFailure {
                     code: "management_failed".into(),
                     message: format!("{message:#}"),
@@ -326,8 +326,7 @@ impl HostRuntime {
                     execution: None,
                 }
             }))
-            .map(Into::into)
-            .map_err(Into::into);
+            .into());
         }
         self.service
             .dispatch(session, message)

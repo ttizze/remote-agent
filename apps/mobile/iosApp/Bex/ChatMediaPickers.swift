@@ -3,18 +3,41 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
-/// Picker-owned URLs expire after their callback. Retain only the selected file
-/// in a private temporary directory until the existing upload completes.
-func retainChatMedia(_ source: URL) throws -> URL {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+/// Runs `body` with a fresh private temporary directory and removes the
+/// directory when `body` fails, so partial files never outlive an error.
+func inTemporaryDirectory<T>(_ body: (URL) throws -> T) throws -> T {
+    let directory = try makeTemporaryDirectory()
     do {
-        let destination = directory.appendingPathComponent(source.lastPathComponent)
-        try FileManager.default.copyItem(at: source, to: destination)
-        return destination
+        return try body(directory)
     } catch {
         try? FileManager.default.removeItem(at: directory)
         throw error
+    }
+}
+
+func inTemporaryDirectory<T>(_ body: (URL) async throws -> T) async throws -> T {
+    let directory = try makeTemporaryDirectory()
+    do {
+        return try await body(directory)
+    } catch {
+        try? FileManager.default.removeItem(at: directory)
+        throw error
+    }
+}
+
+private func makeTemporaryDirectory() throws -> URL {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    return directory
+}
+
+/// Picker-owned URLs expire after their callback. Retain only the selected file
+/// in a private temporary directory until the existing upload completes.
+func retainChatMedia(_ source: URL) throws -> URL {
+    try inTemporaryDirectory { directory in
+        let destination = directory.appendingPathComponent(source.lastPathComponent)
+        try FileManager.default.copyItem(at: source, to: destination)
+        return destination
     }
 }
 
@@ -72,18 +95,10 @@ struct ChatCameraPicker: UIViewControllerRepresentable {
                 else {
                     throw CocoaError(.fileReadCorruptFile)
                 }
-                let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-                    UUID().uuidString,
-                    isDirectory: true
-                )
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                let destination = directory.appendingPathComponent("photo.jpg")
-                do {
+                return try inTemporaryDirectory { directory in
+                    let destination = directory.appendingPathComponent("photo.jpg")
                     try data.write(to: destination)
                     return destination
-                } catch {
-                    try? FileManager.default.removeItem(at: directory)
-                    throw error
                 }
             })
         }

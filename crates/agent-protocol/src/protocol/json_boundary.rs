@@ -11,10 +11,10 @@ pub(super) fn typed_response<T: DeserializeOwned + Into<Body>>(
     line: &str,
 ) -> Result<Response, crate::message::RpcMessageError> {
     let reply = crate::message::RpcResponse::<T>::parse(line)?;
-    Response::from_result(match reply.outcome {
+    Ok(Response::from_result(match reply.outcome {
         Ok(value) => Ok(value),
         Err(error) => Err(serde_json::from_str::<crate::error::RpcFailure>(
             error.get(),
         )?),
-    })
+    }))
 }

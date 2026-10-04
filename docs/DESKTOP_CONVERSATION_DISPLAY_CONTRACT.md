@@ -68,10 +68,17 @@ hydration must not change this default.
 
 - Load the latest bounded page first; request older pages using the server's
   opaque cursor. A refresh must not fetch the entire conversation.
-- Codex timeline pages define one continuous history window. Show only turns
-  represented in that window. Do not
-  create empty turn placeholders or fetch detached opening questions. Continue
-  from the native timeline cursor without rereading the latest page.
+- Display cached conversation content immediately. Codex initially reads the latest
+  five turns through `thread/turns/list` with `itemsView: summary`, in parallel
+  with metadata. Each summary contains its opening user message and final answer.
+  Continue older turn pages from the native opaque cursor without rereading the
+  latest page or creating empty turn placeholders.
+- Keep saved activity collapsed. Expanding a summary requests that turn's full
+  items through bounded `thread/items/list` pages. Apply the result on the same
+  ordered stream as live changes, preserving current status and newer output.
+  Cache hydrated activity and retain it on an unchanged summary refresh; changed
+  or running turns remain eligible for a detail refresh. Gallery reads request
+  full activity explicitly so images inside activity remain available.
 - Do not show history-loading buttons or placeholder conversation rows. Load
   the next bounded page automatically while the oldest loaded boundary is in
   the viewport, including on initial display when the page does not fill the
@@ -79,8 +86,8 @@ hydration must not change this default.
   initial page. Preserve latest following and the reader's position when
   prepending older pages; never request duplicate pages while a read is pending.
 - Retain cached history only when its suffix matches the refreshed page's
-  prefix in order. Apply the same rule to turns and to items within a turn,
-  preserving repeated occurrences from the server page. A shared ID elsewhere
+  prefix in order, preserving repeated turn occurrences from the server page.
+  A shared ID elsewhere
   is not enough; repeated boundary IDs cannot establish which cached occurrence
   the page continues, so they must not retain a cached prefix.
 - When the windows do not overlap, replace the displayed window with the new
@@ -91,8 +98,8 @@ hydration must not change this default.
 - `notLoaded` means the Host omitted item hydration, not that the turn is empty.
   Retain cached items and their deferred-detail markers in that case. If no
   items are cached, preserve the server's additional-loading state.
-- Persist fetched history, drafts, pending submissions, preferences and navigation.
-  Fetch additional history through normal bounded pages.
+- Keep fetched history in the client cache; persist drafts, pending submissions,
+  preferences and navigation. Fetch additional history through bounded pages.
 - Failed additional loading preserves the window and cursor. Retrying clears
   the error and successful loading restores every message in order. Reopening
   must retain fetched history when its boundary still overlaps.
@@ -100,8 +107,12 @@ hydration must not change this default.
 Acceptance: `refresh_keeps_only_contiguous_history_and_its_cursor`,
 `refresh_gap_recovers_missing_history_through_store_after_retry`, and
 `refreshed_history_pages_recover_every_turn_and_item_through_store` cover the
-window rules, RPC failure/recovery, and bounded Host hydration through complete
-retrieval and reopening.
+window rules, RPC failure/recovery, and bounded summary/detail retrieval through
+complete retrieval and reopening.
+
+- Creating a new conversation installs its update subscription in the creation
+  response. The first submission proceeds without an empty history read.
+  Cache, drafts and later navigation must survive creation and submission errors.
 
 ## Conversation navigation
 
@@ -524,6 +535,9 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
 - Desktop draft image thumbnails are 120 px squares with rounded corners. Only
   the hovered thumbnail shows its small white circular remove button, overlapping
   the top-right corner without being clipped by the image's rounded bounds.
+- iPhone and Android draft image thumbnails use the same 120 pt/dp square layout.
+  Their white circular remove buttons stay visible at the top-right corner,
+  outside the image clipping, with native 44 pt/48 dp tap targets.
 - iOS `testSimulatorCanAddASecondPhoto` verifies decoded thumbnails, removal
   placement and draft preservation in addition to separate photo selections.
 

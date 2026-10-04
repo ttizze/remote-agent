@@ -44,7 +44,9 @@ async fn call(
     );
     let mut result: Value = serde_json::from_str(&line).unwrap();
     assert!(result.get("result").is_some() || result.get("error").is_some());
-    if method == "host/session/open" && result.get("error").is_none() {
+    if matches!(method, "host/session/open" | "host/session/create")
+        && result.get("error").is_none()
+    {
         result["result"] = result["result"]["response"].take();
     }
     result
@@ -57,6 +59,7 @@ async fn completed_turn(
     text: &str,
 ) -> String {
     let open = agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
+        include_activity: false,
         session: agent_protocol::session::SessionRef {
             provider: agent_protocol::session::ProviderKind::Codex,
             id: thread.into(),

@@ -85,6 +85,9 @@ extension ThreadScreen {
             Button {
                 isFollowingLatest = false
                 activityExpansionOverrides[turn.id] = ActivityExpansion(status: turn.status, expanded: !expanded)
+                if !expanded, let params = turn.loadItems {
+                    model.perform(.loadTurnItems(params))
+                }
             } label: {
                 ThreadActivityHeader(turn: turn, expanded: expanded)
             }

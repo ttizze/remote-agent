@@ -341,14 +341,14 @@ private struct BexQrScannerSheet: View {
     var body: some View {
         NavigationStack {
             BexQrScannerController(completion: completion)
-            .navigationTitle("QRコードを読み取る")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("キャンセル") { completion(nil) }
-                        .accessibilityIdentifier("scanner.cancel")
+                .navigationTitle("QRコードを読み取る")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("キャンセル") { completion(nil) }
+                            .accessibilityIdentifier("scanner.cancel")
+                    }
                 }
-            }
         }
         .accessibilityIdentifier("scanner.sheet")
     }

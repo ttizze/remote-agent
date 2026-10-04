@@ -360,6 +360,29 @@ impl HostRpcService {
         if let Call::OpenSession(params) = message {
             return self.session_open(session, params).await;
         }
+        if let Call::CreateSession(params) = message {
+            let _workspace = self.inner.worktree_access.read().await;
+            let result = async {
+                let response = self.create_session(params.clone()).await?;
+                let target = response.thread.id.clone().ok_or_else(|| {
+                    Failure::new("invalid_thread", "created session ID is missing")
+                })?;
+                let read = self
+                    .inner
+                    .router
+                    .retain_execution(target)
+                    .map_err(|error| Failure::new("invalid_thread", error))?;
+                self.inner
+                    .router
+                    .finish_session_read(read, session, response)
+                    .map_err(|error| Failure::new("session_create_failed", error))
+            }
+            .await;
+            return match result {
+                Ok(reply) => Ok(reply),
+                Err(error) => Ok(Response::from_result::<(), _>(Err(error)).into()),
+            };
+        }
         let result = async {
             let (target, input_id) = session_target(message);
             let target = target.cloned();
@@ -378,7 +401,6 @@ impl HostRpcService {
             let _workspace_read = if matches!(
                 message,
                 Call::Submit(_)
-                    | Call::CreateSession(_)
                     | Call::ForkSession(_)
                     | Call::AnswerSession(_)
                     | Call::StartTerminal(_)
@@ -429,9 +451,7 @@ impl HostRpcService {
                 &serde_json::value::to_raw_value(error).map_err(invalid_message)?,
             );
         }
-        Ok(Response::from_result(result)
-            .map_err(invalid_message)?
-            .into())
+        Ok(Response::from_result(result).into())
     }
 
     async fn submit_input(
@@ -545,7 +565,7 @@ impl HostRpcService {
                 .retain_execution(target.clone())
                 .map_err(anyhow::Error::msg)?;
             let started = std::time::Instant::now();
-            let mut response = agent.open(&target.id, limit).await?;
+            let mut response = agent.open(&target.id, limit, params.include_activity).await?;
             let native_ms = started.elapsed().as_millis();
             if response.thread.id.as_ref() != Some(&target) {
                 return Err(anyhow::anyhow!("native session identity changed"));
@@ -556,13 +576,7 @@ impl HostRpcService {
                 &self.project_snapshot().await?,
             );
             let project_ms = started.elapsed().as_millis() - native_ms;
-            let more = response.thread.history_has_more == Some(true)
-                || response
-                    .thread
-                    .turns
-                    .iter()
-                    .flatten()
-                    .any(|turn| turn.items_has_more == Some(true));
+            let more = response.thread.history_has_more == Some(true);
             response.thread.history_has_more = Some(more);
             response.thread.history_limit = Some(limit as u64);
             response.thread.history_read_state.get_or_insert_with(|| {
@@ -590,9 +604,7 @@ impl HostRpcService {
             Err(error) => {
                 let message = format!("{error:#}");
                 tracing::error!(target: "bex", operation = "history.open", message);
-                Ok(Response::error("session_open_failed", &message)
-                    .map_err(invalid_message)?
-                    .into())
+                Ok(Response::error("session_open_failed", &message).into())
             }
         }
     }
@@ -678,10 +690,26 @@ impl HostRpcService {
             }
         }
         let response = match request {
+            Call::ReadTurnItems(params) => {
+                let read = self
+                    .inner
+                    .router
+                    .retain_execution(params.session.clone())
+                    .map_err(|error| Failure::new("invalid_params", error))?;
+                let items = self
+                    .agent(params.session.provider)?
+                    .read_turn_items(&params.session.id, &params.turn_id)
+                    .await?;
+                self.inner
+                    .router
+                    .finish_turn_read(read, session, params.turn_id.clone(), items)
+                    .map_err(|error| Failure::new("turn_details_failed", error))?;
+                agent_protocol::models::Empty {}.into()
+            }
             Call::ReadHistory(params) => {
                 let mut page = self
                     .agent(params.session.provider)?
-                    .read_history(&params.session.id, &params.cursor)
+                    .read_history(&params.session.id, &params.cursor, params.include_activity)
                     .await?;
                 agent_protocol::models::defer_item_details(
                     &mut page.turns,
@@ -878,7 +906,7 @@ impl HostRpcService {
                 (self.remove_worktree(params.path.clone()).await?).into()
             }
 
-            Call::CreateSession(params) => (self.create_session(params.clone()).await?).into(),
+            Call::CreateSession(_) => unreachable!("creation owns its subscription"),
             Call::StartTerminal(params) => (self
                 .inner
                 .terminals
@@ -940,25 +968,11 @@ impl HostRpcService {
             Call::ForkSession(params) => {
                 let target = target_session.expect("session-scoped fork");
                 let agent = self.agent(target.provider)?;
-                let scope = uuid::Uuid::new_v4().to_string();
-                let mut response = agent
-                    .fork(
-                        &target.id,
-                        &params.last_turn_id,
-                        self.browser_config(&scope)?,
-                    )
-                    .await?;
-                if let Some(browser) = self.inner.browser.get()
-                    && let Some(id) = &response.thread.id
-                {
-                    browser.bind_scope(scope, id.to_string()).await;
-                }
-                describe_thread(
-                    &mut response.thread,
-                    agent.capabilities(),
-                    &self.project_snapshot().await?,
-                );
-                response.into()
+                self.start_thread(agent.as_ref(), |browser| {
+                    agent.fork(&target.id, &params.last_turn_id, browser)
+                })
+                .await?
+                .into()
             }
             Call::Interrupt(params) => {
                 let target = target_session.expect("session-scoped interrupt");
@@ -1355,14 +1369,27 @@ impl HostRpcService {
                 Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
             }
         }
-        let scope = uuid::Uuid::new_v4().to_string();
-        let mut response = agent
-            .create(
+        self.start_thread(agent.as_ref(), |browser| {
+            agent.create(
                 params.cwd.as_deref().unwrap_or_default(),
                 params.model.as_ref().map(|m| m.id.as_str()),
-                self.browser_config(&scope)?,
+                browser,
             )
-            .await?;
+        })
+        .await
+    }
+
+    /// New threads browse under a provisional scope until their native ID exists.
+    async fn start_thread<F>(
+        &self,
+        agent: &dyn Agent,
+        start: impl FnOnce(Option<serde_json::Value>) -> F,
+    ) -> Result<ThreadResponse, Failure>
+    where
+        F: std::future::Future<Output = Result<ThreadResponse, Failure>>,
+    {
+        let scope = uuid::Uuid::new_v4().to_string();
+        let mut response = start(self.browser_config(&scope)?).await?;
         if let Some(browser) = self.inner.browser.get()
             && let Some(id) = &response.thread.id
         {
@@ -1474,6 +1501,7 @@ fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRe
         Call::ForkSession(p) => (Some(&p.thread_id), None),
         Call::Interrupt(p) => (Some(&p.thread_id), None),
         Call::ReadItem(p) => (Some(&p.thread_id), None),
+        Call::ReadTurnItems(p) => (Some(&p.session), None),
         Call::RenameSession(p) => (Some(&p.thread_id), None),
         _ => (None, None),
     }
@@ -1643,13 +1671,16 @@ mod tests {
             )
             .await
             .unwrap();
-        let Response::Success { result: response } =
-            agent_protocol::protocol::decode::<Response<ThreadResponse>>(&response.initial)
-                .unwrap()
-        else {
+        let Response::Success { result: response } = agent_protocol::protocol::decode::<
+            Response<agent_protocol::session::OpenedSession>,
+        >(&response.initial)
+        .unwrap() else {
             panic!("provider did not recover");
         };
-        assert_eq!(response.thread.id.unwrap().provider, ProviderKind::Claude);
+        assert_eq!(
+            response.response.thread.id.unwrap().provider,
+            ProviderKind::Claude
+        );
     }
 
     #[tokio::test]
@@ -1976,6 +2007,7 @@ mod tests {
         let session = service.open_session();
         let call =
             agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
+                include_activity: false,
                 session: agent_protocol::session::SessionRef {
                     provider: agent_protocol::session::ProviderKind::Claude,
                     id: id.into(),

@@ -199,7 +199,7 @@ fn route(
             )?;
             return Ok((
                 200,
-                serde_json::to_vec(&json!({"threadId":response.thread.id}))?,
+                serde_json::to_vec(&json!({"threadId":response.response.thread.id}))?,
             ));
         }
         "/background-reply" => {

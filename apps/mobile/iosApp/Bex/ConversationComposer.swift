@@ -31,36 +31,41 @@ extension ThreadScreen {
             VStack(alignment: .leading, spacing: 4) {
                 if !attachments.isEmpty {
                     ScrollView(.horizontal) {
-                        HStack(spacing: 8) {
+                        HStack(spacing: 12) {
                             ForEach(Array(attachments.enumerated()), id: \.element.path) { index, attachment in
                                 Group {
                                     if attachment.isImage {
                                         ConversationImage(source: SessionImage(reference: attachment.path),
                                                           label: attachment.name,
                                                           identifier: "composer.attachment.\(index)",
-                                                          media: model.mediaAccess)
-                                            .frame(width: 104, height: 104).clipped()
+                                                          media: model.mediaAccess,
+                                                          contentMode: .fill)
+                                            .frame(width: 120, height: 120)
                                     } else {
                                         Label(attachment.name, systemImage: "doc")
                                             .lineLimit(1).padding(12).padding(.trailing, 24)
                                     }
                                 }
-                                .background(Color(UIColor.secondarySystemBackground),
-                                            in: RoundedRectangle(cornerRadius: 12))
+                                .background(Color(UIColor.secondarySystemBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
                                 .overlay(alignment: .topTrailing) {
                                     Button { model.removeAttachment(index) } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .symbolRenderingMode(.palette)
-                                            .foregroundStyle(.white, .black.opacity(0.75))
-                                            .font(.system(size: 24))
-                                            .frame(width: 44, height: 44)
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 9, weight: .semibold))
+                                            .foregroundStyle(.black)
+                                            .frame(width: 18, height: 18)
+                                            .background(.white, in: Circle())
+                                            .frame(width: 44, height: 44, alignment: .topTrailing)
+                                            .contentShape(Rectangle())
                                     }
+                                    .buttonStyle(.plain)
+                                    .offset(x: 4, y: -4)
                                     .accessibilityLabel("\(attachment.name)を外す")
                                 }
                             }
-                        }
+                        }.padding(8)
                     }
-                    .frame(height: attachments.contains(where: \.isImage) ? 104 : 44)
+                    .frame(height: attachments.contains(where: \.isImage) ? 136 : 60)
                 }
                 Group {
                     if dictation.isRecording {

@@ -13,12 +13,12 @@ fn conversation() -> Thread {
 }
 
 #[rstest::rstest]
-#[case::minimum(0, None, 0, 5)]
-#[case::recorded_window(5, Some(24), 1, 24)]
-#[case::loaded_window(5, None, 8, 8)]
+#[case::minimum(5, None, 0, 5)]
+#[case::recorded_window(5, Some(24), 1, 5)]
+#[case::loaded_window(5, None, 8, 5)]
 #[case::larger_request(40, Some(24), 8, 40)]
-#[case::bounded_wire_limit(5, Some(u64::MAX), 1, u32::MAX)]
-fn history_refresh_preserves_the_requested_and_loaded_windows(
+#[case::bounded_wire_limit(5, Some(u64::MAX), 1, 5)]
+fn history_refresh_does_not_expand_its_request_to_the_cached_window(
     #[case] requested: u32,
     #[case] history_limit: Option<u64>,
     #[case] loaded_turns: usize,

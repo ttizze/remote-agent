@@ -89,6 +89,7 @@ pub struct ActivityPresentation {
     pub activity_initially_expanded: bool,
     pub activity_can_collapse: bool,
     pub is_in_progress: bool,
+    pub load_items: Option<crate::state::operations::LoadTurnItems>,
 }
 #[derive(Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -313,7 +314,7 @@ pub fn project_conversation(
                 return old.clone();
             }
             render_turn(
-                source.id.as_ref().map(|id| id.provider),
+                source.id.as_ref(),
                 source.capabilities.unwrap_or_default().fork,
                 turn.clone(),
                 pending.cloned().collect(),
@@ -365,13 +366,14 @@ pub fn project_conversation(
 }
 
 fn render_turn(
-    provider: Option<crate::session::ProviderKind>,
+    session: Option<&crate::session::SessionRef>,
     supports_fork: bool,
     source: Arc<models::Turn>,
     pending: PendingItems,
     requests: Vec<Arc<WireRequest>>,
     previous: Option<&Arc<RenderedTurn>>,
 ) -> Arc<RenderedTurn> {
+    let provider = session.map(|session| session.provider);
     let cached: HashMap<_, _> = previous
         .into_iter()
         .flat_map(|turn| turn.items())
@@ -467,15 +469,27 @@ fn render_turn(
                 push(User { item });
             }
         }
-        if let Some(summary) = &segment.label {
+        let summary = if source.items_summary {
+            Some(super::work_summary(&source))
+        } else {
+            segment.label.clone()
+        };
+        if let Some(summary) = summary {
             push(ActivityHeader {
                 activity: ActivityPresentation {
                     id: segment.id.clone(),
                     status: source.status.label().into(),
-                    activity_summary: summary.clone(),
-                    activity_initially_expanded: segment.initially_expanded,
-                    activity_can_collapse: segment.collapsible,
+                    activity_summary: summary,
+                    activity_initially_expanded: segment.initially_expanded
+                        && !source.items_summary,
+                    activity_can_collapse: segment.collapsible || source.items_summary,
                     is_in_progress: in_progress,
+                    load_items: session.filter(|_| source.items_summary).map(|thread_id| {
+                        crate::state::operations::LoadTurnItems {
+                            thread_id: thread_id.clone(),
+                            turn_id: source.id.clone(),
+                        }
+                    }),
                 },
             });
             for item in group(Role::Activity) {
@@ -893,7 +907,7 @@ mod tests {
                 .unwrap(),
             );
             let projected = render_turn(
-                Some(crate::session::ProviderKind::Codex),
+                Some(&crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "session".into()).unwrap()),
                 false,
                 Arc::new(models::Turn {
                     id: "turn".into(),
@@ -930,8 +944,6 @@ mod tests {
             fork: true,
             ..Default::default()
         });
-        let turn = Arc::make_mut(&mut thread.turns.as_mut().unwrap()[1]);
-        turn.items_has_more = Some(true);
         let rendered = project_snapshot(snapshot.clone(), None);
         let rows = rendered.turns[1].conversation_rows();
         let ids: Vec<_> = rows.iter().map(|row| row.id.as_str()).collect();
@@ -1035,6 +1047,38 @@ mod tests {
                 "unchanged items must retain their cache even when IDs repeat"
             );
         }
+    }
+
+    #[test]
+    fn summaries_show_input_and_answer_with_activity_loaded_on_expansion() {
+        let source = Arc::new(serde_json::from_value(json!({
+            "id":{"provider":"codex","id":"thread"},"turns":[{
+                "id":"turn","status":"completed","itemsSummary":true,"items":[
+                    {"id":"user","body":{"inline":{"body":{"userMessage":{"text":"question","content":[]}}}}},
+                    {"id":"answer","body":{"inline":{"body":{"assistantText":{"text":"answer","phase":"final"}}}}}
+                ]
+            }]
+        })).unwrap());
+        let rendered = project_conversation(&Snapshot::default(), source, &None);
+        let rows = &rendered.turns[0].rows;
+        assert!(matches!(
+            &rows[0].content,
+            ConversationRowContent::User { .. }
+        ));
+        let ConversationRowContent::ActivityHeader { activity } = &rows[1].content else {
+            panic!("summary activity is inaccessible")
+        };
+        assert!(!activity.activity_initially_expanded);
+        assert!(activity.activity_can_collapse);
+        assert_eq!(activity.load_items.as_ref().unwrap().thread_id.id, "thread");
+        assert_eq!(
+            activity.load_items.as_ref().unwrap().turn_id.as_str(),
+            "turn"
+        );
+        assert!(matches!(
+            &rows[2].content,
+            ConversationRowContent::Response { .. }
+        ));
     }
 
     #[test]

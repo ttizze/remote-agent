@@ -136,13 +136,14 @@ impl Operation for StartSubmission {
     fn submission_id(&self) -> Option<&str> {
         Some(&self.client_user_message_id)
     }
-    type Output = crate::models::ThreadResponse;
+    type Output = crate::session::OpenedSession;
     fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        self.complete(snapshot, output.thread, false)
+        Arc::make_mut(&mut snapshot.subscriptions).insert(output.session, output.subscription_id);
+        self.complete(snapshot, output.response.thread, false)
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
         Outcome::StartedThread {
-            id: output.thread.id.clone().expect("validated thread ID"),
+            id: output.session.clone(),
         }
     }
     async fn run(
@@ -159,7 +160,8 @@ impl Operation for StartSubmission {
             .await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        self.complete(snapshot, output.thread, true)
+        Arc::make_mut(&mut snapshot.subscriptions).insert(output.session, output.subscription_id);
+        self.complete(snapshot, output.response.thread, true)
     }
 }
 
@@ -191,7 +193,8 @@ impl StartSubmission {
         let mut effects = if current_view {
             open_thread(snapshot, thread, None)
         } else {
-            refresh_thread(snapshot, thread)
+            refresh_thread(snapshot, thread);
+            Vec::new()
         };
         let drafts = Arc::make_mut(&mut snapshot.drafts);
         if remove_original {
@@ -233,20 +236,9 @@ impl Operation for SendSubmission {
             draft_key: self.thread_id.clone().into(),
         })
     }
-    type Input = Option<u32>;
+    type Input = bool;
     fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
-        let cached = snapshot.conversations.get(&self.thread_id);
-        Ok(
-            (!snapshot.subscriptions.contains_key(&self.thread_id)).then(|| {
-                ReadThread::history_limit(
-                    5,
-                    cached.and_then(|thread| thread.history_limit),
-                    cached
-                        .and_then(|thread| thread.turns.as_ref())
-                        .map_or(0, Vec::len),
-                )
-            }),
-        )
+        Ok(!snapshot.subscriptions.contains_key(&self.thread_id))
     }
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn submission_id(&self) -> Option<&str> {
@@ -263,14 +255,11 @@ impl Operation for SendSubmission {
     }
     async fn run(
         &self,
-        limit: Self::Input,
+        needs_subscription: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
-        if let Some(limit) = limit {
-            let open = ReadThread {
-                limit,
-                ..ReadThread::new(self.thread_id.clone())
-            };
+        if needs_subscription {
+            let open = ReadThread::new(self.thread_id.clone());
             return context
                 .call(&open)
                 .await

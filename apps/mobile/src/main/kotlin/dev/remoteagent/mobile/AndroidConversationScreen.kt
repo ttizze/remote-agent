@@ -3,7 +3,6 @@ package dev.remoteagent.mobile
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -13,14 +12,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Button
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -99,6 +96,7 @@ internal fun ThreadDetailScreen(
                         activityHeader = { activity ->
                             ActivityHeader(activity, activityExpansion[activity.id]) { choice ->
                                 activityExpansion = activityExpansion + (activity.id to choice)
+                                if (choice.expanded) activity.loadItems?.let { perform(Intent.LoadTurnItems(it)) {} }
                             }
                         },
                     )
@@ -217,29 +215,7 @@ internal fun ThreadComposer(
     val inputUnavailable = navigation.threadId?.let(snapshot::conversation)?.inputUnavailableReason()
     Column(Modifier.padding(12.dp)) {
         inputUnavailable?.let { Text(it) }
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            draft.attachments.forEachIndexed { index, attachment ->
-                Box {
-                    if (attachment.isImage) {
-                        AttachmentThumbnail(attachment.path, attachment.name, perform)
-                    } else Text(attachment.name, Modifier.padding(end = 44.dp, top = 12.dp))
-                    TextButton(
-                        onClick = { perform(Intent.RemoveAttachment(navigation.draftKey, index.toUInt())) {} },
-                        colors =
-                            ButtonDefaults.textButtonColors(
-                                containerColor = Color.Black.copy(alpha = 0.75f),
-                                contentColor = Color.White,
-                            ),
-                        modifier =
-                            Modifier.size(44.dp).align(Alignment.TopEnd).semantics {
-                                contentDescription = "${attachment.name}を外す"
-                            },
-                    ) {
-                        Text("×")
-                    }
-                }
-            }
-        }
+        DraftAttachments(draft.attachments, navigation.draftKey, perform)
         val cursor = draft.text.toByteArray(Charsets.UTF_8).size.toUInt()
         ComposerInvocationPicker(snapshot.composerSuggestions(draft.text, cursor)) { invocation ->
             insertInvocation(draft.text, cursor, invocation.kind, invocation.name)?.let {

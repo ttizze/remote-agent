@@ -420,7 +420,7 @@ pub(crate) fn codex_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
                     .collect()
             })
             .transpose()?,
-        items_has_more: field(&value, "itemsHasMore")?,
+        items_summary: value["itemsView"] == "summary",
         started_at: field(&value, "startedAt")?,
         duration_ms: field(&value, "durationMs")?,
         error: value
@@ -430,6 +430,9 @@ pub(crate) fn codex_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
         started_at_ms: field(&value, "startedAtMs")?,
         completed_at_ms: field(&value, "completedAtMs")?,
     };
+    if value["itemsView"] == "notLoaded" {
+        turn.items = None;
+    }
     if let Some(ids) = value["deferredItemIds"].as_array() {
         for item in turn.items.iter_mut().flatten() {
             if ids.iter().any(|id| id.as_str() == Some(&item.id)) {

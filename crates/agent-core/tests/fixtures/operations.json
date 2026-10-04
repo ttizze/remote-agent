@@ -229,6 +229,12 @@
         "turns": [],
         "future": {
           "opaque": 42
+        },
+        "capabilities": {
+          "additionalInput": true,
+          "fork": true,
+          "rename": true,
+          "modelChange": true
         }
       },
       "model": {
@@ -1620,7 +1626,8 @@
             "provider": "codex",
             "id": "thread"
           },
-          "limit": 1000
+          "limit": 1000,
+          "includeActivity": true
         },
         "response": {
           "result": {
@@ -1767,7 +1774,8 @@
             "provider": "codex",
             "id": "thread"
           },
-          "limit": 1000
+          "limit": 1000,
+          "includeActivity": true
         },
         "response": {
           "error": {

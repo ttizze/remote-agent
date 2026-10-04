@@ -237,7 +237,7 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
                 })
                 .await
                 .unwrap();
-            let id = response.thread.id.unwrap();
+            let id = response.response.thread.id.unwrap();
             store
                 .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
                 .await
@@ -2020,13 +2020,16 @@ async fn creating_default_claude_chat_does_not_launch_the_cli_or_read_models() {
         .await
         .unwrap();
     assert_eq!(
-        response.model.unwrap(),
+        response.response.model.unwrap(),
         models::ModelRef {
             provider: ProviderKind::Claude,
             id: "default".into()
         }
     );
-    assert_eq!(response.thread.id.unwrap().provider, ProviderKind::Claude);
+    assert_eq!(
+        response.response.thread.id.unwrap().provider,
+        ProviderKind::Claude
+    );
     local.close().await;
     fixture.close().await.unwrap();
 }

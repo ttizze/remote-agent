@@ -94,6 +94,38 @@ impl Operation for ListSessions {
 
 pub use agent_protocol::operations::ReadItem;
 
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadTurnItems {
+    pub thread_id: crate::session::SessionRef,
+    pub turn_id: agent_protocol::ids::TurnId,
+}
+
+impl Operation for LoadTurnItems {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::TurnItems {
+            session: self.thread_id.clone(),
+            turn: self.turn_id.clone(),
+        })
+    }
+    no_input!();
+    type Output = crate::models::Empty;
+    async fn run(
+        &self,
+        _: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        context
+            .client
+            .call(&agent_protocol::session::ReadTurnItems {
+                session: self.thread_id.clone(),
+                turn_id: self.turn_id.clone(),
+            })
+            .await
+    }
+}
+
 pub use agent_protocol::session::ReadHistory;
 
 impl Operation for ReadHistory {
@@ -124,33 +156,14 @@ impl Operation for ReadHistory {
             return Vec::new();
         }
         let details = item_details(&self.session, &page.turns);
-        let thread = shared_mut(&mut snapshot.conversations, &self.session).unwrap();
-        thread.turns = Some(crate::session::prepend_history(
-            &page.turns,
-            thread.turns.as_deref().unwrap_or_default(),
-        ));
-        thread.history_cursor = page.next_cursor;
-        thread.history_has_more = Some(thread.history_cursor.is_some());
-        if thread.history_cursor.is_none()
-            && let Some(first) = thread.turns.as_mut().and_then(|turns| turns.first_mut())
-        {
-            Arc::make_mut(first).items_has_more = Some(false);
-        }
-        thread.history_read_state = Some(crate::session::HistoryReadState::new(
-            if thread.history_cursor.is_some() {
-                crate::session::HistoryReadKind::Partial
-            } else {
-                crate::session::HistoryReadKind::Complete
-            },
-            Vec::new(),
-        ));
+        page.prepend_to(shared_mut(&mut snapshot.conversations, &self.session).unwrap());
         snapshot.error = None;
         reconcile_pending(snapshot, &self.session);
         details
     }
 }
 
-fn item_details(
+pub(crate) fn item_details(
     session: &crate::session::SessionRef,
     turns: &[Arc<crate::models::Turn>],
 ) -> Vec<Effect> {
@@ -289,16 +302,6 @@ impl ReadThread {
             limit: 5,
         }
     }
-    pub(in crate::state) fn history_limit(
-        requested: u32,
-        history_limit: Option<u64>,
-        loaded_turns: usize,
-    ) -> u32 {
-        requested
-            .max(u32::try_from(history_limit.unwrap_or_default()).unwrap_or(u32::MAX))
-            .max(u32::try_from(loaded_turns).unwrap_or(u32::MAX))
-            .max(5)
-    }
     pub fn open(thread_id: crate::session::SessionRef) -> Self {
         Self {
             open: true,
@@ -317,6 +320,7 @@ impl rpc::RpcMethod for ReadThread {
         Ok(crate::session::OpenSession {
             session: self.thread_id.clone(),
             limit: self.limit as usize,
+            include_activity: false,
         })
     }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
@@ -338,14 +342,6 @@ impl Operation for ReadThread {
         self.open
     }
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
-        let cached = snapshot.conversations.get(&self.thread_id);
-        self.limit = Self::history_limit(
-            self.limit,
-            cached.and_then(|thread| thread.history_limit),
-            cached
-                .and_then(|thread| thread.turns.as_ref())
-                .map_or(0, Vec::len),
-        );
         if self.open {
             let cwd = snapshot
                 .conversations
@@ -394,16 +390,20 @@ impl Operation for ReadThread {
             }
             *live = turns;
         }
-        let mut details = item_details(
-            &self.thread_id,
-            output.response.thread.turns.as_deref().unwrap_or_default(),
-        );
         let mut effects = if self.open {
             open_thread(snapshot, output.response.thread, output.response.model)
         } else {
-            refresh_thread(snapshot, output.response.thread)
+            refresh_thread(snapshot, output.response.thread);
+            Vec::new()
         };
-        effects.append(&mut details);
+        effects.extend(item_details(
+            &self.thread_id,
+            snapshot
+                .conversations
+                .get(&self.thread_id)
+                .and_then(|thread| thread.turns.as_deref())
+                .unwrap_or_default(),
+        ));
         Arc::make_mut(&mut snapshot.subscriptions).insert(self.thread_id, output.subscription_id);
         effects
     }
@@ -462,7 +462,7 @@ pub(super) fn open_thread(
 ) -> Vec<Effect> {
     let id = thread.id.clone();
     let cwd = thread.cwd.clone().unwrap_or_default();
-    let mut effects = refresh_thread(snapshot, thread);
+    refresh_thread(snapshot, thread);
     if let Some(id) = id {
         navigate(
             snapshot,
@@ -483,32 +483,33 @@ pub(super) fn open_thread(
             *snapshot = updated;
         }
     }
-    effects.extend(review_workspace(snapshot));
-    effects
+    review_workspace(snapshot).into_iter().collect()
 }
 
-pub(super) fn refresh_thread(snapshot: &mut Snapshot, incoming: Thread) -> Vec<Effect> {
+pub(super) fn refresh_thread(snapshot: &mut Snapshot, incoming: Thread) {
     let Some(id) = incoming.id.clone().filter(|id| id.validate().is_ok()) else {
         snapshot.error = Some("thread ID is missing".into());
-        return Vec::new();
+        return;
     };
     let mut thread = incoming;
-    if thread.history_cursor.is_some()
-        && let Some(cached) = snapshot.conversations.get(&id)
+    if let Some(cached) = snapshot.conversations.get(&id)
         && let Some(turns) = crate::session::retained_history(
             cached.turns.as_deref().unwrap_or_default(),
             thread.turns.as_deref().unwrap_or_default(),
         )
     {
-        thread.turns = Some(turns);
-        thread.history_cursor = cached.history_cursor.clone();
-        thread.history_has_more = cached.history_has_more;
-        thread.history_read_state = cached.history_read_state.clone();
+        let count = thread.turns.as_ref().map_or(0, Vec::len);
+        if thread.history_cursor.is_some() && turns.len() > count {
+            thread.turns = Some(turns);
+            thread.history_cursor = cached.history_cursor.clone();
+            thread.history_has_more = cached.history_has_more;
+            thread.history_read_state = cached.history_read_state.clone();
+        } else {
+            thread.turns = Some(turns[turns.len() - count..].to_vec());
+        }
     }
     Arc::make_mut(&mut snapshot.conversations).insert(id.clone(), Arc::new(thread));
     reconcile_pending(snapshot, &id);
-
-    Vec::new()
 }
 
 pub use agent_protocol::operations::ForkSession;
@@ -530,7 +531,8 @@ impl Operation for ForkSession {
         effects
     }
     fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        refresh_thread(snapshot, output.thread)
+        refresh_thread(snapshot, output.thread);
+        Vec::new()
     }
     fn outcome(output: &mut Self::Output) -> Outcome {
         Outcome::StartedThread {
@@ -543,11 +545,18 @@ pub use agent_protocol::operations::CreateSession;
 impl Operation for CreateSession {
     rpc_operation!();
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
-        refresh_thread(snapshot, output.thread)
+        Arc::make_mut(&mut snapshot.subscriptions).insert(output.session, output.subscription_id);
+        open_thread(snapshot, output.response.thread, output.response.model)
     }
-    const STALE_POLICY: StalePolicy = StalePolicy::Apply;
+    fn stale(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
+        Arc::make_mut(&mut snapshot.subscriptions).insert(output.session, output.subscription_id);
+        refresh_thread(snapshot, output.response.thread);
+        Vec::new()
+    }
     fn outcome(output: &mut Self::Output) -> Outcome {
-        ForkSession::outcome(output)
+        Outcome::StartedThread {
+            id: output.session.clone(),
+        }
     }
 }
 pub use agent_protocol::operations::Interrupt;
@@ -628,33 +637,15 @@ impl Operation for LoadModels {
 pub use agent_protocol::operations::OpenRequest;
 
 impl Operation for OpenRequest {
-    type Input = BTreeMap<crate::session::SessionRef, u32>;
-    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
-        Ok(snapshot
-            .conversations
-            .iter()
-            .map(|(id, thread)| {
-                let limit = ReadThread::history_limit(
-                    5,
-                    thread.history_limit,
-                    thread.turns.as_ref().map_or(0, Vec::len),
-                );
-                (id.clone(), limit)
-            })
-            .collect())
-    }
+    no_input!();
     type Output = crate::session::OpenedSession;
     async fn run(
         &self,
-        limits: Self::Input,
+        _: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
         let id = context.client.call(self).await?;
-        let limit = limits.get(&id).copied().unwrap_or(5);
-        let open = ReadThread {
-            limit,
-            ..ReadThread::new(id)
-        };
+        let open = ReadThread::new(id);
         context.call(&open).await
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
