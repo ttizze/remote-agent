@@ -20,7 +20,6 @@ struct ThreadScreen: View {
     @State var scrollPosition = ScrollPosition(idType: String.self, edge: .bottom)
     @State var oldestHistoryRowVisible = false
     @State var latestHistoryRowVisible = false
-    @State private var scrollToTopRequest = 0
     @State var expandedItemIds = Set<String>()
     @State var activityExpansionOverrides = [String: ActivityExpansion]()
     @FocusState var composerFocused: Bool
@@ -95,7 +94,10 @@ struct ThreadScreen: View {
                 ToolbarItem(placement: .principal) {
                     if !isSideChat, !model.isNewThread {
                         Button {
-                            scrollToTopRequest += 1
+                            if let thread = conversation,
+                               let first = conversationRows(thread, expansion: activityExpansionOverrides).first {
+                                withAnimation { scrollPosition.scrollTo(id: first.id, anchor: .top) }
+                            }
                         } label: {
                             conversationTitle
                         }
@@ -159,11 +161,6 @@ struct ThreadScreen: View {
                         scrollPosition.scrollTo(edge: .bottom)
                     }
                 })
-                .onChange(of: scrollToTopRequest) {
-                    if let first = rows.first {
-                        withAnimation { scrollPosition.scrollTo(id: first.id, anchor: .top) }
-                    }
-                }
                 .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
                     oldestHistoryRowVisible = firstRowId.map { visible.contains($0) } ?? false
                     loadVisibleHistory()
