@@ -206,6 +206,8 @@ transfer server just to delete that check would reverse A14.
   UI fixture Hosts use the production diagnostic log; iPhone bundles retain it
   alongside Chrome stderr. Browser diagnostics record startup phases and slow
   or interrupted CDP methods without page URLs, input or image payloads.
+  If Chrome has not published its endpoint after six seconds, CI retains a
+  bounded startup stack sample and memory counters under `qa/chrome-startup-*`.
   Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.

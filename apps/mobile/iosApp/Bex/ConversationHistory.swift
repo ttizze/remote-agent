@@ -100,14 +100,19 @@ extension ThreadScreen {
     }
 
     func loadVisibleHistory() {
-        guard isVisible, conversation?.id == model.selectedThreadId,
-              model.notice == nil, AgentCore.shouldLoadHistory(
-                  hasMore: conversation?.source.hasMoreHistory() == true,
-                  loading: model.loadingHistory,
-                  oldestVisible: oldestHistoryRowVisible,
-                  latestVisible: latestHistoryRowVisible,
-                  followingLatest: isFollowingLatest
-              ) else { return }
+        guard isVisible, let thread = conversation, thread.id == model.selectedThreadId,
+              model.notice == nil else { return }
+        let oldestVisible = visibleHistoryRows?.threadId == thread.id &&
+            conversationRows(thread.rows, expansion: activityExpansionOverrides).first.map {
+                visibleHistoryRows?.rowIds.contains($0.id) == true
+            } == true
+        guard AgentCore.shouldLoadHistory(
+            hasMore: thread.source.hasMoreHistory(),
+            loading: model.loadingHistory,
+            oldestVisible: oldestVisible,
+            latestVisible: latestHistoryRowVisible,
+            followingLatest: isFollowingLatest
+        ) else { return }
         model.loadOlderHistory()
     }
 

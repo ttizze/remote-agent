@@ -18,7 +18,7 @@ struct ThreadScreen: View {
     @State var showingModelSettings = false
     @State var isVisible = false
     @State var isFollowingLatest = true
-    @State var oldestHistoryRowVisible = false
+    @State var visibleHistoryRows: (threadId: String, rowIds: Set<String>)?
     @State var latestHistoryRowVisible = false
     @State var expandedItemIds = Set<String>()
     @State var activityExpansionOverrides = [String: ActivityExpansion]()
@@ -111,7 +111,6 @@ struct ThreadScreen: View {
                 }
                 if let thread = conversation {
                     let rows = conversationRows(thread.rows, expansion: activityExpansionOverrides)
-                    let firstRowId = rows.first?.id
                     let lastRowId = rows.last?.id
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
@@ -146,7 +145,7 @@ struct ThreadScreen: View {
                         }
                     })
                     .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
-                        oldestHistoryRowVisible = firstRowId.map { visible.contains($0) } ?? false
+                        visibleHistoryRows = (thread.id, Set(visible))
                         loadVisibleHistory()
                     }
                     .onScrollGeometryChange(for: ConversationScrollMetrics.self) { geometry in

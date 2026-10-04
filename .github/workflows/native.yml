@@ -188,6 +188,18 @@ jobs:
             cat > "$BEX_BROWSER_EXECUTABLE" <<'CHROME'
           #!/bin/bash
           printf 'Chrome start %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$BEX_BROWSER_LOG"
+          chrome_pid=$$
+          chrome_profile=
+          for arg in "$@"; do
+            case "$arg" in --user-data-dir=*) chrome_profile=${arg#--user-data-dir=} ;; esac
+          done
+          (
+            sleep 6
+            if [[ -n "$chrome_profile" && ! -s "$chrome_profile/DevToolsActivePort" ]]; then
+              vm_stat > "${BEX_BROWSER_LOG%.log}-startup-${chrome_pid}-memory.txt"
+              sample "$chrome_pid" 3 -file "${BEX_BROWSER_LOG%.log}-startup-${chrome_pid}-sample.txt" >/dev/null 2>&1
+            fi
+          ) </dev/null &
           exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "$@" 2>> "$BEX_BROWSER_LOG"
           CHROME
             chmod +x "$BEX_BROWSER_EXECUTABLE"
@@ -207,6 +219,7 @@ jobs:
           path: |
             target/qa/quality.log
             target/qa/chrome.log
+            target/qa/chrome-startup-*.txt
             target/qa/Bex-*
           retention-days: 7
   windows:
