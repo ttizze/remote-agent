@@ -73,7 +73,7 @@ impl HostFixture {
         let service = HostRpcService::new(
             server.clone(),
             ProjectStore::new(directory.join("bex-worktrees.json")),
-        );
+        )?;
         #[cfg(unix)]
         service
             .enable_browser(directory.join("browser"))

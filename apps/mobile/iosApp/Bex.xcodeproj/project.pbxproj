@@ -6,6 +6,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B3E000000000000000000101 /* dm_sans_regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = B3E000000000000000000201; };
+		B3E000000000000000000102 /* dm_sans_medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = B3E000000000000000000202; };
+		B3E000000000000000000103 /* dm_sans_bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = B3E000000000000000000203; };
+		B3E000000000000000000104 /* ThirdPartyNotices in Resources */ = {isa = PBXBuildFile; fileRef = B3E000000000000000000204; };
 		C0DE0000000000000000029A /* BexModelScopeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE0000000000000000039A /* BexModelScopeUITests.swift */; };
 		C0DE00000000000000000401 /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000402; };
         D60000000000000000000001 /* SkeletonUI in Frameworks */ = {isa = PBXBuildFile; productRef = D60000000000000000000002; };
@@ -58,6 +62,10 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		B3E000000000000000000201 /* dm_sans_regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = dm_sans_regular.ttf; path = "../../resources/font/dm_sans_regular.ttf"; sourceTree = "<group>"; };
+		B3E000000000000000000202 /* dm_sans_medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = dm_sans_medium.ttf; path = "../../resources/font/dm_sans_medium.ttf"; sourceTree = "<group>"; };
+		B3E000000000000000000203 /* dm_sans_bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = dm_sans_bold.ttf; path = "../../resources/font/dm_sans_bold.ttf"; sourceTree = "<group>"; };
+		B3E000000000000000000204 /* ThirdPartyNotices */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ThirdPartyNotices; path = "../../../../third-party"; sourceTree = "<group>"; };
 		C0DE0000000000000000039A /* BexModelScopeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexModelScopeUITests.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000402 /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
         F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreen.swift; sourceTree = "<group>"; };
@@ -158,6 +166,10 @@
 		A10000000000000000000031 /* Bex */ = {
 			isa = PBXGroup;
 			children = (
+				B3E000000000000000000201 /* dm_sans_regular.ttf */,
+				B3E000000000000000000202 /* dm_sans_medium.ttf */,
+				B3E000000000000000000203 /* dm_sans_bold.ttf */,
+				B3E000000000000000000204 /* ThirdPartyNotices */,
 				A10000000000000000000011 /* BexIOSApp.swift */,
 				A10000000000000000000012 /* PlatformServices.swift */,
 				A10000000000000000000013 /* QRCodeCaptureViewController.swift */,
@@ -296,7 +308,7 @@
 /* End PBXTargetDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A10000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000007 /* Assets.xcassets in Resources */, E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B3E000000000000000000101 /* dm_sans_regular.ttf in Resources */, B3E000000000000000000102 /* dm_sans_medium.ttf in Resources */, B3E000000000000000000103 /* dm_sans_bold.ttf in Resources */, B3E000000000000000000104 /* ThirdPartyNotices in Resources */, A10000000000000000000007 /* Assets.xcassets in Resources */, E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
 		B20000000000000000000022 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;

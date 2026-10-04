@@ -1934,16 +1934,6 @@ impl Agent for Claude {
             "fork is unsupported by this provider",
         ))
     }
-    async fn rename(
-        &self,
-        _id: &str,
-        _name: &str,
-    ) -> Result<agent_protocol::models::Empty, Failure> {
-        Err(Failure::new(
-            "unsupported_operation",
-            "rename is unsupported by this provider",
-        ))
-    }
     fn event_stream(&self) -> Option<mpsc::Receiver<AgentEvent>> {
         self.event_receiver
             .lock()
@@ -2113,16 +2103,18 @@ mod execution_tests {
         });
         let uuid = Uuid::new_v4();
         let session = SessionRef::new(ProviderKind::Claude, uuid.to_string()).unwrap();
-        router.session_change(
-            &session,
-            SessionChange::Turn {
-                turn: agent_protocol::models::Turn {
-                    id: "turn".into(),
-                    ..Default::default()
+        router
+            .session_change(
+                &session,
+                SessionChange::Turn {
+                    turn: agent_protocol::models::Turn {
+                        id: "turn".into(),
+                        ..Default::default()
+                    },
+                    completed: false,
                 },
-                completed: false,
-            },
-        );
+            )
+            .unwrap();
         let (input, _receiver) = mpsc::channel(1);
         let (interrupt, _) = watch::channel(None);
         let mut worker = Worker {

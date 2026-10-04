@@ -589,28 +589,44 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
         return Err("Expected exactly one xctestrun file".into());
     }
     println!(
-        "Build: {build_seconds:.2}s; running {} tests on {workers} isolated pairs; records: {}",
+        "Build: {build_seconds:.2}s; running {} tests with at most {workers} isolated pairs; records: {}",
         tests.len(),
         records.display()
     );
     let mut pending = JoinSet::new();
     for (index, tests) in groups.into_iter().enumerate() {
-        pending.spawn(worker(
-            tests,
-            target.clone(),
-            runs[0].clone(),
-            simulator_source.clone(),
-            records.join(format!("worker-{}", index + 1)),
-            without_codex,
-            cancel.clone(),
-        ));
+        let target = target.clone();
+        let run = runs[0].clone();
+        let simulator_source = simulator_source.clone();
+        let records = records.clone();
+        let cancel = cancel.clone();
+        pending.spawn(async move {
+            let mut results = Vec::new();
+            // Each case owns a fresh Host database and Simulator. Import sources
+            // from earlier cases must not become another case's persisted data.
+            for (case, test) in tests.into_iter().enumerate() {
+                results.push(
+                    worker(
+                        vec![test],
+                        target.clone(),
+                        run.clone(),
+                        simulator_source.clone(),
+                        records.join(format!("worker-{}-case-{}", index + 1, case + 1)),
+                        without_codex,
+                        cancel.clone(),
+                    )
+                    .await?,
+                );
+            }
+            Result::<Vec<WorkerResult>>::Ok(results)
+        });
     }
     // Await every owner so that an error never drops a live Host's cleanup.
     let mut results = Vec::new();
     let mut failure = None;
     while let Some(result) = pending.join_next().await {
         match result {
-            Ok(Ok(result)) => results.push(result),
+            Ok(Ok(result)) => results.extend(result),
             Ok(Err(error)) if failure.is_none() => failure = Some(error),
             Err(error) if failure.is_none() => failure = Some(error.into()),
             _ => {}

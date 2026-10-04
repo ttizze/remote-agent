@@ -11,7 +11,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("long-conversation")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-long-history"]
+        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-long-history")]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitForExistence(timeout: 30))
@@ -66,7 +66,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("viewport-conversation")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-viewport-history"]
+        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-viewport-history")]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitForExistence(timeout: 30))
@@ -84,7 +84,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("long-conversation")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-long-history"]
+        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-long-history")]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let latest = app.descendants(matching: .any)["item.long-9-0"]
         XCTAssertTrue(latest.waitForExistence(timeout: 20))
@@ -119,7 +119,7 @@ extension BexLaunchUITests {
         app.terminate(); app.launch()
         expandSimulatorProject(app)
 
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-long-history"]
+        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-long-history")]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitForExistence(timeout: 30))
@@ -172,13 +172,20 @@ extension BexLaunchUITests {
             throw XCTSkip("Simulator-only repeated-turn history fixture")
         #endif
         let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "[duplicate] Preserve both persisted responses")
+        try useSimulatorListFixture("repeated-history")
+        app.buttons["tasks.menu"].tap(); app.buttons["tasks.refresh"].tap()
+        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-repeated-history")]
+        XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
+        let composer = app.textFields["task.message"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 15)); composer.tap()
+        composer.typeText("[success] Preserve both persisted responses")
+        app.buttons["task.send"].tap()
         let latest = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(latest.waitForExistence(timeout: 20))
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let row = prefixedElement(app, prefix: "tasks.row.codex:fixture-thread-")
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         XCTAssertTrue(app.descendants(matching: .any)["task.detail"].waitForExistence(timeout: 30))
+        XCTAssertTrue(app.descendants(matching: .any)["item.duplicate-history-new"].waitForExistence(timeout: 20))
         XCTAssertTrue(latest.waitForExistence(timeout: 20),
                       "Reopening history must retain the latest AI response")
         XCTAssertTrue(app.descendants(matching: .any)["item.duplicate-history-old"].waitForExistence(timeout: 20),
@@ -194,7 +201,7 @@ extension BexLaunchUITests {
         let latest = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(latest.waitForExistence(timeout: 20))
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let row = prefixedElement(app, prefix: "tasks.row.codex:fixture-thread-")
+        let row = prefixedElement(app, prefix: "tasks.row.codex:")
         XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
         XCTAssertTrue(latest.waitForExistence(timeout: 20))
         for id in ["item.history-answer-1", "item.history-answer-2"] {
@@ -226,7 +233,7 @@ extension BexLaunchUITests {
         verify()
         captureScreen(app, named: "Visualization selected second icon")
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let row = prefixedElement(app, prefix: "tasks.row.codex:fixture-thread-")
+        let row = prefixedElement(app, prefix: "tasks.row.codex:")
         XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
         XCTAssertTrue(expand.waitForExistence(timeout: 20))
         verify()
@@ -249,7 +256,7 @@ extension BexLaunchUITests {
         verifyMarkdownTable(app)
         captureScreen(app, named: "Japanese Markdown table right columns")
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let row = prefixedElement(app, prefix: "tasks.row.codex:fixture-thread-")
+        let row = prefixedElement(app, prefix: "tasks.row.codex:")
         XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
         XCTAssertTrue(message.waitForExistence(timeout: 20))
         verifyMarkdownTable(app)
@@ -293,7 +300,7 @@ extension BexLaunchUITests {
         message.tap(); message.typeText("Keep this draft")
         XCTAssertEqual(message.value as? String, "Keep this draft")
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let row = prefixedElement(app, prefix: "tasks.row.codex:fixture-thread-")
+        let row = prefixedElement(app, prefix: "tasks.row.codex:")
         XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
         XCTAssertTrue(message.waitForExistence(timeout: 20))
         XCTAssertEqual(message.value as? String, "Keep this draft")
@@ -314,7 +321,7 @@ extension BexLaunchUITests {
 
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 10))
-        let newestTask = prefixedElement(app, prefix: "tasks.row.codex:fixture-thread-")
+        let newestTask = prefixedElement(app, prefix: "tasks.row.codex:")
         XCTAssertTrue(newestTask.waitForExistence(timeout: 10))
         newestTask.tap()
 
@@ -359,7 +366,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("completed-history")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let persisted = app.descendants(matching: .any)["tasks.row.codex:fixture-thread-persisted"]
+        let persisted = try app.descendants(matching: .any)[simulatorConversationRow("fixture-thread-persisted")]
         XCTAssertTrue(persisted.waitForExistence(timeout: 20)); persisted.tap()
         let persistedActivity = app.buttons["turn.activity.fixture-turn-persisted"]
         XCTAssertTrue(persistedActivity.waitForExistence(timeout: 20))

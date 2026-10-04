@@ -48,6 +48,7 @@ struct ThreadErrorRow: View {
 }
 
 struct ThreadMessageRow: View {
+    @Environment(\.colorScheme) private var colorScheme
     let item: ConversationItem
     let isUser: Bool
     let media: ConversationMediaAccess
@@ -88,9 +89,9 @@ struct ThreadMessageRow: View {
                 images
                 if let text = item.data.body, !text.isEmpty {
                     if isUser {
-                        Text(text).font(.system(size: 18))
+                        Text(text).font(.custom("DMSans-Regular", size: 16, relativeTo: .body))
                             .padding(14)
-                            .background(Color(UIColor.secondarySystemBackground),
+                            .background(Color(paletteRGB: colorScheme.nativePalette.userBubble),
                                         in: RoundedRectangle(cornerRadius: 22))
                     } else {
                         ConversationMarkdown(blocks: item.markdown, media: media, selection: selection)

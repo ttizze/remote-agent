@@ -2,6 +2,7 @@ import AgentCore
 import SwiftUI
 
 struct ThreadsScreen: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var model: BexAppViewModel
     @State private var search = ""
     @State private var expandedProjectIds = Set<String>()
@@ -150,8 +151,9 @@ struct ThreadsScreen: View {
             }
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
         .environment(\.defaultMinListRowHeight, 52)
-        .background(Color(UIColor.systemBackground))
+        .background(Color(paletteRGB: colorScheme.nativePalette.sidebar))
         .accessibilityIdentifier("tasks.list")
         .searchable(text: $search, placement: .toolbar, prompt: "チャットを検索")
         .refreshable { model.refreshTaskList() }

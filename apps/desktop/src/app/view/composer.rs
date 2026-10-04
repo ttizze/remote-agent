@@ -228,6 +228,19 @@ impl Desktop {
         {
             body = body.child(div().px_4().py_2().text_sm().child(notice));
         }
+        if self
+            .thread()
+            .is_some_and(|thread| agent_core::presentation::conversation::can_retry_history(thread))
+        {
+            body = body.child(
+                Button::new("history-import-retry")
+                    .label("履歴の取り込みを再試行")
+                    .disabled(self.busy > 0 || !self.snapshot.connected)
+                    .on_click(cx.listener(|view, _, _, _| {
+                        view.dispatch(Intent::ImportHistory(op::ImportHistory {}))
+                    })),
+            );
+        }
         if self.rendered.is_none() {
             body = body.child(
                 v_flex()

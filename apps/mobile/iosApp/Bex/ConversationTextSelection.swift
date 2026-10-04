@@ -65,9 +65,9 @@ struct AssistantSelectableText: UIViewRepresentable {
             }
             let start = text.length
             let style = block.style
-            let size: CGFloat = style.code ? 15 : style.header == 1 ? 25 : style.header == nil ? 18 : 21
+            let size: CGFloat = style.code ? 15 : style.header == 1 ? 25 : style.header == nil ? 16 : 21
             let base = style.code ? UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
-                : UIFont.systemFont(ofSize: size, weight: style.header == nil ? .regular : .semibold)
+                : UIFont.conversationFont(size: size, weight: style.header == nil ? .regular : .semibold)
             let font = UIFontMetrics.default.scaledFont(for: base)
             if let marker = style.marker {
                 text.append(NSAttributedString(

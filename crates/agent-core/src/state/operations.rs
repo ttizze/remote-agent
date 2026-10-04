@@ -66,6 +66,7 @@ pub enum Intent {
     ListWorktrees(ListWorktrees),
     RemoveWorktree(RemoveWorktree),
     ListSessions(ListSessions),
+    ImportHistory(ImportHistory),
     AddProject(AddProject),
     ExpandThreadList {
         project_id: Option<String>,

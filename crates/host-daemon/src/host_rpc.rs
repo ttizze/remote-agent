@@ -4,6 +4,7 @@
 pub(crate) mod agent;
 mod codex;
 mod composer;
+mod conversations;
 pub(crate) mod native;
 pub(crate) mod permissions;
 pub(crate) mod requests;

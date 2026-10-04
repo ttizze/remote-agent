@@ -69,13 +69,13 @@ impl Desktop {
         .flex_1()
         .min_h_0()
         .border_r_0()
-        .bg(rgb(0x242424));
+        .bg(cx.theme().sidebar);
         v_flex()
             .debug_selector(|| "desktop-sidebar-shell".into())
             .w(px(272.))
             .h_full()
             .flex_shrink_0()
-            .bg(rgb(0x242424))
+            .bg(cx.theme().sidebar)
             .border_r_1()
             .border_color(cx.theme().sidebar_border)
             .child(sidebar_header(true, cx))

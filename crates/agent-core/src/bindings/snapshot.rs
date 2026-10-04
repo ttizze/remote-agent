@@ -149,6 +149,9 @@ impl Thread {
     pub fn history_notice(&self) -> Option<String> {
         crate::presentation::conversation::history_notice(&self.0)
     }
+    pub fn can_retry_history(&self) -> bool {
+        crate::presentation::conversation::can_retry_history(&self.0)
+    }
     pub fn has_more_history(&self) -> bool {
         self.0.history_has_more == Some(true)
     }

@@ -11,13 +11,8 @@ pub(crate) fn detail_output() -> String {
 pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
     let id = thread.metadata["id"].as_str().unwrap();
     let cwd = thread.metadata["cwd"].as_str().unwrap();
-    let gallery = thread.metadata.get("gallery") == Some(&Value::Bool(true));
     let long_history = matches!(id, "fixture-long-history" | "fixture-viewport-history");
-    if !long_history
-        && !cwd.ends_with("large-history")
-        && !cwd.ends_with("oversized-history")
-        && !gallery
-    {
+    if !long_history && !cwd.ends_with("large-history") && !cwd.ends_with("oversized-history") {
         return None;
     }
     let mut turns = if long_history {
@@ -99,12 +94,6 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
                 .filter(|turn| turn.borrow()["id"] != format!("turn-{id}"))
                 .cloned(),
         );
-    }
-    if gallery && let Some(last) = turns.last_mut() {
-        let mut latest = last.borrow().clone();
-        latest["items"].as_array_mut().unwrap().extend((0..600).map(|index| json!({"id":format!("gallery-new-command-{index}"),
-                "type":"commandExecution","status":"completed","command":"inspect","aggregatedOutput":"done"})));
-        *last = Rc::new(RefCell::new(latest));
     }
     Some(Thread {
         metadata: thread.metadata.clone(),

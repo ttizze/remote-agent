@@ -4,9 +4,14 @@ import UIKit
 
 struct BexSwiftUIRoot: View {
     @ObservedObject var model: BexAppViewModel
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         BexScreen(model: model)
+            .font(.custom("DMSans-Regular", size: 16, relativeTo: .body))
+            .tint(Color(paletteRGB: colorScheme.nativePalette.primary))
+            .foregroundStyle(Color(paletteRGB: colorScheme.nativePalette.foreground))
+            .background(Color(paletteRGB: colorScheme.nativePalette.background))
             .onChange(of: model.screen) { screen in
                 if screen != .thread {
                     model.sideChatRequest = nil
@@ -16,6 +21,13 @@ struct BexSwiftUIRoot: View {
                 BexQrScannerSheet { model.scanned($0) }
                     .interactiveDismissDisabled()
             }
+    }
+}
+
+extension UIFont {
+    static func conversationFont(size: CGFloat, weight: UIFont.Weight = .regular) -> UIFont {
+        let name = weight >= .semibold ? "DMSans-Bold" : weight >= .medium ? "DMSans-Medium" : "DMSans-Regular"
+        return UIFont(name: name, size: size) ?? .systemFont(ofSize: size, weight: weight)
     }
 }
 
@@ -65,7 +77,6 @@ private struct BexScreen: View {
             }
             .navigationBarTitleDisplayMode(.inline)
         }
-        .preferredColorScheme(.dark)
     }
 
     private var pairingScreen: some View {
@@ -387,5 +398,19 @@ struct BufferedTextInput<Content: View>: View {
                 text = value
             }
         }
+    }
+}
+
+extension Color {
+    init(paletteRGB value: UInt32) {
+        self.init(.sRGB, red: Double((value >> 16) & 255) / 255,
+                  green: Double((value >> 8) & 255) / 255,
+                  blue: Double(value & 255) / 255, opacity: 1)
+    }
+}
+
+extension ColorScheme {
+    var nativePalette: NativePalette {
+        AgentCore.nativePalette(platform: .ios, dark: self == .dark)
     }
 }

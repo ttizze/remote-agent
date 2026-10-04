@@ -1,6 +1,19 @@
 use super::*;
 use crate::client::ClientExt;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ImportHistory {}
+rpc::rpc_method!(ImportHistory, ImportHistory, |self| crate::models::Empty {});
+impl Operation for ImportHistory {
+    rpc_operation!();
+    fn apply(self, snapshot: &mut Snapshot, _: Self::Output) -> Vec<Effect> {
+        vec![Effect::execute(ListSessions::new(
+            (*snapshot.list_query).clone(),
+        ))]
+    }
+}
+
 pub use agent_protocol::operations::AddProject;
 
 impl Operation for AddProject {

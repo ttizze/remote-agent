@@ -38,6 +38,57 @@ async fn start_host(directory: &Path) -> HostFixture {
     .await
     .unwrap()
 }
+async fn imported_codex_session(peer: &Client, title: &str) -> agent_protocol::session::SessionRef {
+    let list: models::ThreadList = peer
+        .request(&agent_protocol::protocol::Call::ListSessions(
+            rpc::ListSessions::new(models::ListQuery {
+                search_term: title.into(),
+                ..Default::default()
+            }),
+        ))
+        .await
+        .unwrap();
+    list.data
+        .into_iter()
+        .find(|thread| {
+            thread.name.as_deref() == Some(title)
+                && thread
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| id.provider == agent_protocol::session::ProviderKind::Codex)
+        })
+        .and_then(|thread| thread.id)
+        .expect("imported conversation must be listed")
+}
+async fn wait_for_import(peer: &Client, target: &agent_protocol::session::SessionRef) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let opened: agent_protocol::session::OpenedSession = peer
+                .request(&agent_protocol::protocol::Call::OpenSession(
+                    agent_protocol::session::OpenSession {
+                        session: target.clone(),
+                        limit: 5,
+                        include_activity: false,
+                    },
+                ))
+                .await
+                .unwrap();
+            let state = opened.response.thread.history_read_state.unwrap();
+            assert!(
+                state.kind != agent_protocol::session::HistoryReadKind::Incomplete,
+                "{:?}",
+                state.issues
+            );
+            if state.kind != agent_protocol::session::HistoryReadKind::Importing {
+                return;
+            }
+            assert!(state.issues.is_empty());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("source history import exceeded its deadline");
+}
 async fn open_session(
     peer: &Client,
     id: &Value,
@@ -1045,69 +1096,117 @@ async fn remote_registration_pairs_the_local_client_identity_for_direct_connecti
     .expect("remote registration deadline");
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn opening_a_task_uses_cached_history_while_the_host_read_is_pending() {
-    use agent_core::state::Intent;
-    use agent_core::store::Store;
+async fn opening_an_imported_task_uses_the_host_database_and_preserves_the_cached_draft() {
+    use agent_core::{state::Intent, store::Store};
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(directory.path()).unwrap();
         std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&json!([
-            {"id":"selected","name":"Selected task","cwd":root,"historyMode":"paginated","createdAt":1,"updatedAt":1}
+            {"id":"selected","name":"Selected task","cwd":root,"historyMode":"paginated",
+             "turns":[{"id":"saved","status":"completed","items":[
+                 {"id":"saved-answer","type":"agentMessage","text":"History for Selected task"}]}]}
         ])).unwrap()).unwrap();
         let fixture = start_host(&root).await;
         let local = fixture.local().await.unwrap();
+        let target = imported_codex_session(&local.peer, "Selected task").await;
+        wait_for_import(&local.peer, &target).await;
         let invitation: Invitation = local.peer.call(&op::CreateInvitation {}).await.unwrap();
-        let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
-        let store = Store::connect(&endpoint, &fixture.ticket, Default::default(), Some(invitation.invitation)).await.unwrap();
-        store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
-        // A paired mobile client must resume without local management privileges.
-        tokio::time::timeout(Duration::from_millis(500), store.resume(&endpoint, &fixture.ticket)).await.unwrap().unwrap();
-        store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef {provider:agent_protocol::session::ProviderKind::Codex,id:"selected".into()}.into(), text: "Unsent draft".into() }).await.unwrap();
-        let mut saved = None;
-        let mut owner = Some(store);
+        let endpoint = Endpoint::bind(Identity::generate(), Relays::Disabled)
+            .await
+            .unwrap();
+        let mut store = Store::connect(
+            &endpoint,
+            &fixture.ticket,
+            Default::default(),
+            Some(invitation.invitation),
+        )
+        .await
+        .unwrap();
+        store
+            .dispatch(Intent::ListSessions(op::ListSessions::new(
+                Default::default(),
+            )))
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            store.resume(&endpoint, &fixture.ticket),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let draft = agent_core::state::DraftKey::from(&target);
+        store
+            .dispatch(Intent::SetDraftText {
+                thread_id: draft.clone(),
+                text: "Unsent draft".into(),
+            })
+            .await
+            .unwrap();
+        // A blocked provider reader cannot delay already imported history.
+        std::fs::write(root.join("hold-history-reads"), []).unwrap();
         for cached in [false, true] {
-            let store = if let Some(store) = owner.take() { store } else {
-                Store::connect(&endpoint, &fixture.ticket, saved.take().unwrap(), None).await.unwrap()
-            };
-            assert_eq!(store.snapshot().conversations.contains_key(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() }), cached);
-            if cached {
-                std::fs::write(root.join("background-reply"), "Latest reply from another client").unwrap();
-            }
-            std::fs::write(root.join("hold-history-reads"), []).unwrap();
-            let opening = store.dispatch(Intent::ReadThread(op::ReadThread::open(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() })));
-            tokio::pin!(opening);
-            assert_eq!(store.snapshot().navigation.thread_id.as_ref().map(|session| session.id.as_str()), Some("selected"));
-            assert_eq!(store.snapshot().navigation.draft_key, agent_core::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() }));
-            assert_eq!(store.snapshot().drafts[&agent_core::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() })].text, "Unsent draft");
-            while !root.join("history-read-held").exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            assert!(tokio::time::timeout(Duration::from_millis(50), &mut opening).await.is_err());
-            if cached {
-                let thread = &store.snapshot().conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() }];
-                assert_eq!(item_text(&(thread.turns.as_ref().unwrap().last().unwrap().items.as_ref().unwrap()[0])), Some("History for Selected task"));
-            }
-            // List refresh shares the production transport but must not wait for history.
-            store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
-            assert!(store.snapshot().threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_ref().map(|session| session.id.as_str()) == Some("selected")));
-            std::fs::remove_file(root.join("hold-history-reads")).unwrap();
-            std::fs::remove_file(root.join("history-read-held")).unwrap();
-            opening.await.unwrap();
+            assert_eq!(store.snapshot().conversations.contains_key(&target), cached);
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                store.dispatch(Intent::ReadThread(op::ReadThread::open(target.clone()))),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            store
+                .dispatch(Intent::ListSessions(op::ListSessions::new(
+                    Default::default(),
+                )))
+                .await
+                .unwrap();
             let current = store.snapshot();
-            let last = current.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() }].turns.as_ref().unwrap().last().unwrap();
+            assert_eq!(current.navigation.thread_id.as_ref(), Some(&target));
+            assert_eq!(current.navigation.draft_key, draft);
+            assert_eq!(current.drafts[&draft].text, "Unsent draft");
+            assert!(
+                current
+                    .threads
+                    .as_ref()
+                    .unwrap()
+                    .data
+                    .iter()
+                    .any(|thread| thread.id.as_ref() == Some(&target))
+            );
+            let last = current.conversations[&target]
+                .turns
+                .as_ref()
+                .unwrap()
+                .last()
+                .unwrap();
             assert_eq!(last.status.label(), "completed");
-            assert_eq!(item_text(&(last.items.as_ref().unwrap()[0])), Some(if cached { "Latest reply from another client" } else { "History for Selected task" }));
-            assert_eq!(current.navigation.thread_id.as_ref().map(|session| session.id.as_str()), Some("selected"));
-            assert_eq!(current.drafts[&agent_core::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "selected".into() })].text, "Unsent draft");
+            assert_eq!(
+                item_text(&last.items.as_ref().unwrap()[0]),
+                Some("History for Selected task")
+            );
             assert!(current.error.is_none(), "{:?}", current.error);
-            store.dispatch(Intent::ShowThreadList).await.unwrap();
-            saved = Some(serde_json::from_slice(&serde_json::to_vec(&store.snapshot()).unwrap()).unwrap());
-            store.close().await.unwrap();
+            assert!(
+                !root.join("history-read-held").exists(),
+                "opening history reread the provider source"
+            );
+            if !cached {
+                store.dispatch(Intent::ShowThreadList).await.unwrap();
+                let saved = serde_json::from_slice(&serde_json::to_vec(&store.snapshot()).unwrap())
+                    .unwrap();
+                store.close().await.unwrap();
+                store = Store::connect(&endpoint, &fixture.ticket, saved, None)
+                    .await
+                    .unwrap();
+            }
         }
+        std::fs::remove_file(root.join("hold-history-reads")).unwrap();
+        store.close().await.unwrap();
         endpoint.close().await;
         local.close().await;
         fixture.close().await.unwrap();
-    }).await.expect("opening a task exceeded its deadline");
+    })
+    .await
+    .expect("opening an imported task exceeded its deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1116,7 +1215,16 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
     use agent_core::store::Store;
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([
+            {"id":"repeated-source","name":"Repeated source","cwd":directory.path(),"historyMode":"paginated",
+             "turns":[{"id":"repeated","status":"completed","items":[{"id":"duplicate-history-old","type":"agentMessage","phase":"final_answer","text":"Older AI response must remain visible."}]},
+                      {"id":"repeated","status":"completed","items":[{"id":"duplicate-history-new","type":"agentMessage","phase":"final_answer","text":"Newer AI response must remain visible."}]}]}
+        ])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
+        let local = fixture.local().await.unwrap();
+        let target = imported_codex_session(&local.peer, "Repeated source").await;
+        wait_for_import(&local.peer, &target).await;
+        local.close().await;
         let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled)
             .await
             .unwrap();
@@ -1124,14 +1232,14 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
             .await
             .unwrap();
         store
-            .dispatch(Intent::NewChat { cwd: String::new() })
+            .dispatch(Intent::ReadThread(op::ReadThread::open(target)))
             .await
             .unwrap();
         let key = store.snapshot().navigation.draft_key.clone();
         store
             .dispatch(Intent::SetDraftText {
                 thread_id: key,
-                text: "[duplicate] Preserve both persisted responses".into(),
+                text: "[success] Preserve both persisted responses".into(),
             })
             .await
             .unwrap();
@@ -1150,7 +1258,7 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
                 .turns
                 .as_ref()
                 .is_some_and(|turns| {
-                    turns.first().is_some_and(|turn| {
+                    turns.last().is_some_and(|turn| {
                         turn.status == agent_protocol::execution::TurnStatus::Completed
                     })
                 })
@@ -1257,36 +1365,35 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         let fixture = HostFixture::start(directory.path(), AppServerConfig { program, ..Default::default() },
             Arc::new(Memory::default()), "isolated Host", false, None).await.unwrap();
         let local = fixture.local().await.unwrap();
-        let previous: models::Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"history"},"historyCursor":null,
+        let target = imported_codex_session(&local.peer, "History pagination").await;
+        // First-run import hydrates the source once. Subsequent reads own no provider IO.
+        wait_for_import(&local.peer, &target).await;
+        let mut previous: models::Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"history"},"historyCursor":null,
             "turns":[{"id":"turn-0","status":"completed","items":[{"id":"item-0-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 0/0","phase":"unknown"}}}}}]}, {"id":"turn-11","status":"completed","items":[{"id":"item-11-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 11/0","phase":"unknown"}}}}}],
                 "itemsSummary":true}]})).unwrap();
+        previous.id = Some(target.clone());
         let initial = Snapshot {
-            conversations: Arc::new(std::collections::BTreeMap::from([(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }, Arc::new(previous))])),
+            conversations: Arc::new(std::collections::BTreeMap::from([(target.clone(), Arc::new(previous))])),
             ..Default::default()
         };
         let store = Store::new((local.peer, local.events), initial);
         store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
-        store.dispatch(Intent::ReadThread(op::ReadThread::new(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }))).await.unwrap();
+        store.dispatch(Intent::ReadThread(op::ReadThread::new(target.clone()))).await.unwrap();
         let snapshot = store.snapshot();
-        let thread = &snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }];
+        let thread = &snapshot.conversations[&target];
         assert_eq!(thread.turns.as_ref().unwrap().len(), 5, "initial display is a bounded turn summary page");
         assert_eq!(thread.history_has_more, Some(true));
         let latest = thread.turns.as_ref().unwrap().last().unwrap();
         assert_eq!(latest.items.as_ref().unwrap().len(), 1);
         assert!(latest.items_summary);
         assert_eq!(latest.items.as_ref().unwrap()[0].id, "item-11-619".into());
-        let trace = std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap();
-        let reads: Vec<Value> = trace.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-        assert_eq!(reads.iter().filter(|entry| entry["method"] == "thread/turns/list").count(), 1,
-            "initial loading is one summary page");
-        assert!(reads.iter().all(|entry| entry["method"] != "thread/items/list" && entry["method"] != "thread/timeline/list"),
-            "initial history does not hydrate activity or use unsupported methods");
+        let reads_before = std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap();
         let rendered = agent_core::presentation::conversation::project_conversation(&snapshot, thread.clone(), &None);
         assert_eq!(rendered.turns.len(), 5, "the rendered history must contain no empty turn placeholders");
         for _ in 0..20 {
             let snapshot = store.snapshot();
-            if snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }].history_has_more != Some(true) { break; }
-            store.dispatch(Intent::ReadOlder { thread_id: agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() } }).await.unwrap();
+            if snapshot.conversations[&target].history_has_more != Some(true) { break; }
+            store.dispatch(Intent::ReadOlder { thread_id: target.clone() }).await.unwrap();
         }
         let reads: Vec<Value> = std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap()
             .lines().map(|line| serde_json::from_str(line).unwrap()).collect();
@@ -1295,7 +1402,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         assert!(timeline[0]["cursor"].is_null());
         assert!(timeline[1..].iter().all(|entry| entry["cursor"].is_string()), "older reads must not restart at the newest page");
         assert_eq!(timeline.iter().map(|entry| entry["cursor"].clone()).collect::<std::collections::HashSet<_>>().len(), timeline.len());
-        let session = agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "history".into()).unwrap();
+        let session = target.clone();
         let ids: Vec<_> = store.snapshot().conversations[&session].turns.as_ref().unwrap().iter().map(|turn| turn.id.clone()).collect();
         for turn_id in ids {
             store.dispatch(Intent::LoadTurnItems(op::LoadTurnItems { thread_id: session.clone(), turn_id: turn_id.clone() })).await.unwrap();
@@ -1306,10 +1413,10 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         }
         for reopen in [false, true] {
             if reopen {
-                store.dispatch(Intent::ReadThread(op::ReadThread::open(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }))).await.unwrap();
+                store.dispatch(Intent::ReadThread(op::ReadThread::open(target.clone()))).await.unwrap();
             }
             let snapshot = store.snapshot();
-            let thread = &snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "history".into() }];
+            let thread = &snapshot.conversations[&target];
             assert_eq!(thread.history_has_more, Some(false));
             let loaded = thread.turns.as_ref().unwrap();
             assert_eq!(loaded.len(), turns.len());
@@ -1323,6 +1430,10 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
             }
             assert_eq!(snapshot.error, None);
         }
+        let reads_after = std::fs::read_to_string(directory.path().join("rpc-trace.jsonl")).unwrap();
+        let provider_reads = |trace: &str| trace.lines().map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|entry| matches!(entry["method"].as_str(), Some("thread/read" | "thread/turns/list" | "thread/items/list"))).count();
+        assert_eq!(provider_reads(&reads_before), provider_reads(&reads_after), "history paging and expansion must use persisted contents");
         store.close().await.unwrap();
         local.endpoint.close().await;
         fixture.close().await.unwrap();
@@ -1330,49 +1441,44 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn summary_history_rejects_repeated_cursors_and_oversized_pages() {
+async fn imported_history_reports_repeated_cursors_and_invalid_pages_without_hiding_failure() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let directory = tempfile::tempdir().unwrap();
-        let valid = |id: &str| json!({"id":id,"status":"completed","itemsView":"summary","items":[]});
+        let valid = |id: &str| json!({"id":id,"status":"completed","itemsView":"full","items":[]});
         let cases = [
-            ("oversized", 5, json!({"data":(0..6).map(|id| valid(&id.to_string())).collect::<Vec<_>>(),"nextCursor":null}), "turn page exceeds requested size"),
-            ("not-summary", 5, json!({"data":[{"id":"turn","itemsView":"full","items":[]}],"nextCursor":null}), "turn summary is missing"),
-            ("missing-turn", 5, json!({"data":[valid("")],"nextCursor":null}), "turn summary is missing"),
-            ("missing-item", 5, json!({"data":[{"id":"turn","itemsView":"summary","items":[{"id":"","type":"agentMessage","text":"answer"}]}],"nextCursor":null}), "turn summary is missing"),
+            ("oversized", json!({"data":(0..6).map(|id| valid(&id.to_string())).collect::<Vec<_>>(),"nextCursor":null}), "turn page exceeds requested size"),
+            ("not-full", json!({"data":[{"id":"turn","itemsView":"summary","items":[]}],"nextCursor":null}), "turn summary is missing"),
+            ("missing-turn", json!({"data":[valid("")],"nextCursor":null}), "turn summary is missing"),
+            ("missing-item", json!({"data":[{"id":"turn","itemsView":"full","items":[{"id":"","type":"agentMessage","text":"answer"}]}],"nextCursor":null}), "turn summary is missing"),
+            ("loop", json!({"data":[],"nextCursor":"opaque-loop"}), "history cursor repeated"),
         ];
-        let mut threads: Vec<_> = cases.iter().map(|(id, _, response, _)| json!({
-            "id":id,"cwd":directory.path(),"historyMode":"paginated","fixtureHistoryResponse":response,
+        let threads: Vec<_> = cases.iter().map(|(id, response, _)| json!({
+            "id":id,"name":id,"cwd":directory.path(),"historyMode":"paginated","fixtureHistoryResponse":response,
             "turns":[{"id":"turn","status":"completed","items":[{"id":"answer","type":"agentMessage","text":"saved answer"}]}]
         })).collect();
-        threads.push(json!({"id":"loop","cwd":directory.path(),"historyMode":"paginated",
-            "fixtureHistoryResponse":{"data":[],"nextCursor":"opaque-loop"},
-            "turns":[{"id":"turn","status":"completed","items":[{"id":"answer","type":"agentMessage","text":"saved"}]}]}));
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&threads).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
-        for (id, limit, _, message) in cases {
-            let result = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
-                &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { include_activity: false,
-                    session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, id.into()).unwrap(), limit,
-                })
-            ).await;
-            let error = match result {
-                Err(agent_protocol::error::PeerError::Remote { error, .. }) => error,
-                _ => panic!("invalid summary was accepted: {id}"),
-            };
-            let failure: agent_protocol::error::RpcFailure = serde_json::from_str(&error).unwrap();
-            assert_eq!(failure.code, "session_open_failed");
-            assert_eq!(failure.message, message);
+        for (id, _, message) in cases {
+            let target = imported_codex_session(&local.peer, id).await;
+            loop {
+                let opened: agent_protocol::session::OpenedSession = local.peer.request(
+                    &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
+                        session: target.clone(), limit: 5, include_activity: false,
+                    }),
+                ).await.unwrap();
+                let state = opened.response.thread.history_read_state.unwrap();
+                if state.issues.iter().any(|issue| issue.contains(message)) {
+                    assert_eq!(state.kind, agent_protocol::session::HistoryReadKind::Incomplete);
+                    break;
+                }
+                assert_eq!(state.kind, agent_protocol::session::HistoryReadKind::Importing, "{id}: {:?}", state.issues);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
-        let error = local.peer.call(&agent_protocol::session::ReadHistory { include_activity: false,
-            session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "loop".into()).unwrap(),
-            cursor: "opaque-loop".into(),
-        }).await.unwrap_err();
-        assert!(error.to_string().contains("history cursor repeated"));
         local.close().await;
         fixture.close().await.unwrap();
-    }).await.expect("summary validation exceeded its deadline");
+    }).await.expect("history validation exceeded its deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1387,15 +1493,16 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
         })));
         items.push(json!({"id":"answer","type":"agentMessage","phase":"final_answer","text":"The build passed"}));
         std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([{
-            "id":"command-history","cwd":directory.path(),"historyMode":"paginated",
+            "id":"command-history","name":"Command history","cwd":directory.path(),"historyMode":"paginated",
             "turns":[{"id":"turn","status":"completed","items":items}]
         }])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
+        let target = imported_codex_session(&local.peer, "Command history").await;
+        wait_for_import(&local.peer, &target).await;
         let (opened, mut updates) = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
             &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { include_activity: false,
-                session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "command-history".to_string()).unwrap(), limit: 5,
+                session: target.clone(), limit: 5,
             }),
         ).await.unwrap();
         let bytes = agent_protocol::protocol::encode(&opened).unwrap().len();
@@ -1406,7 +1513,7 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
         assert!(turn.items_summary);
         assert_eq!(item_text(&loaded[1]), Some("The build passed"));
         local.peer.call(&agent_protocol::session::ReadTurnItems {
-            session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "command-history".into()).unwrap(), turn_id: "turn".into(),
+            session: target.clone(), turn_id: "turn".into(),
         }).await.unwrap();
         let hydrated = next_change(&mut updates, "turnItems").await;
         let loaded: Vec<Arc<models::Item>> = serde_json::from_value(hydrated["items"].clone()).unwrap();
@@ -1414,7 +1521,7 @@ async fn many_small_command_outputs_do_not_delay_opening_history() {
         assert_eq!(loaded.iter().filter(|item| item.is_deferred()).count(), 498);
         for index in [0, 49, 97] {
             let detail = local.peer.call(&rpc::ReadItem {
-                thread_id: agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "command-history".into() }, turn_id: "turn".into(), item_id: loaded[index + 1].id.clone(),
+                thread_id: target.clone(), turn_id: "turn".into(), item_id: loaded[index + 1].id.clone(),
             }).await.unwrap();
             assert!(matches!(detail.item.body(), agent_protocol::items::ItemBody::CommandExecution {output, ..} if output == items[index + 1]["aggregatedOutput"].as_str().unwrap())); assert!(!detail.item.is_deferred());
         }
@@ -1428,10 +1535,17 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"workspace", "name":"Workspace", "roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
+        std::fs::create_dir(directory.path().join("large-history")).unwrap();
+        std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([
+            {"id":"large-source","name":"Large source","cwd":directory.path().join("large-history"),"historyMode":"paginated","updatedAt":200},
+            {"id":"fixture-long-history","name":"Long source","cwd":directory.path(),"historyMode":"paginated","updatedAt":1}
+        ])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let mobile = fixture.local().await.unwrap();
 
-        let started = mobile.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path().join("large-history")})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
+        let target = imported_codex_session(&mobile.peer, "Large source").await;
+        wait_for_import(&mobile.peer, &target).await;
+        let started = open_session(&mobile.peer, &json!(target), 5).await.0["response"].clone();
         assert_eq!(started["thread"]["projectId"], json!({"Assigned":"workspace"}));
         let thread = &started["thread"]["id"];
         let listed = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>(json!({"limit":20})).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
@@ -1459,11 +1573,8 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         assert_eq!(body_json(&detail["item"])["commandExecution"]["output"], format!("{}END_OF_LARGE_OUTPUT", "output line\n".repeat(700000)));
         assert_eq!(detail["item"]["id"], "large-command");
         assert!(mobile.peer.call(&serde_json::from_value::<rpc::ReadItem>(json!({"threadId":thread,"turnId":"wrong-turn","itemId":"large-command"})).unwrap()).await.is_err());
-        std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([
-            {"id":"fixture-long-history","cwd":directory.path(),"historyMode":"paginated","updatedAt":1}
-        ])).unwrap()).unwrap();
-        mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>(json!({"useStateDbOnly":true})).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-        let history_id = agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, "fixture-long-history".into()).unwrap();
+        let history_id = imported_codex_session(&mobile.peer, "Long source").await;
+        wait_for_import(&mobile.peer, &history_id).await;
         let mut page: models::ThreadResponse = serde_json::from_value(open_session(&mobile.peer, &json!(history_id), 5).await.0["response"].clone()).unwrap();
         let initial = page.thread.turns.as_ref().unwrap();
         assert_eq!(initial.len(), 5, "initial history is a bounded summary page");
@@ -1553,18 +1664,19 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(first["projects"].as_array().unwrap().len(), 5);
         assert_eq!(first["hasMoreProjects"], true);
         assert_eq!(first["projects"].as_array().unwrap().iter().take(5).map(|project| project["id"].as_str().unwrap()).collect::<Vec<_>>(), ["project-5", "project-3", "project-7", "project-6", "project-4"]);
-        assert_eq!(rows[0]["id"], json!({"provider":"codex","id":"worktree"}));
-        assert_eq!(rows[4]["id"], json!({"provider":"codex","id":"p5-15"}));
-        assert_eq!(rows[5]["id"], json!({"provider":"codex","id":"explicit"}));
-        assert_eq!(rows[25]["id"], json!({"provider":"codex","id":"projectless"}));
-        assert_eq!(rows[29]["id"], json!({"provider":"codex","id":"chat-15"}));
+        assert_eq!(rows[0]["name"], "Worktree conversation");
+        assert_ne!(rows[0]["id"]["id"], "worktree", "the Host owns conversation identity");
+        assert_eq!(rows[4]["name"], "Project 05 conversation 15");
+        assert_eq!(rows[5]["name"], "Explicit assignment");
+        assert_eq!(rows[25]["name"], "Explicit chat");
+        assert_eq!(rows[29]["name"], "Chat 15");
         assert!(rows.iter().all(|thread| thread["turns"].is_null() && thread["preview"].is_null()));
         assert_eq!(first["moreProjectIds"].as_array().unwrap().len(), 5);
         assert_eq!(first["hasMoreChats"], true);
 
         let more = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>((request(5, 5, 15)).clone()).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         assert_eq!(more["data"].as_array().unwrap().len(), 40);
-        assert_eq!(more["data"][14]["id"], json!({"provider":"codex","id":"p5-5"}));
+        assert_eq!(more["data"][14]["name"], "Project 05 conversation 05");
         let end = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>((request(15, 25, 25)).clone()).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         assert_eq!(end["data"].as_array().unwrap().len(), 19 + 6*5 + 19);
         assert_eq!(end["hasMoreChats"], false);
@@ -1573,12 +1685,13 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         let found = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>(json!({"searchTerm":"Project 01"})).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         assert_eq!(found["projects"].as_array().unwrap().len(), 1);
         assert_eq!(found["data"].as_array().unwrap().len(), 5);
-        assert_eq!(found["data"][0]["id"], json!({"provider":"codex","id":"p1-18"}));
-        let body = open_session(&mobile.peer, &json!({"provider":"codex","id":"p5-1"}), 5).await.0["response"].clone();
+        assert_eq!(found["data"][0]["name"], "Project 01 conversation 18");
+        let target = imported_codex_session(&mobile.peer, "Project 05 conversation 01").await;
+        let body = open_session(&mobile.peer, &json!(target), 5).await.0["response"].clone();
         assert_eq!(body["thread"]["projectId"], json!({"Assigned":"project-5"}));
         assert_eq!(body_json(&body["thread"]["turns"][0]["items"][0])["assistantText"]["text"], "History for Project 05 conversation 01");
         assert_eq!(body["thread"]["status"], "unknown");
-        let item = mobile.peer.call(&serde_json::from_value::<rpc::ReadItem>(json!({"threadId":{"provider":"codex","id":"p5-1"},"turnId":"turn-p5-1","itemId":"answer-p5-1"})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
+        let item = mobile.peer.call(&serde_json::from_value::<rpc::ReadItem>(json!({"threadId":target,"turnId":"turn-p5-1","itemId":"answer-p5-1"})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         assert_eq!(body_json(&item["item"])["assistantText"]["text"], "History for Project 05 conversation 01");
         assert!(agent_protocol::protocol::json_boundary::call("host/thread/watch", json!({"watchId":1,"threadId":{"provider":"codex","id":"p5-1"},"path":rollout})).is_err(), "external rollout following is retired");
         mobile.close().await;
@@ -1605,7 +1718,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         let project_state = root.join("bex-projects.json");
         std::fs::write(&project_state, serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":workspace}]}])).unwrap()).unwrap();
         let server = Arc::new(CodexAppServer::spawn(codex_fixture::config(&root)).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")));
+        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json"))).unwrap();
         let mut session = service.open_session();
         async fn request(service: &HostRpcService, session: &mut host_daemon::HostSession, method: &str, params: Value) -> Value {
             let reply = service.dispatch(session.id(), &agent_protocol::protocol::json_boundary::call(method, params).unwrap()).await.unwrap();
@@ -1646,7 +1759,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
                 assert_eq!(global["thread"]["projectId"], json!({"Unassigned":{}}));
                 chat_ids.push(global["thread"]["id"].clone());
         }
-        let restarted = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")));
+        let restarted = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json"))).unwrap();
         let mut restarted_session = restarted.open_session();
         assert_eq!(request(&restarted, &mut restarted_session, "host/worktree/settings/read", json!({})).await, settings);
         for id in &chat_ids {
@@ -2043,7 +2156,8 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
         let service = HostRpcService::new(
             Ok(server.clone()),
             ProjectStore::new(root.join("bex-worktrees.json")),
-        );
+        )
+        .unwrap();
         let runtime = Arc::new(
             HostRuntime::new(
                 service,
@@ -2841,32 +2955,14 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             root.join("bex-worktrees.json"),
             json!({"workspaceRoots": {checkout.to_str().unwrap(): repo}}).to_string(),
         ).unwrap();
+        let mut native_rows: Vec<_> = [&checkout, &checkout.join("nested"), &repo, &root].iter().enumerate().map(|(index, cwd)| {
+            json!({"id":format!("worktree-{index}"),"cwd":cwd,"name":format!("Worktree {index}"),"gitInfo":{"branch":"task"}})
+        }).collect();
+        std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&native_rows).unwrap()).unwrap();
         let fixture = start_host(&root).await;
         let local = fixture.local().await.unwrap();
         let mut ids = Vec::new();
-        for cwd in [&checkout, &checkout.join("nested"), &repo, &root] {
-            let reply = local
-                .peer
-                .call(
-                    &serde_json::from_value::<op::CreateSession>(
-                        json!({"provider":"codex","cwd":cwd}),
-                    )
-                    .unwrap(),
-                )
-                .await
-                .map(|output| serde_json::to_value(output.response).unwrap())
-                .unwrap();
-            ids.push(
-                serde_json::from_value::<agent_protocol::session::SessionRef>(
-                    reply["thread"]["id"].clone(),
-                )
-                .unwrap(),
-            );
-        }
-        let mut native_rows: Vec<_> = ids.iter().zip([&checkout, &checkout.join("nested"), &repo, &root]).map(|(id, cwd)| {
-            json!({"id":id.id,"cwd":cwd,"name":"worktree history","gitInfo":{"branch":"task"}})
-        }).collect();
-        std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&native_rows).unwrap()).unwrap();
+        for index in 0..4 { ids.push(imported_codex_session(&local.peer, &format!("Worktree {index}")).await); }
         let store = Store::new((local.peer, local.events), Snapshot::default());
         for (step, expected) in [
             ("fresh", None),
@@ -2988,6 +3084,7 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 "missing-metadata" => {
                     native_rows[1]["gitInfo"] = Value::Null;
                     std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&native_rows).unwrap()).unwrap();
+                    store.dispatch(Intent::ImportHistory(op::ImportHistory {})).await.unwrap();
                 }
                 "deleted-branch" => { git(&repo, &["branch", "-d", "task"]); }
                 _ => {}
@@ -3079,7 +3176,15 @@ async fn gallery_reads_native_older_images_after_a_live_turn_completes() {
     let id = &started["thread"]["id"];
     let (_, mut events) = open_session(&mobile.peer, id, 5).await;
     mobile.peer.call(&serde_json::from_value::<rpc::Submission>(json!({"clientUserMessageId":next_submission_id(),"threadId":id,"input":[{"text":{"text":"[generated-images] [gallery] Browse all generated images"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
-    completed_turn(&mut events).await;
+    loop {
+        if completed_turn(&mut events).await["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("fixture-turn-")
+        {
+            break;
+        }
+    }
     let peer = Arc::new(mobile.peer);
     let images = peer
         .session_images(
@@ -3104,20 +3209,14 @@ async fn oversized_session_opens_repeatedly_and_downloads_lossless_items_without
     tokio::time::timeout(Duration::from_secs(120), async {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("oversized-history")).unwrap();
+        std::fs::write(directory.path().join("list-fixture.json"), serde_json::to_vec(&json!([
+            {"id":"oversized-source","name":"Oversized source","cwd":directory.path().join("oversized-history"),"historyMode":"paginated"}
+        ])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let mobile = fixture.local().await.unwrap();
-        let started = mobile
-            .peer
-            .call(
-                &serde_json::from_value::<op::CreateSession>(
-                    json!({"provider":"codex","cwd":directory.path().join("oversized-history")}),
-                )
-                .unwrap(),
-            )
-            .await
-            .map(|output| serde_json::to_value(output.response).unwrap())
-            .unwrap();
-        let thread = &started["thread"]["id"];
+        let target = imported_codex_session(&mobile.peer, "Oversized source").await;
+        wait_for_import(&mobile.peer, &target).await;
+        let thread = &json!(target);
         for _ in 0..2 {
             let opened = mobile.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { session: serde_json::from_value(thread.clone()).unwrap(), limit: 5, include_activity: true })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
             assert!(agent_protocol::protocol::encode(&opened).unwrap().len() < 16 * 1024);
@@ -3585,7 +3684,7 @@ async fn native_history_errors_preserve_failure_and_only_confirmed_empty_history
             } else {
                 format!("thread {detail} is not materialized yet; thread/turns/list is unavailable before first user message")
             };
-            json!({"id":id,"cwd":directory.path(),"historyMode":"paginated",
+            json!({"id":id,"name":id,"cwd":directory.path(),"historyMode":"paginated",
                 "fixtureHistoryError":{"code":code,"message":message},
                 "turns":if *has_history {vec![json!({"id":"saved","status":"completed","items":[{"id":"answer","type":"agentMessage","text":"Saved answer"}]})]} else {vec![]}
             })
@@ -3595,9 +3694,10 @@ async fn native_history_errors_preserve_failure_and_only_confirmed_empty_history
         let local = fixture.local().await.unwrap();
         local.peer.call(&op::ListSessions::new(Default::default())).await.unwrap();
         for ((_, id, _, succeeds, _), native) in cases.iter().zip(&threads) {
+            let target = imported_codex_session(&local.peer, id).await;
             let result = local.peer.request_stream::<agent_protocol::session::OpenedSession>(
                 &agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession { include_activity: false,
-                    session: agent_protocol::session::SessionRef::new(agent_protocol::session::ProviderKind::Codex, id.to_string()).unwrap(), limit:5,
+                    session: target, limit:5,
                 })
             ).await;
             if *succeeds {
@@ -3608,13 +3708,10 @@ async fn native_history_errors_preserve_failure_and_only_confirmed_empty_history
                 assert_eq!(state.kind, agent_protocol::session::HistoryReadKind::Complete);
                 assert!(state.issues.is_empty());
             } else {
-                let error = match result {
-                    Err(agent_protocol::error::PeerError::Remote { error, .. }) => error,
-                    _ => panic!("native history failure was replaced with a successful empty snapshot: {id}"),
-                };
-                let failure: agent_protocol::error::RpcFailure = serde_json::from_str(&error).unwrap();
-                assert_eq!(failure.code, "session_open_failed");
-                assert_eq!(failure.message, native["fixtureHistoryError"]["message"]);
+                let (opened, _updates) = result.unwrap();
+                let state = opened.response.thread.history_read_state.unwrap();
+                assert_eq!(state.kind, agent_protocol::session::HistoryReadKind::Incomplete);
+                assert!(state.issues.iter().any(|issue| issue.contains(native["fixtureHistoryError"]["message"].as_str().unwrap())), "{id}: {:?}", state.issues);
             }
         }
         local.close().await;

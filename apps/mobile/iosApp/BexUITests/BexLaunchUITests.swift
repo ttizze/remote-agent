@@ -58,6 +58,13 @@ final class BexLaunchUITests: XCTestCase {
         return body
     }
 
+    func simulatorConversationRow(_ nativeId: String) throws -> String {
+        struct Session: Decodable { let provider: String; let id: String }
+        let data = try simulatorFixture("conversation/" + nativeId, expectedStatus: 200)
+        let session = try JSONDecoder().decode(Session.self, from: data)
+        return "tasks.row.\(session.provider):\(session.id)"
+    }
+
     func useSimulatorListFixture(_ path: String) throws {
         addTeardownBlock { _ = try self.simulatorFixture("list-fixture/reset") }
         try simulatorFixture(path)

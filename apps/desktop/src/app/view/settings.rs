@@ -137,7 +137,14 @@ impl Desktop {
         body =
             match self.settings_page {
                 SettingsPage::Models => body.child(self.default_model_settings(cx)),
-                SettingsPage::Agents => body.child(self.account_controls(true, cx)),
+                SettingsPage::Agents => body.child(self.account_controls(true, cx)).child(
+                    Button::new("import-history")
+                        .label("既存の会話を取り込み・再試行")
+                        .disabled(self.busy > 0 || !self.snapshot.connected)
+                        .on_click(cx.listener(|view, _, _, _| {
+                            view.dispatch(Intent::ImportHistory(op::ImportHistory {}));
+                        })),
+                ),
                 SettingsPage::Connections => {
                     let setup = self.snapshot.connection_setup();
                     let agent_controls = self.connection_agent_controls(&setup.agents, cx);

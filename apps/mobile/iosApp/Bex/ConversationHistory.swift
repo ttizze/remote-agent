@@ -11,7 +11,15 @@ extension ThreadScreen {
     @ViewBuilder
     func conversationRow(_ row: ThreadConversationRow) -> some View {
         switch row.content {
-        case let .historyNotice(message): Text(message).font(.caption).foregroundStyle(.secondary)
+        case let .historyNotice(message):
+            VStack(alignment: .leading, spacing: 8) {
+                Text(message).font(.caption).foregroundStyle(.secondary)
+                if row.id == "history-read-state", conversation?.source.canRetryHistory() == true {
+                    Button("履歴の取り込みを再試行") { model.perform(.importHistory(ImportHistory())) }
+                        .disabled(!model.isConnected)
+                        .accessibilityIdentifier("history.import.retry")
+                }
+            }
         case let .native(content, item): nativeConversationRow(content, item: item)
         case let .queued(item):
             userMessageRow(item)

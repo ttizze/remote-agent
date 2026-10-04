@@ -82,6 +82,8 @@ android {
     buildFeatures { compose = true }
     sourceSets.getByName("androidTest").assets.srcDir(rootProject.file("crates/agent-core/tests/fixtures/markdown"))
     sourceSets.getByName("main") {
+        res.srcDir("resources")
+        assets.srcDir(rootProject.file("third-party"))
         kotlin.srcDir(rootProject.file("target/agent-bindings/dev"))
         jniLibs.srcDir(layout.buildDirectory.dir("generated/jniLibs").get().asFile)
     }

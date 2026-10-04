@@ -869,13 +869,6 @@ impl Agent for Codex {
         )
         .await
     }
-    async fn rename(&self, id: &str, name: &str) -> Result<agent_protocol::models::Empty, Failure> {
-        self.request(
-            "thread/name/set",
-            &serde_json::json!({"threadId":id,"name":name}),
-        )
-        .await
-    }
     fn event_stream(&self) -> Option<tokio::sync::mpsc::Receiver<AgentEvent>> {
         // Subscribe before spawning the pump. Otherwise Codex can emit a
         // server request in the scheduling gap and it would be lost before
@@ -895,11 +888,9 @@ impl Agent for Codex {
                 match events.recv().await {
                     Ok(PeerEvent::Message(message)) => {
                         let sequence = message.sequence;
-                        let _processed = scopeguard::guard(sequence, |sequence| {
-                            processed.send_replace(sequence);
-                        });
                         let line = message.value;
                         let Ok(request) = RpcMessage::parse(&line) else {
+                            processed.send_replace(sequence);
                             continue;
                         };
                         if request.kind() == RpcMessageKind::Request
@@ -977,6 +968,10 @@ impl Agent for Codex {
                                 );
                             }
                         }
+                        // An event is processed only after the Host has committed
+                        // it. A failed commit closes this stream before advancing
+                        // the barrier awaited by native command responses.
+                        processed.send_replace(sequence);
                     }
                     Ok(PeerEvent::Response { sequence, .. }) => {
                         processed.send_replace(sequence);

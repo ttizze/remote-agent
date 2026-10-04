@@ -1540,10 +1540,21 @@ mod progress_tests {
 }
 
 /// Shared read-state wording; native views only render this projection.
+pub fn can_retry_history(thread: &models::Thread) -> bool {
+    thread.history_read_state.as_ref().is_some_and(|state| {
+        matches!(
+            state.kind,
+            crate::session::HistoryReadKind::Incomplete
+                | crate::session::HistoryReadKind::Unavailable
+        )
+    })
+}
+
 pub fn history_notice(thread: &models::Thread) -> Option<String> {
     use crate::session::HistoryReadKind;
     let state = thread.history_read_state.as_ref()?;
     let heading = match state.kind {
+        HistoryReadKind::Importing => "既存の履歴を取り込んでいます。",
         HistoryReadKind::Partial => "履歴の一部を表示しています。",
         HistoryReadKind::Incomplete => "履歴の一部を読み取れませんでした。",
         HistoryReadKind::Unavailable => {

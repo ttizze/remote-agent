@@ -1,0 +1,2574 @@
+{
+  "reference": {
+    "repository": "pingdotgg/t3code",
+    "commit": "4ee6bfd50ef4a089440d5c3662db2298da9cc50e",
+    "release": "v0.0.46-nightly.20261004.2652",
+    "published_at": "2026-10-04T18:23:26Z"
+  },
+  "requirements": {
+    "transport": "iroh",
+    "pairing": "QR",
+    "clients": [
+      "desktop",
+      "ios",
+      "android"
+    ],
+    "web": false,
+    "t3_wire_compatibility": false,
+    "legacy_runtime_compatibility": false,
+    "first_run_history_import": [
+      "codex",
+      "claude"
+    ],
+    "visual_parity": true,
+    "nightly_distribution": true,
+    "integration": "pull_request_only"
+  },
+  "coverage_note": "Reference inventory only. Unreviewed entries do not establish feature coverage or implementation. Desktop routes represent T3 desktop UI even though Web distribution is excluded.",
+  "user_documentation": [
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/activity-log.md",
+      "path": "docs/user/activity-log.md",
+      "features": [
+        {
+          "name": "Activity log",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/appearance.md",
+      "path": "docs/user/appearance.md",
+      "features": [
+        {
+          "name": "Appearance and themes",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Composer context",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Motion",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Custom themes",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Environment themes",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Publish a theme",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/background-service.md",
+      "path": "docs/user/background-service.md",
+      "features": [
+        {
+          "name": "Running T3 Code in the background",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Manage the service",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Platform support",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Troubleshooting",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/browser-import.md",
+      "path": "docs/user/browser-import.md",
+      "features": [
+        {
+          "name": "Import browser sessions",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/composer.md",
+      "path": "docs/user/composer.md",
+      "features": [
+        {
+          "name": "Messages and context",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Attach files",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Send while the agent is working",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Queue messages offline on mobile",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Custom models",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Model defaults",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Quote an assistant response",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Recall a sent prompt",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Edit an earlier prompt",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Prompt stash",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Voice input on iPhone",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Queued messages",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Commands and skills",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Context in your message",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Attached files",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Images and videos in messages",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Files outside the workspace",
+          "state": "unreviewed"
+        },
+        {
+          "name": "HTML and PDF files in the file viewer",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/cursor.md",
+      "path": "docs/user/cursor.md",
+      "features": [
+        {
+          "name": "Cursor",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Prerequisites",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Sign in",
+          "state": "unreviewed"
+        },
+        {
+          "name": "V2 Capability Mapping",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Replay And Live Testing",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/devices.md",
+      "path": "docs/user/devices.md",
+      "features": [
+        {
+          "name": "Devices",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Open a device",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Tools",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Agents and devices",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Remote connections",
+          "state": "unreviewed"
+        },
+        {
+          "name": "SSH device hosts",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Device tool updates",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/install.md",
+      "path": "docs/user/install.md",
+      "features": [
+        {
+          "name": "Install T3 Code",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Requirements",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Command line",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Intel Macs",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Desktop app",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Windows Subsystem for Linux",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Open a project from a terminal",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Mobile app",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Providers",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Next steps",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/keybindings.md",
+      "path": "docs/user/keybindings.md",
+      "features": [
+        {
+          "name": "Keybindings",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Composer controls",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Copy pull request references",
+          "state": "unreviewed"
+        },
+        {
+          "name": "iPad",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Edit the configuration file",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Rule shape",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Key syntax",
+          "state": "unreviewed"
+        },
+        {
+          "name": "When conditions",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Precedence",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Commands with special behavior",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Reserved shortcuts",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Desktop quit shortcut",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/keyboard-focus.md",
+      "path": "docs/user/keyboard-focus.md",
+      "features": [
+        {
+          "name": "Keyboard focus",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/mobile-notifications.md",
+      "path": "docs/user/mobile-notifications.md",
+      "features": [
+        {
+          "name": "Mobile notifications",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/open-source-licenses.md",
+      "path": "docs/user/open-source-licenses.md",
+      "features": [
+        {
+          "name": "Open source licenses",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/permission-modes.md",
+      "path": "docs/user/permission-modes.md",
+      "features": [
+        {
+          "name": "Permission modes",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Provider differences",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/portable-handoffs.md",
+      "path": "docs/user/portable-handoffs.md",
+      "features": [
+        {
+          "name": "Context in portable handoffs",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Context limits",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/project-settings.md",
+      "path": "docs/user/project-settings.md",
+      "features": [
+        {
+          "name": "Settings and project overrides",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Worktree branch names",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Scheduled tasks on mobile",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Defaults and inheritance",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Storage cleanup",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Project icons",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Keep the default branch current",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/providers-acp.md",
+      "path": "docs/user/providers-acp.md",
+      "features": [
+        {
+          "name": "ACP Registry",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Add an agent",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Where agents run",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Signing in",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Models and options",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Commands and skills",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Native sessions",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Permissions and terminals",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Checkpoints",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Advanced configuration",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/providers-antigravity.md",
+      "path": "docs/user/providers-antigravity.md",
+      "features": [
+        {
+          "name": "Antigravity",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Set up Antigravity",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Sign in from a remote device",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Other sign-in methods",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Runtime installation",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Use a manual installation",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Models and threads",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Skills and attachments",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Subagents",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Accounts and removal",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Check access and troubleshoot",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/providers-claude.md",
+      "path": "docs/user/providers-claude.md",
+      "features": [
+        {
+          "name": "Claude",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Separate accounts or configurations",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Compact long conversations",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Usage limits",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Skills",
+          "state": "unreviewed"
+        },
+        {
+          "name": "OpenRouter",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Other routers",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/providers-codex.md",
+      "path": "docs/user/providers-codex.md",
+      "features": [
+        {
+          "name": "Codex",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Connect with ChatGPT",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Use an existing Codex login",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Use multiple accounts",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Multiple CLI logins",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Switch accounts in an existing thread",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Answer questions while Codex works",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Approve app access",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Codex says I hit a usage limit",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Send feedback to OpenAI",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/providers-opencode.md",
+      "path": "docs/user/providers-opencode.md",
+      "features": [
+        {
+          "name": "OpenCode",
+          "state": "unreviewed"
+        },
+        {
+          "name": "OpenCode 2",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Local or external server",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Approvals",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Refresh models, commands, and skills",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/providers-pi.md",
+      "path": "docs/user/providers-pi.md",
+      "features": [
+        {
+          "name": "Pi",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Set Up Pi",
+          "state": "unreviewed"
+        },
+        {
+          "name": "What Carries Over",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Permission Modes",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Troubleshooting",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/question-attachments.md",
+      "path": "docs/user/question-attachments.md",
+      "features": [
+        {
+          "name": "Files in question answers",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/remote-access.md",
+      "path": "docs/user/remote-access.md",
+      "features": [
+        {
+          "name": "Remote access",
+          "state": "unreviewed"
+        },
+        {
+          "name": "T3 Connect",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Pair over a LAN or private network",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Balance new threads across machines",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Tailscale HTTPS",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Hosted web app",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Desktop-managed SSH",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Manage or revoke access",
+          "state": "unreviewed"
+        },
+        {
+          "name": "T3 Connect troubleshooting",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Using the Desktop App as a Remote Only",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/snap-shot.md",
+      "path": "docs/user/snap-shot.md",
+      "features": [
+        {
+          "name": "SnapShots",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Turning it on",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Taking a capture",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Changing the shortcut",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Include app text",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Sound, flash, and animation",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Linux desktops",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/source-control.md",
+      "path": "docs/user/source-control.md",
+      "features": [
+        {
+          "name": "Source control",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Connect an account",
+          "state": "unreviewed"
+        },
+        {
+          "name": "GitHub",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Forgejo and Gitea",
+          "state": "unreviewed"
+        },
+        {
+          "name": "GitLab",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Bitbucket",
+          "state": "unreviewed"
+        },
+        {
+          "name": "or",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Azure DevOps",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Start, clone, or publish a project",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Create a pull request",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Review and merge",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Mark files as viewed",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Troubleshooting",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Linked pull requests",
+          "state": "unreviewed"
+        },
+        {
+          "name": "GitHub stacks",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/telemetry.md",
+      "path": "docs/user/telemetry.md",
+      "features": [
+        {
+          "name": "Product usage data",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/terminal.md",
+      "path": "docs/user/terminal.md",
+      "features": [
+        {
+          "name": "Terminal history",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/thread-migration.md",
+      "path": "docs/user/thread-migration.md",
+      "features": [
+        {
+          "name": "Threads from older T3 Code versions",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Continuing a migrated thread",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Keeping a recovery copy",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/thread-sidebar.md",
+      "path": "docs/user/thread-sidebar.md",
+      "features": [
+        {
+          "name": "Working with threads",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Start a thread",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Start without a project",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Start in the background",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Pin and reorder threads",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Fold working threads (beta)",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Settle finished work",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Link a pull request",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Find and reference work",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Inspect agent work",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Snooze until later",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/updating.md",
+      "path": "docs/user/updating.md",
+      "features": [
+        {
+          "name": "Updating T3 Code",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Before you update",
+          "state": "unreviewed"
+        },
+        {
+          "name": "When versions don't match",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Update a connected server",
+          "state": "unreviewed"
+        },
+        {
+          "name": "If an update fails",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Update providers",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Mobile updates",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/usage.md",
+      "path": "docs/user/usage.md",
+      "features": [
+        {
+          "name": "Usage and limits",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Understand your usage",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Set custom model prices",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Track subscription limits",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Connect a CLIProxyAPI hub",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Subscription usage widget",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Keyboard shortcuts",
+          "state": "unreviewed"
+        }
+      ]
+    },
+    {
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/docs/user/welcome-wizard.md",
+      "path": "docs/user/welcome-wizard.md",
+      "features": [
+        {
+          "name": "Welcome wizard",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Connect your computers",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Check your agents",
+          "state": "unreviewed"
+        },
+        {
+          "name": "Import your projects",
+          "state": "unreviewed"
+        }
+      ]
+    }
+  ],
+  "rpc_methods": [
+    {
+      "name": "projects.list",
+      "key": "projectsList",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projects.add",
+      "key": "projectsAdd",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projects.remove",
+      "key": "projectsRemove",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projects.listEntries",
+      "key": "projectsListEntries",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projects.readFile",
+      "key": "projectsReadFile",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projects.searchContents",
+      "key": "projectsSearchContents",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projects.searchEntries",
+      "key": "projectsSearchEntries",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projects.writeFile",
+      "key": "projectsWriteFile",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projects.mutate",
+      "key": "projectsMutate",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projects.ensureScratch",
+      "key": "projectsEnsureScratch",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projects.createNew",
+      "key": "projectsCreateNew",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "shell.openInEditor",
+      "key": "shellOpenInEditor",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "filesystem.browse",
+      "key": "filesystemBrowse",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "agentSessions.scan",
+      "key": "agentSessionsScan",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "agentSessions.import",
+      "key": "agentSessionsImport",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "assets.createUrl",
+      "key": "assetsCreateUrl",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "assets.persistChatAttachments",
+      "key": "assetsPersistChatAttachments",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "attachments.createUploadUrl",
+      "key": "attachmentsCreateUploadUrl",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "attachments.delete",
+      "key": "attachmentsDelete",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.uploadFeedback",
+      "key": "providerUploadFeedback",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.auth.start",
+      "key": "providerAuthStart",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.consumeResetCredit",
+      "key": "providerConsumeResetCredit",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.auth.complete",
+      "key": "providerAuthComplete",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.chatgpt.reconnect-profile",
+      "key": "chatGptReconnectProfile",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.chatgpt.import-profile",
+      "key": "chatGptImportProfile",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.chatgpt.handoff.subscribe",
+      "key": "chatGptHandoffSubscribe",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.codex.auth-callback.subscribe",
+      "key": "codexAuthCallbackSubscribe",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.auth.respond",
+      "key": "providerAuthRespond",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.auth.cancel",
+      "key": "providerAuthCancel",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.auth.logout",
+      "key": "providerAuthLogout",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.auth.subscribe",
+      "key": "providerAuthSubscribe",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.install.start",
+      "key": "providerInstallStart",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.install.cancel",
+      "key": "providerInstallCancel",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.install.subscribe",
+      "key": "providerInstallSubscribe",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.install.remove",
+      "key": "providerInstallRemove",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "vcs.pull",
+      "key": "vcsPull",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "vcs.refreshStatus",
+      "key": "vcsRefreshStatus",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "vcs.listRefs",
+      "key": "vcsListRefs",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "vcs.createWorktree",
+      "key": "vcsCreateWorktree",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "vcs.removeWorktree",
+      "key": "vcsRemoveWorktree",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "vcs.createRef",
+      "key": "vcsCreateRef",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "vcs.switchRef",
+      "key": "vcsSwitchRef",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "vcs.init",
+      "key": "vcsInit",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "git.runStackedAction",
+      "key": "gitRunStackedAction",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "git.resolvePullRequest",
+      "key": "gitResolvePullRequest",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "git.preparePullRequestThread",
+      "key": "gitPreparePullRequestThread",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "review.getDiffPreview",
+      "key": "reviewGetDiffPreview",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "review.getDiffFileContents",
+      "key": "reviewGetDiffFileContents",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "terminal.open",
+      "key": "terminalOpen",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "terminal.attach",
+      "key": "terminalAttach",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "terminal.write",
+      "key": "terminalWrite",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "terminal.resize",
+      "key": "terminalResize",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "terminal.clear",
+      "key": "terminalClear",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "terminal.restart",
+      "key": "terminalRestart",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "terminal.close",
+      "key": "terminalClose",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "preview.open",
+      "key": "previewOpen",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "preview.navigate",
+      "key": "previewNavigate",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "preview.resize",
+      "key": "previewResize",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "preview.refresh",
+      "key": "previewRefresh",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "preview.close",
+      "key": "previewClose",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "preview.list",
+      "key": "previewList",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "preview.reportStatus",
+      "key": "previewReportStatus",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "previewAutomation.connect",
+      "key": "previewAutomationConnect",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "previewAutomation.respond",
+      "key": "previewAutomationRespond",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "previewAutomation.focusHost",
+      "key": "previewAutomationFocusHost",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "device.configure",
+      "key": "deviceConfigure",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "device.list",
+      "key": "deviceList",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "device.testHost",
+      "key": "deviceTestHost",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "device.open",
+      "key": "deviceOpen",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "device.close",
+      "key": "deviceClose",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "device.shutdown",
+      "key": "deviceShutdown",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "device.detail",
+      "key": "deviceDetail",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "device.action",
+      "key": "deviceAction",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.probe",
+      "key": "serverProbe",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.getConfig",
+      "key": "serverGetConfig",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.refreshProviders",
+      "key": "serverRefreshProviders",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.updateProvider",
+      "key": "serverUpdateProvider",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.updateServer",
+      "key": "serverUpdateServer",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.updateServerWithProgress",
+      "key": "serverUpdateServerWithProgress",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.commitDesktopUpdate",
+      "key": "serverCommitDesktopUpdate",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.upsertKeybinding",
+      "key": "serverUpsertKeybinding",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.removeKeybinding",
+      "key": "serverRemoveKeybinding",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.getSettings",
+      "key": "serverGetSettings",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.updateSettings",
+      "key": "serverUpdateSettings",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.discoverSourceControl",
+      "key": "serverDiscoverSourceControl",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.searchAcpRegistry",
+      "key": "serverSearchAcpRegistry",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.prepareAcpRegistryAgent",
+      "key": "serverPrepareAcpRegistryAgent",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.uninstallAcpRegistryManagedBinary",
+      "key": "serverUninstallAcpRegistryManagedBinary",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.acceptAcpRegistryUrlAuth",
+      "key": "serverAcceptAcpRegistryUrlAuth",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.listAcpRegistrySessions",
+      "key": "serverListAcpRegistrySessions",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.importAcpRegistrySession",
+      "key": "serverImportAcpRegistrySession",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.deleteAcpRegistrySession",
+      "key": "serverDeleteAcpRegistrySession",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.listAcpRegistryProviders",
+      "key": "serverListAcpRegistryProviders",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.setAcpRegistryProvider",
+      "key": "serverSetAcpRegistryProvider",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.disableAcpRegistryProvider",
+      "key": "serverDisableAcpRegistryProvider",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.logoutAcpRegistry",
+      "key": "serverLogoutAcpRegistry",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.getTraceDiagnostics",
+      "key": "serverGetTraceDiagnostics",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.getProcessDiagnostics",
+      "key": "serverGetProcessDiagnostics",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.getHostResources",
+      "key": "serverGetHostResources",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.getProcessResourceHistory",
+      "key": "serverGetProcessResourceHistory",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.getResourceTelemetryHistory",
+      "key": "serverGetResourceTelemetryHistory",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.retryResourceTelemetry",
+      "key": "serverRetryResourceTelemetry",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.signalProcess",
+      "key": "serverSignalProcess",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.reportClientActivity",
+      "key": "serverReportClientActivity",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.reportHostPowerState",
+      "key": "serverReportHostPowerState",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.getBackgroundPolicy",
+      "key": "serverGetBackgroundPolicy",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.getUsageSummary",
+      "key": "serverGetUsageSummary",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "server.refreshUsageRates",
+      "key": "serverRefreshUsageRates",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "scheduledTasks.list",
+      "key": "scheduledTasksList",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "scheduledTasks.subscribe",
+      "key": "scheduledTasksSubscribe",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "scheduledTasks.upsert",
+      "key": "scheduledTasksUpsert",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "scheduledTasks.setEnabled",
+      "key": "scheduledTasksSetEnabled",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "scheduledTasks.delete",
+      "key": "scheduledTasksDelete",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "scheduledTasks.runNow",
+      "key": "scheduledTasksRunNow",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "cloud.getRelayClientStatus",
+      "key": "cloudGetRelayClientStatus",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "cloud.installRelayClient",
+      "key": "cloudInstallRelayClient",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.list",
+      "key": "pullRequestsList",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.listStats",
+      "key": "pullRequestsListStats",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.summary",
+      "key": "pullRequestsSummary",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.routing",
+      "key": "pullRequestsRouting",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.routingIdentity",
+      "key": "pullRequestsRoutingIdentity",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.stack",
+      "key": "pullRequestsStack",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.linkedThreads",
+      "key": "pullRequestsLinkedThreads",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.detail",
+      "key": "pullRequestsDetail",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.preview",
+      "key": "pullRequestsPreview",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.checks",
+      "key": "pullRequestsChecks",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.activity",
+      "key": "pullRequestsActivity",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.threadComments",
+      "key": "pullRequestsThreadComments",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.diffFileContents",
+      "key": "pullRequestsDiffFileContents",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.filesViewed",
+      "key": "pullRequestsFilesViewed",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.setFilesViewed",
+      "key": "pullRequestsSetFilesViewed",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.runAction",
+      "key": "pullRequestsRunAction",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.update",
+      "key": "pullRequestsUpdate",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.comment",
+      "key": "pullRequestsComment",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.updateComment",
+      "key": "pullRequestsUpdateComment",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.submitReview",
+      "key": "pullRequestsSubmitReview",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.replyToThread",
+      "key": "pullRequestsReplyToThread",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.setThreadResolution",
+      "key": "pullRequestsSetThreadResolution",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.setReaction",
+      "key": "pullRequestsSetReaction",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.invalidate",
+      "key": "pullRequestsInvalidate",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.subscribeRefreshes",
+      "key": "pullRequestsSubscribeRefreshes",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.reviewerCandidates",
+      "key": "pullRequestsReviewerCandidates",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.requestReviewers",
+      "key": "pullRequestsRequestReviewers",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.labelCandidates",
+      "key": "pullRequestsLabelCandidates",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "pullRequests.setLabels",
+      "key": "pullRequestsSetLabels",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "sourceControl.lookupRepository",
+      "key": "sourceControlLookupRepository",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "sourceControl.cloneRepository",
+      "key": "sourceControlCloneRepository",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "sourceControl.publishRepository",
+      "key": "sourceControlPublishRepository",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projectClone.start",
+      "key": "projectCloneStart",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projectClone.cancel",
+      "key": "projectCloneCancel",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "projectClone.retry",
+      "key": "projectCloneRetry",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeProjectClones",
+      "key": "subscribeProjectClones",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeVcsStatus",
+      "key": "subscribeVcsStatus",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeWorktreeSetup",
+      "key": "subscribeWorktreeSetup",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "worktreeSetup.cancel",
+      "key": "worktreeSetupCancel",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeTerminalEvents",
+      "key": "subscribeTerminalEvents",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeTerminalMetadata",
+      "key": "subscribeTerminalMetadata",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribePreviewEvents",
+      "key": "subscribePreviewEvents",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeDiscoveredLocalServers",
+      "key": "subscribeDiscoveredLocalServers",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeDeviceState",
+      "key": "subscribeDeviceState",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeServerConfig",
+      "key": "subscribeServerConfig",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeServerLifecycle",
+      "key": "subscribeServerLifecycle",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeAuthAccess",
+      "key": "subscribeAuthAccess",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeBackgroundPolicy",
+      "key": "subscribeBackgroundPolicy",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "subscribeResourceTelemetry",
+      "key": "subscribeResourceTelemetry",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/rpc.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.dispatchCommand",
+      "key": "dispatchCommand",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.getTurnDiff",
+      "key": "getTurnDiff",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.getFullThreadDiff",
+      "key": "getFullThreadDiff",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.searchThreads",
+      "key": "searchThreads",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.getArchivedShellSnapshot",
+      "key": "getArchivedShellSnapshot",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.getThreadProjection",
+      "key": "getThreadProjection",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.getWorkflowScript",
+      "key": "getWorkflowScript",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.getTurnItem",
+      "key": "getTurnItem",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.launchThread",
+      "key": "launchThread",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.subscribeArchivedShell",
+      "key": "subscribeArchivedShell",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.subscribeShell",
+      "key": "subscribeShell",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "orchestration.subscribeThread",
+      "key": "subscribeThread",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    }
+  ],
+  "conversation_commands": [
+    {
+      "name": "thread.create",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.archive",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.unarchive",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.delete",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.settle",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.auto-settle",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.unsettle",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.snooze",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.unsnooze",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.auto-settle.set",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.pin",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.unpin",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.pin.reorder",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.active.reorder",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.visit",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.mark-unread",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.metadata.update",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.pull-request.link",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.pull-request.unlink",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.pull-request-link.sync",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.pull-request.watch",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.pull-request.sync",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.title.regeneration.complete",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.runtime-mode.set",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.interaction-mode.set",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.model-selection.set",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider-session.detach",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "message.dispatch",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "prepared-run.release",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "notification.delivery.accept",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "prepared-run.progress",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "prepared-run.fail",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "prepared-run.retry",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "run.interrupt",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "queued-message.promote-to-steer",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "queue.resume",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "queued-run.reorder",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "queued-run.cancel",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "queued-run.edit",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "runtime-request.respond",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.user-input.dismiss",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "checkpoint.rollback",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.fork",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.merge_back",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "delegated_task.request",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "delegated_task.wake-policy",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "delegated_task.completion-delivery.acknowledge",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "delegated_task.completion-delivery.dispose",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "thread.created.record",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    },
+    {
+      "name": "provider.switch",
+      "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
+      "state": "unreviewed"
+    }
+  ],
+  "desktop_routes": [
+    {
+      "path": "apps/web/src/routes/__root.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/_chat.$environmentId.$threadId.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/_chat.draft.$draftId.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/_chat.index.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/_chat.pull-requests.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/_chat.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/connect.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/pair.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/projects.$projectKey.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.appearance.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.archived.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.connections.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.diagnostics.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.general.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.integrations.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.keybindings.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.open-source-licenses.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.projects.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.providers.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.scheduled-tasks.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.snap-shot.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.source-control.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.storage.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/settings.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/usage.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/web/src/routes/welcome.tsx",
+      "state": "unreviewed"
+    }
+  ],
+  "mobile_screens": [
+    {
+      "path": "apps/mobile/src/features/archive/ArchivedThreadsRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/archive/ArchivedThreadsScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/cloud/ConnectOnboardingRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/connection/ConnectionsNewRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/connection/ConnectionsRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/devices/DevicePreviewRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/diagnostics/SettingsDiagnosticsRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/files/AttachmentFileScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/files/ThreadFilesRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/home/HomeRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/home/HomeScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/projects/AddProjectScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsAboutRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsAppearanceRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsAuthRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsClientStorageRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsEnvironmentDetailRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsEnvironmentsRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsFollowUpRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsKeyboardRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsLegalRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsNotificationsRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsOpenSourceLicensesRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsProjectGroupingRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsProjectOverviewRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsProviderAccountsRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsScheduledTasksRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsServerControlsRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/SettingsThreadsRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/components/SettingsLegalDocumentRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/settings/components/SettingsScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/terminal/ThreadTerminalRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/threads/NewTaskDraftRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/threads/NewTaskDraftScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/threads/NewTaskRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/threads/ThreadDetailScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/threads/ThreadRouteScreen.tsx",
+      "state": "unreviewed"
+    },
+    {
+      "path": "apps/mobile/src/features/usage/UsageRouteScreen.tsx",
+      "state": "unreviewed"
+    }
+  ]
+}

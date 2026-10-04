@@ -71,6 +71,7 @@ contracts! {
     ReadItem, "host/session/item/read" => (op::ReadItem, op::ItemResponse) [clone, op::ReadItem::validate],
     AddProject, "host/project/add" => (op::AddProject, String) [clone],
     ListSessions, "host/session/list" => (op::ListSessions, m::ThreadList) [clone],
+    ImportHistory, "host/session/history/import" => (m::Empty, m::Empty),
     CreateSession, "host/session/create" => (op::CreateSession, s::OpenedSession),
     ForkSession, "host/session/fork" => (op::ForkSession, m::ThreadResponse) [clone, op::ForkSession::validate],
     Submit, "host/session/submit" => (op::Submission, op::SubmissionReceipt) [clone],

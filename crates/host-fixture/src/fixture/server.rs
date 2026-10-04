@@ -532,19 +532,6 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                 }
                 "thread/read" | "thread/resume" => {
                     context.trace(method, json!({"threadId":params["threadId"]}))?;
-                    let failure = context.home.join("fail-next-history-read");
-                    if method == "thread/read" && failure.exists() {
-                        fs::remove_file(failure)?;
-                        context.error(id, -32601, "list_turns is not supported yet")?;
-                        continue;
-                    }
-                    let external = context.home.join("background-reply");
-                    if external.exists()
-                        && let Some(latest) = threads.values().max_by_key(|thread| thread.borrow().metadata["createdAt"].as_i64().unwrap_or(0)) {
-                            latest.borrow_mut().turns.push(Rc::new(RefCell::new(json!({"id":"fixture-external-turn","status":"completed","items":[
-                                {"id":"fixture-external-final","type":"agentMessage","phase":"final_answer","text":fs::read_to_string(&external)?}]}))));
-                            fs::remove_file(external)?;
-                    }
                     let Some(thread) = threads.get(params["threadId"].as_str().unwrap_or("")) else {
                         context.error(id, -32602, "thread not found")?; continue;
                     };

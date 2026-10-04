@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import dev.remoteagent.core.ImportHistory
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.ListQuery
 import dev.remoteagent.core.ListSessions
@@ -66,6 +67,7 @@ internal fun ThreadListScreen(
                 Button(onClick = showHosts) { Text("PC一覧") }
                 Button(onClick = { perform(Intent.ListSessions(ListSessions(query = query))) }) { Text("更新") }
             }
+            TextButton(onClick = { perform(Intent.ImportHistory(ImportHistory())) }) { Text("既存の会話を取り込み・再試行") }
             OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), label = { Text("チャットを検索") })
             Text("プロジェクト", style = MaterialTheme.typography.headlineSmall)
         }

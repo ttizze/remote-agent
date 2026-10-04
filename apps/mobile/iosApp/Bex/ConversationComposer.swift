@@ -89,7 +89,7 @@ extension ThreadScreen {
                             .accessibilityIdentifier("dictation.processing")
                     } else {
                         messageField
-                            .font(.system(size: 18))
+                            .font(.custom("DMSans-Regular", size: 16, relativeTo: .body))
                     }
                 }
                 .padding(.horizontal, 8)

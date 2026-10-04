@@ -63,7 +63,7 @@ extension BexLaunchUITests {
         XCTAssertEqual(project.value as? String, "閉じています")
         project.tap()
         let threadNumber = try XCTUnwrap(finalID.split(separator: "-").dropLast().last)
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-thread-\(threadNumber)"]
+        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-thread-\(threadNumber)")]
         XCTAssertTrue(row.waitForExistence(timeout: 20)); row.tap()
         XCTAssertTrue(app.descendants(matching: .any)[finalID].waitForExistence(timeout: 30))
         let settings = app.buttons["model.settings"]
@@ -293,7 +293,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(answer.waitForExistence(timeout: 25))
         let answerID = answer.identifier
         let number = try XCTUnwrap(answerID.split(separator: "-").dropLast().last)
-        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-thread-\(number)"]
+        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-thread-\(number)")]
         let message = app.textFields["task.message"]
 
         message.tap(); message.typeText("Keep this conversation draft")

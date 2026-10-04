@@ -59,7 +59,6 @@ pub(super) async fn run(
         "approval",
         "items",
         "history",
-        "duplicate",
         "followups",
     ]
     .into_iter()
@@ -88,7 +87,7 @@ pub(super) async fn run(
         None
     };
     if prompt.contains("[gallery]") {
-        gallery(&context.home, &thread)?;
+        gallery(&context, &thread)?;
     }
 
     context.turn_event("turn/started", &thread_id, &turn.borrow())?;
@@ -248,7 +247,9 @@ pub(super) async fn run(
             complete(&context, &thread_id, &turn, index)?;
         }
     }
-    let mut response_text = if prompt.contains("[selection]") {
+    let mut response_text = if prompt.contains("[external-reply]") {
+        "Latest reply from another client".to_owned()
+    } else if prompt.contains("[selection]") {
         "Needle Alpha Bravo.\n\nSecond paragraph stays unselected.".to_owned()
     } else if prompt.contains("[visualize]") {
         let path = context.home.join(format!("icon-options-{suffix}.html"));
@@ -288,7 +289,11 @@ pub(super) async fn run(
             );
         }
     }
-    let final_id = format!("fixture-final-{suffix}");
+    let final_id = if prompt.contains("[external-reply]") {
+        "fixture-external-final".into()
+    } else {
+        format!("fixture-final-{suffix}")
+    };
     let index = turn.borrow()["items"].as_array().unwrap().len();
     context.stream_item(
         &thread_id,
@@ -324,14 +329,12 @@ pub(super) async fn run(
     }
     complete(&context, &thread_id, &turn, index)?;
     context.finish(&thread, &turn, "completed", None)?;
-    if scenario == "duplicate" {
-        thread.borrow_mut().turns.push(Rc::new(RefCell::new(json!({"id":turn_id,"status":"completed","items":[
-            {"id":"duplicate-history-old","type":"agentMessage","phase":"final_answer","text":"Older AI response must remain visible."}]}))));
-    }
     Ok(())
 }
 
-fn gallery(home: &Path, thread: &SharedThread) -> Result<()> {
+fn gallery(context: &Context, thread: &SharedThread) -> Result<()> {
+    let home = &context.home;
+    let thread_id = thread.borrow().metadata["id"].as_str().unwrap().to_owned();
     let mut older = Vec::with_capacity(6);
     let mut pixels = vec![0; 128 * 128 * 3];
     for index in 0..6 {
@@ -360,7 +363,10 @@ fn gallery(home: &Path, thread: &SharedThread) -> Result<()> {
     thread
         .metadata
         .insert("historyMode".into(), "paginated".into());
-    thread.metadata.insert("gallery".into(), true.into());
+    for turn in &older {
+        let body = turn.borrow();
+        context.turn_event("turn/completed", &thread_id, &body)?;
+    }
     thread.turns.splice(..0, older);
     Ok(())
 }

@@ -93,6 +93,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var notice by mutableStateOf<String?>(null)
     val loadingHistory: Boolean
         get() = snapshot.navigation().threadId?.let { snapshot.operationRunning(OperationKey.History(it)) } ?: false
+
     var list by mutableStateOf<ThreadList?>(null)
         private set
 
@@ -433,8 +434,8 @@ internal fun RemoteAgentApp(
     BackHandler(model.screen != Screen.Hosts) {
         if (model.screen == Screen.Conversation) model.showThreads() else model.showHosts()
     }
-    MaterialTheme {
-        Scaffold(topBar = { TopAppBar(title = { Text("Remote Agent") }) }) { padding ->
+    NativeTheme {
+        Scaffold(topBar = { TopAppBar(title = { Text("Bex") }) }) { padding ->
             Column(Modifier.padding(padding)) {
                 ConnectionStatus(
                     model.notice ?: model.snapshot.error(),

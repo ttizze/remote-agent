@@ -43,6 +43,12 @@
     <true/>
     <key>UILaunchScreen</key>
     <dict/>
+    <key>UIAppFonts</key>
+    <array>
+        <string>dm_sans_regular.ttf</string>
+        <string>dm_sans_medium.ttf</string>
+        <string>dm_sans_bold.ttf</string>
+    </array>
     <key>UISupportedInterfaceOrientations~ipad</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>

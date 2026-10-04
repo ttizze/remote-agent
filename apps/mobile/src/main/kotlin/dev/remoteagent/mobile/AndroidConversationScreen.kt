@@ -16,8 +16,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -43,6 +43,7 @@ import dev.remoteagent.core.ActivityExpansion
 import dev.remoteagent.core.ActivityPresentation
 import dev.remoteagent.core.ConversationRow
 import dev.remoteagent.core.ConversationRowContent
+import dev.remoteagent.core.ImportHistory
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Interrupt
 import dev.remoteagent.core.Outcome
@@ -85,7 +86,19 @@ internal fun ThreadDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 threadId?.let(snapshot::conversation)?.historyNotice()?.let { notice ->
-                    item(key = "history:read-state") { Text(notice) }
+                    item(key = "history:read-state") {
+                        Column {
+                            Text(notice)
+                            if (threadId?.let(snapshot::conversation)?.canRetryHistory() == true) {
+                                TextButton(
+                                    onClick = { perform(Intent.ImportHistory(ImportHistory())) {} },
+                                    enabled = snapshot.connected(),
+                                ) {
+                                    Text("履歴の取り込みを再試行")
+                                }
+                            }
+                        }
+                    }
                 }
                 val renderRow: @Composable (ConversationRowContent) -> Unit = { content ->
                     ConversationContent(
@@ -302,18 +315,18 @@ private fun ObserveFollowing(
     LaunchedEffect(snapshot, following, older) {
         val hasMore = snapshot.navigation().threadId?.let(snapshot::conversation)?.hasMoreHistory() == true
         snapshotFlow {
-            val viewportHeight = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
-            shouldLoadHistory(
-                hasMore,
-                older == null || snapshot.error() != null,
-                viewportHeight > 0 &&
-                    listState.firstVisibleItemIndex == 0 &&
-                    listState.firstVisibleItemScrollOffset <
-                        viewportHeight * HISTORY_PREFETCH_FRACTION,
-                !listState.canScrollForward,
-                following,
-            )
-        }.collect { needed -> if (needed) older?.invoke() }
+                val viewportHeight = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
+                shouldLoadHistory(
+                    hasMore,
+                    older == null || snapshot.error() != null,
+                    viewportHeight > 0 &&
+                        listState.firstVisibleItemIndex == 0 &&
+                        listState.firstVisibleItemScrollOffset < viewportHeight * HISTORY_PREFETCH_FRACTION,
+                    !listState.canScrollForward,
+                    following,
+                )
+            }
+            .collect { needed -> if (needed) older?.invoke() }
     }
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress to !listState.canScrollForward }

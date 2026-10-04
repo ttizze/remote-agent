@@ -69,16 +69,24 @@ hydration must not change this default.
 - Load the latest bounded page first; request older pages using the server's
   opaque cursor. A refresh must not fetch the entire conversation.
 - Display cached conversation content immediately. Codex initially reads the latest
-  five turns through `thread/turns/list` with `itemsView: summary`, in parallel
-  with metadata. Each summary contains its opening user message and final answer.
-  Continue older turn pages from the native opaque cursor without rereading the
+  five turns from the Host's persisted history, with an indexed summary view.
+  Each summary contains its opening user message and final answer.
+  Continue older turn pages from the Host's opaque cursor without rereading the
   latest page or creating empty turn placeholders.
 - Keep saved activity collapsed. Expanding a summary requests that turn's full
-  items through bounded `thread/items/list` pages. Apply the result on the same
+  items from the Host's DB. Apply the result on the same
   ordered stream as live changes, preserving current status and newer output.
   Cache hydrated activity and retain it on an unchanged summary refresh; changed
   or running turns remain eligible for a detail refresh. Gallery reads request
   full activity explicitly so images inside activity remain available.
+- Codex and Claude histories are imported automatically on first startup. Native
+  pagination and hydration belong to the importer; conversation refresh and
+  detail reads use the Host's DB after import. Import work must not block the
+  title list. Preserve an unfinished import's continuation across restart and
+  expose import failures as incomplete history with a visible reason, rather
+  than presenting the missing history as confirmed empty. Reopening retries
+  an unfinished import. Keep provider source data. These ownership changes follow
+  the October 5, 2026 native rewrite requirement in `T3_NATIVE_REWRITE_PLAN.md`.
 - Do not show history-loading buttons or placeholder conversation rows. Load
   the next bounded page automatically while the oldest loaded boundary is in
   the viewport, including on initial display when the page does not fill the

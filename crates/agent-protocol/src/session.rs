@@ -12,8 +12,8 @@ pub enum ProviderKind {
     Claude,
 }
 
-/// A native provider ID, scoped by provider. Paths and abbreviated IDs are not
-/// resolved here; only the provider adapter can resolve a native session.
+/// An opaque conversation reference. Host/client RPCs use Host-owned IDs;
+/// provider adapters use native IDs only inside the Host boundary.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "SessionIdentity")]
 pub struct SessionRef {
@@ -41,7 +41,7 @@ impl SessionRef {
     }
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.id.is_empty() || self.id.len() > 4096 || self.id.trim() != self.id {
-            return Err("native session ID is required");
+            return Err("conversation ID is required");
         }
         Ok(())
     }
@@ -93,7 +93,8 @@ pub enum UpdateError {
     MissingRequest,
 }
 
-/// A small change to the current conversation, never a persistent event log.
+/// A change to conversation content. The Host adds ownership and commit metadata
+/// when journaling it; clients apply it to their current snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SessionChange {
@@ -413,6 +414,29 @@ impl SessionChange {
     }
 }
 
+/// A finished provider echo proves that an admitted input no longer owns work.
+/// A Sending receipt still belongs to the Host's provider write if the echo arrives first.
+pub fn submission_confirmed(
+    id: &crate::ids::ClientInputId,
+    delivery: &SubmissionDelivery,
+    turns: &[Arc<Turn>],
+) -> bool {
+    *delivery != SubmissionDelivery::Sending
+        && turns
+            .iter()
+            .filter(|turn| {
+                matches!(
+                    turn.status,
+                    TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
+                )
+            })
+            .flat_map(|turn| turn.items.iter().flatten())
+            .any(|item| {
+                matches!(item.body(), ItemBody::UserMessage { .. })
+                    && item.client_input_id.as_ref() == Some(id)
+            })
+}
+
 fn merge_fields(previous: &Turn, incoming: &Turn) -> Turn {
     let mut merged = previous.clone();
     macro_rules! field { ($($field:ident),* $(,)?) => { $(if incoming.$field.is_some() { merged.$field = incoming.$field.clone(); })* }; }
@@ -597,6 +621,7 @@ pub fn input_unavailable_reason(thread: &Thread) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HistoryReadKind {
+    Importing,
     Complete,
     Partial,
     Incomplete,
@@ -633,6 +658,67 @@ mod history_tests {
     use super::*;
     use proptest::prelude::*;
     use std::slice::from_ref;
+
+    #[test]
+    fn submission_confirmation_requires_a_finished_user_echo_and_returned_rpc() {
+        let id: crate::ids::ClientInputId = "input".into();
+        let mut item = Item::new(
+            "echo".into(),
+            Default::default(),
+            ItemBody::UserMessage {
+                text: None,
+                content: vec![],
+            },
+        );
+        item.client_input_id = Some(id.clone());
+        for status in [
+            TurnStatus::Running,
+            TurnStatus::Unknown,
+            TurnStatus::Completed,
+            TurnStatus::Failed,
+            TurnStatus::Interrupted,
+        ] {
+            let mut turn = Arc::new(Turn {
+                id: "turn".into(),
+                status,
+                items: Some(vec![Arc::new(item.clone())]),
+                ..Default::default()
+            });
+            assert!(!submission_confirmed(
+                &id,
+                &SubmissionDelivery::Sending,
+                from_ref(&turn)
+            ));
+            for delivery in [
+                SubmissionDelivery::Accepted { turn_id: None },
+                SubmissionDelivery::Unknown,
+                SubmissionDelivery::Rejected,
+            ] {
+                assert_eq!(
+                    submission_confirmed(&id, &delivery, from_ref(&turn)),
+                    matches!(
+                        status,
+                        TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
+                    )
+                );
+                assert!(!submission_confirmed(
+                    &"other".into(),
+                    &delivery,
+                    from_ref(&turn)
+                ));
+            }
+            Arc::make_mut(&mut turn).items = Some(vec![Arc::new(Item::new(
+                "answer".into(),
+                Default::default(),
+                ItemBody::Compaction {},
+            ))]);
+            assert!(!submission_confirmed(
+                &id,
+                &SubmissionDelivery::Unknown,
+                from_ref(&turn)
+            ));
+        }
+    }
 
     fn turn(id: usize, range: std::ops::Range<usize>, summary: bool) -> Arc<Turn> {
         Arc::new(Turn {

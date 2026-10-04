@@ -24,22 +24,11 @@ impl SessionActor {
         // finished turn. Completion alone says nothing about a queued input or
         // an RPC still in flight on another client.
         self.timeline.submissions.retain(|id, delivery| {
-            matches!(
+            !agent_protocol::session::submission_confirmed(
+                id,
                 delivery,
-                agent_protocol::session::SubmissionDelivery::Sending
-            ) || !self
-                .timeline
-                .turns
-                .iter()
-                .flatten()
-                .filter(|turn| turn.status != agent_protocol::execution::TurnStatus::Running)
-                .flat_map(|turn| turn.items.iter().flatten())
-                .any(|item| {
-                    matches!(
-                        item.body(),
-                        agent_protocol::items::ItemBody::UserMessage { .. }
-                    ) && item.client_input_id.as_ref() == Some(id)
-                })
+                self.timeline.turns.as_deref().unwrap_or_default(),
+            )
         });
         if let Some(turns) = &mut self.timeline.turns {
             turns.retain(|turn| turn.status == agent_protocol::execution::TurnStatus::Running || self.timeline.submissions.values().any(|delivery| matches!(delivery, agent_protocol::session::SubmissionDelivery::Accepted {turn_id:Some(id)} if id == &turn.id)));
@@ -72,7 +61,7 @@ impl SessionActor {
             thread.status = self.timeline.status;
         }
         thread.requests = self.timeline.requests.clone();
-        thread.submissions = self.timeline.submissions.clone();
+        thread.submissions.extend(self.timeline.submissions.clone());
         thread
     }
 }
@@ -114,5 +103,15 @@ mod tests {
             actor.timeline.status == agent_protocol::models::SessionStatus::Unknown,
             "retained delivery evidence must not override newer provider execution state"
         );
+        let mut durable = Thread::default();
+        durable
+            .submissions
+            .insert("after-restart".into(), SubmissionDelivery::Unknown);
+        let merged = actor.overlay(durable);
+        assert_eq!(
+            merged.submissions["after-restart"],
+            SubmissionDelivery::Unknown
+        );
+        assert_eq!(merged.submissions["waiting"], SubmissionDelivery::Sending);
     }
 }
