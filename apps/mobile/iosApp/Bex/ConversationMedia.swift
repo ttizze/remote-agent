@@ -171,21 +171,13 @@ struct ConversationImage: View {
 private func writeConversationImage(_ data: Data) async throws -> URL {
     try Task.checkCancellation()
     let local = try await Task.detached(priority: .userInitiated) {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            UUID().uuidString,
-            isDirectory: true
-        )
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        do {
+        try inTemporaryDirectory { directory in
             let image = CGImageSourceCreateWithData(data as CFData, nil)
             let type = image.flatMap { CGImageSourceGetType($0) }.flatMap { UTType($0 as String) }
             let local = directory.appendingPathComponent("image")
                 .appendingPathExtension(type?.preferredFilenameExtension ?? "png")
             try data.write(to: local)
             return local
-        } catch {
-            try? FileManager.default.removeItem(at: directory)
-            throw error
         }
     }.value
     if Task.isCancelled {
