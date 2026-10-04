@@ -29,7 +29,6 @@ pub(super) struct Chrome {
 
 impl Chrome {
     pub async fn launch(profile: &Path, executable: &Path) -> Result<Self, String> {
-        let started = std::time::Instant::now();
         crate::platform::create_state_directory(profile).map_err(|e| e.to_string())?;
         let port_file = profile.join("DevToolsActivePort");
         match tokio::fs::remove_file(&port_file).await {
@@ -55,25 +54,12 @@ impl Chrome {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("BEXブラウザを起動できません: {e}"))?;
-        eprintln!(
-            "Browser startup diagnostic: process spawned at {:?}",
-            started.elapsed()
-        );
-        let mut last_read = String::new();
         let result = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 if child.try_wait().map_err(|e| e.to_string())?.is_some() {
                     return Err("BEXブラウザが起動中に終了しました。".into());
                 }
-                let read = tokio::fs::read_to_string(&port_file).await;
-                if let Ok(contents) = &read {
-                    if last_read != *contents {
-                        eprintln!(
-                            "Browser startup diagnostic: port published at {:?}: {contents:?}",
-                            started.elapsed()
-                        );
-                        last_read.clone_from(contents);
-                    }
+                if let Ok(contents) = tokio::fs::read_to_string(&port_file).await {
                     let mut lines = contents.lines();
                     if let (Some(port), Some(path)) = (
                         lines.next().and_then(|p| p.parse::<u16>().ok()),
@@ -83,25 +69,11 @@ impl Chrome {
                         && !path.contains(['\r', '\n', '?', '#'])
                     {
                         let url = format!("ws://127.0.0.1:{port}{path}");
-                        eprintln!(
-                            "Browser startup diagnostic: connecting at {:?}",
-                            started.elapsed()
-                        );
                         let (socket, _) = async_tungstenite::tokio::connect_async(url)
                             .await
                             .map_err(|_| "BEXブラウザに接続できません。".to_owned())?;
-                        eprintln!(
-                            "Browser startup diagnostic: connected at {:?}",
-                            started.elapsed()
-                        );
                         return Ok(socket);
                     }
-                } else if last_read.is_empty() {
-                    last_read = format!("{:?}", read.err());
-                    eprintln!(
-                        "Browser startup diagnostic: initial port read at {:?}: {last_read}",
-                        started.elapsed()
-                    );
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -118,10 +90,6 @@ impl Chrome {
                 broken: false,
             }),
             Err(error) => {
-                eprintln!(
-                    "Browser startup diagnostic: failed at {:?}: {error}; last read={last_read}",
-                    started.elapsed()
-                );
                 child.stdin.take();
                 let _ = child.wait().await;
                 Err(error)
