@@ -72,7 +72,13 @@ internal fun ThreadDetailScreen(
     val listState = rememberLazyListState()
     var activityExpansion by remember(threadId) { mutableStateOf(emptyMap<String, ActivityExpansion>()) }
     var following by remember(threadId) { mutableStateOf(true) }
-    ObserveFollowing(listState, snapshot, following, { following = it }, scrollToTopRequest, older)
+    LaunchedEffect(scrollToTopRequest) {
+        if (scrollToTopRequest > 0) {
+            following = false
+            listState.scrollToItem(0)
+        }
+    }
+    ObserveFollowing(listState, snapshot, following, { following = it }, older)
     Column(modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
@@ -309,15 +315,8 @@ private fun ObserveFollowing(
     snapshot: Snapshot,
     following: Boolean,
     follow: (Boolean) -> Unit,
-    scrollToTopRequest: Int,
     older: (() -> Unit)?,
 ) {
-    LaunchedEffect(scrollToTopRequest) {
-        if (scrollToTopRequest > 0) {
-            follow(false)
-            listState.scrollToItem(0)
-        }
-    }
     LaunchedEffect(snapshot) {
         if (following) {
             withFrameNanos {}
@@ -327,13 +326,14 @@ private fun ObserveFollowing(
     LaunchedEffect(snapshot, following, older) {
         val hasMore = snapshot.navigation().threadId?.let(snapshot::conversation)?.hasMoreHistory() == true
         snapshotFlow {
+            val viewportHeight = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
             shouldLoadHistory(
                 hasMore,
                 older == null || snapshot.error() != null,
-                listState.layoutInfo.viewportEndOffset > listState.layoutInfo.viewportStartOffset &&
+                viewportHeight > 0 &&
                     listState.firstVisibleItemIndex == 0 &&
                     listState.firstVisibleItemScrollOffset <
-                        (listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset) * 0.6,
+                        viewportHeight * HISTORY_PREFETCH_FRACTION,
                 !listState.canScrollForward,
                 following,
             )
@@ -351,3 +351,5 @@ private suspend fun androidx.compose.foundation.lazy.LazyListState.scrollToLates
     scrollToItem(last)
     scroll { scrollBy(layoutInfo.visibleItemsInfo.lastOrNull()?.size?.toFloat() ?: 0f) }
 }
+
+private const val HISTORY_PREFETCH_FRACTION = 0.6

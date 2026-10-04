@@ -126,7 +126,7 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
         }
     }
 
-    func start(completion: @escaping (Result<Data, Error>) -> Void) {
+    func start(started: @escaping () -> Void, completion: @escaping (Result<Data, Error>) -> Void) {
         guard requestID == nil else { return }
         let id = UUID()
         requestID = id
@@ -162,6 +162,7 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
                     recorder.isMeteringEnabled = true
                     guard recorder.record() else { throw Self.error("録音を開始できませんでした。") }
                     self.isRecording = true
+                    started()
                     self.meteringTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
                         Task { @MainActor [weak self] in
                             guard let self, isRecording, let recorder = self.recorder else { return }

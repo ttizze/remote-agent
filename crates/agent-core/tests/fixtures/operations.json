@@ -1796,6 +1796,7 @@
       {
         "method": "host/dictation/transcribe",
         "params": {
+          "preparation": null,
           "audio": "AQIDBA=="
         },
         "response": {
@@ -1817,6 +1818,7 @@
       {
         "method": "host/dictation/transcribe",
         "params": {
+          "preparation": null,
           "audio": "AQIDBA=="
         },
         "response": {
@@ -1838,6 +1840,7 @@
       {
         "method": "host/dictation/transcribe",
         "params": {
+          "preparation": null,
           "audio": "AQIDBA=="
         },
         "response": {

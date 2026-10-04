@@ -185,7 +185,11 @@ async fn real_cargo_waits_for_the_same_cleanup_lock_inode() {
         .output(&cancel, Duration::from_secs(30), Duration::from_secs(10))
         .await
         .unwrap();
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fs::read(log).unwrap())
+    );
     Fixture::runs(&root);
 }
 

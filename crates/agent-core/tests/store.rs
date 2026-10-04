@@ -36,6 +36,69 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 #[tokio::test]
+async fn dictation_preparation_keeps_audio_until_stop_and_orders_cancel_after_start() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let preparation = store.prepare_dictation();
+    let id = preparation.id();
+    let before = store.snapshot();
+    let start = read(&mut reader).await;
+    assert_eq!(start["method"], "host/dictation/prepare");
+    assert_eq!(start["params"], json!({"id":id}));
+    drop(preparation);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), reader.read_request())
+            .await
+            .is_err(),
+        "cancellation must wait for the preparation request to finish"
+    );
+    writer.reply(&start, json!({"result":{}})).await.unwrap();
+    let cancel = read(&mut reader).await;
+    assert_eq!(cancel["method"], "host/dictation/cancel");
+    assert_eq!(cancel["params"], json!({"id":id}));
+    writer.reply(&cancel, json!({"result":{}})).await.unwrap();
+    assert_eq!(store.snapshot().drafts, before.drafts);
+    assert_eq!(store.snapshot().epoch, before.epoch);
+    assert!(store.snapshot().error.is_none());
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn dictation_preparation_failure_does_not_block_complete_recording_transcription() {
+    let (store, mut reader, writer) = setup(Snapshot::default()).await;
+    let preparation = store.prepare_dictation();
+    let start = read(&mut reader).await;
+    writer.reply(&start, json!({"error":{"code":"unavailable","message":"preparation failed","delivery":"notSent"}})).await.unwrap();
+    let cancel = read(&mut reader).await;
+    assert_eq!(cancel["method"], "host/dictation/cancel");
+    writer.reply(&cancel, json!({"result":{}})).await.unwrap();
+    assert!(store.snapshot().error.is_none());
+    let operation = store.dispatch(Intent::Transcribe(op::Dictate {
+        draft_key: DraftKey::from("/fixture"),
+        preparation: Some(preparation.id()),
+        audio: vec![1, 0, 255, 127],
+        send: false,
+        client_user_message_id: "spoken".into(),
+    }));
+    let transcribe = read(&mut reader).await;
+    assert_eq!(transcribe["method"], "host/dictation/transcribe");
+    assert_eq!(
+        transcribe["params"],
+        json!({"preparation":preparation.id(),"audio":"AQD/fw=="})
+    );
+    writer
+        .reply(&transcribe, json!({"result":{"text":"spoken"}}))
+        .await
+        .unwrap();
+    operation.await.unwrap();
+    assert_eq!(
+        store.snapshot().drafts[&DraftKey::from("/fixture")].text,
+        "spoken"
+    );
+    drop(preparation);
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn list_refresh_bursts_keep_only_the_latest_expansion_without_blocking_navigation() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let first = store.dispatch(Intent::ListSessions(op::ListSessions::new(
@@ -1106,6 +1169,7 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
                             id: "thread".into(),
                         }
                         .into(),
+                        preparation: None,
                         audio: vec![0, 0],
                         send: true,
                         client_user_message_id: "dictation".into(),
@@ -1190,6 +1254,7 @@ async fn new_chat_dictation_preserves_text_and_images_for_draft_and_direct_send(
             .unwrap();
         let transcribing = store.dispatch(Intent::Transcribe(op::Dictate {
             draft_key: key.clone(),
+            preparation: None,
             audio: vec![0, 0],
             send: direct,
             client_user_message_id: "dictation".into(),
@@ -1283,6 +1348,7 @@ async fn navigation_cancels_dictation_send_but_keeps_the_transcript_in_its_draft
             store
                 .dispatch(Intent::Transcribe(op::Dictate {
                     draft_key: "/fixture".into(),
+                    preparation: None,
                     audio: vec![0, 0],
                     send: true,
                     client_user_message_id: "dictation".into(),
@@ -1346,6 +1412,7 @@ async fn silent_dictation_preserves_drafts_and_navigation_without_sending() {
         let (store, mut reader, mut writer) = setup(initial).await;
         let operation = store.dispatch(Intent::Transcribe(op::Dictate {
             draft_key: key.clone(),
+            preparation: None,
             audio: vec![0, 0],
             send,
             client_user_message_id: "silent".into(),

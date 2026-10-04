@@ -16,6 +16,7 @@ pub(super) struct Dictation {
     pub(super) phase: Phase,
     send: bool,
     control: Option<platform::Recording>,
+    preparation: Option<agent_core::client::DictationPreparation>,
     pub(super) levels: std::collections::VecDeque<f32>,
 }
 impl Desktop {
@@ -29,7 +30,7 @@ impl Desktop {
             .px_2()
             .gap_3()
             .child(
-                self.icon_button(
+                Self::icon_button(
                     "cancel-dictation",
                     IconName::Close,
                     "録音を取り消す (Esc)",
@@ -71,7 +72,7 @@ impl Desktop {
                     .into_any_element()
             })
             .child(
-                self.icon_button(
+                Self::icon_button(
                     "stop-dictation",
                     IconName::Pause,
                     "録音を終了して文字起こし",
@@ -82,7 +83,7 @@ impl Desktop {
                 .disabled(!recording),
             )
             .child(
-                self.icon_button(
+                Self::icon_button(
                     "send-dictation",
                     IconName::ArrowUp,
                     "文字起こしして送信",
@@ -126,6 +127,7 @@ impl Desktop {
                     phase: Phase::Preparing,
                     send: false,
                     control: Some(control),
+                    preparation: None,
                     levels: std::collections::VecDeque::from([0.; 40]),
                 });
                 self.error.clear();
@@ -167,7 +169,13 @@ impl Desktop {
             platform::RecordingEvent::RequestingPermission => state.phase = Phase::Permission,
             #[cfg(target_os = "macos")]
             platform::RecordingEvent::Preparing => state.phase = Phase::Preparing,
-            platform::RecordingEvent::Started => state.phase = Phase::Recording,
+            platform::RecordingEvent::Started => {
+                state.phase = Phase::Recording;
+                state.preparation = self
+                    .session
+                    .as_ref()
+                    .map(|session| session.store.prepare_dictation());
+            }
             platform::RecordingEvent::Level(level) => {
                 if state.phase == Phase::Recording && level.is_finite() {
                     state.levels.pop_front();
@@ -182,6 +190,10 @@ impl Desktop {
                 state.control = None;
                 let intent = Intent::Transcribe(op::Dictate {
                     draft_key: state.key.clone(),
+                    preparation: state
+                        .preparation
+                        .as_ref()
+                        .map(|preparation| preparation.id()),
                     audio,
                     send: state.send && state.generation == self.snapshot.epoch,
                     client_user_message_id: uuid::Uuid::new_v4().to_string().into(),

@@ -221,7 +221,7 @@ impl Desktop {
                                 .primary()
                                 .disabled(self.busy > 0),
                         )
-                        .child(self.icon_button(
+                        .child(Self::icon_button(
                             "reload-file",
                             IconName::RotateCw,
                             "再読み込み・下書きを破棄",
@@ -273,7 +273,7 @@ impl Desktop {
             .child(
                 h_flex()
                     .gap_2()
-                    .child(self.icon_button(
+                    .child(Self::icon_button(
                         "parent-directory",
                         IconName::ArrowUp,
                         "親フォルダ",
@@ -290,7 +290,7 @@ impl Desktop {
                         },
                     ))
                     .child(Input::new(&self.path).small().aria_label("フォルダのパス"))
-                    .child(self.icon_button(
+                    .child(Self::icon_button(
                         "browse",
                         IconName::ArrowRight,
                         "フォルダを開く",
@@ -356,7 +356,7 @@ impl Desktop {
                 .gap_1()
                 .border_b_1()
                 .border_color(rgb(0x303030))
-                .child(self.icon_button(
+                .child(Self::icon_button(
                     "panel-home",
                     IconName::LayoutDashboard,
                     "パネルのホーム",
@@ -366,7 +366,7 @@ impl Desktop {
                 .child(tabs)
                 .child(div().flex_1())
                 .when(self.panel == Panel::Terminal, |bar| {
-                    bar.child(self.icon_button(
+                    bar.child(Self::icon_button(
                         "new-terminal",
                         IconName::Plus,
                         "新しいターミナル",
@@ -378,7 +378,7 @@ impl Desktop {
                     ))
                 })
                 .when(self.panel == Panel::SideChat, |bar| {
-                    bar.child(self.icon_button(
+                    bar.child(Self::icon_button(
                         "new-side-chat",
                         new_chat_icon(),
                         "新しいサイドチャット",
@@ -392,7 +392,7 @@ impl Desktop {
                         },
                     ))
                 })
-                .child(self.icon_button(
+                .child(Self::icon_button(
                     "close-panel",
                     IconName::Close,
                     "右パネルを閉じる",
@@ -453,7 +453,7 @@ impl Desktop {
                                     .as_ref()
                                     .map_or(0, |review| review.deletions)
                             )))
-                        .child(self.icon_button(
+                        .child(Self::icon_button(
                             "refresh-diff",
                             IconName::RotateCw,
                             "変更を更新",

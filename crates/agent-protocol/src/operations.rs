@@ -151,6 +151,7 @@ pub struct ModelPage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(serialize = "T: AsRef<[u8]>", deserialize = "T: From<Vec<u8>>"))]
 pub struct Transcribe<T = Vec<u8>> {
+    pub preparation: Option<String>,
     #[serde(with = "crate::protocol::bytes")]
     pub audio: T,
 }
@@ -164,9 +165,15 @@ impl<T: AsRef<[u8]>> RpcMethod for Transcribe<T> {
         &self,
     ) -> Result<<Self::Contract as crate::protocol::contracts::Contract>::Params, PeerError> {
         Ok(Transcribe {
+            preparation: self.preparation.clone(),
             audio: self.audio.as_ref().to_vec(),
         })
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DictationPreparation {
+    pub id: String,
 }
 
 #[derive(Debug, Serialize, Clone, Deserialize)]

@@ -865,7 +865,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                         assert!(review["files"].as_array().unwrap().iter().any(|file| file["path"] == "tracked.txt"));
                     }
                     let drafts = store.snapshot().drafts.clone();
-                    let dictation = management.peer.request::<rpc::Transcription>(&agent_protocol::protocol::Call::Transcribe(serde_json::from_value::<rpc::Transcribe>(json!({"audio":"AAA="})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap());
+                    let dictation = management.peer.request::<rpc::Transcription>(&agent_protocol::protocol::Call::Transcribe(serde_json::from_value::<rpc::Transcribe>(json!({"preparation":null,"audio":"AAA="})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap());
                     assert!(dictation.is_err());
                     assert_eq!(*store.snapshot().drafts, *drafts);
                     assert!(management.peer.call(&op::ReadWorktreeSettings {}).await.is_ok());

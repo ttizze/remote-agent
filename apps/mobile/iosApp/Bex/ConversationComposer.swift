@@ -249,10 +249,14 @@ extension ThreadScreen {
         sendRecordedText = false
         let sendIntent = $sendRecordedText
         let key = model.draftKey
-        dictation.start { [weak model] result in
+        var preparation: DictationPreparation?
+        dictation.start(started: { [weak model] in
+            preparation = model?.store?.prepareDictation()
+        }) { [weak model] result in
             guard let model, model.draftKey == key else { return }
             switch result {
-            case let .success(audio): model.transcribe(audio, draftKey: key, sendImmediately: sendIntent.wrappedValue)
+            case let .success(audio): model.transcribe(audio, draftKey: key, sendImmediately: sendIntent.wrappedValue,
+                                                       preparation: preparation)
             case let .failure(error): model.transferError = error.localizedDescription
             }
         }

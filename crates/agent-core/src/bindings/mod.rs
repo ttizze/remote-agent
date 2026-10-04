@@ -327,6 +327,11 @@ impl AgentStore {
             })
     }
 
+    /// Prepare network access without capturing or sending microphone audio.
+    pub fn prepare_dictation(&self) -> Arc<crate::client::DictationPreparation> {
+        Arc::new(self.store.prepare_dictation())
+    }
+
     /// Enqueue synchronously; native task scheduling cannot reorder UI intents.
     pub fn dispatch(&self, intent: Intent) -> Result<Arc<Receipt>, AgentError> {
         let receipt = self.store.dispatch(intent);

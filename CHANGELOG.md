@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prepare the authenticated dictation connection while desktop and iPhone record. Start recognition and upload the complete PCM only after recording stops, keeping the same recognition settings. Scope preparation to the client and recording, service keepalive, release cancelled or expired connections, and retry a lost prepared socket with the complete recording. Advance the binary protocol to reject connections using the previous request layout.
+
 - Reuse fixed Nix tooling across worktrees without entering Nix on each local test run. Keep Cargo locks, indexes and build outputs local while cloning locked dependency data with copy-on-write. Run agent-peer assertions directly with Cargo locally and retain Nix package checks in CI. Keep the UniFFI CLI feature limited to binding generation so unit tests do not replace its native library. Use controlled virtual time for long unit-test delays and parallelize foreground cases.
 
 - Run all local Rust unit tests across crates in parallel with Nix-pinned cargo-nextest, concurrently with headless Swift Markdown tests, while collecting failures from both suites.

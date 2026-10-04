@@ -8,6 +8,7 @@ use crate::client::ClientExt;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dictate {
     pub draft_key: DraftKey,
+    pub preparation: Option<String>,
     pub audio: Vec<u8>,
     pub send: bool,
     pub client_user_message_id: agent_protocol::ids::ClientInputId,
@@ -25,7 +26,10 @@ impl Operation for Dictate {
         Ok((
             draft,
             context
-                .call(&rpc::Transcribe { audio: &self.audio })
+                .call(&rpc::Transcribe {
+                    preparation: self.preparation.clone(),
+                    audio: &self.audio,
+                })
                 .await?,
         ))
     }
