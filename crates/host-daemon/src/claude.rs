@@ -1152,10 +1152,10 @@ impl Worker {
                 message["summary"].as_str(),
                 message["output_file"].as_str(),
             )
-        } else if kind == "attachment" && message["attachment"]["type"] == "queued_command" {
-            native::queued_task_outcome(
-                message["attachment"]["commandMode"].as_str(),
-                &message["attachment"]["prompt"],
+        } else if kind == "user" {
+            native::notification_outcome(
+                message["origin"]["kind"].as_str(),
+                &message["message"]["content"],
             )
         } else {
             None
@@ -1176,6 +1176,24 @@ impl Worker {
                 item: Arc::new(item),
             })
             .await?;
+            return Ok(());
+        }
+        if kind == "user" && message["origin"]["kind"] == "task-notification" {
+            if let Some(item) = native::user_item(
+                message["uuid"]
+                    .as_str()
+                    .ok_or("Claude notification ID is missing")?,
+                &message["message"]["content"],
+                message["isMeta"] == true,
+                message["origin"]["kind"].as_str(),
+                message["promptSource"].as_str(),
+            ) {
+                self.change(SessionChange::Item {
+                    turn_id: self.turn_id.clone(),
+                    item: Arc::new(item),
+                })
+                .await?;
+            }
             return Ok(());
         }
         if kind == "attachment" {
@@ -2280,10 +2298,18 @@ mod execution_tests {
                 .unwrap();
             rows.push(saved_result);
             parent = format!("notice-{id}");
-            rows.push(json!({"type":"attachment","uuid":parent,"parentUuid":format!("result-{id}"),
-                "attachment":{"type":"queued_command","commandMode":"task-notification",
-                    "prompt":format!("<task-notification><tool-use-id>{id}</tool-use-id><status>{status}</status><summary>work & result <details></summary></task-notification>")}}));
+            let native_notice = json!({"type":"user","uuid":parent,"parentUuid":format!("result-{id}"),
+                "origin":{"kind":"task-notification"},"promptSource":"system",
+                "turnOrigin":"task_notification","queueSkipAttachments":true,
+                "message":{"role":"user","content":format!("<task-notification><tool-use-id>{id}</tool-use-id><status>{status}</status><summary>work & result <details></summary></task-notification>")}});
+            worker.message(native_notice.clone()).await.unwrap();
+            rows.push(native_notice);
         }
+        let unmatched = json!({"type":"user","uuid":"unmatched-notice","parentUuid":parent,
+            "origin":{"kind":"task-notification"},"promptSource":"system",
+            "message":{"role":"user","content":"<task-notification><tool-use-id>missing</tool-use-id><status>completed</status><summary>done</summary></task-notification>"}});
+        worker.message(unmatched.clone()).await.unwrap();
+        rows.push(unmatched);
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join(format!("{uuid}.jsonl"));
         std::fs::write(
@@ -2300,12 +2326,13 @@ mod execution_tests {
         let live = router.current_turn(&session, "turn").unwrap();
         assert_eq!(live.items, saved[0].items);
         let items = live.items.as_ref().unwrap();
-        assert_eq!(items.len(), 8);
+        assert_eq!(items.len(), 9);
+        assert!(matches!(items[8].body(), ItemBody::Attachment { .. }));
         assert_eq!(items[4].status, ItemStatus::Failed);
         assert!(
             matches!(items[4].body(), ItemBody::CommandExecution {output, exit_code: Some(7), ..} if output == "failed")
         );
-        for (item, status) in items[5..].iter().zip([
+        for (item, status) in items[5..8].iter().zip([
             ItemStatus::Completed,
             ItemStatus::Failed,
             ItemStatus::Interrupted,

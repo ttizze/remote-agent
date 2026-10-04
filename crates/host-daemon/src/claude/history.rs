@@ -138,7 +138,14 @@ pub(super) fn summary(path: &Path) -> Result<crate::host_rpc::agent::SessionSumm
         if let Some(title) = value["customTitle"].as_str().or(value["aiTitle"].as_str()) {
             thread.name = Some(title.into());
         }
-        if thread.preview.is_none() && value["type"] == "user" && value["isMeta"] != true {
+        if thread.preview.is_none()
+            && value["type"] == "user"
+            && native::is_human_input(
+                value["isMeta"] == true,
+                value["origin"]["kind"].as_str(),
+                value["promptSource"].as_str(),
+            )
+        {
             thread.preview = input_text(&value["message"]["content"]);
         }
     }
@@ -314,11 +321,10 @@ fn convert(
         if let Some(cwd) = node["cwd"].as_str() {
             thread.cwd = Some(cwd.into());
         }
-        if kind == "attachment"
-            && node["attachment"]["type"] == "queued_command"
-            && let Some(outcome) = native::queued_task_outcome(
-                node["attachment"]["commandMode"].as_str(),
-                &node["attachment"]["prompt"],
+        if kind == "user"
+            && let Some(outcome) = native::notification_outcome(
+                node["origin"]["kind"].as_str(),
+                &node["message"]["content"],
             )
             && let Some((turn_index, item_index, item)) =
                 turns
@@ -362,7 +368,13 @@ fn convert(
                     continue;
                 };
                 let input = if kind == "user" {
-                    native::input_item(id, &blocks, node["isMeta"] == true)
+                    native::user_item(
+                        id,
+                        &node["message"]["content"],
+                        node["isMeta"] == true,
+                        node["origin"]["kind"].as_str(),
+                        node["promptSource"].as_str(),
+                    )
                 } else {
                     None
                 };
@@ -387,7 +399,15 @@ fn convert(
         }
         // Queued human input and task activity stay in the running turn.
         // Only a standalone user message starts another persisted turn.
-        if (kind == "user" && initial_item.is_some()) || turns.is_empty() {
+        if (kind == "user"
+            && initial_item.as_ref().is_some_and(|item| {
+                matches!(
+                    item.body(),
+                    agent_protocol::items::ItemBody::UserMessage { .. }
+                )
+            }))
+            || turns.is_empty()
+        {
             turns.push(Arc::new(Turn {
                 id: initial_item
                     .as_ref()
@@ -621,7 +641,7 @@ mod tests {
             json!({"type":"assistant","uuid":"call","parentUuid":"first","message":{"id":"message","content":[{"type":"tool_use","id":"work","name":"Bash","input":{"command":"work"}}]}}),
             json!({"type":"user","uuid":"launch","parentUuid":"call","message":{"content":[{"type":"tool_result","tool_use_id":"work","content":"launched"}]},"toolUseResult":{"backgroundTaskId":"task"}}),
             json!({"type":"user","uuid":"second","parentUuid":"launch","message":{"content":"second input"}}),
-            json!({"type":"attachment","uuid":"notice","parentUuid":"second","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification><tool-use-id>work</tool-use-id><output-file>/work/result.output</output-file><status>failed</status><summary>work failed</summary></task-notification>"}}),
+            json!({"type":"user","uuid":"notice","parentUuid":"second","origin":{"kind":"task-notification"},"promptSource":"system","turnOrigin":"task_notification","queueSkipAttachments":true,"message":{"content":"<task-notification><tool-use-id>work</tool-use-id><output-file>/work/result.output</output-file><status>failed</status><summary>work failed</summary></task-notification>"}}),
         ];
         let history = convert(
             Thread {
@@ -707,6 +727,27 @@ mod tests {
             );
             assert_eq!(item_text(&items[4]), Some("queued answer"));
         }
+    }
+
+    #[test]
+    fn current_user_notification_stays_in_activity_and_does_not_become_the_preview() {
+        let notice = json!({"type":"user","uuid":"notice","parentUuid":null,
+            "version":"2.1.281","origin":{"kind":"task-notification"},"promptSource":"system",
+            "turnOrigin":"task_notification","queueSkipAttachments":true,
+            "message":{"role":"user","content":"<task-notification><tool-use-id>missing</tool-use-id><status>completed</status><summary>done</summary></task-notification>"}});
+        let source = [notice, json!({"type":"user","uuid":"human","parentUuid":"notice","message":{"content":"real question"}})]
+            .iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+        let (_root, path) = fixture(&source);
+        let response = read(&path, 100).unwrap();
+        assert_eq!(response.thread.preview.as_deref(), Some("real question"));
+        let turns = response.thread.turns.unwrap();
+        assert_eq!(turns.len(), 2);
+        let item = &turns[0].items.as_ref().unwrap()[0];
+        assert!(matches!(item.body(), ItemBody::Attachment { .. }));
+        assert!(matches!(
+            agent_core::presentation::ItemMetadata::from(item.as_ref()).kind,
+            agent_core::presentation::GroupKind::Activity
+        ));
     }
 
     #[test]
