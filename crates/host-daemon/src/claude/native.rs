@@ -129,9 +129,11 @@ pub(super) fn tool_result_item(
     metadata: &Value,
     failed: bool,
 ) -> Item {
-    Item::new(
+    let body = Box::new(tool_result_body(body, content, metadata));
+    Item {
         id,
-        if failed {
+        client_input_id: None,
+        status: if failed {
             ItemStatus::Failed
         } else if metadata["backgroundTaskId"]
             .as_str()
@@ -142,8 +144,15 @@ pub(super) fn tool_result_item(
         } else {
             ItemStatus::Completed
         },
-        tool_result_body(body, content, metadata),
-    )
+        body: if metadata["persistedOutputPath"]
+            .as_str()
+            .is_some_and(|path| !path.is_empty())
+        {
+            ItemContent::Deferred { summary: body }
+        } else {
+            ItemContent::Inline { body }
+        },
+    }
 }
 
 pub(super) struct TaskOutcome<'a> {
@@ -664,6 +673,7 @@ mod tests {
             false,
         );
         assert_eq!(unknown.status, ItemStatus::Completed);
+        assert!(!unknown.is_deferred());
         assert!(matches!(
             unknown.body(),
             ItemBody::CommandExecution {
@@ -672,6 +682,15 @@ mod tests {
             }
         ));
         let known = tool_result_body(command.body(), &json!("failed"), &json!({"exitCode":7}));
+        let saved = tool_result_item(
+            command.id.clone(),
+            command.body(),
+            &json!("failed"),
+            &json!({"exitCode":7,"persistedOutputPath":"/work/output"}),
+            true,
+        );
+        assert!(saved.is_deferred());
+        assert_eq!(saved.body(), &known);
         assert!(matches!(
             tool_result_body(&known, &json!("expanded"), &Value::Null),
             ItemBody::CommandExecution {

@@ -159,12 +159,9 @@ fn input_text(content: &Value) -> Option<String> {
     (!text.is_empty()).then(|| text.chars().take(160).collect())
 }
 
-pub(super) struct NativeItemDetails {
-    pub output_path: Option<String>,
-}
 pub(super) struct NativeHistory {
     pub response: ThreadResponse,
-    pub details: BTreeMap<ItemId, NativeItemDetails>,
+    pub output_paths: BTreeMap<ItemId, String>,
 }
 pub(super) fn read_details(path: &Path, limit: usize) -> Result<NativeHistory> {
     read_with_summary(path, summary(path)?.thread, limit)
@@ -306,7 +303,7 @@ fn convert(
     if chain.is_empty() && !nodes.is_empty() {
         warnings.push("transcript has no readable message chain");
     }
-    let mut details = BTreeMap::new();
+    let mut output_paths = BTreeMap::new();
     let session = thread.id.as_ref().unwrap().clone();
     let mut turns: Vec<Arc<Turn>> = Vec::new();
     let mut model = None;
@@ -342,12 +339,7 @@ fn convert(
                     })
         {
             if let Some(path) = outcome.output_path {
-                details.insert(
-                    item.id.clone(),
-                    NativeItemDetails {
-                        output_path: Some(path.into()),
-                    },
-                );
+                output_paths.insert(item.id.clone(), path.into());
             }
             Arc::make_mut(&mut turns[turn_index])
                 .items
@@ -436,14 +428,12 @@ fn convert(
                             &node["toolUseResult"],
                             block["is_error"] == true,
                         ));
-                        details.insert(
-                            item.id.clone(),
-                            NativeItemDetails {
-                                output_path: node["toolUseResult"]["persistedOutputPath"]
-                                    .as_str()
-                                    .map(str::to_owned),
-                            },
-                        );
+                        if let Some(path) = node["toolUseResult"]["persistedOutputPath"]
+                            .as_str()
+                            .filter(|path| !path.is_empty())
+                        {
+                            output_paths.insert(item.id.clone(), path.into());
+                        }
                     } else {
                         warnings.push("tool result has no available tool call");
                     }
@@ -485,7 +475,7 @@ fn convert(
     thread.turns = Some(turns);
     Ok(NativeHistory {
         response: ThreadResponse { thread, model },
-        details,
+        output_paths,
     })
 }
 
@@ -645,10 +635,8 @@ mod tests {
         .unwrap();
         let turns = history.response.thread.turns.unwrap();
         assert_eq!(
-            history.details[&ItemId::from("work")]
-                .output_path
-                .as_deref(),
-            Some("/work/result.output")
+            history.output_paths[&ItemId::from("work")],
+            "/work/result.output"
         );
         assert_eq!(turns.len(), 2);
         let items = turns[0].items.as_ref().unwrap();

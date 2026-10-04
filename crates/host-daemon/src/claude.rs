@@ -515,11 +515,7 @@ impl Claude {
             .find(|item| item.id == params.item_id)
             .ok_or("Claude native history item is unavailable")?;
         let mut item = (**item).clone();
-        if let Some(path) = native_history
-            .details
-            .get(&item.id)
-            .and_then(|details| details.output_path.as_deref())
-        {
+        if let Some(path) = native_history.output_paths.get(&item.id) {
             use tokio::io::AsyncReadExt;
             let file = tokio::fs::File::open(path)
                 .await
