@@ -48,6 +48,23 @@ impl HostRuntime {
     }
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken) -> Result<()> {
         self.service.start();
+        let service = self.service.clone();
+        let maintenance_stop = shutdown.clone();
+        let maintenance = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = maintenance_stop.cancelled() => break,
+                    _ = interval.tick() => {
+                        if let Err(error) = service.cleanup_merged_worktrees().await {
+                            tracing::warn!(target: "bex", operation = "host.worktree.cleanup", message = %error);
+                        }
+                    }
+                }
+            }
+        });
         let mut sessions = JoinSet::new();
         let authorized_slots = Arc::new(tokio::sync::Semaphore::new(64));
         let pairing_slots = Arc::new(tokio::sync::Semaphore::new(16));
@@ -87,9 +104,11 @@ impl HostRuntime {
             }
         };
         shutdown.cancel();
+        let maintenance_result = maintenance.await;
         while sessions.join_next().await.is_some() {}
         self.service.shutdown_owned_processes().await;
         self.endpoint.close().await;
+        maintenance_result?;
         result
     }
     async fn serve(

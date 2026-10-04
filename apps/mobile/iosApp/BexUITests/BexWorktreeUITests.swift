@@ -92,6 +92,7 @@ extension BexLaunchUITests {
         openWorktreeSettings(app)
         let create = app.switches["worktree.create"]
         let copy = app.switches["worktree.copy"]
+        let deleteMerged = app.switches["worktree.deleteMerged"]
         let directory = app.textFields["worktree.directory"]
         let paths = app.textViews["worktree.paths"]
         XCTAssertEqual(create.value as? String, "0")
@@ -99,6 +100,10 @@ extension BexLaunchUITests {
         toggle(create); toggle(copy)
         XCTAssertEqual(create.value as? String, "1")
         XCTAssertEqual(copy.value as? String, "1")
+        scrollToListElement(deleteMerged, in: app)
+        XCTAssertEqual(deleteMerged.value as? String, "0")
+        toggle(deleteMerged)
+        XCTAssertEqual(deleteMerged.value as? String, "1")
         paths.tap(); paths.typeText(".env\nconfig/local")
         directory.tap(); directory.typeText("relative")
         app.buttons["worktree.save"].tap()
@@ -122,6 +127,8 @@ extension BexLaunchUITests {
         XCTAssertEqual(copy.value as? String, "1")
         XCTAssertEqual(directory.value as? String, destination)
         XCTAssertEqual(paths.value as? String, ".env\nconfig/local")
+        scrollToListElement(deleteMerged, in: app)
+        XCTAssertEqual(deleteMerged.value as? String, "1")
         let saved = XCTAttachment(screenshot: app.screenshot())
         saved.name = "Host worktree settings reopened on iPhone"; saved.lifetime = .keepAlways; add(saved)
         verifyWorktreeCancellationAndReset(app)
@@ -146,12 +153,21 @@ extension BexLaunchUITests {
     private func verifyWorktreeCancellationAndReset(_ app: XCUIApplication) {
         let create = app.switches["worktree.create"]
         let copy = app.switches["worktree.copy"]
+        let deleteMerged = app.switches["worktree.deleteMerged"]
         let directory = app.textFields["worktree.directory"]
+        scrollToEarlierListElement(create, in: app, attempts: 10)
         toggle(create)
+        scrollToListElement(deleteMerged, in: app)
+        toggle(deleteMerged)
         app.buttons["worktree.cancel"].tap()
         openWorktreeSettings(app)
         XCTAssertEqual(create.value as? String, "1", "Cancel must not update Host preferences")
+        scrollToListElement(deleteMerged, in: app)
+        XCTAssertEqual(deleteMerged.value as? String, "1", "Cancel must not update cleanup preferences")
+        scrollToEarlierListElement(create, in: app, attempts: 10)
         toggle(create); toggle(copy)
+        scrollToListElement(deleteMerged, in: app)
+        toggle(deleteMerged)
         directory.tap()
         directory.press(forDuration: 1.2)
         let selectAll = app.descendants(matching: .any)
@@ -165,6 +181,8 @@ extension BexLaunchUITests {
         XCTAssertEqual(create.value as? String, "0")
         XCTAssertEqual(copy.value as? String, "0")
         XCTAssertEqual(directory.value as? String, directory.placeholderValue)
+        scrollToListElement(deleteMerged, in: app)
+        XCTAssertEqual(deleteMerged.value as? String, "0")
         app.buttons["worktree.cancel"].tap()
     }
 

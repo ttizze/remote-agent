@@ -162,14 +162,14 @@ async fn real_cargo_waits_for_the_same_cleanup_lock_inode() {
     let fixture = Fixture::new().await;
     let root = fixture.project("locked").await;
     let locks = profile_locks(&root.join("target/debug")).unwrap().unwrap();
-    let log = root.join("cargo.stderr");
+    let log = root.join("lock-wait.log");
     let mut command = fixture.cargo(&root, &root.join("target"));
     command.stderr(fs::File::create(&log).unwrap());
     let mut process = Child::spawn(command).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let waiting = fs::read_to_string(&log)
-            .unwrap()
+        let stderr = fs::read(&log).unwrap();
+        let waiting = String::from_utf8_lossy(&stderr)
             .contains("Blocking waiting for file lock on build directory");
         assert!(process.try_wait().unwrap().is_none());
         if waiting {
@@ -177,9 +177,9 @@ async fn real_cargo_waits_for_the_same_cleanup_lock_inode() {
         }
         assert!(
             Instant::now() < deadline,
-            "Cargo did not wait for the profile lock"
+            "Cargo did not reach the held profile lock"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     drop(locks);
     let (_sender, cancel) = watch::channel(false);

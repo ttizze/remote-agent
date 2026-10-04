@@ -140,7 +140,7 @@ async fn incompatible_wire_versions_are_rejected_in_both_directions() {
     use std::time::Duration;
 
     tokio::time::timeout(Duration::from_secs(10), async {
-        let incompatible_alpn = b"remote-agent/streams/2";
+        let incompatible_alpn = b"remote-agent/streams/3";
         let current = Endpoint::bind(Identity::generate(), Relays::Loopback)
             .await
             .unwrap();
