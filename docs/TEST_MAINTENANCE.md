@@ -178,6 +178,7 @@ transfer server just to delete that check would reverse A14.
   Require successful CI checks for the current commit and a clean working tree
   before claiming full verification. Manual check commands remain for
   debugging. Apple CI uses three Apple Silicon `macos-26` runners with Xcode 26.6.
+  It selects the image's preinstalled Xcode directly.
   The Mac runner uses `nix develop . --command just quality rust` for Rust
   contracts and Mac Browser E2E. Two iPhone runners use
   `nix develop . --command just quality swift` for Swift checks and acceptance.

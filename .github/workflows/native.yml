@@ -127,16 +127,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Select stable Xcode and free unused SDK space
+      - name: Use preinstalled Xcode 26.6
         run: |
           export DEVELOPER_DIR="$BEX_XCODE_DEVELOPER_DIR"
           test -d "$DEVELOPER_DIR"
-          selected_xcode=$(dirname "$(dirname "$DEVELOPER_DIR")")
-          for xcode in /Applications/Xcode*.app; do
-            if [[ $(realpath "$xcode") != "$selected_xcode" ]]; then
-              sudo rm -rf "$xcode"
-            fi
-          done
           xcodebuild -version
           xcrun simctl list runtimes
           df -h /
