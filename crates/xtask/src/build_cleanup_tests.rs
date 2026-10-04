@@ -162,22 +162,22 @@ async fn real_cargo_waits_for_the_same_cleanup_lock_inode() {
     let fixture = Fixture::new().await;
     let root = fixture.project("locked").await;
     let locks = profile_locks(&root.join("target/debug")).unwrap().unwrap();
-    let stderr = fixture.root.join("cargo-wait.stderr");
+    let log = root.join("lock-wait.log");
     let mut command = fixture.cargo(&root, &root.join("target"));
-    command.stderr(fs::File::create(&stderr).unwrap());
+    command.stderr(fs::File::create(&log).unwrap());
     let mut process = Child::spawn(command).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         assert!(process.try_wait().unwrap().is_none());
-        let log = fs::read_to_string(&stderr).unwrap();
-        if log.contains("Blocking waiting for file lock") {
+        let stderr = fs::read(&log).unwrap();
+        if String::from_utf8_lossy(&stderr).contains("Blocking waiting for file lock") {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "Cargo did not wait for the lock: {log}"
+            "Cargo did not reach the held lock"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     drop(locks);
     let (_sender, cancel) = watch::channel(false);
@@ -188,7 +188,7 @@ async fn real_cargo_waits_for_the_same_cleanup_lock_inode() {
     assert!(
         output.status.success(),
         "{}",
-        fs::read_to_string(stderr).unwrap()
+        String::from_utf8_lossy(&fs::read(log).unwrap())
     );
     Fixture::runs(&root);
 }

@@ -58,6 +58,7 @@ struct WorktreeSettingsScreen: View {
     @Environment(\.dismiss) private var dismiss
     @State private var createOnNewSession = false
     @State private var copyOnCreate = false
+    @State private var deleteMerged = false
     @State private var copyPaths = ""
     @State private var directory = ""
     @State private var loaded = false
@@ -90,6 +91,12 @@ struct WorktreeSettingsScreen: View {
                     .accessibilityIdentifier("worktree.paths")
             } header: { Text("コピー対象") }
                 footer: { Text("リポジトリからの相対パスを1行に1つ指定します（例: .env、config/local）。存在しないパスはスキップします。") }
+                .disabled(!loaded || busy || !model.isConnected)
+            Section {
+                Toggle("マージ済みを自動削除", isOn: $deleteMerged)
+                    .accessibilityIdentifier("worktree.deleteMerged")
+            } header: { Text("自動削除") }
+                footer: { Text("main に取り込まれた作業場所を毎分確認します。実行中・回答待ち・ターミナル使用中・ローカル変更ありの場合は保留し、後で再確認します。ブランチと会話履歴は残ります。") }
                 .disabled(!loaded || busy || !model.isConnected)
             if busy {
                 ProgressView().accessibilityLabel("設定を通信中")
@@ -144,6 +151,7 @@ struct WorktreeSettingsScreen: View {
             guard let settings = snapshot.worktreeSettings() else { error = "設定の応答が無効です。"; return }
             createOnNewSession = settings.createOnNewSession
             copyOnCreate = settings.copyOnCreate
+            deleteMerged = settings.deleteMerged
             copyPaths = settings.copyPaths.joined(separator: "\n")
             directory = settings.worktreeDirectory
             loaded = true
@@ -156,7 +164,8 @@ struct WorktreeSettingsScreen: View {
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         model.requestSnapshot(.updateWorktreeSettings(UpdateWorktreeSettings(settings: WorktreeSettings(
             createOnNewSession: createOnNewSession, copyOnCreate: copyOnCreate,
-            copyPaths: paths, worktreeDirectory: directory.trimmingCharacters(in: .whitespacesAndNewlines)
+            copyPaths: paths, worktreeDirectory: directory.trimmingCharacters(in: .whitespacesAndNewlines),
+            deleteMerged: deleteMerged
         )))) { snapshot, result in
             busy = false
             if case let .failure(failure) = result {
