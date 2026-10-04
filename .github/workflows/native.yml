@@ -94,6 +94,13 @@ jobs:
         run: nix develop .#native --command cargo build --locked -p host-fixture -p codex-app-server -p bex-process --bins
       - name: Android emulator acceptance
         run: nix develop .#android-test --command bash scripts/android-e2e.sh
+      - name: Retain Android acceptance logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: android-acceptance
+          path: target/qa/android-*
+          retention-days: 7
   macos:
     name: ${{ matrix.client }}
     strategy:
@@ -180,8 +187,8 @@ jobs:
             cat > target/qa/chrome-ci <<'SH'
           #!/bin/sh
           exec 2>> "$BEX_CHROME_LOG"
-          printf 'CI Chrome launch: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >&2
-          (sleep 10; /usr/bin/sample "$$" 2 -file "$BEX_CHROME_LOG.sample.txt") &
+          printf 'CI Chrome launch: %s; pid=%s; args=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$$" "$*" >&2
+          (sleep 2; /usr/bin/sample "$$" 1 -file "$BEX_CHROME_LOG.$$.sample.txt") &
           exec "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" --enable-logging=stderr --use-mock-keychain "$@"
           SH
             chmod 700 target/qa/chrome-ci
@@ -203,7 +210,7 @@ jobs:
           path: |
             target/qa/quality.log
             target/qa/chrome.log
-            target/qa/chrome.log.sample.txt
+            target/qa/chrome.log.*.sample.txt
             target/qa/Bex-*
           retention-days: 7
   windows:

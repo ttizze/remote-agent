@@ -346,7 +346,26 @@ async fn worker(
             arguments.push("test-without-building".into());
             let setup_seconds = started.elapsed().as_secs_f64();
             println!("{label}: Simulator and Host ready in {setup_seconds:.2}s");
-            let status = supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, BUILD_TIMEOUT).await;
+            let testing = supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, BUILD_TIMEOUT);
+            tokio::pin!(testing);
+            let status = if std::env::var("CI").as_deref() == Ok("true") {
+                tokio::select! {
+                    status = &mut testing => status,
+                    _ = async {
+                        loop {
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                            let output = fs::read_to_string(prefix.with_extension("log")).unwrap_or_default();
+                            if output.contains("App event loop idle notification not received") {
+                                let _ = supervision::run(
+                                    &args!["/usr/bin/sample", "Bex", "2", "-file", prefix.with_extension("hang.sample.txt")],
+                                    &cwd, Io::Log(&log), &cancel, Duration::from_secs(10),
+                                ).await;
+                                break;
+                            }
+                        }
+                    } => testing.await,
+                }
+            } else { testing.await };
             if *cancel.borrow() { return Err(supervision::interrupted()); }
             let summary = supervision::run(&args!["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", &bundle, "--format", "json"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
             let summary: Value = serde_json::from_slice(&summary.stdout)?;
@@ -461,6 +480,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
     }
     let log = File::create(records.join("build.log"))?;
     let build_started = Instant::now();
+    println!("Building iOS bindings and isolated Host fixtures");
     for arguments in [
         args![vec; "scripts/build-agent-ios.sh", "simulator"],
         args![vec;
@@ -496,6 +516,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
             }
         }
     }
+    println!("Building the iOS app and UI test bundle");
     supervision::run(
         &args![
             "xcodebuild",
@@ -545,6 +566,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
     )
     .await?;
     let runtime = runtime(&serde_json::from_slice(&runtimes.stdout)?)?;
+    println!("Preparing the iOS Simulator runtime");
     let template_started = Instant::now();
     // Hosted CI devices disappear with the runner. Migrate the worker's own
     // device once instead of migrating, shutting down, cloning and booting again.

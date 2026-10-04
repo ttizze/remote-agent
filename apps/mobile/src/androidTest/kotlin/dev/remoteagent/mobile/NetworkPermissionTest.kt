@@ -14,6 +14,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -44,7 +45,9 @@ class NetworkPermissionTest {
             assertTrue(device.wait(Until.hasObject(By.text("アプリの設定を開く")), 10_000))
             assertFalse(device.hasObject(By.text("PCとペアリング")))
             assertThrows(IOException::class.java) { readLocalHost() }
-            device.findObject(By.text("アプリの設定を開く")).click()
+            val settings = device.wait(Until.findObject(By.text("アプリの設定を開く")), 10_000)
+            assertNotNull("App settings must remain available after a denied network request", settings)
+            settings.click()
             assertTrue(device.wait(Until.hasObject(By.pkg("com.android.settings")), 10_000))
             device.pressBack()
             assertTrue(device.wait(Until.hasObject(By.text("インターネット経由で接続")), 10_000))
