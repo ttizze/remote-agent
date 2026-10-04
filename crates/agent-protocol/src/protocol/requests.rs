@@ -63,6 +63,7 @@ macro_rules! contracts {
 }
 contracts! {
     OpenSession, "host/session/open" => (s::OpenSession, s::OpenedSession),
+    ReadHistory, "host/session/history/read" => (s::ReadHistory, s::HistoryPage) [clone],
     AnswerSession, "host/session/answer" => (op::SessionAnswer, m::Empty),
     RequestSession, "host/session/request" => (op::OpenRequest, s::SessionRef) [clone],
     SessionScope, "host/session/scope" => (m::Empty, String),

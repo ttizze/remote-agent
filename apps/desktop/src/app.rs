@@ -155,7 +155,6 @@ struct DetailLoad {
 }
 #[derive(Clone)]
 enum ConversationRow {
-    History,
     Turn(Arc<agent_core::presentation::conversation::RenderedTurn>),
     Pending(String, Arc<PendingSubmission>),
     Request(Box<agent_core::presentation::conversation::Request>),
@@ -163,7 +162,6 @@ enum ConversationRow {
 impl ConversationRow {
     fn same_identity(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::History, Self::History) => true,
             (Self::Turn(a), Self::Turn(b)) => a.source.id == b.source.id,
             (Self::Pending(a, _), Self::Pending(b, _)) => a == b,
             (Self::Request(a), Self::Request(b)) => a.id == b.id,
@@ -471,21 +469,6 @@ impl Desktop {
         }
         let list = ListState::new(0, ListAlignment::Bottom, px(600.));
         list.set_follow_mode(FollowMode::Tail);
-        let entity = cx.entity().downgrade();
-        list.set_scroll_handler(move |event, window, _| {
-            if event.is_scrolled && !event.is_following_tail && event.visible_range.start == 0 {
-                let entity = entity.clone();
-                window.on_next_frame(move |window, cx| {
-                    let _ = entity.update(cx, |view, cx| {
-                        if view.history_error.is_empty()
-                            && view.list.logical_scroll_top().item_ix == 0
-                        {
-                            view.older(window, cx);
-                        }
-                    });
-                });
-            }
-        });
         let mut view = Self {
             session: None,
             snapshot: Arc::default(),
@@ -808,7 +791,6 @@ impl Desktop {
                 if let Err(error) = result {
                     self.history_error = error;
                 }
-                self.list.remeasure_items(0..1);
                 return;
             }
             OperationCompletion::Item { generation, key } => {
@@ -1227,12 +1209,13 @@ impl Desktop {
         }
         self.rows = rows;
         if self.history_loading
+            && !self.list.is_following_tail()
             && let Some((id, old_height)) = preserve
         {
             let generation = self.snapshot.epoch;
             let owner = cx.entity().downgrade();
             window.on_next_frame(move |_, cx| { let _ = owner.update(cx, |view, cx| {
-                if view.snapshot.epoch == generation && matches!(view.rows.get(anchor.item_ix), Some(ConversationRow::Turn(turn)) if turn.source.id == id)
+                if view.snapshot.epoch == generation && !view.list.is_following_tail() && matches!(view.rows.get(anchor.item_ix), Some(ConversationRow::Turn(turn)) if turn.source.id == id)
                     && let Some(bounds) = view.list.bounds_for_item(anchor.item_ix)
                 {
                     view.list.scroll_to(ListOffset { item_ix: anchor.item_ix, offset_in_item: anchor.offset_in_item + bounds.size.height - old_height }); cx.notify();
@@ -1275,24 +1258,31 @@ impl Desktop {
         self.dispatch(Intent::ReadThread(op::ReadThread::open(id)));
         self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
-    fn older(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if self.history_loading {
-            return;
+    fn load_visible_history(&mut self, cx: &mut Context<Self>) {
+        let viewport = self.list.viewport_bounds();
+        let oldest_visible = viewport.size.height > px(0.)
+            && (self.rows.is_empty()
+                || self.list.bounds_for_item(0).is_some_and(|bounds| {
+                    bounds.top() >= viewport.top() - viewport.size.height * 0.6
+                        && bounds.top() <= viewport.bottom()
+                }));
+        if agent_core::presentation::conversation::should_load_history(
+            self.has_older_history(),
+            self.history_loading || !self.history_error.is_empty(),
+            oldest_visible,
+            self.list.is_scrolled_to_end() != Some(false),
+            self.list.is_following_tail(),
+        ) {
+            let generation = self.snapshot.epoch;
+            self.history_loading = true;
+            self.perform(
+                Intent::ReadOlder {
+                    thread_id: self.selected().expect("selected conversation").clone(),
+                },
+                OperationCompletion::History { generation },
+            );
+            cx.notify();
         }
-        if !self.has_older_history() {
-            return;
-        }
-        let generation = self.snapshot.epoch;
-        self.history_loading = true;
-        self.history_error.clear();
-        self.list.remeasure_items(0..1);
-        self.perform(
-            Intent::ReadOlder {
-                thread_id: self.selected().expect("selected conversation").clone(),
-            },
-            OperationCompletion::History { generation },
-        );
-        cx.notify();
     }
     fn detail(&mut self, turn_id: TurnId, item_id: ItemId) {
         let key = (turn_id.clone(), item_id.clone());
@@ -1797,7 +1787,6 @@ fn conversation_rows(
 ) -> Vec<ConversationRow> {
     let mut rows = Vec::new();
     if let Some(rendered) = rendered {
-        rows.push(ConversationRow::History);
         rows.extend(rendered.turns.iter().cloned().map(ConversationRow::Turn));
         rows.extend(rendered.queued.iter().filter_map(|item| {
             if let agent_core::presentation::conversation::ItemSource::Pending(id, pending) =
@@ -2122,19 +2111,17 @@ mod completion_tests {
         );
         let rows = conversation_rows(&rendered);
         let repeated = conversation_rows(&rendered);
-        assert_eq!(rows.len(), 4);
-        assert!(matches!(rows[0], ConversationRow::History));
+        assert_eq!(rows.len(), 3);
         for (index, turn) in source.turns.as_ref().unwrap().iter().enumerate() {
-            let ConversationRow::Turn(row) = &rows[index + 1] else {
+            let ConversationRow::Turn(row) = &rows[index] else {
                 panic!("missing turn")
             };
             assert!(Arc::ptr_eq(&row.source, turn));
         }
         assert!(
-            matches!(&rows[3], ConversationRow::Request(request) if request.id.as_str() == "global")
+            matches!(&rows[2], ConversationRow::Request(request) if request.id.as_str() == "global")
         );
-        assert!(rows.iter().zip(&repeated).all(|(a, b)| a.unchanged(b)
-            || matches!((a, b), (ConversationRow::History, ConversationRow::History))));
+        assert!(rows.iter().zip(&repeated).all(|(a, b)| a.unchanged(b)));
         assert_eq!(snapshot, before);
     }
 }

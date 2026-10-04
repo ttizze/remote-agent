@@ -118,7 +118,7 @@ extension BexAppViewModel {
         }
     }
 
-    func loadOlderHistory(_: String?) {
+    func loadOlderHistory() {
         guard !loadingHistory, let id = selectedThreadId else { return }
         loadingHistory = true
         perform(.readOlder(threadId: id)) { [weak self] _ in

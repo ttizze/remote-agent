@@ -89,6 +89,80 @@ impl Operation for ListSessions {
 
 pub use agent_protocol::operations::ReadItem;
 
+pub use agent_protocol::session::ReadHistory;
+
+impl Operation for ReadHistory {
+    type Output = (agent_protocol::session::HistoryPage, Option<uuid::Uuid>);
+    async fn run(&self, context: &mut Execution<'_>) -> Result<Self::Output, PeerError> {
+        let subscription = context.snapshot.subscriptions.get(&self.session).copied();
+        Ok((context.call(self).await?, subscription))
+    }
+    fn apply(self, snapshot: &mut Snapshot, (page, subscription): Self::Output) -> Vec<Effect> {
+        if subscription != snapshot.subscriptions.get(&self.session).copied()
+            || snapshot
+                .conversations
+                .get(&self.session)
+                .is_none_or(|thread| thread.history_cursor.as_deref() != Some(&self.cursor))
+        {
+            return Vec::new();
+        }
+        let details = item_details(&self.session, &page.turns);
+        let thread = shared_mut(&mut snapshot.conversations, &self.session).unwrap();
+        thread.turns = Some(crate::session::prepend_history(
+            &page.turns,
+            thread.turns.as_deref().unwrap_or_default(),
+        ));
+        thread.history_cursor = page.next_cursor;
+        thread.history_has_more = Some(thread.history_cursor.is_some());
+        if thread.history_cursor.is_none()
+            && let Some(first) = thread.turns.as_mut().and_then(|turns| turns.first_mut())
+        {
+            Arc::make_mut(first).items_has_more = Some(false);
+        }
+        thread.history_read_state = Some(crate::session::HistoryReadState::new(
+            if thread.history_cursor.is_some() {
+                crate::session::HistoryReadKind::Partial
+            } else {
+                crate::session::HistoryReadKind::Complete
+            },
+            Vec::new(),
+        ));
+        snapshot.error = None;
+        reconcile_pending(snapshot, &self.session);
+        details
+    }
+}
+
+fn item_details(
+    session: &crate::session::SessionRef,
+    turns: &[Arc<crate::models::Turn>],
+) -> Vec<Effect> {
+    turns
+        .iter()
+        .flat_map(|turn| {
+            turn.items
+                .iter()
+                .flatten()
+                .filter(|item| {
+                    item.is_deferred()
+                        && matches!(
+                            item.body(),
+                            crate::models::ItemBody::UserMessage { .. }
+                                | crate::models::ItemBody::AssistantText { .. }
+                                | crate::models::ItemBody::ImageGeneration { .. }
+                        )
+                })
+                .map(|item| {
+                    Effect::execute(ReadItem {
+                        thread_id: session.clone(),
+                        turn_id: turn.id.clone(),
+                        item_id: item.id.clone(),
+                    })
+                })
+        })
+        .collect()
+}
+
 /// The item Arc is its local source generation. Session updates replace this
 /// Arc even when the new value happens to equal the old one.
 #[derive(Debug)]
@@ -306,33 +380,10 @@ impl Operation for ReadThread {
             }
             *live = turns;
         }
-        let mut details: Vec<_> = output
-            .response
-            .thread
-            .turns
-            .iter()
-            .flatten()
-            .flat_map(|turn| {
-                turn.items
-                    .iter()
-                    .flatten()
-                    .filter(|item| {
-                        matches!(
-                            item.body(),
-                            crate::models::ItemBody::UserMessage { .. }
-                                | crate::models::ItemBody::AssistantText { .. }
-                                | crate::models::ItemBody::ImageGeneration { .. }
-                        ) && item.is_deferred()
-                    })
-                    .map(|item| {
-                        Effect::execute(ReadItem {
-                            thread_id: self.thread_id.clone(),
-                            turn_id: turn.id.clone(),
-                            item_id: item.id.clone(),
-                        })
-                    })
-            })
-            .collect();
+        let mut details = item_details(
+            &self.thread_id,
+            output.response.thread.turns.as_deref().unwrap_or_default(),
+        );
         let mut effects = if self.open {
             open_thread(snapshot, output.response.thread, output.response.model)
         } else {
@@ -427,7 +478,19 @@ pub(super) fn refresh_thread(snapshot: &mut Snapshot, incoming: Thread) -> Vec<E
         snapshot.error = Some("thread ID is missing".into());
         return Vec::new();
     };
-    let thread = incoming;
+    let mut thread = incoming;
+    if thread.history_cursor.is_some()
+        && let Some(cached) = snapshot.conversations.get(&id)
+        && let Some(turns) = crate::session::retained_history(
+            cached.turns.as_deref().unwrap_or_default(),
+            thread.turns.as_deref().unwrap_or_default(),
+        )
+    {
+        thread.turns = Some(turns);
+        thread.history_cursor = cached.history_cursor.clone();
+        thread.history_has_more = cached.history_has_more;
+        thread.history_read_state = cached.history_read_state.clone();
+    }
     Arc::make_mut(&mut snapshot.conversations).insert(id.clone(), Arc::new(thread));
     reconcile_pending(snapshot, &id);
 

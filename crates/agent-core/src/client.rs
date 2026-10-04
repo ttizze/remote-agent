@@ -149,8 +149,8 @@ impl ClientExt for Client {
         thread_id: &crate::session::SessionRef,
         session: Option<&crate::transport::Session>,
     ) -> Result<Vec<SessionImage>, PeerError> {
-        // One bounded provider view; close this transient subscription before
-        // returning images so it never replaces the Store's visible session.
+        // Gallery reads follow bounded history pages independently of the
+        // Store's visible window and close their transient subscription first.
         let read = ReadThread {
             limit: 1000,
             ..ReadThread::new(thread_id.to_owned())
@@ -160,7 +160,34 @@ impl ClientExt for Client {
             .await?;
         validate_output(&read, &opened)?;
         drop(stream);
-        let thread = opened.response.thread;
+        let mut thread = opened.response.thread;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let Some(cursor) = thread.history_cursor.take() else {
+                break;
+            };
+            if !seen.insert(cursor.clone()) {
+                return Err(PeerError::InvalidMessage("history cursor repeated".into()));
+            }
+            let page = self
+                .call(&crate::session::ReadHistory {
+                    session: thread_id.clone(),
+                    cursor,
+                })
+                .await?;
+            thread.turns = Some(crate::session::prepend_history(
+                &page.turns,
+                thread.turns.as_deref().unwrap_or_default(),
+            ));
+            thread.history_cursor = page.next_cursor;
+            thread.history_has_more = Some(thread.history_cursor.is_some());
+            if thread.history_cursor.is_none() {
+                thread.history_read_state = Some(crate::session::HistoryReadState::new(
+                    crate::session::HistoryReadKind::Complete,
+                    Vec::new(),
+                ));
+            }
+        }
         let mut images = Vec::new();
         let mut sources = std::collections::HashSet::new();
         let mut native_items = std::collections::HashSet::new();

@@ -78,6 +78,11 @@ pub(crate) trait Agent: Identity {
     fn storage_directory(&self) -> &Path;
     async fn list(&self, search: &str, cursor: Option<String>) -> Result<SessionPage, Failure>;
     async fn open(&self, id: &str, limit: usize) -> Result<ThreadResponse, Failure>;
+    async fn read_history(
+        &self,
+        id: &str,
+        cursor: &str,
+    ) -> Result<agent_protocol::session::HistoryPage, Failure>;
     async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure>;
     async fn create(
         &self,

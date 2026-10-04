@@ -388,6 +388,9 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         Respond, Transcribe, UploadAttachment, PairRemoteHost,
     ], {
         Intent::ReadOlder { thread_id } => {
+            if let Some(cursor) = previous.conversations.get(&thread_id).and_then(|thread| thread.history_cursor.clone()) {
+                return prepare(previous, next, op::ReadHistory { session: thread_id, cursor });
+            }
             let limit = u32::try_from(previous.conversations.get(&thread_id).map_or(5, |thread| {
                 thread.history_limit
                     .unwrap_or_else(|| thread.turns.as_ref().map_or(5, |turns| turns.len() as u64))

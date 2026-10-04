@@ -168,14 +168,16 @@ async fn real_cargo_waits_for_the_same_cleanup_lock_inode() {
     let mut process = Child::spawn(command).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        assert!(process.try_wait().unwrap().is_none());
         let stderr = fs::read(&log).unwrap();
-        if String::from_utf8_lossy(&stderr).contains("Blocking waiting for file lock") {
+        let waiting = String::from_utf8_lossy(&stderr)
+            .contains("Blocking waiting for file lock on build directory");
+        assert!(process.try_wait().unwrap().is_none());
+        if waiting {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "Cargo did not reach the held lock"
+            "Cargo did not reach the held profile lock"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }

@@ -122,25 +122,6 @@ impl Desktop {
         let history = list(self.list.clone(), move |index, _, cx| {
             entity
                 .update(cx, |view, cx| match view.rows.get(index).cloned() {
-                    Some(ConversationRow::History) => {
-                        if !view.has_older_history() {
-                            return div().into_any_element();
-                        }
-                        let label = if view.history_loading {
-                            "履歴を読み込み中…".into()
-                        } else if !view.history_error.is_empty() {
-                            format!("{} · 再試行", view.history_error)
-                        } else {
-                            "以前の履歴を読み込む".into()
-                        };
-                        h_flex()
-                            .justify_center()
-                            .p_4()
-                            .child(view.button("older-history", label, cx, |view, window, cx| {
-                                view.older(window, cx)
-                            }))
-                            .into_any_element()
-                    }
                     Some(ConversationRow::Turn(turn)) => {
                         let session = view
                             .rendered
