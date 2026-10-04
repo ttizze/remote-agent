@@ -13,7 +13,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
-      - name: Diagnose isolated headless Chrome startup
+      - name: Build the native process supervisor
+        run: nix develop . --command cargo build --locked -p bex-process --bin bex-provider-supervisor
+      - name: Diagnose supervised headless Chrome startup
         run: |
           nix develop . --command python3 - <<'PY'
           import json, os, signal, subprocess, tempfile, time
@@ -24,7 +26,9 @@ jobs:
           with tempfile.TemporaryDirectory(prefix='bex-ios-') as directory:
               profile = Path(directory) / 'host/browser'
               stderr = Path(directory) / 'chrome-stderr.log'
-              command = [chrome, '--user-data-dir=' + str(profile), '--headless=new',
+              profile.mkdir(parents=True, mode=0o700)
+              command = ['cargo', 'run', '--locked', '-p', 'bex-process', '--bin', 'bex-provider-supervisor', '--',
+                         chrome, '--user-data-dir=' + str(profile), '--headless=new',
                          '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
                          '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
                          '--window-size=1024,768', 'about:blank']
@@ -41,13 +45,9 @@ jobs:
                   finally:
                       process.stdin.close()
                       try:
-                          os.killpg(process.pid, signal.SIGTERM)
-                      except ProcessLookupError:
-                          pass
-                      try:
                           process.wait(timeout=5)
                       except subprocess.TimeoutExpired:
-                          os.killpg(process.pid, signal.SIGKILL)
+                          os.killpg(process.pid, signal.SIGTERM)
                           process.wait()
                   assert ready, 'Chrome did not publish its DevTools port'
           PY
