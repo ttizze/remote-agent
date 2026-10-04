@@ -1,7 +1,7 @@
 import AgentCore
 import SwiftUI
 
-private let modelSettingsBackground = Color(white: 0.09)
+private let modelSettingsBackground = Color(red: 0.08, green: 0.09, blue: 0.11)
 
 struct ModelSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -14,6 +14,7 @@ struct ModelSettingsSheet: View {
         .presentationDetents([.height(520), .large])
         .presentationDragIndicator(.visible)
         .presentationBackground(modelSettingsBackground)
+        .presentationCornerRadius(24)
     }
 }
 
@@ -66,7 +67,7 @@ struct ModelSettingsScreen: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
+        HStack(alignment: .top, spacing: 16) {
             ModelAgentRail(provider: provider, disabled: disabled || (!defaults && !model.isNewThread),
                            select: selectProvider)
             Divider().padding(.vertical, 8)
@@ -79,10 +80,11 @@ struct ModelSettingsScreen: View {
                     } label: {
                         HStack {
                             Text(identity)
-                                .lineLimit(1).font(.system(size: 12))
+                                .lineLimit(1).font(.system(size: 13)).foregroundStyle(.secondary)
                             Spacer(minLength: 8)
                             Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
                         }
+                        .padding(.horizontal, 12)
                         .frame(minHeight: 44).contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -92,7 +94,7 @@ struct ModelSettingsScreen: View {
                         WeeklyUsageView(windows: model.snapshot.accountWeeklyUsage(
                             provider: account.provider, id: account.id
                         ), compact: true)
-                            .accessibilityIdentifier("model.account.usage")
+                            .accessibilityIdentifier("model.account.usage").padding(.horizontal, 12)
                             .padding(.bottom, 12)
                     }
                     Divider()
@@ -101,13 +103,13 @@ struct ModelSettingsScreen: View {
                     if let scope, model.snapshot.hasModelDefaultsOverride(scope: scope) {
                         Divider()
                         Button("共通設定を使う") { model.perform(.inheritModelDefaults(scope: scope)) }
-                            .buttonStyle(.plain).frame(minHeight: 44)
+                            .buttonStyle(.plain).frame(minHeight: 44).padding(.horizontal, 12)
                             .accessibilityIdentifier("model.defaults.inherit").disabled(disabled)
                     }
                 }
-                .padding(.horizontal, 16).padding(.bottom, 16)
             }
         }
+        .padding(.horizontal, 32).padding(.vertical, 12)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("model.picker")
         .font(.system(size: 14))
@@ -152,6 +154,7 @@ struct ModelSettingsScreen: View {
             Divider()
             HStack(spacing: 16) {
                 if !controls.efforts.isEmpty {
+                    let effort = defaults ? preferences.effort ?? "自動" : controls.effort
                     Menu {
                         Picker("思考の深さ", selection: Binding<String?>(get: {
                             defaults ? preferences.effort : controls.effort
@@ -169,11 +172,12 @@ struct ModelSettingsScreen: View {
                         }
                         .pickerStyle(.inline).labelsHidden()
                     } label: {
-                        ModelControlLabel(icon: "brain", value: defaults ? preferences.effort ?? "自動" : controls.effort)
+                        ModelControlLabel(value: effort, icon: ReasoningStrengthIcon(level: controls.effortLevel,
+                                                                                     count: controls.efforts.count))
                     }
                     .accessibilityLabel("思考の深さ")
                     .accessibilityIdentifier("model.sheet.effort")
-                    .accessibilityValue(defaults ? preferences.effort ?? "自動" : controls.effort)
+                    .accessibilityValue(effort)
                     .disabled(disabled)
                 }
                 if let tier = controls.fastServiceTier {
@@ -196,7 +200,7 @@ struct ModelSettingsScreen: View {
                         }
                         .pickerStyle(.inline).labelsHidden()
                     } label: {
-                        ModelControlLabel(icon: controls.fast ? "bolt.fill" : "bolt", value: value)
+                        ModelControlLabel(value: value, icon: Image(systemName: controls.fast ? "bolt.fill" : "bolt"))
                     }
                     .accessibilityLabel("速度")
                     .accessibilityIdentifier(defaults ? "model.defaults.speed" : "model.sheet.fast")
@@ -204,6 +208,7 @@ struct ModelSettingsScreen: View {
                 }
             }
             .buttonStyle(.plain)
+            .padding(.horizontal, 12).padding(.top, 4)
         }
     }
 
@@ -215,7 +220,7 @@ struct ModelSettingsScreen: View {
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .accessibilityIdentifier("model.search")
         }
-        .frame(minHeight: 44)
+        .padding(.horizontal, 12).frame(minHeight: 44)
         .overlay(alignment: .bottom) { Divider() }
         .padding(.bottom, 8)
         let choices = model.snapshot.modelsMatching(provider: provider, query: search)
@@ -235,7 +240,7 @@ struct ModelSettingsScreen: View {
                 }
                 if choices.isEmpty {
                     Text(loadingModels ? "モデルを読み込み中…" : "利用可能なモデルがありません")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.secondary).padding(.horizontal, 12)
                 }
                 ForEach(choices, id: \.model) { choice in
                     Button {
@@ -254,7 +259,6 @@ struct ModelSettingsScreen: View {
             }
             .buttonStyle(.plain).foregroundStyle(.primary)
         }
-        .scrollClipDisabled()
         .frame(height: min(CGFloat(max(choices.count + (defaults ? 1 : 0), 1)) * 44, 264))
         .padding(.bottom, 8)
         ForEach(model.snapshot.modelErrorMessages(provider: provider), id: \.self) { error in
@@ -308,7 +312,7 @@ private struct ModelAgentRail: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.top, 8).frame(width: 60)
+        .frame(width: 44)
     }
 }
 
@@ -318,29 +322,27 @@ private struct ModelChoiceRow: View {
 
     var body: some View {
         HStack {
-            Text(label)
+            Text(label).fontWeight(selected ? .medium : .regular)
             Spacer()
             if selected {
                 Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
             }
         }
+        .padding(.horizontal, 12)
         .frame(minHeight: 44)
         .contentShape(Rectangle())
-        .background {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(selected ? Color(white: 0.13) : .clear)
-                .padding(.horizontal, -8)
-        }
+        .background(selected ? Color.accentColor.opacity(0.14) : .clear,
+                    in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
-private struct ModelControlLabel: View {
-    let icon: String
+private struct ModelControlLabel<Icon: View>: View {
     let value: String
+    let icon: Icon
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: icon)
+            icon
             Text(value)
             Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
         }

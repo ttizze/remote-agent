@@ -54,7 +54,7 @@ struct ReasoningStrengthIcon: View {
             ForEach(0 ..< count, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 1)
                     .fill(index < Int(level) ? Color.accentColor : Color.secondary.opacity(0.35))
-                    .frame(width: 3, height: 5 + CGFloat(index) * 2.5)
+                    .frame(width: 3, height: 6 + 10 * CGFloat(index + 1) / CGFloat(count))
             }
         }
         .frame(width: 28, height: 22)
