@@ -1211,8 +1211,8 @@ impl HostRpcService {
             let mut group = Vec::new();
             for (_, capabilities, threads, head) in &mut listings {
                 while head.as_ref().is_ok_and(|thread| {
-                    thread.as_ref().is_some_and(|thread| {
-                        thread
+                    thread.as_ref().is_some_and(|summary| {
+                        summary
                             .thread
                             .updated_at
                             .unwrap_or_default()
@@ -1567,7 +1567,7 @@ mod tests {
             .boxed();
         assert!(next_title(&mut threads, deadline).await.unwrap().is_some());
         assert_eq!(
-            next_title(&mut threads, deadline).await.unwrap_err().code,
+            next_title(&mut threads, deadline).await.err().unwrap().code,
             "provider_timeout"
         );
         assert_eq!(
