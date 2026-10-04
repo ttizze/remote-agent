@@ -1404,10 +1404,6 @@ impl Desktop {
                     .await
                     .map_err(|error| error.to_string())?;
                 store
-                    .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
-                    .await
-                    .map_err(|error| error.to_string())?;
-                store
                     .dispatch(Intent::Submit {
                         thread_id: Some(id),
                         client_user_message_id: uuid::Uuid::new_v4().to_string().into(),

@@ -20,7 +20,6 @@
         {
           "durationMs": 3000,
           "id": "fixture-turn-1-1",
-          "itemsHasMore": false,
           "items": [
             {
               "id": "fixture-user-1-1",

@@ -474,6 +474,7 @@ impl Desktop {
                         let toggle = id.clone();
                         let status = activity.status.clone();
                         let turn_id = turn.id.clone();
+                        let load_items = activity.load_items.clone();
                         self.button(
                             format!("work-{id}"),
                             format!("{label} {}", if expanded { "⌄" } else { "›" }),
@@ -486,6 +487,9 @@ impl Desktop {
                                         expanded: !expanded,
                                     },
                                 );
+                                if !expanded && let Some(params) = &load_items {
+                                    view.dispatch(Intent::LoadTurnItems(params.clone()));
+                                }
                                 view.pause_tail();
                                 view.remeasure_item(&turn_id);
                             },

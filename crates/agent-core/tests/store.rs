@@ -2270,7 +2270,7 @@ async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_wind
             assert_eq!(request["method"], "host/session/open");
             assert_eq!(
                 request["params"],
-                json!({"session":{"provider":"codex","id":"thread"},"limit":10})
+                json!({"session":{"provider":"codex","id":"thread"},"limit":10,"includeActivity":false})
             );
             let response = if failed {
                 json!({"error":{"code":"request_failed","message":"temporary history failure"}})
@@ -2351,7 +2351,7 @@ async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
             } else {
                 json!([{"id":"last-old","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"tail","phase":"unknown"}}}}}])
             };
-            writer.reply(&request, json!({"result":{"thread":{"id":{"provider":"codex","id":"thread"},"historyLimit":limit,"historyHasMore":!complete,"turns":[{"id":"old","itemsHasMore":!complete,"items":items,"status":"unknown"},{"id":"new","status":"completed","items":[{"id":"new-item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"unknown"}}}}}]}]}}})).await.unwrap();
+            writer.reply(&request, json!({"result":{"thread":{"id":{"provider":"codex","id":"thread"},"historyLimit":limit,"historyHasMore":!complete,"turns":[{"id":"old","items":items,"status":"unknown"},{"id":"new","status":"completed","items":[{"id":"new-item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"unknown"}}}}}]}]}}})).await.unwrap();
         }
         (reader, writer)
     });
@@ -2393,7 +2393,6 @@ async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
         item_text(&(turns[1].items.as_ref().unwrap()[0])),
         Some("new")
     );
-    assert_eq!(turns[0].items_has_more, Some(false));
     assert_eq!(thread.history_has_more, Some(false));
     let _server = server.await.unwrap();
     store.close().await.unwrap();
@@ -3556,7 +3555,7 @@ async fn session_update_gap_preserves_history_and_only_reports_failed_recovery(
         .unwrap();
     let recovery = read(&mut reader).await;
     assert_eq!(recovery["method"], "host/session/open");
-    assert_eq!(recovery["params"]["limit"], 24);
+    assert_eq!(recovery["params"]["limit"], 5);
     assert!(!store.snapshot().subscriptions.contains_key(&id));
     assert!(store.snapshot().error.is_none());
     assert_eq!(
@@ -4174,7 +4173,7 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
     };
     let initial: Thread = serde_json::from_value(
         json!({"id":id,"historyCursor":"oldest-A","historyHasMore":true,
-        "turns":[{"id":"turn","status":"completed","itemsHasMore":true,"items":[item("tail")]}]}),
+        "turns":[{"id":"turn","status":"completed","items":[item("tail")]}]}),
     )
     .unwrap();
     let (store, mut reader, writer) = setup(Snapshot {
@@ -4189,7 +4188,10 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
     });
     let request = read(&mut reader).await;
     assert_eq!(request["method"], "host/session/history/read");
-    assert_eq!(request["params"], json!({"session":id,"cursor":"oldest-A"}));
+    assert_eq!(
+        request["params"],
+        json!({"session":id,"cursor":"oldest-A","includeActivity":false})
+    );
     assert!(store.snapshot().operation_running(history.clone()));
     writer
         .reply(
@@ -4220,7 +4222,7 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
         .reply(
             &request,
             json!({"result":{"nextCursor":"oldest-B",
-        "turns":[{"id":"turn","status":"unknown","itemsHasMore":false,"items":[item("head")]}]}}),
+        "turns":[{"id":"older-turn","status":"completed","items":[item("head")]}]}}),
         )
         .await
         .unwrap();
@@ -4241,7 +4243,13 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
             .iter()
             .map(|item| item.id.as_str())
             .collect::<Vec<_>>(),
-        ["head", "tail"]
+        ["head"]
+    );
+    assert_eq!(
+        thread.turns.as_ref().unwrap()[1].items.as_ref().unwrap()[0]
+            .id
+            .as_str(),
+        "tail"
     );
 
     let pending = store.dispatch(Intent::ReadOlder {
@@ -4251,12 +4259,24 @@ async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace
     assert_eq!(old_request["params"]["cursor"], "oldest-B");
     let refresh = store.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone())));
     let request = read(&mut reader).await;
-    writer.reply(&request, json!({"result":{"thread":{"id":id,"historyCursor":"fresh-C","historyHasMore":true,
-        "turns":[{"id":"turn","status":"completed","itemsHasMore":true,"items":[item("fresh-tail")]}]}}})).await.unwrap();
+    writer
+        .reply(
+            &request,
+            json!({"result":{"thread":{"id":id,"historyCursor":"fresh-C","historyHasMore":true,
+        "turns":[{"id":"fresh-turn","status":"completed","items":[item("fresh-tail")]}]}}}),
+        )
+        .await
+        .unwrap();
     refresh.await.unwrap();
     let refreshed = store.snapshot().conversations.clone();
-    writer.reply(&old_request, json!({"result":{"nextCursor":null,
-        "turns":[{"id":"stale-turn","status":"completed","itemsHasMore":false,"items":[item("stale")]}]}})).await.unwrap();
+    writer
+        .reply(
+            &old_request,
+            json!({"result":{"nextCursor":null,
+        "turns":[{"id":"stale-turn","status":"completed","items":[item("stale")]}]}}),
+        )
+        .await
+        .unwrap();
     pending.await.unwrap();
     assert!(!store.snapshot().operation_running(history.clone()));
     assert!(store.snapshot().operation_error(history).is_none());

@@ -75,6 +75,7 @@ pub enum Intent {
     ReadThread(ReadThread),
     OpenRequest(OpenRequest),
     ReadItem(ReadItem),
+    LoadTurnItems(LoadTurnItems),
     ResizeTerminal(ResizeTerminal),
     Interrupt(Interrupt),
     ShowThreadList,
@@ -177,6 +178,10 @@ pub enum StalePolicy {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum OperationKey {
+    TurnItems {
+        session: crate::session::SessionRef,
+        turn: agent_protocol::ids::TurnId,
+    },
     SessionList,
     History {
         session: crate::session::SessionRef,

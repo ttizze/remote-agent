@@ -3,14 +3,14 @@ use super::{requests::RequestOrigin, routing::SessionRouter, service::Failure};
 use agent_protocol::{
     composer::ComposerCatalog,
     ids::TurnId,
-    models::{Empty, Thread, ThreadResponse},
+    models::{Empty, Item, Thread, ThreadResponse},
     operations as op,
     permissions::{PermissionMode, PermissionSettings},
     session::{Capabilities, SessionRef},
 };
 use futures_util::{Stream, future::BoxFuture};
 use serde_json::Value;
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 pub(crate) struct SessionSummary {
     pub thread: Thread,
@@ -113,13 +113,20 @@ pub(crate) trait Agent: Identity {
     fn validate_create(&self) -> Result<(), Failure>;
     fn storage_directory(&self) -> &Path;
     async fn list(&self, search: &str, cursor: Option<String>) -> Result<SessionPage, Failure>;
-    async fn open(&self, id: &str, limit: usize) -> Result<ThreadResponse, Failure>;
+    async fn open(
+        &self,
+        id: &str,
+        limit: usize,
+        include_activity: bool,
+    ) -> Result<ThreadResponse, Failure>;
     async fn read_history(
         &self,
         id: &str,
         cursor: &str,
+        include_activity: bool,
     ) -> Result<agent_protocol::session::HistoryPage, Failure>;
     async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure>;
+    async fn read_turn_items(&self, id: &str, turn_id: &TurnId) -> Result<Vec<Arc<Item>>, Failure>;
     async fn create(
         &self,
         cwd: &str,

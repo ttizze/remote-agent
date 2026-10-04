@@ -33,11 +33,17 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
             let query: ListQuery = serde_json::from_value(command["query"].clone()).unwrap();
             call!(ListSessions { query })
         }
-        "startThread" => call!(CreateSession {
-            provider: agent_protocol::session::ProviderKind::Codex,
-            cwd: optional(command, "cwd").map(str::to_owned),
-            model: serde_json::from_value(command["model"].clone()).unwrap()
-        }),
+        "startThread" => serde_json::to_value(
+            client
+                .call(&CreateSession {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    cwd: optional(command, "cwd").map(str::to_owned),
+                    model: serde_json::from_value(command["model"].clone()).unwrap(),
+                })
+                .await?
+                .response,
+        )
+        .unwrap(),
         "readThread" | "readOlder" => serde_json::to_value(
             client
                 .call(&ReadThread {

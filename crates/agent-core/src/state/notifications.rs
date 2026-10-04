@@ -120,17 +120,7 @@ pub(super) fn session_update(
             Arc::make_mut(&mut next.subscriptions).remove(id);
             // Recover through a fresh snapshot/subscription. The Store reports
             // a failed read; a recoverable gap is not a persistent user error.
-            return (
-                next,
-                vec![Effect::execute(op::ReadThread {
-                    limit: op::ReadThread::history_limit(
-                        5,
-                        current.history_limit,
-                        current.turns.as_ref().map_or(0, Vec::len),
-                    ),
-                    ..op::ReadThread::new(id.clone())
-                })],
-            );
+            return (next, vec![Effect::execute(op::ReadThread::new(id.clone()))]);
         }
     };
     use crate::session::SessionChange;
@@ -141,17 +131,28 @@ pub(super) fn session_update(
             ..
         }
     );
+    let details = if let SessionChange::TurnItems { turn_id, .. } = &update.change {
+        thread
+            .turns
+            .iter()
+            .flatten()
+            .rfind(|turn| &turn.id == turn_id)
+            .map_or_else(Vec::new, |turn| {
+                op::item_details(id, std::slice::from_ref(turn))
+            })
+    } else {
+        Vec::new()
+    };
     let active = thread.status == crate::models::SessionStatus::Running;
     let refresh_workspace = (completed || matches!(update.change, SessionChange::Item { .. }))
         && current.cwd.as_deref() == Some(&next.navigation.cwd);
     Arc::make_mut(&mut next.conversations).insert(id.clone(), Arc::new(thread));
     reconcile_pending(&mut next, id);
     let changed_metadata = matches!(&update.change, SessionChange::Item { item, .. } if matches!(item.body(), crate::models::ItemBody::UserMessage { .. }) || (matches!(item.body(), crate::models::ItemBody::CommandExecution { .. }) && item.status == crate::models::ItemStatus::Completed));
-    let mut effects = if completed || changed_metadata {
-        refresh_list(previous)
-    } else {
-        Vec::new()
-    };
+    let mut effects = details;
+    if completed || changed_metadata {
+        effects.extend(refresh_list(previous));
+    }
     if next.connected
         && completed
         && !active

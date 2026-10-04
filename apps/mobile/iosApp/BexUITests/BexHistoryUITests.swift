@@ -15,7 +15,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitForExistence(timeout: 30))
-        let latest = app.descendants(matching: .any)["item.long-latest-message"]
+        let latest = app.descendants(matching: .any)["item.long-9-0"]
         XCTAssertTrue(latest.waitForExistence(timeout: 20))
         let visible = expectation(for: NSPredicate(format: "isHittable == true"), evaluatedWith: latest)
         wait(for: [visible], timeout: 5)
@@ -72,7 +72,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(detail.waitForExistence(timeout: 30))
         let latest = app.descendants(matching: .any)["item.long-latest-message"]
         XCTAssertTrue(latest.waitForExistence(timeout: 20))
-        let filled = expectation(for: NSPredicate { _, _ in self.loadedItems(in: detail) > 100 }, evaluatedWith: detail)
+        let filled = expectation(for: NSPredicate { _, _ in self.loadedItems(in: detail) > 1 }, evaluatedWith: detail)
         wait(for: [filled], timeout: 20)
         XCTAssertTrue(latest.isHittable, "Automatic initial paging must keep the latest message visible")
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "history.")).count, 0)
@@ -86,7 +86,7 @@ extension BexLaunchUITests {
         expandSimulatorProject(app)
         let row = app.descendants(matching: .any)["tasks.row.codex:fixture-long-history"]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
-        let latest = app.descendants(matching: .any)["item.long-latest-message"]
+        let latest = app.descendants(matching: .any)["item.long-9-0"]
         XCTAssertTrue(latest.waitForExistence(timeout: 20))
         let message = app.descendants(matching: .any)["task.message"]
         message.tap(); message.typeText("[approval] Reopen while this turn is running")
@@ -123,7 +123,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitForExistence(timeout: 30))
-        XCTAssertTrue(app.descendants(matching: .any)["item.long-latest-message"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.descendants(matching: .any)["item.long-9-0"].waitForExistence(timeout: 20))
         let message = app.descendants(matching: .any)["task.message"]
         XCTAssertTrue(message.waitForExistence(timeout: 10))
         message.tap(); message.typeText("[delayed-input] Keep the reading position")
@@ -147,7 +147,7 @@ extension BexLaunchUITests {
         }
         let atBottom = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: latestButton)
         wait(for: [atBottom], timeout: 5)
-        let anchor = app.descendants(matching: .any)["item.long-latest-message"]
+        let anchor = app.descendants(matching: .any)["item.long-9-0"]
         let beforeDrag = anchor.frame.minY
         // Start in the horizontal padding so the press cannot begin text selection.
         let start = detail.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.55))

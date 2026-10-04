@@ -82,7 +82,10 @@ impl ClientExt for Client {
         &self,
         operation: &O,
     ) -> Result<Option<(O::Output, Updates, uuid::Uuid)>, PeerError> {
-        if operation.method() != "host/session/open" {
+        if !matches!(
+            operation.method(),
+            "host/session/open" | "host/session/create"
+        ) {
             return Ok(None);
         }
         let (mut output, updates) = self
@@ -151,12 +154,15 @@ impl ClientExt for Client {
     ) -> Result<Vec<SessionImage>, PeerError> {
         // Gallery reads follow bounded history pages independently of the
         // Store's visible window and close their transient subscription first.
-        let read = ReadThread {
-            limit: 1000,
-            ..ReadThread::new(thread_id.to_owned())
-        };
+        let read = ReadThread::new(thread_id.to_owned());
         let (opened, stream) = self
-            .request_stream::<crate::session::OpenedSession>(&read.request()?)
+            .request_stream::<crate::session::OpenedSession>(&crate::protocol::Call::OpenSession(
+                crate::session::OpenSession {
+                    session: thread_id.clone(),
+                    limit: 1000,
+                    include_activity: true,
+                },
+            ))
             .await?;
         validate_output(&read, &opened)?;
         drop(stream);
@@ -173,6 +179,7 @@ impl ClientExt for Client {
                 .call(&crate::session::ReadHistory {
                     session: thread_id.clone(),
                     cursor,
+                    include_activity: true,
                 })
                 .await?;
             thread.turns = Some(crate::session::prepend_history(

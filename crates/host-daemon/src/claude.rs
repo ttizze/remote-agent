@@ -1689,7 +1689,12 @@ impl Agent for Claude {
             next_cursor: None,
         })
     }
-    async fn open(&self, id: &str, limit: usize) -> Result<ThreadResponse, Failure> {
+    async fn open(
+        &self,
+        id: &str,
+        limit: usize,
+        _include_activity: bool,
+    ) -> Result<ThreadResponse, Failure> {
         self.read(id, limit)
             .await
             .map_err(|e| Failure::new("session_read_failed", e))
@@ -1698,6 +1703,7 @@ impl Agent for Claude {
         &self,
         _id: &str,
         _cursor: &str,
+        _include_activity: bool,
     ) -> Result<agent_protocol::session::HistoryPage, Failure> {
         Err(Failure::new(
             "invalid_cursor",
@@ -1706,6 +1712,16 @@ impl Agent for Claude {
     }
     async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure> {
         Claude::read_item(self, params).await.map_err(Into::into)
+    }
+    async fn read_turn_items(
+        &self,
+        _id: &str,
+        _turn_id: &agent_protocol::ids::TurnId,
+    ) -> Result<Vec<Arc<agent_protocol::models::Item>>, Failure> {
+        Err(Failure::new(
+            "unsupported_operation",
+            "Claude already loads turn activity",
+        ))
     }
     async fn create(
         &self,

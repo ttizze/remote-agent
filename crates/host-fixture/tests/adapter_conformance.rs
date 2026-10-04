@@ -16,6 +16,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 async fn open(client: &Client, session: &SessionRef) -> (OpenedSession, Reader) {
     client
         .request_stream(&Call::OpenSession(OpenSession {
+            include_activity: true,
             session: session.clone(),
             limit: 20,
         }))
@@ -69,6 +70,7 @@ async fn create(client: &Client, provider: ProviderKind, root: &Path) -> Session
         })
         .await
         .unwrap()
+        .response
         .thread
         .id
         .unwrap()

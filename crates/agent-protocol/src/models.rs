@@ -113,7 +113,8 @@ pub struct Turn {
     #[serde(default)]
     pub status: TurnStatus,
     pub items: Option<Vec<Arc<Item>>>,
-    pub items_has_more: Option<bool>,
+    #[serde(default)]
+    pub items_summary: bool,
     pub started_at: Option<f64>,
     pub duration_ms: Option<u64>,
     pub error: Option<ExecutionError>,
@@ -145,20 +146,26 @@ impl Thread {
 pub fn defer_item_details(turns: &mut [Arc<Turn>], max_inline_bytes: usize) {
     for turn in turns {
         let turn = Arc::make_mut(turn);
-        for item in turn.items.iter_mut().flatten() {
-            let limit = if matches!(
-                item.body(),
-                ItemBody::UserMessage { .. }
-                    | ItemBody::AssistantText { .. }
-                    | ItemBody::ImageGeneration { .. }
-            ) {
-                max_inline_bytes
-            } else {
-                512.min(max_inline_bytes)
-            };
-            if !item.id.is_empty() && !fits_inline(item, limit) {
-                Arc::make_mut(item).defer();
-            }
+        if let Some(items) = &mut turn.items {
+            defer_items(items, max_inline_bytes);
+        }
+    }
+}
+
+pub fn defer_items(items: &mut [Arc<Item>], max_inline_bytes: usize) {
+    for item in items {
+        let limit = if matches!(
+            item.body(),
+            ItemBody::UserMessage { .. }
+                | ItemBody::AssistantText { .. }
+                | ItemBody::ImageGeneration { .. }
+        ) {
+            max_inline_bytes
+        } else {
+            512.min(max_inline_bytes)
+        };
+        if !item.id.is_empty() && !fits_inline(item, limit) {
+            Arc::make_mut(item).defer();
         }
     }
 }

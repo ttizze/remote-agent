@@ -70,6 +70,15 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
         thread.turns.clone()
     };
     if long_history {
+        if id == "fixture-viewport-history" {
+            // Four activity-only turns leave the initial summary shorter than
+            // the viewport. Older summary pages must load automatically.
+            for turn in &turns[5..9] {
+                let item_id = format!("{}-work", turn.borrow()["id"].as_str().unwrap());
+                turn.borrow_mut()["items"] = json!([{"id":item_id,
+                    "type":"commandExecution","command":"inspect","status":"completed","aggregatedOutput":"done"}]);
+            }
+        }
         let mut last = turns.last().unwrap().borrow_mut();
         if id == "fixture-viewport-history" {
             last["status"] = "completed".into();
@@ -145,44 +154,52 @@ pub(super) fn page(
     let offset = offset(params);
     let count = limit(params, 10);
     let descending = params["sortDirection"] == "desc";
-    if method == "thread/timeline/list" {
+    if method == "thread/turns/list" {
         context.trace(method, params.clone())?;
-        if let Some(response) = thread.metadata.get("fixtureTimelineResponse") {
+        if let Some(response) = thread.metadata.get("fixtureHistoryResponse") {
             return context.respond(id, response);
         }
-        let offset = params["cursor"]
-            .as_str()
-            .and_then(|cursor| cursor.strip_prefix("timeline:"))
-            .and_then(|cursor| cursor.parse::<usize>().ok())
-            .unwrap_or(0);
-        let count = count.min(
-            thread
-                .metadata
-                .get("fixtureTimelinePageLimit")
-                .and_then(Value::as_u64)
-                .and_then(|limit| usize::try_from(limit).ok())
-                .unwrap_or(count),
-        );
-        let mut entries = Vec::new();
-        for turn in &turns {
-            entries.push(json!({"type":"turnStarted","position":entries.len(),
-                "turnId":turn["id"],"startedAt":turn["startedAt"]}));
-            for item in turn["items"].as_array().unwrap() {
-                entries.push(json!({"type":"item","position":entries.len(),
-                    "turnId":turn["id"],"item":item}));
-            }
-            if turn["status"] != "inProgress" {
-                entries.push(json!({"type":"turnCompleted","position":entries.len(),
-                    "turnId":turn["id"],"status":turn["status"],
-                    "startedAt":turn["startedAt"],"completedAt":turn["completedAt"],
-                    "durationMs":turn["durationMs"],"error":turn["error"]}));
-            }
+        let mut values: Vec<Value> = turns
+            .iter()
+            .map(|turn| {
+                let mut turn = (**turn).clone();
+                let items = turn["items"].as_array().unwrap();
+                let view = params["itemsView"].as_str().unwrap_or("summary");
+                turn["items"] = match view {
+                    "notLoaded" => json!([]),
+                    "summary" => {
+                        let mut summary = Vec::new();
+                        if let Some(item) = items.iter().find(|item| item["type"] == "userMessage")
+                        {
+                            summary.push(item.clone());
+                        }
+                        if let Some(item) = items.iter().rfind(|item| {
+                            item["type"] == "agentMessage"
+                                && (item["phase"].is_null() || item["phase"] == "final_answer")
+                        }) {
+                            summary.push(item.clone());
+                        }
+                        json!(summary)
+                    }
+                    _ => json!(items),
+                };
+                turn["itemsView"] = view.into();
+                turn
+            })
+            .collect();
+        if descending {
+            values.reverse();
         }
-        let end = entries.len().saturating_sub(offset);
-        let start = end.saturating_sub(count);
-        let data: Vec<_> = entries[start..end].iter().collect();
-        let next_cursor = (start > 0).then(|| format!("timeline:{}", offset + data.len()));
-        context.respond(id, &Page { data, next_cursor })
+        let total = values.len();
+        let data = values.into_iter().skip(offset).take(count).collect();
+        context.respond(
+            id,
+            &Page {
+                data,
+                next_cursor: (offset.saturating_add(count) < total)
+                    .then(|| offset.saturating_add(count).to_string()),
+            },
+        )
     } else {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]

@@ -448,12 +448,19 @@ pub struct CreateSession {
     pub model: Option<crate::models::ModelRef>,
 }
 
-impl CreateSession {
-    pub(crate) fn validate(
-        &self,
-        output: &crate::models::ThreadResponse,
-    ) -> Result<(), &'static str> {
-        validate_thread(output, None)
+impl RpcMethod for CreateSession {
+    rpc_contract!(CreateSession);
+    fn params(&self) -> Result<Self, PeerError> {
+        Ok(self.clone())
+    }
+    fn subscription(output: &mut Self::Output, id: uuid::Uuid) {
+        output.subscription_id = id;
+    }
+    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
+        if output.session.provider != self.provider {
+            return Err("created session provider does not match");
+        }
+        validate_thread(&output.response, Some(&output.session))
     }
 }
 

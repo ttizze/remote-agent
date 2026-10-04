@@ -524,7 +524,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                         context.respond(id, &json!({"turnId":turn_id}))?;
                     }
                 }
-                "thread/items/list" | "thread/timeline/list" => {
+                "thread/items/list" | "thread/turns/list" => {
                     let Some(thread) = threads.get(params["threadId"].as_str().unwrap_or("")) else {
                         context.error(id, -32602, "thread not found")?; continue;
                     };

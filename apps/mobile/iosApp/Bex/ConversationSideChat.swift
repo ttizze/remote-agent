@@ -68,7 +68,6 @@ final class SideChatRequest: ObservableObject {
             }
             guard model.screen == .thread, model.selectedProfileId == host,
                   model.sideChatRequest?.id == id else { return }
-            _ = try await model.outcome(for: .readThread(ReadThread(threadId: threadId, open: true)))
             model.composerFocusRequest = UUID()
         } catch {
             self.error = model.snapshot.error() ?? error.localizedDescription

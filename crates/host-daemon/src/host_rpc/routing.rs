@@ -404,6 +404,58 @@ impl SessionRouter {
             actor,
         })
     }
+    /// Publish hydration on the existing ordered stream, between live changes.
+    /// Native history stays in the requesting client's cache.
+    pub(super) fn finish_turn_read(
+        &self,
+        read: SessionLease,
+        session: SessionId,
+        turn_id: agent_protocol::ids::TurnId,
+        native_items: Vec<Arc<agent_protocol::models::Item>>,
+    ) -> Result<(), String> {
+        let actor = lock_state(&read.actor);
+        if !actor
+            .subscriptions
+            .values()
+            .any(|(owner, _)| *owner == session)
+        {
+            return Err("conversation subscription changed during detail read".into());
+        }
+        let live = actor
+            .timeline
+            .turns
+            .iter()
+            .flatten()
+            .rfind(|current| current.id == turn_id);
+        let mut items = agent_protocol::session::append_items(
+            native_items,
+            live.and_then(|turn| turn.items.as_deref())
+                .unwrap_or_default(),
+        );
+        agent_protocol::models::defer_items(
+            &mut items,
+            agent_protocol::models::MAX_INLINE_ITEM_BYTES,
+        );
+        let mut change = SessionChange::TurnItems { turn_id, items };
+        let mut frame = protocol::encode(&change).map_err(|error| error.to_string())?;
+        if frame.len() > MAX_QUEUED_BYTES {
+            if let SessionChange::TurnItems { items, .. } = &mut change {
+                agent_protocol::models::defer_items(items, 0);
+            }
+            frame = protocol::encode(&change).map_err(|error| error.to_string())?;
+        }
+        let failed = actor
+            .subscriptions
+            .values()
+            .filter(|(owner, _)| *owner == session)
+            .any(|(owner, output)| output.try_send(*owner, frame.clone()).is_err());
+        drop(actor);
+        if failed {
+            self.close_failed(vec![session]);
+            return Err("conversation detail stream is unavailable".into());
+        }
+        Ok(())
+    }
     pub(super) fn finish_session_read(
         &self,
         read: SessionLease,
@@ -858,6 +910,101 @@ impl SessionRouter {
 mod tests {
     use super::*;
     use agent_protocol::models::{Item, Thread, Turn};
+
+    #[tokio::test]
+    async fn detail_reads_are_ordered_with_live_changes_and_stay_on_the_requesting_connection() {
+        let router = SessionRouter::new();
+        let first = router.open_session();
+        let second = router.open_session();
+        let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+        let response = ThreadResponse {
+            thread: Thread {
+                id: Some(target.clone()),
+                turns: Some(vec![Arc::new(Turn {
+                    id: "turn".into(),
+                    items_summary: true,
+                    items: Some(vec![]),
+                    ..Default::default()
+                })]),
+                ..Default::default()
+            },
+            model: None,
+        };
+        let mut first_updates = router
+            .finish_session_read(open(&router, "native"), first.id(), response.clone())
+            .unwrap()
+            .updates
+            .unwrap();
+        let mut second_updates = router
+            .finish_session_read(open(&router, "native"), second.id(), response)
+            .unwrap()
+            .updates
+            .unwrap();
+        let item = |text: &str| {
+            Arc::new(Item::new(
+                "answer".into(),
+                Default::default(),
+                agent_protocol::models::ItemBody::AssistantText {
+                    text: text.into(),
+                    phase: Default::default(),
+                },
+            ))
+        };
+        router.session_change(
+            &target,
+            SessionChange::Turn {
+                turn: Turn {
+                    id: "turn".into(),
+                    items: Some(vec![item("current")]),
+                    ..Default::default()
+                },
+                completed: false,
+            },
+        );
+        let _: SessionChange = protocol::decode(&first_updates.recv().await.unwrap()).unwrap();
+        let _: SessionChange = protocol::decode(&second_updates.recv().await.unwrap()).unwrap();
+        router
+            .finish_turn_read(
+                open(&router, "native"),
+                first.id(),
+                "turn".into(),
+                vec![item("old")],
+            )
+            .unwrap();
+        router.session_change(
+            &target,
+            SessionChange::Text {
+                turn_id: "turn".into(),
+                item_id: "answer".into(),
+                field: agent_protocol::session::TextField::AssistantText,
+                delta: " + delta".into(),
+            },
+        );
+        let hydration: SessionChange =
+            protocol::decode(&first_updates.recv().await.unwrap()).unwrap();
+        let SessionChange::TurnItems { items, .. } = &hydration else {
+            panic!("detail patch missing")
+        };
+        assert!(
+            matches!(items[0].body(), agent_protocol::models::ItemBody::AssistantText {text, ..} if text == "current")
+        );
+        assert!(matches!(
+            protocol::decode::<SessionChange>(&first_updates.recv().await.unwrap()).unwrap(),
+            SessionChange::Text { .. }
+        ));
+        assert!(matches!(
+            protocol::decode::<SessionChange>(&second_updates.recv().await.unwrap()).unwrap(),
+            SessionChange::Text { .. }
+        ));
+        assert!(second_updates.receiver.try_recv().is_err());
+        drop(first_updates);
+        assert!(
+            router
+                .finish_turn_read(open(&router, "native"), first.id(), "turn".into(), vec![],)
+                .is_err()
+        );
+        assert!(second_updates.receiver.try_recv().is_err());
+    }
     use agent_protocol::session::TextField;
     use serde_json::json;
 

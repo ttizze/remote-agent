@@ -406,13 +406,21 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     ], {
         Intent::ReadOlder { thread_id } => {
             if let Some(cursor) = previous.conversations.get(&thread_id).and_then(|thread| thread.history_cursor.clone()) {
-                return prepare(previous, next, op::ReadHistory { session: thread_id, cursor });
+                return prepare(previous, next, op::ReadHistory { session: thread_id, cursor, include_activity: false });
             }
             let limit = u32::try_from(previous.conversations.get(&thread_id).map_or(5, |thread| {
                 thread.history_limit
                     .unwrap_or_else(|| thread.turns.as_ref().map_or(5, |turns| turns.len() as u64))
             })).unwrap_or(u32::MAX).saturating_add(5);
             return prepare(previous, next, op::ReadThread { limit, ..op::ReadThread::new(thread_id) });
+        }
+        Intent::LoadTurnItems(params) => {
+            if previous.conversations.get(&params.thread_id)
+                .and_then(|thread| thread.turns.as_ref())
+                .and_then(|turns| turns.iter().rfind(|turn| turn.id == params.turn_id))
+                .is_some_and(|turn| turn.items_summary) {
+                return prepare(previous, next, params);
+            }
         }
         Intent::AcknowledgeTerminal { handle, sequence } => {
             if previous.terminals.get(&handle).is_some_and(|terminal| {

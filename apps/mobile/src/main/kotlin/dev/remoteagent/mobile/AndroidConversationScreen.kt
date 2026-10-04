@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -95,6 +96,7 @@ internal fun ThreadDetailScreen(
                         activityHeader = { activity ->
                             ActivityHeader(activity, activityExpansion[activity.id]) { choice ->
                                 activityExpansion = activityExpansion + (activity.id to choice)
+                                if (choice.expanded) activity.loadItems?.let { perform(Intent.LoadTurnItems(it)) {} }
                             }
                         },
                     )
