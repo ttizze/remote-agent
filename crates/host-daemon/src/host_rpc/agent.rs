@@ -13,8 +13,13 @@ use futures_util::{Stream, future::BoxFuture};
 use serde_json::Value;
 use std::path::Path;
 
+pub(crate) struct SessionSummary {
+    pub thread: Thread,
+    pub branch: Option<String>,
+}
+
 pub(crate) struct SessionPage {
-    pub data: Vec<Thread>,
+    pub data: Vec<SessionSummary>,
     pub next_cursor: Option<String>,
 }
 
@@ -31,7 +36,7 @@ pub(crate) struct SubmissionState {
 pub(crate) fn session_pages<'a>(
     agent: &'a dyn Agent,
     search: &'a str,
-) -> impl Stream<Item = Result<Vec<Thread>, Failure>> + 'a {
+) -> impl Stream<Item = Result<Vec<SessionSummary>, Failure>> + 'a {
     futures_util::stream::try_unfold(
         Some((None, std::collections::HashSet::new())),
         move |state| async move {

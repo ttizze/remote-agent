@@ -2787,6 +2787,10 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             &["worktree", "add", "-b", "task", checkout.to_str().unwrap()],
         );
         std::fs::create_dir(checkout.join("nested")).unwrap();
+        std::fs::write(
+            root.join("bex-worktrees.json"),
+            json!({"workspaceRoots": {checkout.to_str().unwrap(): repo}}).to_string(),
+        ).unwrap();
         let fixture = start_host(&root).await;
         let local = fixture.local().await.unwrap();
         let mut ids = Vec::new();
@@ -2809,9 +2813,14 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 .unwrap(),
             );
         }
+        let mut native_rows: Vec<_> = ids.iter().zip([&checkout, &checkout.join("nested"), &repo, &root]).map(|(id, cwd)| {
+            json!({"id":id.id,"cwd":cwd,"name":"worktree history","gitInfo":{"branch":"task"}})
+        }).collect();
+        std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&native_rows).unwrap()).unwrap();
         let store = Store::new((local.peer, local.events), Snapshot::default());
         for (step, expected) in [
             ("fresh", None),
+            ("empty", None),
             ("untracked", Some(Unmerged)),
             ("staged", Some(Unmerged)),
             ("commit", Some(Unmerged)),
@@ -2819,6 +2828,8 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
             ("edited", Some(Unmerged)),
             ("reverted", Some(Merged)),
             ("new-work", Some(Unmerged)),
+            ("main-only", Some(Unmerged)),
+            ("no-diff", None),
         ] {
             match step {
                 "untracked" => std::fs::write(checkout.join("work.txt"), "work\n").unwrap(),
@@ -2829,8 +2840,23 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 "reverted" => {
                     git(&checkout, &["restore", "work.txt"]);
                 }
-                "commit" | "new-work" => {
+                "empty" => {
                     git(&checkout, &["commit", "--allow-empty", "-m", step]);
+                }
+                "commit" => {
+                    git(&checkout, &["commit", "-m", step]);
+                }
+                "new-work" => {
+                    std::fs::write(checkout.join("work.txt"), "new work\n").unwrap();
+                    git(&checkout, &["commit", "-am", step]);
+                }
+                "no-diff" => {
+                    git(&checkout, &["revert", "--no-edit", "HEAD"]);
+                }
+                "main-only" => {
+                    std::fs::write(repo.join("main.txt"), "only on main\n").unwrap();
+                    git(&repo, &["add", "main.txt"]);
+                    git(&repo, &["commit", "-m", step]);
                 }
                 "merge" => {
                     git(&repo, &["merge", "--ff-only", "task"]);
@@ -2874,6 +2900,10 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 .worktree_status,
             Some(Merged)
         );
+        std::fs::remove_dir(checkout.join("nested")).unwrap();
+        store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+        assert_eq!(store.snapshot().thread_list().unwrap().threads.iter().find(|row| row.id == ids[1]).unwrap().worktree_status, None);
+        std::fs::create_dir(checkout.join("nested")).unwrap();
         git(&checkout, &["checkout", "--detach"]);
         store
             .dispatch(Intent::ListSessions(op::ListSessions::new(
@@ -2893,6 +2923,34 @@ async fn session_list_tracks_real_worktree_changes_and_merges_through_host_and_s
                 .worktree_status,
             None
         );
+        git(&checkout, &["checkout", "task"]);
+        std::fs::write(checkout.join("work.txt"), "remaining work\n").unwrap();
+        git(&checkout, &["commit", "-am", "remaining work"]);
+        git(&repo, &["worktree", "remove", checkout.to_str().unwrap()]);
+        for (step, expected) in [
+            ("deleted-unmerged", Some(Unmerged)),
+            ("deleted-merged", Some(Merged)),
+            ("missing-metadata", Some(Merged)),
+            ("deleted-branch", None),
+        ] {
+            match step {
+                "deleted-merged" => { git(&repo, &["merge", "--no-ff", "-m", "merge remaining work", "task"]); }
+                "missing-metadata" => {
+                    native_rows[1]["gitInfo"] = Value::Null;
+                    std::fs::write(root.join("list-fixture.json"), serde_json::to_vec(&native_rows).unwrap()).unwrap();
+                }
+                "deleted-branch" => { git(&repo, &["branch", "-d", "task"]); }
+                _ => {}
+            }
+            store.dispatch(Intent::ListSessions(op::ListSessions::new(Default::default()))).await.unwrap();
+            let snapshot = store.snapshot();
+            let list = snapshot.thread_list().unwrap();
+            for (index, id) in ids.iter().enumerate() {
+                let row = list.threads.iter().find(|row| &row.id == id).unwrap();
+                assert_eq!(row.worktree_status, if index < 2 && !(index == 1 && step == "missing-metadata") { expected } else { None }, "{step}: {index}");
+            }
+            assert_eq!(snapshot.error, None);
+        }
         store.close().await.unwrap();
         local.endpoint.close().await;
         fixture.close().await.unwrap();

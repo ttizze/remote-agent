@@ -353,12 +353,12 @@ UIの責任分割は対象外だが、型変更や非同期完了の意味を接
 
 ```sh
 # fixture等で使う既存supervisorをビルド
-nix develop . --command cargo build --locked -p bex-process --bin bex-provider-supervisor
+scripts/dev-env.sh cargo build --locked -p bex-process --bin bex-provider-supervisor
 
 # Rustのテスト・整形・静的検査
-nix develop . --command just unit-tests
-nix develop . --command cargo fmt --all -- --check
-nix develop . --command cargo clippy --locked --workspace --all-targets -- -D warnings
+scripts/dev-env.sh just unit-tests
+scripts/dev-env.sh cargo fmt --all -- --check
+scripts/dev-env.sh cargo clippy --locked --workspace --all-targets -- -D warnings
 
 # mainへpushした後、そのcommitのCI結果を確認
 gh run list --workflow native.yml --branch main

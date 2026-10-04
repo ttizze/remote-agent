@@ -28,13 +28,18 @@ impl Snapshot {
                 .unwrap_or(ProjectMembership::Unassigned {})
         }
     }
-    pub(crate) fn project_for_workspace(&self, workspace: &str) -> Option<&str> {
-        let workspace = Path::new(workspace);
-        let mapped = self
-            .worktree_roots
+    pub(crate) fn worktree_mapping(&self, workspace: &Path) -> Option<(&str, &str)> {
+        self.worktree_roots
             .iter()
             .filter(|(root, _)| workspace.starts_with(root))
             .max_by_key(|(root, _)| root.len())
+            .map(|(root, source)| (root.as_str(), source.as_str()))
+    }
+
+    pub(crate) fn project_for_workspace(&self, workspace: &str) -> Option<&str> {
+        let workspace = Path::new(workspace);
+        let mapped = self
+            .worktree_mapping(workspace)
             .map(|(root, source)| Path::new(source).join(workspace.strip_prefix(root).unwrap()));
         let workspace = mapped.as_deref().unwrap_or(workspace);
         if !workspace.is_absolute() {

@@ -552,21 +552,23 @@ mod tests {
         }).await.unwrap();
         }
     }
+    #[rstest::rstest]
+    #[case(false, "live")]
+    #[case(true, "live")]
+    #[case(false, "slow")]
+    #[case(true, "slow")]
+    #[case(true, "silent")]
+    #[case(true, "replacement-error")]
+    #[case(true, "error")]
     #[tokio::test]
-    async fn foreground_reuses_live_session_and_replaces_silent_session() {
+    async fn foreground_reuses_live_session_and_replaces_silent_session(
+        #[case] selected: bool,
+        #[case] mode: &str,
+    ) {
         use crate::transport::Trust;
         use serde_json::{Value, json};
-        for (selected, mode) in [
-            (false, "live"),
-            (true, "live"),
-            (false, "slow"),
-            (true, "slow"),
-            (true, "silent"),
-            (true, "replacement-error"),
-            (true, "error"),
-        ] {
-            let silent = mode == "silent";
-            tokio::time::timeout(Duration::from_secs(10), async {
+        let silent = mode == "silent";
+        tokio::time::timeout(Duration::from_secs(10), async {
                     let identity = Identity::generate();
                     let trust = Trust { allowed: [identity.node_id()].into(), ..Default::default() };
                     let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
@@ -670,7 +672,6 @@ mod tests {
                     tokio::join!(server, client);
                     first.close(); host.close().await;
                 }).await.unwrap();
-        }
     }
 
     #[tokio::test]
@@ -896,8 +897,10 @@ mod tests {
                 let store = AgentStore::offline(crate::persistence::encode(&cached).unwrap(), None).await.unwrap();
                 let (connected, (session, mut reader, writer)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
                 connected.unwrap();
+                let (withheld, waiting) = tokio::sync::oneshot::channel();
                 let server = async {
                     let mut pending = Vec::new();
+                    let mut withheld = Some(withheld);
                     for round in 0..(3 + usize::from(selected)) {
                         let mut requests = Vec::new();
                         while requests.len() < (1 + usize::from(selected) + 2 * usize::from(round == 0)) {
@@ -918,6 +921,7 @@ mod tests {
                             } else { json!({"result":result}) };
                             writer.reply(&request, response).await.unwrap();
                         }
+                        if round == 2 && selected { withheld.take().unwrap().send(()).unwrap(); }
                     }
                     assert!(reader.read_request().await.unwrap().is_none());
                 };
@@ -948,7 +952,20 @@ mod tests {
                     assert!(store.snapshot().connected());
                     assert!(store.snapshot().error.as_ref().unwrap().contains("temporary read error"));
                     if selected {
-                        assert!(refresh().await.unwrap_err().to_string().contains("timed out"));
+                        let refresh = refresh();
+                        tokio::pin!(refresh);
+                        tokio::select! {
+                            result = &mut refresh => panic!("withheld history must remain pending: {result:?}"),
+                            result = waiting => result.unwrap(),
+                        }
+                        // The list reply is adopted and only the withheld history read remains.
+                        while store.snapshot().threads.as_ref().unwrap().data[0].name.as_deref() != Some("round 2") {
+                            updates.changed().await.unwrap();
+                        }
+                        tokio::time::pause();
+                        tokio::time::advance(Duration::from_secs(30)).await;
+                        tokio::time::resume();
+                        assert!(refresh.await.unwrap_err().to_string().contains("timed out"));
                         assert!(store.snapshot().connected());
                     }
                     refresh().await.unwrap();

@@ -86,7 +86,7 @@ pub(super) fn resolve(home: &Path, id: Uuid) -> Result<PathBuf> {
 }
 
 /// Extract metadata without loading complete tool output or message bodies.
-pub(super) fn summary(path: &Path) -> Result<Thread> {
+pub(super) fn summary(path: &Path) -> Result<crate::host_rpc::agent::SessionSummary> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(path)?;
     let metadata = file.metadata()?;
@@ -114,6 +114,7 @@ pub(super) fn summary(path: &Path) -> Result<Thread> {
         status: agent_protocol::models::SessionStatus::Unknown,
         ..Default::default()
     };
+    let mut branch = None;
     for line in head.split(|byte| *byte == b'\n').chain(
         tail.split(|byte| *byte == b'\n')
             .skip(usize::from(offset > 0)),
@@ -128,6 +129,9 @@ pub(super) fn summary(path: &Path) -> Result<Thread> {
                 "Claude transcript session identity does not match its filename"
             ));
         }
+        if let Some(saved_branch) = value["gitBranch"].as_str() {
+            branch = Some(saved_branch.to_owned());
+        }
         if let Some(cwd) = value["cwd"].as_str() {
             thread.cwd = Some(cwd.into());
         }
@@ -138,7 +142,7 @@ pub(super) fn summary(path: &Path) -> Result<Thread> {
             thread.preview = input_text(&value["message"]["content"]);
         }
     }
-    Ok(thread)
+    Ok(crate::host_rpc::agent::SessionSummary { thread, branch })
 }
 
 fn input_text(content: &Value) -> Option<String> {
@@ -188,11 +192,11 @@ pub(super) struct NativeHistory {
     pub details: BTreeMap<ItemId, NativeItemDetails>,
 }
 pub(super) fn read_details(path: &Path, limit: usize) -> Result<NativeHistory> {
-    read_with_summary(path, summary(path)?, limit)
+    read_with_summary(path, summary(path)?.thread, limit)
 }
 
 pub(super) fn read(path: &Path, limit: usize) -> Result<ThreadResponse> {
-    read_with_summary(path, summary(path)?, limit).map(|history| history.response)
+    read_with_summary(path, summary(path)?.thread, limit).map(|history| history.response)
 }
 
 pub(super) fn read_related(
@@ -664,6 +668,20 @@ mod tests {
         let page = read(&path, 1).unwrap();
         assert_eq!(page.thread.history_has_more, Some(true));
         assert_eq!(page.thread.turns.unwrap()[0].id, "next-turn".into());
+        assert_eq!(fs::read_to_string(path).unwrap(), source);
+    }
+
+    #[test]
+    fn session_summary_retains_the_latest_native_workspace_and_branch() {
+        let source = [
+            json!({"sessionId":ID,"cwd":"/original","gitBranch":"main","type":"user","message":{"content":"question"}}),
+            json!({"sessionId":ID,"cwd":"/checkout","gitBranch":"bex/task","type":"assistant"}),
+        ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+        let (_root, path) = fixture(&source);
+        let summary = summary(&path).unwrap();
+        assert_eq!(summary.thread.cwd.as_deref(), Some("/checkout"));
+        assert_eq!(summary.branch.as_deref(), Some("bex/task"));
+        assert_eq!(summary.thread.preview.as_deref(), Some("question"));
         assert_eq!(fs::read_to_string(path).unwrap(), source);
     }
 
