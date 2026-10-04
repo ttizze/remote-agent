@@ -1,7 +1,7 @@
 //! RPC correlation and ordering for external provider JSONL processes.
 mod jsonl;
 pub use agent_protocol::message::{RpcMessage, RpcMessageError, RpcMessageKind, RpcResponse};
-pub use jsonl::{DEFAULT_MAX_MESSAGE_BYTES, JsonlError, JsonlReader, JsonlWriter};
+pub use jsonl::{JsonlError, JsonlReader, JsonlWriter};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     collections::HashMap,
@@ -34,11 +34,7 @@ pub enum PeerEvent {
     /// Notifications and server requests retain their complete envelopes.
     Message(Reply<Arc<str>>),
     /// Provider adapters can wait until preceding stdio events have been processed.
-    Response {
-        sequence: u64,
-        request_id: Option<u64>,
-        method: Option<Arc<str>>,
-    },
+    Response { sequence: u64 },
     Closed(String),
 }
 struct PreparedRequest {
@@ -462,11 +458,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             let pending = {
                 let pending = id.and_then(|id| received.pending.remove(&id));
                 if let Some(events) = &received.events {
-                    let _ = events.send(PeerEvent::Response {
-                        sequence,
-                        request_id: id,
-                        method: pending.as_ref().map(|pending| pending.method.clone()),
-                    });
+                    let _ = events.send(PeerEvent::Response { sequence });
                 }
                 pending
             };
@@ -761,17 +753,13 @@ mod tests {
         let (reply, _writer) = tokio::join!(peer.request::<_, Value>("read", &params), server);
         let reply = reply.unwrap();
         assert_eq!(reply.value["text"], "base");
-        let PeerEvent::Response {
-            sequence, method, ..
-        } = events.recv().await.unwrap()
-        else {
+        let PeerEvent::Response { sequence } = events.recv().await.unwrap() else {
             panic!("expected response")
         };
         let PeerEvent::Message(delta) = events.recv().await.unwrap() else {
             panic!("closed")
         };
         assert_eq!(sequence, reply.sequence);
-        assert_eq!(method.as_deref(), Some("read"));
         assert_eq!(delta.sequence, reply.sequence + 1);
         assert_eq!(
             serde_json::from_str::<Value>(&delta.value).unwrap()["method"],

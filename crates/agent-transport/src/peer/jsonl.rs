@@ -10,7 +10,7 @@ use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 /// The reader rejects an overlong line before it can grow without bound, and
 /// the writer applies the same limit before putting a serialized message on
 /// the wire.
-pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_MAX_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum JsonlError {
@@ -83,10 +83,6 @@ impl<W: AsyncWrite> JsonlWriter<W> {
             inner: BufWriter::new(writer),
             maximum,
         }
-    }
-
-    pub const fn max_message_bytes(&self) -> usize {
-        self.maximum
     }
 }
 

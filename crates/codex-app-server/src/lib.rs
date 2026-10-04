@@ -10,8 +10,6 @@ use tokio::{process::Child, sync::broadcast};
 #[derive(Debug, Clone)]
 pub struct AppServerConfig {
     pub program: PathBuf,
-    pub client: ClientInfo,
-    pub request_timeout: Duration,
     pub codex_home: Option<PathBuf>,
     pub config_overrides: Vec<String>,
 }
@@ -20,32 +18,16 @@ impl Default for AppServerConfig {
     fn default() -> Self {
         Self {
             program: PathBuf::from(executable::DEFAULT_CODEX_PROGRAM),
-            client: ClientInfo {
-                name: "remote_agent_host".to_owned(),
-                title: "Remote Agent Host".to_owned(),
-                version: env!("CARGO_PKG_VERSION").to_owned(),
-            },
-            request_timeout: Duration::from_secs(30),
             codex_home: None,
             config_overrides: Vec::new(),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClientInfo {
-    pub name: String,
-    pub title: String,
-    pub version: String,
-}
-
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeResponse {
     pub user_agent: String,
-    pub platform_family: String,
-    pub platform_os: String,
     pub codex_home: PathBuf,
 }
 
@@ -65,8 +47,6 @@ pub enum Error {
     MissingPipe(&'static str),
     #[error("Codex App Server I/O failed: {0}")]
     Io(#[from] io::Error),
-    #[error("invalid Codex App Server JSON: {0}")]
-    Json(#[from] serde_json::Error),
     #[error(transparent)]
     Peer(#[from] PeerError),
     #[error("Codex App Server lifecycle method {method} is managed by spawn")]
@@ -105,14 +85,18 @@ impl CodexAppServer {
         let peer = RpcPeer::open(
             agent_transport::peer::JsonlReader::new(stdout),
             stdin,
-            Some(config.request_timeout),
+            Some(Duration::from_secs(30)),
             1024,
         )?;
         let initialize_response = peer
             .request(
                 "initialize",
                 &InitializeParams {
-                    client_info: &config.client,
+                    client_info: ClientInfo {
+                        name: "remote_agent_host",
+                        title: "Remote Agent Host",
+                        version: env!("CARGO_PKG_VERSION"),
+                    },
                     capabilities: Capabilities {
                         experimental_api: true,
                     },
@@ -142,20 +126,8 @@ impl CodexAppServer {
     /// Sends one raw JSON-RPC request to Codex. The request's original id is
     /// restored on the raw response returned to the caller.
     pub async fn request_raw(&self, line: &str) -> Result<String, Error> {
-        Ok(self.request_raw_sequenced(line).await?.value)
-    }
-
-    /// Retain the receive position so Host hydration can await its event pump.
-    pub async fn request_raw_sequenced(
-        &self,
-        line: &str,
-    ) -> Result<agent_transport::peer::Reply<String>, Error> {
-        let message = RpcMessage::parse(line)
-            .map_err(|error| Error::Peer(PeerError::InvalidMessage(error.to_string())))?;
-        if let Some(method) = message.method() {
-            ensure_public_method(method)?;
-        }
-        Ok(self.peer.request_raw(line).await?)
+        ensure_public_line(line)?;
+        Ok(self.peer.request_raw(line).await?.value)
     }
 
     /// Shared peer correlation and typed payloads.
@@ -180,7 +152,7 @@ impl CodexAppServer {
     /// validating its JSON-RPC envelope. Raw requests must use
     /// [`Self::request_raw`] so their ids can be correlated.
     pub async fn send_raw(&self, line: &str) -> Result<(), Error> {
-        ensure_public_send_method(line)?;
+        ensure_public_line(line)?;
         self.peer.send_raw(line).await.map_err(Into::into)
     }
 
@@ -195,9 +167,15 @@ impl CodexAppServer {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InitializeParams<'a> {
-    client_info: &'a ClientInfo,
+struct InitializeParams {
+    client_info: ClientInfo,
     capabilities: Capabilities,
+}
+#[derive(Serialize)]
+struct ClientInfo {
+    name: &'static str,
+    title: &'static str,
+    version: &'static str,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -214,7 +192,7 @@ fn ensure_public_method(method: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn ensure_public_send_method(line: &str) -> Result<(), Error> {
+fn ensure_public_line(line: &str) -> Result<(), Error> {
     let message = RpcMessage::parse(line)
         .map_err(|error| Error::Peer(PeerError::InvalidMessage(error.to_string())))?;
     if let Some(method) = message.method() {

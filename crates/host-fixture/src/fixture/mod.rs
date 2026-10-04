@@ -16,12 +16,7 @@ use std::{
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
-    /// Native elapsed-time UI checks need an epoch timestamp near the wall clock.
-    #[serde(default)]
-    pub live_clock: bool,
-    #[serde(default)]
     pub deferred_thread_metadata: bool,
-    #[serde(default)]
     pub initialize_gate: Option<PathBuf>,
     pub trace: bool,
     pub expected_cwd: Option<PathBuf>,
@@ -31,7 +26,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            live_clock: false,
             deferred_thread_metadata: false,
             initialize_gate: None,
             trace: false,

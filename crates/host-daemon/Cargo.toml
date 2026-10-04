@@ -7,7 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait = "0.1.89"
-url.workspace = true
 tracing.workspace = true
 bex-process = { path = "../bex-process" }
 agent-protocol = { path = "../agent-protocol" }
@@ -45,4 +44,3 @@ agent-core = { path = "../agent-core" }
 # Match desktop builds even when CI tests only the headless packages. With both
 # backends enabled, cold dictation must select a provider before starting TLS.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
-serde_json.workspace = true

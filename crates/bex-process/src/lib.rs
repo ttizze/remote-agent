@@ -16,7 +16,7 @@ fn supervisor_command() -> io::Result<Command> {
         .ok_or_else(|| io::Error::other("Host executable directory is unavailable"))?;
     let directory = if directory
         .file_name()
-        .is_some_and(|name| name == "deps" || name == "examples")
+        .is_some_and(|name| name == "deps")
     {
         directory.parent().unwrap_or(directory)
     } else {

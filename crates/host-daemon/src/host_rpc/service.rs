@@ -246,7 +246,6 @@ impl HostRpcService {
             program,
             directory,
             native_home,
-            self.inner.browser.get().cloned(),
         )
         .await
         .inspect_err(|error| {

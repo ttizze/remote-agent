@@ -14,7 +14,7 @@ mod terminals;
 mod workspace_files;
 mod workspace_review;
 mod worktrees;
-pub use workspace_review::{WorkspaceReview, inspect_workspace};
+use workspace_review::inspect_workspace;
 
 pub use host_runtime::HostRuntime;
 

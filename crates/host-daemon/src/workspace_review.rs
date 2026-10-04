@@ -6,7 +6,7 @@ use std::{
 };
 
 use agent_protocol::models::ChangedFile as WorkspaceFileChange;
-pub use agent_protocol::models::WorkspaceReview;
+use agent_protocol::models::WorkspaceReview;
 
 pub async fn inspect_workspace(cwd: String) -> Result<WorkspaceReview> {
     tokio::task::spawn_blocking(move || collect_workspace_review(PathBuf::from(cwd)))

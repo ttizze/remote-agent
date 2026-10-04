@@ -1,6 +1,6 @@
 use super::server::{Context, Thread, limit, offset};
 use crate::Result;
-use serde::{Serialize, Serializer, ser::SerializeMap};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{cell::RefCell, rc::Rc};
 
@@ -103,32 +103,11 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
     })
 }
 
-struct TurnView<'a> {
-    turn: &'a Value,
-    unloaded: bool,
-}
-
-impl Serialize for TurnView<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        let fields = self.turn.as_object().unwrap();
-        let mut map = serializer.serialize_map(Some(fields.len()))?;
-        for (key, value) in fields {
-            if key == "items" && self.unloaded {
-                map.serialize_entry(key, &[] as &[Value])?;
-            } else {
-                map.serialize_entry(key, value)?;
-            }
-        }
-        map.end()
-    }
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Page<T> {
     data: Vec<T>,
     next_cursor: Option<String>,
-    backwards_cursor: Option<String>,
 }
 
 pub(super) fn page(
@@ -208,27 +187,6 @@ pub(super) fn page(
             &Page {
                 data,
                 next_cursor,
-                backwards_cursor: None,
-            },
-        )
-    } else if method == "thread/turns/list" {
-        let end = offset.saturating_add(count).min(turns.len());
-        let data = (offset..end)
-            .map(|index| TurnView {
-                turn: &turns[if descending {
-                    turns.len() - index - 1
-                } else {
-                    index
-                }],
-                unloaded: params["itemsView"] == "notLoaded",
-            })
-            .collect();
-        context.respond(
-            id,
-            &Page {
-                data,
-                next_cursor: (end < turns.len()).then(|| end.to_string()),
-                backwards_cursor: None,
             },
         )
     } else {
@@ -260,7 +218,6 @@ pub(super) fn page(
             &Page {
                 data,
                 next_cursor: (end < total).then(|| end.to_string()),
-                backwards_cursor: None,
             },
         )
     }

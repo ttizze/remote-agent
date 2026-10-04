@@ -163,8 +163,8 @@ pub(super) struct NativeHistory {
     pub response: ThreadResponse,
     pub output_paths: BTreeMap<ItemId, String>,
 }
-pub(super) fn read_details(path: &Path, limit: usize) -> Result<NativeHistory> {
-    read_with_summary(path, summary(path)?.thread, limit)
+pub(super) fn read_details(path: &Path) -> Result<NativeHistory> {
+    read_with_summary(path, summary(path)?.thread, usize::MAX)
 }
 
 pub(super) fn read(path: &Path, limit: usize) -> Result<ThreadResponse> {
@@ -175,7 +175,6 @@ pub(super) fn read_related(
     home: &Path,
     session_id: Uuid,
     agent_id: &str,
-    limit: usize,
 ) -> Result<ThreadResponse> {
     if agent_id.is_empty()
         || !agent_id
@@ -204,7 +203,7 @@ pub(super) fn read_related(
         ..Default::default()
     };
     thread.agent_id = Some(agent_id.into());
-    read_with_summary(&path, thread, limit).map(|history| history.response)
+    read_with_summary(&path, thread, usize::MAX).map(|history| history.response)
 }
 
 fn read_with_summary(path: &Path, thread: Thread, limit: usize) -> Result<NativeHistory> {
@@ -788,7 +787,7 @@ mod tests {
             + "\n";
         let path = directory.join("agent-agent-fixture.jsonl");
         fs::write(&path, &source).unwrap();
-        let related = read_related(root.path(), session, "agent-fixture", 1000).unwrap();
+        let related = read_related(root.path(), session, "agent-fixture").unwrap();
         assert_eq!(related.thread.agent_id.as_deref(), Some("agent-fixture"));
         assert!(
             related
@@ -799,8 +798,8 @@ mod tests {
                 .any(|turn| turn.items.as_ref().is_some_and(|items| !items.is_empty()))
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), source);
-        assert!(read_related(root.path(), session, "../elsewhere", 5).is_err());
-        assert!(read_related(root.path(), session, "missing", 5).is_err());
+        assert!(read_related(root.path(), session, "../elsewhere").is_err());
+        assert!(read_related(root.path(), session, "missing").is_err());
         assert_eq!(fs::read_to_string(parent).unwrap(), NATIVE);
     }
     #[test]

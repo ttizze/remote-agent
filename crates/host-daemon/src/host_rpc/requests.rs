@@ -687,7 +687,7 @@ fn elicitation_input(params: &Value, schema_key: &str) -> Result<ElicitationInpu
     match params["mode"].as_str().unwrap_or("form") {
         "url" => {
             let url = params["url"].as_str().ok_or("elicitation URL is missing")?;
-            let parsed = url::Url::parse(url).map_err(|_| "elicitation URL is invalid")?;
+            let parsed = reqwest::Url::parse(url).map_err(|_| "elicitation URL is invalid")?;
             if !matches!(parsed.scheme(), "http" | "https") {
                 return Err("unsupported elicitation URL scheme".into());
             }

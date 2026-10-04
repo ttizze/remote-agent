@@ -90,7 +90,6 @@ impl From<&str> for OperationError {
 }
 
 pub(crate) struct Claude {
-    browser: Option<Arc<crate::browser::Browser>>,
     program: PathBuf,
     directory: PathBuf,
     native_home: PathBuf,
@@ -143,7 +142,6 @@ impl Claude {
         program: PathBuf,
         directory: PathBuf,
         native_home: Option<PathBuf>,
-        browser: Option<Arc<crate::browser::Browser>>,
     ) -> anyhow::Result<Self> {
         crate::platform::create_state_directory(&directory)?;
         let native_home = native_home.map(Ok).unwrap_or_else(history::home)?;
@@ -155,7 +153,6 @@ impl Claude {
         .await?;
         let (events, event_receiver) = mpsc::channel(256);
         Ok(Self {
-            browser,
             accounts: AsyncMutex::new(accounts),
             program,
             directory,
@@ -497,7 +494,7 @@ impl Claude {
         let home = self.native_home.clone();
         let native_history = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native)?;
-            history::read_details(&path, usize::MAX)
+            history::read_details(&path)
         })
         .await
         .map_err(|error| error.to_string())?
@@ -546,7 +543,7 @@ impl Claude {
             let home = self.native_home.clone();
             let agent_id = agent_id.to_owned();
             let related = tokio::task::spawn_blocking(move || {
-                history::read_related(&home, native, &agent_id, usize::MAX)
+                history::read_related(&home, native, &agent_id)
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -668,6 +665,7 @@ impl Claude {
     async fn start_turn(
         &self,
         params: &op::Submission,
+        browser: Option<Value>,
     ) -> Result<agent_protocol::ids::TurnId, OperationError> {
         let record = self.record(&params.thread_id.id).await?;
         if self.stop.is_cancelled() {
@@ -728,18 +726,7 @@ impl Claude {
                 Path::new(&cwd),
                 Some((&session, state.resumable)),
                 Some((&model, effort)),
-                self.browser
-                    .as_ref()
-                    .map(|browser| {
-                        browser.provider_config(
-                            &SessionRef {
-                                provider: ProviderKind::Claude,
-                                id: session.to_string(),
-                            }
-                            .to_string(),
-                        )
-                    })
-                    .transpose()?,
+                browser,
             )
             .await?;
             process.retain_capacity(permit);
@@ -1748,7 +1735,7 @@ impl Agent for Claude {
         input: &op::Submission,
         route: crate::host_rpc::submission::SubmissionTarget<'_>,
         _reload: bool,
-        _browser: Option<Value>,
+        browser: Option<Value>,
     ) -> Result<op::SubmissionReceipt, Failure> {
         use crate::host_rpc::submission::SubmissionTarget;
         let turn_id = match route {
@@ -1766,7 +1753,7 @@ impl Agent for Claude {
                 )
                 .await?,
             ),
-            SubmissionTarget::Start { .. } => Some(self.start_turn(input).await?),
+            SubmissionTarget::Start { .. } => Some(self.start_turn(input, browser).await?),
         };
         Ok(op::SubmissionReceipt { turn_id })
     }
@@ -1964,7 +1951,6 @@ mod execution_tests {
             root.join("unused"),
             root.join("adapter"),
             Some(root.join("native")),
-            None,
         )
         .await
         .unwrap();

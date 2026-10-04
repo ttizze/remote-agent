@@ -31,7 +31,6 @@ pub(crate) struct Account {
 struct Registry {
     accounts: Vec<Account>,
     selected_id: Option<String>,
-    #[serde(default)]
     signed_out: bool,
 }
 

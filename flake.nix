@@ -114,8 +114,6 @@
               # Use macOS's kernel-matched process inspector. The Nix lsof
               # build scans this host much more slowly under Simulator load.
               export PATH="/usr/sbin:$PATH"
-              export MOBILE_CARGO="${rustToolchain}/bin/cargo"
-              export MOBILE_RUSTC="${rustToolchain}/bin/rustc"
               # The Nix compiler setup overwrites DEVELOPER_DIR with its own SDK.
               if [ -d "''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" ]; then
                 export DEVELOPER_DIR="''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"

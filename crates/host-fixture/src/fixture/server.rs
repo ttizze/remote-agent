@@ -195,11 +195,7 @@ impl Context {
         let mut thread = thread.borrow_mut();
         let mut turn = turn.borrow_mut();
         turn["status"] = status.into();
-        turn["completedAt"] = if self.config.live_clock {
-            (turn["startedAt"].as_f64().unwrap_or(1.) + 3.).into()
-        } else {
-            4.into()
-        };
+        turn["completedAt"] = 4.into();
         turn["durationMs"] = 3000.into();
         if let Some(error) = error {
             turn["error"] = error;
@@ -462,10 +458,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     }
                     let suffix = format!("{}-{}", thread_id.rsplit('-').next().unwrap(), thread.borrow().turns.len() + 1);
                     let turn_id = format!("fixture-turn-{suffix}");
-                    let started = if context.config.live_clock {
-                        json!(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs_f64())
-                    } else { json!(1) };
-                    let turn = Rc::new(RefCell::new(json!({"id":turn_id,"status":"inProgress","items":[],"startedAt":started})));
+                    let turn = Rc::new(RefCell::new(json!({"id":turn_id,"status":"inProgress","items":[],"startedAt":1})));
                     thread.borrow_mut().turns.push(turn.clone());
                     thread.borrow_mut().metadata.insert("status".into(), json!({"type":"active","activeFlags":[]}));
                     context.respond(id, &json!({"turn":{"id":turn_id}}))?;
@@ -531,7 +524,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                         context.respond(id, &json!({"turnId":turn_id}))?;
                     }
                 }
-                "thread/turns/list" | "thread/items/list" | "thread/timeline/list" => {
+                "thread/items/list" | "thread/timeline/list" => {
                     let Some(thread) = threads.get(params["threadId"].as_str().unwrap_or("")) else {
                         context.error(id, -32602, "thread not found")?; continue;
                     };
