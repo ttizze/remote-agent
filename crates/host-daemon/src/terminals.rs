@@ -620,9 +620,14 @@ mod tests {
                 }
                 assert!(!terminals.in_use(&cwd));
                 for pid in pids.split_whitespace() {
-                    let output = std::process::Command::new("ps").args(["-o","stat=","-p",pid]).output().unwrap();
-                    let state = String::from_utf8_lossy(&output.stdout);
-                    assert!(state.trim().is_empty() || state.trim().starts_with('Z'), "process {pid} survived cleanup: {state}");
+                    loop {
+                        let output = std::process::Command::new("ps").args(["-o","stat=","-p",pid]).output().unwrap();
+                        let state = String::from_utf8_lossy(&output.stdout);
+                        if state.trim().is_empty() || state.trim().starts_with('Z') { break; }
+                        // macOS can report an exiting process as "?E" before it disappears.
+                        assert!(state.contains('E'), "process {pid} survived cleanup: {state}");
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
                 }
             }
         }).await.expect("terminal cleanup stalled");
