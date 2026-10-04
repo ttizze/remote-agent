@@ -460,10 +460,19 @@ mod tests {
         assert!(off.sampler.lock().unwrap().is_none());
         let trace = Trace::with_enabled(true);
         trace.activate();
-        tokio::task::yield_now().await;
         std::thread::sleep(Duration::from_millis(350));
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(trace.snapshot().events.iter().any(|event| event.phase == ConnectionPhase::RuntimePulse && event.value >= 350_000));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !trace
+                .snapshot()
+                .events
+                .iter()
+                .any(|event| event.phase == ConnectionPhase::RuntimePulse && event.value >= 350_000)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Runtime sampler must observe the 350ms stall");
     }
 
     #[tokio::test]
