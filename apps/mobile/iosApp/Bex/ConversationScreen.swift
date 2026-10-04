@@ -158,7 +158,7 @@ struct ThreadScreen: View {
                     }
                     loadVisibleHistory()
                 }.onEnded { gesture in
-                    if gesture.translation.height <= 0, latestHistoryRowVisible {
+                    if gesture.translation.height < -abs(gesture.translation.width), latestHistoryRowVisible {
                         isFollowingLatest = true
                         followLatest(to: lastRowId)
                     }
