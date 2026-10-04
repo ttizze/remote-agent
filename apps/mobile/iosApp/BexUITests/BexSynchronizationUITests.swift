@@ -3,6 +3,50 @@ import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
+    func testSimulatorEditsHeldQueueAndPreservesDraftAcrossRelaunch() throws {
+        let app = try connectedSimulatorApp()
+        try startSimulatorConversation(app, promptText: "[approval] Hold the active turn")
+        XCTAssertTrue(app.buttons["request.accept"].waitForExistence(timeout: 15))
+        let composer = app.textFields["task.message"]
+        composer.tap(); composer.typeText("Queued from iPhone")
+        app.buttons["queue.add"].tap()
+        XCTAssertTrue(app.buttons["queue.open"].waitForExistence(timeout: 10))
+        let cleared = expectation(for: NSPredicate(format: "value == placeholderValue"), evaluatedWith: composer)
+        wait(for: [cleared], timeout: 10)
+        app.buttons["queue.open"].tap()
+        XCTAssertTrue(app.staticTexts["Queued from iPhone"].waitForExistence(timeout: 10))
+        app.buttons["queue.toggle"].tap()
+        XCTAssertTrue(app.staticTexts["キューは停止中です"].waitForExistence(timeout: 10))
+        editFirstQueuedMessage(app, suffix: " edited")
+        XCTAssertTrue(app.staticTexts["Queued from iPhone edited"].waitForExistence(timeout: 10))
+        captureScreen(app, named: "Held queue edited on iPhone")
+        app.buttons["queue.close"].tap()
+        composer.tap(); composer.typeText("Keep this separate draft")
+        app.terminate(); app.launch()
+        XCTAssertTrue(composer.waitForExistence(timeout: 15))
+        XCTAssertEqual(composer.value as? String, "Keep this separate draft")
+        app.buttons["queue.open"].tap()
+        XCTAssertTrue(app.staticTexts["Queued from iPhone edited"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["キューは停止中です"].exists)
+        prefixedButton(app, prefix: "queue.actions.").tap()
+        app.buttons["削除"].tap()
+        XCTAssertTrue(app.staticTexts["待機中のメッセージはありません"].waitForExistence(timeout: 10))
+        app.buttons["queue.close"].tap()
+        XCTAssertEqual(composer.value as? String, "Keep this separate draft")
+        XCTAssertFalse(app.staticTexts["notice"].exists)
+    }
+
+    private func editFirstQueuedMessage(_ app: XCUIApplication, suffix: String) {
+        prefixedButton(app, prefix: "queue.actions.").tap()
+        app.buttons["編集"].tap()
+        let field = app.alerts.textFields["メッセージ"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        let original = field.value as? String ?? ""
+        field.tap(); field.typeKey("a", modifierFlags: .command)
+        field.typeText(original + suffix)
+        app.alerts.buttons["保存"].tap()
+    }
+
     private func createBackgroundTaskRowIdentifier() throws -> String {
         struct Session: Decodable {
             let provider: String
@@ -25,7 +69,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("external-conversation")
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
-        let row = try app.buttons[simulatorConversationRow("fixture-external-thread")]
+        let row = try app.buttons[simulatorConversationElementID("fixture-external-thread")]
         XCTAssertTrue(row.waitForExistence(timeout: 15))
         row.tap()
         XCTAssertTrue(app.descendants(matching: .any)["task.loading"].waitForExistence(timeout: 2),
@@ -131,7 +175,7 @@ extension BexLaunchUITests {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         let number = firstAnswerID.replacingOccurrences(of: "item.fixture-final-", with: "")
             .split(separator: "-")[0]
-        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-thread-\(number)")]
+        let row = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-thread-\(number)")]
         XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         XCTAssertTrue(app.descendants(matching: .any)[secondAnswerID].waitForExistence(timeout: 20))
         XCTAssertFalse(banner.exists)
@@ -146,7 +190,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("external-conversation")
         app.buttons["tasks.menu"].tap()
         app.buttons["tasks.refresh"].tap()
-        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-external-thread")]
+        let row = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-external-thread")]
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         XCTAssertTrue(
             app.descendants(matching: .any)["item.answer-fixture-external-thread"].waitForExistence(timeout: 15),

@@ -397,7 +397,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
-        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListSessions, ImportHistory, AddProject, CreateSession,
+        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListSessions, ImportHistory, QueueControl, AddProject, CreateSession,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
@@ -453,7 +453,13 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 draft,
                 client_user_message_id,
                 None,
+                false,
             );
+        }
+        Intent::Queue { thread_id, client_user_message_id } => {
+            let draft_key = DraftKey::from(thread_id.clone());
+            let draft = previous.drafts.get(&draft_key).cloned().unwrap_or_default();
+            return submission(previous, Some(thread_id), draft_key, draft, client_user_message_id, None, true);
         }
         Intent::RestoreUnknownSubmission { client_user_message_id } => {
             if previous
@@ -1023,6 +1029,7 @@ fn submission(
     draft: Arc<Draft>,
     client_user_message_id: agent_protocol::ids::ClientInputId,
     clear_draft: Option<Arc<Draft>>,
+    force_queue: bool,
 ) -> (Snapshot, Vec<Effect>) {
     let mut next = previous.clone();
     next.error = None;
@@ -1070,6 +1077,7 @@ fn submission(
             thread_id,
             client_user_message_id,
             draft,
+            force_queue,
         }),
         None => Effect::execute(op::StartSubmission {
             provider: crate::presentation::model_settings::draft_provider(
@@ -1123,6 +1131,10 @@ fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &crate::session::Sessio
         }
         let mut pending = (*snapshot.pending_submissions[&id]).clone();
         match delivery {
+            SubmissionDelivery::Queued => {
+                pending.accepted = true;
+                pending.delivery_unknown = false;
+            }
             SubmissionDelivery::Sending => pending.delivery_unknown = false,
             SubmissionDelivery::Accepted { turn_id } => {
                 pending.accepted = true;
@@ -1142,15 +1154,19 @@ fn reconcile_pending(snapshot: &mut Snapshot, thread_id: &crate::session::Sessio
     let thread = &snapshot.conversations[thread_id];
     let echoed = |id: &agent_protocol::ids::ClientInputId, pending: &Arc<PendingSubmission>| {
         pending.draft_key == DraftKey::from(thread_id)
-            && thread
-                .turns
+            && (thread
+                .queued_inputs
                 .iter()
-                .flatten()
-                .flat_map(|turn| turn.items.iter().flatten())
-                .any(|item| {
-                    matches!(item.body(), crate::models::ItemBody::UserMessage { .. })
-                        && item.client_input_id.as_ref() == Some(id)
-                })
+                .any(|input| &input.submission.client_user_message_id == id)
+                || thread
+                    .turns
+                    .iter()
+                    .flatten()
+                    .flat_map(|turn| turn.items.iter().flatten())
+                    .any(|item| {
+                        matches!(item.body(), crate::models::ItemBody::UserMessage { .. })
+                            && item.client_input_id.as_ref() == Some(id)
+                    }))
     };
     if snapshot
         .pending_submissions

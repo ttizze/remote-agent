@@ -1258,8 +1258,9 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
                 .turns
                 .as_ref()
                 .is_some_and(|turns| {
-                    turns.last().is_some_and(|turn| {
+                    turns.iter().any(|turn| {
                         turn.status == agent_protocol::execution::TurnStatus::Completed
+                            && turn.items.iter().flatten().any(|item| item.client_input_id.as_deref() == Some("duplicate-message"))
                     })
                 })
             {
@@ -1924,13 +1925,28 @@ async fn upstream_exit_keeps_host_management_connected() {
         std::fs::write(directory.path().join("exit-on-list"), "").unwrap();
         assert!(
             store
-                .dispatch(Intent::ListSessions(op::ListSessions::new(
-                    Default::default()
-                )))
+                .dispatch(Intent::ImportHistory(op::ImportHistory {}))
                 .await
                 .is_err()
         );
         assert!(store.snapshot().error.is_some());
+        store
+            .dispatch(Intent::ListSessions(op::ListSessions::new(
+                Default::default(),
+            )))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .snapshot()
+                .threads
+                .as_ref()
+                .unwrap()
+                .provider_errors
+                .as_ref()
+                .unwrap()
+                .contains_key("codex")
+        );
         let management = fixture
             .local()
             .await
@@ -2665,7 +2681,7 @@ async fn merged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() {
         assert_eq!(opened["response"]["thread"]["status"], "running");
         let listed = local
             .peer
-            .call(&rpc::ListSessions::new(Default::default()))
+            .call(&rpc::ListSessions::new(models::ListQuery { search_term: "outside the visible filter".into(), ..Default::default() }))
             .await
             .unwrap();
         assert!(
@@ -2673,7 +2689,7 @@ async fn merged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() {
                 .data
                 .iter()
                 .any(|thread| thread.id.as_ref() == Some(active)),
-            "the active first turn must be absent from the history list in this regression"
+            "worktree protection must hold even when the active conversation is outside the visible filter"
         );
         let terminal_path = &checkouts[1].1;
         local

@@ -8,10 +8,16 @@ extension BexLaunchUITests {
         let project = app.buttons["tasks.project.simulator-project"]
         XCTAssertTrue(project.waitForExistence(timeout: 10))
         project.tap()
-        let running = app.descendants(matching: .any)["tasks.running.codex:merge-active"]
+        let running = try app.descendants(matching: .any)[simulatorConversationElementID(
+            "merge-active",
+            kind: "running"
+        )]
         XCTAssertTrue(running.waitForExistence(timeout: 10))
-        let merged = app.descendants(matching: .any)["tasks.merged.codex:merge-active"]
-        let unmerged = app.descendants(matching: .any)["tasks.unmerged.codex:merge-active"]
+        let merged = try app.descendants(matching: .any)[simulatorConversationElementID("merge-active", kind: "merged")]
+        let unmerged = try app.descendants(matching: .any)[simulatorConversationElementID(
+            "merge-active",
+            kind: "unmerged"
+        )]
         XCTAssertFalse(merged.exists || unmerged.exists)
         try simulatorFixture("merge-worktree/dirty")
         refreshSimulatorTaskList(app)
@@ -25,11 +31,21 @@ extension BexLaunchUITests {
         XCTAssertFalse(unmerged.exists)
         XCTAssertTrue(running.exists)
         XCTAssertGreaterThan(merged.frame.minX, running.frame.maxX)
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.merged.codex:merge-idle"].exists)
+        XCTAssertTrue(try app.descendants(matching: .any)[simulatorConversationElementID("merge-idle", kind: "merged")]
+            .exists)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Merged worktree session list"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+        try verifyMergedWorktreeAfterRelaunch(app, running: running, merged: merged, unmerged: unmerged)
+    }
+
+    private func verifyMergedWorktreeAfterRelaunch(
+        _ app: XCUIApplication,
+        running: XCUIElement,
+        merged: XCUIElement,
+        unmerged: XCUIElement
+    ) throws {
         app.terminate()
         app.launch()
         expandSimulatorProject(app)
@@ -46,7 +62,8 @@ extension BexLaunchUITests {
         let removed = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: merged)
         wait(for: [removed], timeout: 10)
         XCTAssertTrue(unmerged.exists)
-        XCTAssertTrue(app.descendants(matching: .any)["tasks.unmerged.codex:merge-idle"].exists)
+        XCTAssertTrue(try app
+            .descendants(matching: .any)[simulatorConversationElementID("merge-idle", kind: "unmerged")].exists)
         XCTAssertTrue(running.exists)
     }
 
@@ -205,7 +222,7 @@ extension BexLaunchUITests {
         app.buttons["tasks.refresh"].tap()
         let project = app.buttons["tasks.project.simulator-project"]
         XCTAssertTrue(project.waitForExistence(timeout: 10)); project.tap()
-        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-worktree-thread")]
+        let row = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-worktree-thread")]
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         let changes = app.buttons["task.diff"]
         XCTAssertTrue(changes.waitForExistence(timeout: 15))

@@ -204,7 +204,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert!(accounts["result"]["selected"]["codex"].is_null());
         assert!(accounts["result"]["error"].is_string());
         assert!(call(&service, &mut session, "host/session/list", json!({})).await.get("error").is_none());
-        assert_eq!(call(&service, &mut session, "host/session/submit", json!({"threadId":{"provider":"codex","id":"any"},"clientUserMessageId":"unavailable-account","input":[{"text":{"text":"must not use a different account"}}]})).await["error"]["code"], "account_unavailable");
+        assert_eq!(call(&service, &mut session, "host/session/submit", json!({"threadId":{"provider":"codex","id":thread},"clientUserMessageId":"unavailable-account","input":[{"text":{"text":"must not use a different account"}}]})).await["error"]["code"], "account_unavailable");
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
         let started = call(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":home})).await;
         completed_turn(&service, &mut session, started["result"]["thread"]["id"]["id"].as_str().unwrap(), "recovered account").await;

@@ -90,6 +90,7 @@ struct ServiceInner {
     conversations: Arc<Conversations>,
     initial_import: tokio::sync::OnceCell<()>,
     catalog_import: tokio::sync::Mutex<()>,
+    catalog_errors: std::sync::RwLock<HashMap<ProviderKind, Failure>>,
     event_pumps: std::sync::Mutex<std::collections::HashSet<ProviderKind>>,
     files: crate::workspace_files::WorkspaceFiles,
     worktrees: crate::worktrees::Worktrees,
@@ -128,6 +129,7 @@ impl HostRpcService {
                 conversations,
                 initial_import: Default::default(),
                 catalog_import: Default::default(),
+                catalog_errors: Default::default(),
                 event_pumps: Default::default(),
                 files,
             }),
@@ -283,26 +285,32 @@ impl HostRpcService {
             let pages = session_pages(agent, "");
             futures_util::pin_mut!(pages);
             while let Some(page) = pages.try_next().await? {
-                for summary in page {
-                    if summary.thread.id.is_none() {
-                        continue;
-                    }
-                    let target = self
-                        .inner
+                targets.extend(
+                    self.inner
                         .conversations
-                        .discover(&summary.thread, &scope, summary.branch.as_deref())
-                        .map_err(|error| Failure::new("history_import_failed", error))?;
-                    self.inner.router.broadcast(
-                        agent_protocol::protocol::Notification::SessionRenamed {
-                            session: target.clone(),
-                        },
-                    );
-                    targets.push(target);
-                }
+                        .discover_page(&page, &scope)
+                        .map_err(|error| Failure::new("history_import_failed", error))?,
+                );
             }
             Ok::<_, Failure>(())
         }
         .await;
+        let mut errors = self
+            .inner
+            .catalog_errors
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        match &result {
+            Ok(()) => {
+                errors.remove(&provider);
+            }
+            Err(error) => {
+                errors.insert(provider, error.clone());
+            }
+        }
+        self.inner
+            .router
+            .broadcast(agent_protocol::protocol::Notification::CatalogChanged {});
         (targets, result.err())
     }
 
@@ -550,17 +558,26 @@ impl HostRpcService {
     }
     pub(crate) fn provider_errors(&self) -> serde_json::Value {
         let mut errors: serde_json::Map<_, _> = self
-            .agents()
-            .into_iter()
-            .filter_map(|(p, a)| {
-                a.availability().err().map(|e| {
-                    (
-                        provider_key(p),
-                        serde_json::to_value(e).expect("failure serializes"),
-                    )
-                })
+            .inner
+            .catalog_errors
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .map(|(provider, error)| {
+                (
+                    provider_key(*provider),
+                    serde_json::to_value(error).expect("failure serializes"),
+                )
             })
             .collect();
+        errors.extend(self.agents().into_iter().filter_map(|(p, a)| {
+            a.availability().err().map(|e| {
+                (
+                    provider_key(p),
+                    serde_json::to_value(e).expect("failure serializes"),
+                )
+            })
+        }));
         errors.extend(
             self.inner
                 .startup_errors
@@ -615,12 +632,13 @@ impl HostRpcService {
             };
         }
         let result = match message {
-            Call::Submit(input) => {
+            Call::Submit(input) | Call::QueueInput(input) => {
                 // The Host owns execution after dispatch starts. Closing the RPC
                 // drops only the reply waiter, never an admitted provider write.
                 let service = self.clone();
+                let force_queue = matches!(message, Call::QueueInput(_));
                 let input = input.clone();
-                tokio::spawn(async move { service.execute_submission(&input).await })
+                tokio::spawn(async move { service.execute_submission(&input, force_queue).await })
                     .await
                     .map_err(|error| Failure::unknown("submission_outcome_unknown", error))
                     .and_then(|result| result)
@@ -657,6 +675,7 @@ impl HostRpcService {
     async fn execute_submission(
         &self,
         input: &op::Submission,
+        force_queue: bool,
     ) -> Result<op::SubmissionReceipt, Failure> {
         use agent_protocol::session::SubmissionDelivery;
         let target = &input.thread_id;
@@ -666,6 +685,7 @@ impl HostRpcService {
             .router
             .retain_execution(target.clone())
             .map_err(|error| Failure::new("invalid_params", error))?;
+        self.native_session(target)?;
         if let Some(delivery) = self
             .inner
             .conversations
@@ -674,24 +694,92 @@ impl HostRpcService {
         {
             return replay_submission(delivery);
         }
-        self.native_session(target)?;
-        self.agent(target.provider)?.availability()?;
+        if input
+            .model
+            .as_ref()
+            .is_some_and(|model| model.provider != target.provider || model.id.trim().is_empty())
+        {
+            return Err(Failure::new(
+                "provider_mismatch",
+                "別のプロバイダーのモデルを使う場合は新しい会話を作成してください。",
+            ));
+        }
         let _workspace = self.inner.worktree_access.read().await;
-        // Finish the source snapshot before a provider write can move its cursors.
-        self.import_conversation(target, usize::MAX).await?;
-        let _serial = self.inner.router.submission_lock(target).lock_owned().await;
+        let serial = self.inner.router.submission_lock(target);
+        let mut _serial_guard = serial.clone().lock_owned().await;
+        let held = self
+            .inner
+            .conversations
+            .queue_held(target)
+            .map_err(|error| Failure::new("conversation_unavailable", error))?;
+        let prepared = if force_queue || held {
+            None
+        } else {
+            self.agent(target.provider)?.availability()?;
+            // Complete the source snapshot before native execution can move its
+            // cursors. Admission to a held queue requires no provider process.
+            drop(_serial_guard);
+            self.import_conversation(target, usize::MAX).await?;
+            _serial_guard = serial.lock_owned().await;
+            Some(self.prepare_input(target).await?)
+        };
+        let held = self
+            .inner
+            .conversations
+            .queue_held(target)
+            .map_err(|error| Failure::new("conversation_unavailable", error))?;
+        let queued = held
+            || prepared
+                .as_ref()
+                .is_none_or(|(route, _)| *route == super::submission::SubmissionTarget::Queue);
         if let Some(delivery) = self
             .inner
             .conversations
-            .admit(input)
+            .admit(
+                input,
+                if queued {
+                    SubmissionDelivery::Queued
+                } else {
+                    SubmissionDelivery::Sending
+                },
+            )
             .map_err(|error| Failure::new("input_admission_failed", error))?
         {
             return replay_submission(delivery);
         }
-        let result = match self.inner.router.begin_submission(target, id) {
-            Ok(()) => self.submit_input(target, input).await,
-            Err(error) => Err(error),
+        if queued {
+            self.inner
+                .router
+                .publish_submission(
+                    target,
+                    input.client_user_message_id.clone(),
+                    SubmissionDelivery::Queued,
+                )
+                .map_err(|error| Failure::unknown("input_admission_unknown", error))?;
+            self.queue_changed(target);
+            self.wake_queue(target.clone());
+            return Ok(op::SubmissionReceipt { turn_id: None });
+        }
+        let (route, reload) = prepared.expect("immediate input has an execution route");
+        let result = match self.inner.router.publish_submission(
+            target,
+            input.client_user_message_id.clone(),
+            agent_protocol::session::SubmissionDelivery::Sending,
+        ) {
+            Ok(()) => self.submit_input(target, input, route, reload).await,
+            Err(error) => Err(Failure::unknown("submission_outcome_unknown", error)),
         };
+        self.finish_input(target, id, &result)?;
+        result
+    }
+
+    fn finish_input(
+        &self,
+        target: &agent_protocol::session::SessionRef,
+        id: &str,
+        result: &Result<op::SubmissionReceipt, Failure>,
+    ) -> Result<(), Failure> {
+        use agent_protocol::session::SubmissionDelivery;
         let delivery = match &result {
             Ok(receipt) => SubmissionDelivery::Accepted {
                 turn_id: receipt.turn_id.clone(),
@@ -705,24 +793,13 @@ impl HostRpcService {
             .router
             .finish_submission(target, id, delivery)
             .map_err(|error| Failure::unknown("submission_outcome_unknown", error))?;
-        result
+        Ok(())
     }
 
-    async fn submit_input(
+    async fn prepare_input(
         &self,
         target: &agent_protocol::session::SessionRef,
-        input: &op::Submission,
-    ) -> Result<op::SubmissionReceipt, Failure> {
-        if input
-            .model
-            .as_ref()
-            .is_some_and(|model| model.provider != target.provider || model.id.trim().is_empty())
-        {
-            return Err(Failure::new(
-                "provider_mismatch",
-                "別のプロバイダーのモデルを使う場合は新しい会話を作成してください。",
-            ));
-        }
+    ) -> Result<(super::submission::SubmissionTarget, bool), Failure> {
         let agent = self.agent(target.provider)?;
         agent.availability()?;
         let native = self.native_session(target)?;
@@ -753,8 +830,17 @@ impl HostRpcService {
             response.thread.cwd.as_deref(),
         )
         .map_err(|e| Failure::new("submission_unavailable", e))?;
-        let mut reload = state.needs_reload;
-        if let super::submission::SubmissionTarget::Start { cwd } = route
+        Ok((route, state.needs_reload))
+    }
+
+    async fn submit_input(
+        &self,
+        target: &agent_protocol::session::SessionRef,
+        input: &op::Submission,
+        route: super::submission::SubmissionTarget,
+        mut reload: bool,
+    ) -> Result<op::SubmissionReceipt, Failure> {
+        if let super::submission::SubmissionTarget::Start { cwd } = &route
             && let Some(directory) = self
                 .inner
                 .worktrees
@@ -768,8 +854,8 @@ impl HostRpcService {
             reload = true;
         }
         let mut native_input = input.clone();
-        native_input.thread_id = native;
-        agent
+        native_input.thread_id = self.native_session(target)?;
+        self.agent(target.provider)?
             .submit(
                 &native_input,
                 route,
@@ -777,6 +863,99 @@ impl HostRpcService {
                 self.browser_config(&target.to_string())?,
             )
             .await
+    }
+
+    fn queue_changed(&self, target: &agent_protocol::session::SessionRef) {
+        self.inner
+            .router
+            .broadcast(agent_protocol::protocol::Notification::HistoryChanged {
+                session: target.clone(),
+            });
+    }
+
+    fn wake_queue(&self, target: agent_protocol::session::SessionRef) {
+        let inner = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            let Some(inner) = inner.upgrade() else { return };
+            let service = Self { inner };
+            if let Err(error) = service.deliver_queued(&target).await {
+                let _serial = service
+                    .inner
+                    .router
+                    .submission_lock(&target)
+                    .lock_owned()
+                    .await;
+                if let Err(commit) = service
+                    .inner
+                    .conversations
+                    .queue_control(&target, &agent_protocol::queue::QueueAction::Pause)
+                {
+                    tracing::error!(target: "bex", operation = "queue.pause_failed", message = %commit);
+                }
+                service.queue_changed(&target);
+                tracing::warn!(target: "bex", operation = "queue.delivery_failed", code = error.code, message = %error);
+            }
+        });
+    }
+
+    async fn deliver_queued(
+        &self,
+        target: &agent_protocol::session::SessionRef,
+    ) -> Result<(), Failure> {
+        let _execution = self
+            .inner
+            .router
+            .retain_execution(target.clone())
+            .map_err(|error| Failure::new("invalid_queue", error))?;
+        if self
+            .inner
+            .conversations
+            .queue_held(target)
+            .map_err(|error| Failure::new("queue_read_failed", error))?
+            || !self
+                .inner
+                .conversations
+                .has_queued(target)
+                .map_err(|error| Failure::new("queue_read_failed", error))?
+        {
+            return Ok(());
+        }
+        let _workspace = self.inner.worktree_access.read().await;
+        self.import_conversation(target, usize::MAX).await?;
+        let _serial = self.inner.router.submission_lock(target).lock_owned().await;
+        if !self
+            .inner
+            .conversations
+            .has_queued(target)
+            .map_err(|error| Failure::new("queue_read_failed", error))?
+        {
+            return Ok(());
+        }
+        let (route, reload) = self.prepare_input(target).await?;
+        if !matches!(route, super::submission::SubmissionTarget::Start { .. }) {
+            return Ok(());
+        }
+        let Some(input) = self
+            .inner
+            .conversations
+            .claim_queued(target)
+            .map_err(|error| Failure::new("queue_claim_failed", error))?
+        else {
+            return Ok(());
+        };
+        self.queue_changed(target);
+        let id = input.client_user_message_id.as_str();
+        let result = match self.inner.router.publish_submission(
+            target,
+            input.client_user_message_id.clone(),
+            agent_protocol::session::SubmissionDelivery::Sending,
+        ) {
+            Ok(()) => self.submit_input(target, &input, route, reload).await,
+            Err(error) => Err(Failure::unknown("submission_outcome_unknown", error)),
+        };
+        self.finish_input(target, id, &result)?;
+        self.queue_changed(target);
+        result.map(|_| ())
     }
 
     async fn answer_request(
@@ -916,6 +1095,25 @@ impl HostRpcService {
                 transfer: None,
             }
         };
+        if response.item.is_deferred() {
+            let previous = response.item.clone();
+            let mut native = params.clone();
+            native.thread_id = self.native_session(target)?;
+            let mut hydrated = self.agent(target.provider)?.read_item(&native).await?;
+            self.normalize_item(&mut hydrated.item)?;
+            if !self
+                .inner
+                .router
+                .hydrate_item(target, &params.turn_id, &previous, &hydrated.item)
+                .map_err(|error| Failure::new("item_import_failed", error))?
+            {
+                return Err(Failure::new(
+                    "item_changed",
+                    "item changed while importing its body; read it again",
+                ));
+            }
+            response = hydrated;
+        }
         let bytes = agent_protocol::protocol::encode(&response.item).expect("item serializes");
         if bytes.len() > agent_protocol::models::MAX_INLINE_ITEM_BYTES {
             response.transfer = Some(
@@ -1188,6 +1386,22 @@ impl HostRpcService {
                 self.refresh_import().await?;
                 agent_protocol::models::Empty {}.into()
             }
+            Call::QueueControl(params) => {
+                self.native_session(&params.session)?;
+                let _serial = self
+                    .inner
+                    .router
+                    .submission_lock(&params.session)
+                    .lock_owned()
+                    .await;
+                self.inner
+                    .conversations
+                    .queue_control(&params.session, &params.action)
+                    .map_err(|error| Failure::new("queue_update_failed", error))?;
+                self.queue_changed(&params.session);
+                self.wake_queue(params.session.clone());
+                agent_protocol::models::Empty {}.into()
+            }
             Call::ReadWorktreeSettings(_) | Call::UpdateWorktreeSettings(_) => {
                 let update = if let Call::UpdateWorktreeSettings(settings) = request {
                     Some(settings.clone())
@@ -1279,7 +1493,13 @@ impl HostRpcService {
             }
             Call::Interrupt(params) => {
                 let target = target_session.expect("session-scoped interrupt");
+                let _serial = self.inner.router.submission_lock(target).lock_owned().await;
                 let native = self.native_session(target)?;
+                self.inner
+                    .conversations
+                    .queue_control(target, &agent_protocol::queue::QueueAction::Pause)
+                    .map_err(|error| Failure::new("queue_pause_failed", error))?;
+                self.queue_changed(target);
                 self.agent(target.provider)?
                     .interrupt(&native.id, &params.turn_id)
                     .await?
@@ -1752,11 +1972,18 @@ impl HostRpcService {
                         let service = Self { inner };
                         let mut change = event.change;
                         let result = async {
-                            let renamed = matches!(&change, super::agent::AgentChange::Renamed(_));
+                            let renamed = match &change {
+                                super::agent::AgentChange::Renamed { name, .. } => {
+                                    Some(name.clone())
+                                }
+                                _ => None,
+                            };
                             let native = match &mut change {
                                 super::agent::AgentChange::Session { session, .. }
                                 | super::agent::AgentChange::Request { session, .. }
-                                | super::agent::AgentChange::Renamed(session) => Some(session),
+                                | super::agent::AgentChange::Renamed { session, .. } => {
+                                    Some(session)
+                                }
                                 _ => None,
                             };
                             if let Some(native) = native {
@@ -1770,18 +1997,12 @@ impl HostRpcService {
                                             .map_err(|error| error.to_string())?,
                                     )
                                     .map_err(|error| error.to_string())?;
-                                if renamed {
-                                    let response = agent
-                                        .state(&native.id)
-                                        .await
+                                if let Some(name) = renamed {
+                                    service
+                                        .inner
+                                        .conversations
+                                        .rename(&target, &name, false)
                                         .map_err(|error| error.to_string())?;
-                                    if let Some(name) = response.response.thread.name {
-                                        service
-                                            .inner
-                                            .conversations
-                                            .rename(&target, &name, false)
-                                            .map_err(|error| error.to_string())?;
-                                    }
                                 }
                                 *native = target;
                             }
@@ -1805,7 +2026,25 @@ impl HostRpcService {
                                         .map_err(|error| error.to_string())?;
                                 }
                             }
-                            change.apply(&router)
+                            let finished = match &change {
+                                super::agent::AgentChange::Session {
+                                    session,
+                                    change:
+                                        agent_protocol::session::SessionChange::Turn {
+                                            completed: true,
+                                            ..
+                                        }
+                                        | agent_protocol::session::SessionChange::Status {
+                                            status: agent_protocol::execution::SessionStatus::Idle,
+                                        },
+                                } => Some(session.clone()),
+                                _ => None,
+                            };
+                            change.apply(&router)?;
+                            if let Some(target) = finished {
+                                service.wake_queue(target);
+                            }
+                            Ok(())
                         }
                         .await;
                         if let Err(error) = &result {
@@ -1826,6 +2065,7 @@ fn replay_submission(
 ) -> Result<op::SubmissionReceipt, Failure> {
     use agent_protocol::session::SubmissionDelivery;
     match delivery {
+        SubmissionDelivery::Queued => Ok(op::SubmissionReceipt { turn_id: None }),
         SubmissionDelivery::Accepted { turn_id } => Ok(op::SubmissionReceipt { turn_id }),
         SubmissionDelivery::Rejected => Err(Failure::new(
             "submission_rejected",
@@ -1907,7 +2147,10 @@ fn canonical_storage_path(path: &std::path::Path) -> std::path::PathBuf {
 // additionally identify the operations whose delivery must be tracked.
 fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRef>, Option<&str>) {
     match request {
-        Call::Submit(p) => (Some(&p.thread_id), Some(p.client_user_message_id.as_str())),
+        Call::Submit(p) | Call::QueueInput(p) => {
+            (Some(&p.thread_id), Some(p.client_user_message_id.as_str()))
+        }
+        Call::QueueControl(p) => (Some(&p.session), None),
         Call::ForkSession(p) => (Some(&p.thread_id), None),
         Call::Interrupt(p) => (Some(&p.thread_id), None),
         Call::ReadItem(p) => (Some(&p.thread_id), None),
@@ -2133,7 +2376,6 @@ mod tests {
                     input
                         .try_send(crate::claude::Command {
                             value: serde_json::Value::Null,
-                            user: None,
                             delivered: None,
                         })
                         .is_ok()
@@ -2372,6 +2614,82 @@ mod tests {
             .into_value();
             assert_eq!(response["error"]["code"], expected, "{method}");
         }
+    }
+
+    #[tokio::test]
+    async fn held_queue_admits_once_without_a_provider_process() {
+        use super::*;
+        use agent_protocol::{
+            queue::QueueAction,
+            session::{SessionRef, SubmissionDelivery},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            Err("not available".into()),
+            ProjectStore::new(root.path().join("worktrees.json")),
+        )
+        .unwrap();
+        let target = service
+            .inner
+            .conversations
+            .bind(
+                &SessionRef {
+                    provider: ProviderKind::Codex,
+                    id: "source".into(),
+                },
+                &service.storage_scope(ProviderKind::Codex).unwrap(),
+            )
+            .unwrap();
+        service
+            .inner
+            .conversations
+            .queue_control(&target, &QueueAction::Pause)
+            .unwrap();
+        let input = op::Submission {
+            thread_id: target.clone(),
+            client_user_message_id: "held".into(),
+            input: vec![op::Input::Text {
+                text: "save until the provider recovers".into(),
+            }],
+            model: None,
+            effort: None,
+            service_tier: None,
+        };
+        for _ in 0..2 {
+            assert!(
+                service
+                    .execute_submission(&input, false)
+                    .await
+                    .unwrap()
+                    .turn_id
+                    .is_none()
+            );
+        }
+        let thread = service
+            .inner
+            .conversations
+            .open_thread(&target, 5, false)
+            .unwrap()
+            .thread;
+        assert!(thread.queue_held);
+        assert_eq!(thread.queued_inputs.len(), 1);
+        assert_eq!(thread.queued_inputs[0].submission, input);
+        assert_eq!(thread.queued_inputs[0].delivery, SubmissionDelivery::Queued);
+        assert!(thread.turns.unwrap_or_default().is_empty());
+        let mut mismatched = input;
+        mismatched.client_user_message_id = "mismatched".into();
+        mismatched.model = Some(agent_protocol::models::ModelRef {
+            provider: ProviderKind::Claude,
+            id: "default".into(),
+        });
+        assert_eq!(
+            service
+                .execute_submission(&mismatched, true)
+                .await
+                .unwrap_err()
+                .code,
+            "provider_mismatch"
+        );
     }
 
     #[tokio::test]

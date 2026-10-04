@@ -89,6 +89,10 @@ pub struct Thread {
     pub requests: BTreeMap<crate::ids::RequestId, Arc<crate::requests::Request>>,
     #[serde(default)]
     pub submissions: BTreeMap<crate::ids::ClientInputId, crate::session::SubmissionDelivery>,
+    #[serde(default)]
+    pub queued_inputs: Vec<crate::queue::QueueEntry>,
+    #[serde(default)]
+    pub queue_held: bool,
     pub id: Option<crate::session::SessionRef>,
     pub name: Option<String>,
     pub cwd: Option<String>,

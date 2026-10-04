@@ -420,8 +420,8 @@ pub(super) fn event_change(
             change,
         }
     } else if message.method() == Some("thread/name/updated") {
-        AgentChange::Renamed(
-            SessionRef::new(
+        AgentChange::Renamed {
+            session: SessionRef::new(
                 ProviderKind::Codex,
                 params["threadId"]
                     .as_str()
@@ -429,7 +429,11 @@ pub(super) fn event_change(
                     .into(),
             )
             .map_err(str::to_owned)?,
-        )
+            name: params["threadName"]
+                .as_str()
+                .ok_or("renamed session title is missing")?
+                .into(),
+        }
     } else {
         return Ok(None);
     };
@@ -748,7 +752,7 @@ impl Agent for Codex {
     async fn submit(
         &self,
         input: &op::Submission,
-        route: super::submission::SubmissionTarget<'_>,
+        route: super::submission::SubmissionTarget,
         reload: bool,
         browser: Option<Value>,
     ) -> Result<op::SubmissionReceipt, Failure> {
@@ -760,15 +764,16 @@ impl Agent for Codex {
         });
         let turn_id = match route {
             SubmissionTarget::Steer(turn) => {
-                params["expectedTurnId"] = turn.into();
+                params["expectedTurnId"] = turn.clone().into();
                 self.request::<_, agent_protocol::models::Empty>("turn/steer", &params)
                     .await?;
                 Some(turn.into())
             }
             SubmissionTarget::Queue => {
-                let reply: Value = self.request("thread/queue/add", &params).await?;
-                native_turn_id(reply["queuedSubmission"]["id"].as_str())?;
-                None
+                return Err(Failure::new(
+                    "invalid_execution_route",
+                    "the Host owns queued input",
+                ));
             }
             SubmissionTarget::Start { cwd } => {
                 if reload {

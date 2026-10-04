@@ -9,6 +9,13 @@ extension ThreadScreen {
     var composer: some View {
         let attachments = model.snapshot.draft(key: model.coreDraftKey).attachments
         return VStack(spacing: 12) {
+            if let threadId = model.selectedThreadId, let thread = model.snapshot.conversation(id: threadId),
+               !thread.queueMessages().isEmpty || thread.queueHeld() {
+                ConversationQueuePanel(messages: thread.queueMessages(), held: thread.queueHeld(),
+                                       enabled: model.isConnected && !model.sending, media: model.mediaAccess,
+                                       action: model.controlQueue)
+                    .id(threadId)
+            }
             if model.isNewThread {
                 newThreadContext
             }
@@ -124,6 +131,26 @@ extension ThreadScreen {
                         ProgressView().frame(height: 40)
                     }
                     Spacer(minLength: 0)
+                    if model.selectedThreadId != nil {
+                        Button {
+                            UIApplication.shared.sendAction(
+                                #selector(UIResponder.resignFirstResponder),
+                                to: nil,
+                                from: nil,
+                                for: nil
+                            )
+                            composerFocused = false
+                            model.enqueueDraft()
+                        } label: {
+                            Image(systemName: "text.badge.plus").frame(width: 44, height: 44)
+                        }
+                        .disabled(!model.isConnected || model.sending || model.transferring || preparingMedia ||
+                            dictation.isRecording || model.transcribing ||
+                            (model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments
+                                .isEmpty))
+                        .accessibilityLabel("キューに追加")
+                        .accessibilityIdentifier("queue.add")
+                    }
                     let controls = model.snapshot.modelQuickControls(threadId: model.coreDraftKey)
                     if let next = controls.toggleFastTo {
                         Button { model.chooseServiceTier(next) } label: {
@@ -236,8 +263,9 @@ extension ThreadScreen {
             }
             .buttonStyle(.plain)
             .padding(7)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 30))
-            .overlay(RoundedRectangle(cornerRadius: 30).stroke(Color.white.opacity(0.12)))
+            .background(Color(paletteRGB: colorScheme.nativePalette.composer), in: RoundedRectangle(cornerRadius: 26))
+            .overlay(RoundedRectangle(cornerRadius: 26)
+                .stroke(Color(paletteRGB: colorScheme.nativePalette.border).opacity(0.8)))
         }
         .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 8)
         .background(LinearGradient(

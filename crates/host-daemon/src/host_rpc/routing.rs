@@ -296,54 +296,6 @@ impl SessionRouter {
     pub(super) fn execution_targets(&self) -> Vec<SessionRef> {
         lock_state(&self.state).executions.keys().cloned().collect()
     }
-    pub(super) fn begin_submission(
-        &self,
-        target: &SessionRef,
-        id: &str,
-    ) -> Result<(), super::service::Failure> {
-        use super::service::Failure;
-        if id.is_empty() || id.len() > 256 {
-            return Err(Failure::new(
-                "invalid_params",
-                "clientUserMessageId is required",
-            ));
-        }
-        let actor = self.actor(target);
-        let mut owned = lock_state(&actor);
-        if owned.timeline.submissions.get(id).is_some_and(|delivery| {
-            *delivery != agent_protocol::session::SubmissionDelivery::Rejected
-        }) {
-            return Err(Failure::unknown(
-                "submission_outcome_unknown",
-                "submission is already in flight; read the session before sending again",
-            ));
-        }
-        if owned.timeline.submissions.len() >= 128 {
-            owned.timeline.submissions.retain(|_, delivery| {
-                *delivery != agent_protocol::session::SubmissionDelivery::Rejected
-            });
-        }
-        if owned.timeline.submissions.len() >= 128 {
-            return Err(Failure::new(
-                "input_capacity_reached",
-                "active input capacity reached",
-            ));
-        }
-        let mut failed = Vec::new();
-        self.change_locked(
-            &mut owned,
-            target,
-            &SessionChange::Submission {
-                id: id.into(),
-                delivery: agent_protocol::session::SubmissionDelivery::Sending,
-            },
-            &mut failed,
-        )
-        .map_err(|error| Failure::new("conversation_commit_failed", error))?;
-        drop(owned);
-        self.close_failed(failed);
-        Ok(())
-    }
     pub(super) fn finish_submission(
         &self,
         target: &SessionRef,
@@ -662,6 +614,74 @@ impl SessionRouter {
         self.prune(target, &actor);
         result
     }
+
+    /// Publish an admission already committed by the conversation owner.
+    pub(super) fn publish_submission(
+        &self,
+        target: &SessionRef,
+        id: agent_protocol::ids::ClientInputId,
+        delivery: agent_protocol::session::SubmissionDelivery,
+    ) -> Result<(), String> {
+        let actor = self.actor(target);
+        let mut failed = Vec::new();
+        let result = self.publish_changes(
+            &mut lock_state(&actor),
+            target,
+            &[SessionChange::Submission { id, delivery }],
+            &mut failed,
+        );
+        self.close_failed(failed);
+        self.prune(target, &actor);
+        result
+    }
+
+    pub(super) fn hydrate_item(
+        &self,
+        target: &SessionRef,
+        turn: &agent_protocol::ids::TurnId,
+        previous: &agent_protocol::models::Item,
+        item: &agent_protocol::models::Item,
+    ) -> Result<bool, String> {
+        let actor = self.actor(target);
+        let mut owned = lock_state(&actor);
+        let store = lock_state(&self.state)
+            .conversations
+            .clone()
+            .ok_or("conversation store is unavailable")?;
+        if !store
+            .hydrate_item(target, turn, previous, item)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(false);
+        }
+        let mut failed = Vec::new();
+        let result = if owned
+            .timeline
+            .turns
+            .iter()
+            .flatten()
+            .any(|current| &current.id == turn)
+        {
+            self.publish_changes(
+                &mut owned,
+                target,
+                &[SessionChange::Item {
+                    turn_id: turn.clone(),
+                    item: Arc::new(item.clone()),
+                }],
+                &mut failed,
+            )
+        } else {
+            self.broadcast(Notification::HistoryChanged {
+                session: target.clone(),
+            });
+            Ok(())
+        };
+        drop(owned);
+        self.close_failed(failed);
+        self.prune(target, &actor);
+        result.map(|_| true)
+    }
     pub(crate) fn resolve_native_request(
         &self,
         instance: uuid::Uuid,
@@ -889,7 +909,17 @@ impl SessionRouter {
                 .apply(target, changes.iter())
                 .map_err(|error| format!("cannot commit conversation event: {error:#}"))?;
         }
-        for change in &changes {
+        self.publish_changes(actor, target, &changes, failed)
+    }
+
+    fn publish_changes(
+        &self,
+        actor: &mut SessionActor,
+        target: &SessionRef,
+        changes: &[SessionChange],
+        failed: &mut Vec<SessionId>,
+    ) -> Result<(), String> {
+        for change in changes {
             if let SessionChange::ResolveRequest { request_id } = change
                 && let Some(origin) = actor.request_origins.remove(request_id)
             {
@@ -934,6 +964,85 @@ impl SessionRouter {
 mod tests {
     use super::*;
     use agent_protocol::models::{Item, Thread, Turn};
+
+    #[tokio::test]
+    async fn opening_after_admission_does_not_reject_or_commit_the_admission_again() {
+        use agent_protocol::{operations::Submission, session::SubmissionDelivery};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.sqlite");
+        let store = Arc::new(super::super::conversations::Conversations::open(&path).unwrap());
+        let target = store
+            .bind(
+                &SessionRef::new(ProviderKind::Codex, "source".into()).unwrap(),
+                "scope",
+            )
+            .unwrap();
+        let input = Submission {
+            thread_id: target.clone(),
+            client_user_message_id: "send".into(),
+            input: Vec::new(),
+            model: None,
+            effort: None,
+            service_tier: None,
+        };
+        store.admit(&input, SubmissionDelivery::Sending).unwrap();
+        let router = SessionRouter::with_conversations(store.clone());
+        let connection = router.open_session();
+        let read = router.retain_execution(target.clone()).unwrap();
+        let mut updates = router
+            .finish_session_read(
+                read,
+                connection.id(),
+                store.open_thread(&target, 5, true).unwrap(),
+            )
+            .unwrap()
+            .updates
+            .unwrap();
+        let disk = rusqlite::Connection::open(&path).unwrap();
+        let before: i64 = disk
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        router
+            .publish_submission(
+                &target,
+                input.client_user_message_id.clone(),
+                SubmissionDelivery::Sending,
+            )
+            .unwrap();
+        let change: SessionChange = protocol::decode(&updates.recv().await.unwrap()).unwrap();
+        assert!(matches!(
+            change,
+            SessionChange::Submission {
+                delivery: SubmissionDelivery::Sending,
+                ..
+            }
+        ));
+        assert_eq!(
+            store.previous_command(&input).unwrap(),
+            Some(SubmissionDelivery::Sending)
+        );
+        assert_eq!(
+            disk.query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        router
+            .finish_submission(
+                &target,
+                "send",
+                SubmissionDelivery::Accepted {
+                    turn_id: Some("run".into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            disk.query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            before + 1
+        );
+    }
 
     #[tokio::test]
     async fn a_failed_journal_commit_cannot_publish_or_change_execution_state() {
@@ -1638,18 +1747,33 @@ mod tests {
     }
 
     #[test]
-    fn completion_does_not_discard_unconfirmed_input_and_accepted_receipts_replay() {
+    fn completion_does_not_discard_unconfirmed_input_or_its_accepted_receipt() {
         let router = SessionRouter::new();
         let target = SessionRef {
             provider: ProviderKind::Codex,
             id: "native".into(),
         };
-        router.begin_submission(&target, "send").unwrap();
-        assert!(router.begin_submission(&target, "send").is_err());
+        router
+            .publish_submission(
+                &target,
+                "send".into(),
+                agent_protocol::session::SubmissionDelivery::Sending,
+            )
+            .unwrap();
+        assert_eq!(
+            lock_state(&router.actor(&target)).timeline.submissions["send"],
+            agent_protocol::session::SubmissionDelivery::Sending
+        );
         turn(&router, false);
-        assert!(router.begin_submission(&target, "send").is_err());
+        assert_eq!(
+            lock_state(&router.actor(&target)).timeline.submissions["send"],
+            agent_protocol::session::SubmissionDelivery::Sending
+        );
         turn(&router, true);
-        assert!(router.begin_submission(&target, "send").is_err());
+        assert_eq!(
+            lock_state(&router.actor(&target)).timeline.submissions["send"],
+            agent_protocol::session::SubmissionDelivery::Sending
+        );
         router
             .finish_submission(
                 &target,
@@ -1681,7 +1805,9 @@ mod tests {
             "native".to_string(),
         )
         .unwrap();
-        router.begin_submission(&target, "input").unwrap();
+        router
+            .publish_submission(&target, "input".into(), SubmissionDelivery::Sending)
+            .unwrap();
         router
             .session_change(
                 &target,

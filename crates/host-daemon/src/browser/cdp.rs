@@ -91,7 +91,9 @@ impl Chrome {
             }),
             Err(error) => {
                 child.stdin.take();
-                let _ = child.wait().await;
+                // EOF asks the companion supervisor to reap the whole browser
+                // process group. Cleanup must not keep an RPC pending forever.
+                let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
                 Err(error)
             }
         }

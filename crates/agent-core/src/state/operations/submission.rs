@@ -66,6 +66,7 @@ impl Operation for Dictate {
             draft,
             client_user_message_id,
             Some(clear_draft),
+            false,
         );
         *snapshot = next;
         effects
@@ -210,6 +211,7 @@ impl StartSubmission {
             thread_id: id,
             client_user_message_id,
             draft,
+            force_queue: false,
         }));
         if snapshot.threads.is_some() {
             effects.push(Effect::execute(ListSessions::new(
@@ -224,6 +226,7 @@ pub struct SendSubmission {
     pub thread_id: crate::session::SessionRef,
     pub client_user_message_id: agent_protocol::ids::ClientInputId,
     pub draft: Arc<Draft>,
+    pub force_queue: bool,
 }
 #[derive(Debug)]
 pub enum SubmissionProgress {
@@ -294,17 +297,22 @@ impl Operation for SendSubmission {
                 }
             });
         }
-        let reply = context
-            .client
-            .call(&Submission {
-                thread_id: self.thread_id.clone(),
-                client_user_message_id: self.client_user_message_id.clone(),
-                input,
-                model: self.draft.model.clone(),
-                effort: self.draft.effort.clone(),
-                service_tier: self.draft.service_tier.clone(),
-            })
-            .await?;
+        let submission = Submission {
+            thread_id: self.thread_id.clone(),
+            client_user_message_id: self.client_user_message_id.clone(),
+            input,
+            model: self.draft.model.clone(),
+            effort: self.draft.effort.clone(),
+            service_tier: self.draft.service_tier.clone(),
+        };
+        let reply = if self.force_queue {
+            context
+                .client
+                .request(&agent_protocol::protocol::Call::QueueInput(submission))
+                .await?
+        } else {
+            context.client.call(&submission).await?
+        };
         Ok(SubmissionProgress::Sent(reply.turn_id))
     }
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
@@ -331,6 +339,13 @@ impl Operation for SendSubmission {
         reconcile_pending(snapshot, &thread_id);
 
         Vec::new()
+    }
+}
+
+impl Operation for agent_protocol::queue::QueueControl {
+    rpc_operation!();
+    fn apply(self, _: &mut Snapshot, _: Self::Output) -> Vec<Effect> {
+        vec![Effect::continuation(ReadThread::new(self.session))]
     }
 }
 

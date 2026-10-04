@@ -14,7 +14,9 @@ import androidx.compose.ui.unit.sp
 import dev.remoteagent.core.ThemePlatform
 import dev.remoteagent.core.nativePalette
 
-internal fun paletteColor(rgb: UInt) = Color(0xff000000L or rgb.toLong())
+private const val OPAQUE_ALPHA = 0xff000000L
+
+internal fun paletteColor(rgb: UInt) = Color(OPAQUE_ALPHA or rgb.toLong())
 
 private val nativeFont =
     FontFamily(
@@ -64,6 +66,7 @@ internal fun NativeTheme(content: @Composable () -> Unit) {
                 surface = paletteColor(colors.surface),
                 onSurface = paletteColor(colors.foreground),
                 surfaceVariant = paletteColor(colors.userBubble),
+                surfaceContainer = paletteColor(colors.composer),
                 onSurfaceVariant = paletteColor(colors.muted),
                 outline = paletteColor(colors.border),
                 error = paletteColor(colors.error),

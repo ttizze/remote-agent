@@ -4,34 +4,35 @@ use agent_protocol::models::SessionStatus;
 /// Pure execution decision used by the Host after reading native state and
 /// overlaying its live execution. Client caches never choose an input route.
 #[derive(Debug, PartialEq)]
-pub(crate) enum SubmissionTarget<'a> {
-    Steer(&'a str),
+pub(crate) enum SubmissionTarget {
+    Steer(String),
     Queue,
-    Start { cwd: &'a str },
+    Start { cwd: String },
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum RunningInput {
     SteerOrQueue,
     Queue,
 }
-pub(super) fn submission_target<'a>(
+pub(super) fn submission_target(
     status: SessionStatus,
-    running_turn: Option<&'a str>,
+    running_turn: Option<&str>,
     running_input: RunningInput,
-    cwd: Option<&'a str>,
-) -> Result<SubmissionTarget<'a>, &'static str> {
+    cwd: Option<&str>,
+) -> Result<SubmissionTarget, &'static str> {
     if status == SessionStatus::Running {
         if running_input == RunningInput::SteerOrQueue
             && let Some(turn) = running_turn
         {
-            return Ok(SubmissionTarget::Steer(turn));
+            return Ok(SubmissionTarget::Steer(turn.into()));
         }
         return Ok(SubmissionTarget::Queue);
     }
     Ok(SubmissionTarget::Start {
         cwd: cwd
             .filter(|cwd| !cwd.trim().is_empty())
-            .ok_or("thread working directory is unknown")?,
+            .ok_or("thread working directory is unknown")?
+            .into(),
     })
 }
 
@@ -48,7 +49,9 @@ mod tests {
             for mode in [RunningInput::SteerOrQueue, RunningInput::Queue] {
                 assert_eq!(
                     submission_target(status, Some("historical"), mode, Some("/project")).unwrap(),
-                    SubmissionTarget::Start { cwd: "/project" }
+                    SubmissionTarget::Start {
+                        cwd: "/project".into()
+                    }
                 );
                 assert!(submission_target(status, Some("historical"), mode, Some(" ")).is_err());
             }
@@ -57,7 +60,7 @@ mod tests {
             (
                 RunningInput::SteerOrQueue,
                 Some("live"),
-                SubmissionTarget::Steer("live"),
+                SubmissionTarget::Steer("live".into()),
             ),
             (RunningInput::SteerOrQueue, None, SubmissionTarget::Queue),
             (RunningInput::Queue, Some("live"), SubmissionTarget::Queue),
@@ -75,7 +78,7 @@ mod tests {
             let mode = if steer { RunningInput::SteerOrQueue } else { RunningInput::Queue };
             let route=submission_target(SessionStatus::Running,turn.as_deref(),mode,Some("/project"));
             match route {
-                Ok(SubmissionTarget::Steer(id))=>{proptest::prop_assert!(steer);proptest::prop_assert_eq!(Some(id),turn.as_deref());},
+                Ok(SubmissionTarget::Steer(id))=>{proptest::prop_assert!(steer);proptest::prop_assert_eq!(Some(id.as_str()),turn.as_deref());},
                 Ok(SubmissionTarget::Queue)=>{proptest::prop_assert!(!steer||turn.is_none());},
                 Err(_)=>proptest::prop_assert!(false,"running execution accepts additional input"),
                 Ok(SubmissionTarget::Start {..})=>proptest::prop_assert!(false,"running execution must not start another turn"),

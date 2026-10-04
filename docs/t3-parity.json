@@ -112,7 +112,20 @@
         },
         {
           "name": "Send while the agent is working",
-          "state": "unreviewed"
+          "state": "designed",
+          "implementation": [
+            "crates/host-daemon/src/host_rpc/conversations.rs",
+            "crates/host-daemon/src/host_rpc/service.rs",
+            "crates/agent-core/src/presentation/conversation.rs",
+            "apps/desktop/src/app/view/queue.rs",
+            "apps/mobile/iosApp/Bex/ConversationQueue.swift",
+            "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt"
+          ],
+          "remaining": [
+            "per-client follow-up setting",
+            "opposite-action shortcut and mobile long press",
+            "promote oldest queued message to steer"
+          ]
         },
         {
           "name": "Queue messages offline on mobile",
@@ -148,7 +161,31 @@
         },
         {
           "name": "Queued messages",
-          "state": "unreviewed"
+          "state": "designed",
+          "implementation": [
+            "crates/host-daemon/src/host_rpc/conversations.rs",
+            "crates/host-daemon/src/host_rpc/service.rs",
+            "crates/agent-core/src/presentation/conversation.rs",
+            "apps/desktop/src/app/view/queue.rs",
+            "apps/mobile/iosApp/Bex/ConversationQueue.swift",
+            "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt"
+          ],
+          "clients": [
+            "desktop",
+            "ios",
+            "android"
+          ],
+          "remaining": [
+            "promote to steer",
+            "full composer editing and draft restoration",
+            "drag handles and keyboard shortcuts",
+            "native and visual acceptance"
+          ],
+          "verification": {
+            "host_queue_unit_tests": "passed",
+            "native_acceptance": "pending",
+            "visual_comparison": "pending"
+          }
         },
         {
           "name": "Commands and skills",
@@ -2234,22 +2271,102 @@
     {
       "name": "queue.resume",
       "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
-      "state": "unreviewed"
+      "state": "designed",
+      "clients": [
+        "desktop",
+        "ios",
+        "android"
+      ],
+      "implementation": [
+        "crates/host-daemon/src/host_rpc/conversations.rs",
+        "crates/host-daemon/src/host_rpc/service.rs",
+        "crates/agent-core/src/presentation/conversation.rs",
+        "apps/desktop/src/app/view/queue.rs",
+        "apps/mobile/iosApp/Bex/ConversationQueue.swift",
+        "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt"
+      ],
+      "acceptance": "Host persistence, held restart recovery, immutable admission identity, stale controls, and all native entry points.",
+      "verification": {
+        "unit_tests": "passed",
+        "native_acceptance": "pending",
+        "visual_comparison": "pending"
+      }
     },
     {
       "name": "queued-run.reorder",
       "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
-      "state": "unreviewed"
+      "state": "designed",
+      "clients": [
+        "desktop",
+        "ios",
+        "android"
+      ],
+      "implementation": [
+        "crates/host-daemon/src/host_rpc/conversations.rs",
+        "crates/host-daemon/src/host_rpc/service.rs",
+        "crates/agent-core/src/presentation/conversation.rs",
+        "apps/desktop/src/app/view/queue.rs",
+        "apps/mobile/iosApp/Bex/ConversationQueue.swift",
+        "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt"
+      ],
+      "acceptance": "Host persistence, held restart recovery, immutable admission identity, stale controls, and all native entry points.",
+      "verification": {
+        "unit_tests": "passed",
+        "native_acceptance": "pending",
+        "visual_comparison": "pending"
+      }
     },
     {
       "name": "queued-run.cancel",
       "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
-      "state": "unreviewed"
+      "state": "designed",
+      "clients": [
+        "desktop",
+        "ios",
+        "android"
+      ],
+      "implementation": [
+        "crates/host-daemon/src/host_rpc/conversations.rs",
+        "crates/host-daemon/src/host_rpc/service.rs",
+        "crates/agent-core/src/presentation/conversation.rs",
+        "apps/desktop/src/app/view/queue.rs",
+        "apps/mobile/iosApp/Bex/ConversationQueue.swift",
+        "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt"
+      ],
+      "acceptance": "Host persistence, held restart recovery, immutable admission identity, stale controls, and all native entry points.",
+      "verification": {
+        "unit_tests": "passed",
+        "native_acceptance": "pending",
+        "visual_comparison": "pending"
+      }
     },
     {
       "name": "queued-run.edit",
       "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
-      "state": "unreviewed"
+      "state": "designed",
+      "clients": [
+        "desktop",
+        "ios",
+        "android"
+      ],
+      "implementation": [
+        "crates/host-daemon/src/host_rpc/conversations.rs",
+        "crates/host-daemon/src/host_rpc/service.rs",
+        "crates/agent-core/src/presentation/conversation.rs",
+        "apps/desktop/src/app/view/queue.rs",
+        "apps/mobile/iosApp/Bex/ConversationQueue.swift",
+        "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt"
+      ],
+      "acceptance": "Host persistence, held restart recovery, immutable admission identity, stale controls, and all native entry points.",
+      "verification": {
+        "unit_tests": "passed",
+        "native_acceptance": "pending",
+        "visual_comparison": "pending"
+      },
+      "remaining": [
+        "attachment and context editing",
+        "composer edit draft restore and stale edit recovery"
+      ]
     },
     {
       "name": "runtime-request.respond",

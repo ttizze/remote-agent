@@ -7,7 +7,7 @@ mod terminal;
 mod theme;
 use futures_util::FutureExt;
 use gpui_kit::{component::Root, *};
-const WINDOW_HEADER_HEIGHT: f32 = 44.;
+const WINDOW_HEADER_HEIGHT: f32 = 52.;
 #[derive(Clone)]
 pub(crate) struct Runtime {
     pub(crate) handle: tokio::runtime::Handle,

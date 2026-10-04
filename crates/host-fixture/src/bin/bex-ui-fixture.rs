@@ -18,6 +18,12 @@ async fn main() {
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let directory = dunce::canonicalize(&directory).unwrap();
+    agent_transport::diagnostics::initialize(
+        &directory,
+        agent_transport::diagnostics::Component::Host,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .unwrap();
     let workspace = directory.join("project");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(

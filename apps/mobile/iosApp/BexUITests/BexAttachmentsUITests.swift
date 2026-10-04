@@ -98,7 +98,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("worktree-conversation")
         app.buttons["tasks.menu"].tap(); app.buttons["tasks.refresh"].tap()
         expandSimulatorProject(app)
-        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-worktree-thread")]
+        let row = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-worktree-thread")]
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         let prompt = app.textFields["task.message"]
         XCTAssertTrue(prompt.waitForExistence(timeout: 10))

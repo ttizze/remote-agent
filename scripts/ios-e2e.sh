@@ -69,6 +69,7 @@ if [[ $# == 0 ]]; then
         testSimulatorReopensRunningLongHistoryWithoutBlankViewport \
         testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
         testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
+        testSimulatorEditsHeldQueueAndPreservesDraftAcrossRelaunch \
         testSimulatorCanAttachDownloadAndPrepareAIEdit \
         testSimulatorCanAddASecondPhoto \
         testSimulatorCanAttachPhotosAndVideos \

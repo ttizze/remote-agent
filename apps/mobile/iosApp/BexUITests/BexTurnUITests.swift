@@ -8,7 +8,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("long-conversation")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-long-history")]
+        let row = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-long-history")]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         XCTAssertTrue(app.descendants(matching: .any)["item.long-9-0"].waitForExistence(timeout: 20))
         let message = app.descendants(matching: .any)["task.message"]
@@ -215,7 +215,7 @@ extension BexLaunchUITests {
         app.terminate()
         let reopened = try connectedSimulatorApp()
         let number = try XCTUnwrap(sideID.split(separator: "-").dropLast().last)
-        let row = try reopened.descendants(matching: .any)[simulatorConversationRow("fixture-thread-\(number)")]
+        let row = try reopened.descendants(matching: .any)[simulatorConversationElementID("fixture-thread-\(number)")]
         XCTAssertTrue(row.waitForExistence(timeout: 15)); row.tap()
         XCTAssertTrue(reopened.descendants(matching: .any)[sideID].waitForExistence(timeout: 20))
         XCTAssertTrue(reopened.staticTexts["> Needle\n\n[success] Explain this selection"].exists)
@@ -282,7 +282,7 @@ extension BexLaunchUITests {
         app.terminate()
         _ = try connectedSimulatorApp(expandProject: false)
         let number = try XCTUnwrap(answerID.split(separator: "-").dropLast().last)
-        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-thread-\(number)")]
+        let row = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-thread-\(number)")]
         XCTAssertTrue(row.waitForExistence(timeout: 20), "The chat must be outside collapsed projects")
         row.tap()
         XCTAssertTrue(app.descendants(matching: .any)[answerID].waitForExistence(timeout: 20))

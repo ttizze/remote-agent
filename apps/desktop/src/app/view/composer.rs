@@ -435,19 +435,19 @@ impl Desktop {
             .max_w(px(CHAT_WIDTH))
             .p(px(7.))
             .gap_2()
-            .rounded(px(30.))
+            .rounded(px(24.))
             .child(self.completion_menu(cx))
             .when(!attachments.is_empty(), |composer| composer.child(files))
-            .bg(rgb(0x2b2b2b))
+            .bg(cx.theme().secondary)
             .border_1()
-            .border_color(rgb(0x363636))
+            .border_color(cx.theme().border)
             .when(phase.is_none(), |composer| {
                 composer.child(
                     div().px_2().pt(px(10.)).pb_1().child(
                         Textarea::new(&self.composer)
                             .appearance(false)
                             .bordered(false)
-                            .text_size(px(18.))
+                            .text_size(px(16.))
                             .aria_label("AI に依頼する")
                             .readonly(!self.snapshot.connected),
                     ),
@@ -478,6 +478,29 @@ impl Desktop {
                         )
                         .child(self.permission_menu(cx))
                         .child(div().flex_1())
+                        .when(self.selected().is_some(), |row| {
+                            row.child(
+                                Button::new("queue-add")
+                                    .label("キューに追加")
+                                    .small()
+                                    .ghost()
+                                    .disabled(!self.snapshot.connected || self.busy > 0 || empty)
+                                    .on_click(cx.listener(|view, _, _, _| {
+                                        if let Some(session) = view.selected().cloned() {
+                                            view.busy += 1;
+                                            view.perform(
+                                                Intent::Queue {
+                                                    thread_id: session,
+                                                    client_user_message_id: uuid::Uuid::new_v4()
+                                                        .to_string()
+                                                        .into(),
+                                                },
+                                                OperationCompletion::Busy,
+                                            );
+                                        }
+                                    })),
+                            )
+                        })
                         .child(self.fast_control("model-fast", false, cx))
                         .child(self.model_menu(cx))
                         .child(self.effort_control("model-effort", false, cx))
@@ -492,6 +515,7 @@ impl Desktop {
             .w_full()
             .max_w(px(CHAT_WIDTH))
             .gap_1()
+            .child(self.queue_panel(cx))
             .when(
                 !self.selected().is_none()
                     && self

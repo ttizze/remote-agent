@@ -67,6 +67,7 @@ pub enum Intent {
     RemoveWorktree(RemoveWorktree),
     ListSessions(ListSessions),
     ImportHistory(ImportHistory),
+    QueueControl(agent_protocol::queue::QueueControl),
     AddProject(AddProject),
     ExpandThreadList {
         project_id: Option<String>,
@@ -158,6 +159,10 @@ pub enum Intent {
     },
     Submit {
         thread_id: Option<crate::session::SessionRef>,
+        client_user_message_id: agent_protocol::ids::ClientInputId,
+    },
+    Queue {
+        thread_id: crate::session::SessionRef,
         client_user_message_id: agent_protocol::ids::ClientInputId,
     },
     RestoreUnknownSubmission {

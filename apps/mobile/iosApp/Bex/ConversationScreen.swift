@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 struct ThreadScreen: View {
     @ObservedObject var model: BexAppViewModel
+    @Environment(\.colorScheme) var colorScheme
     let conversation: ConversationPresentation?
     var isSideChat = false
     var openTools: ((WorkspaceTab?, Bool) -> Void)?
@@ -208,7 +209,7 @@ struct ThreadScreen: View {
                     .accessibilityIdentifier("task.loading")
             }
         }
-        .background(Color(UIColor.systemBackground))
+        .background(Color(paletteRGB: colorScheme.nativePalette.background))
         .safeAreaInset(edge: .bottom, spacing: 0) { composer }
     }
 }

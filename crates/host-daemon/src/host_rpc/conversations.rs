@@ -67,7 +67,7 @@ impl Conversations {
                 native_id TEXT NOT NULL, metadata TEXT NOT NULL, model TEXT NOT NULL,
                 imported INTEGER NOT NULL DEFAULT 0, started INTEGER NOT NULL DEFAULT 0,
                 cursor TEXT, oldest INTEGER NOT NULL DEFAULT 1, branch TEXT, import_issue TEXT,
-                manual_title INTEGER NOT NULL DEFAULT 0,
+                manual_title INTEGER NOT NULL DEFAULT 0, queue_held INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(provider, scope, native_id));
              CREATE TABLE IF NOT EXISTS turns (
                 conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -92,8 +92,10 @@ impl Conversations {
                 cursor TEXT NOT NULL, PRIMARY KEY(conversation, cursor));
              CREATE TABLE IF NOT EXISTS commands (
                 conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-                input_id TEXT NOT NULL, payload TEXT NOT NULL, delivery TEXT NOT NULL,
-                PRIMARY KEY(conversation, input_id));"
+                input_id TEXT NOT NULL, payload TEXT NOT NULL, execution TEXT NOT NULL,
+                delivery TEXT NOT NULL, queue_position INTEGER NOT NULL, queued INTEGER NOT NULL,
+                PRIMARY KEY(conversation, input_id));
+             CREATE INDEX IF NOT EXISTS waiting_commands ON commands(conversation, delivery, queue_position);"
         )?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -123,6 +125,9 @@ impl Conversations {
             let target = thread
                 .id
                 .context("persisted conversation identity is missing")?;
+            if self.has_queued(&target)? {
+                self.queue_control(&target, &agent_protocol::queue::QueueAction::Pause)?;
+            }
             let running = {
                 let connection = self.lock();
                 let mut query = connection.prepare("SELECT position FROM turns WHERE conversation=?1 AND observed=1 AND json_extract(body, '$.status')='running' ORDER BY position")?;
@@ -180,39 +185,11 @@ impl Conversations {
     }
 
     pub(super) fn bind(&self, native: &SessionRef, scope: &str) -> Result<SessionRef> {
-        native.validate().map_err(anyhow::Error::msg)?;
-        let provider = serde_json::to_string(&native.provider)?;
         let mut connection = self.lock();
         let tx = connection.transaction()?;
-        let existing: Option<String> = tx
-            .query_row(
-                "SELECT id FROM conversations WHERE provider=?1 AND scope=?2 AND native_id=?3",
-                params![provider, scope, native.id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let id = match existing {
-            Some(id) => id,
-            None => {
-                let id = uuid::Uuid::new_v4().to_string();
-                let metadata = Thread {
-                    id: Some(SessionRef {
-                        provider: native.provider,
-                        id: id.clone(),
-                    }),
-                    ..Default::default()
-                };
-                tx.execute("INSERT INTO conversations(id, provider, scope, native_id, metadata, model) VALUES(?1, ?2, ?3, ?4, ?5, 'null')",
-                    params![id, provider, scope, native.id, serde_json::to_string(&metadata)?])?;
-                tx.execute("INSERT INTO events(conversation, body) VALUES(?1, ?2)", params![id, serde_json::to_string(&serde_json::json!({"created": {"metadata": metadata, "native": native, "scope": scope}}))?])?;
-                id
-            }
-        };
+        let target = bind(&tx, native, scope)?;
         tx.commit()?;
-        Ok(SessionRef {
-            provider: native.provider,
-            id,
-        })
+        Ok(target)
     }
 
     pub(super) fn native(&self, target: &SessionRef, scope: &str) -> Result<SessionRef> {
@@ -241,45 +218,47 @@ impl Conversations {
             .map_err(Into::into)
     }
 
-    pub(super) fn discover(
+    pub(super) fn discover_page(
         &self,
-        summary: &Thread,
+        page: &[super::agent::SessionSummary],
         scope: &str,
-        branch: Option<&str>,
-    ) -> Result<SessionRef> {
-        let native = summary
-            .id
-            .as_ref()
-            .context("provider summary has no identity")?;
-        let target = self.bind(native, scope)?;
-        let mut metadata = summary.clone();
-        metadata.id = Some(target.clone());
-        metadata.turns = None;
+    ) -> Result<Vec<SessionRef>> {
         let mut connection = self.lock();
         let tx = connection.transaction()?;
-        if let Some((name, updated_at)) = manual_title(&tx, &target.id)? {
-            metadata.name = Some(name);
-            metadata.updated_at = Some(updated_at);
+        let mut targets = Vec::with_capacity(page.len());
+        for summary in page {
+            let Some(native) = &summary.thread.id else {
+                continue;
+            };
+            let target = bind(&tx, native, scope)?;
+            let mut metadata = summary.thread.clone();
+            metadata.id = Some(target.clone());
+            metadata.turns = None;
+            if let Some((name, updated_at)) = manual_title(&tx, &target.id)? {
+                metadata.name = Some(name);
+                metadata.updated_at = Some(updated_at);
+            }
+            tx.execute(
+                "UPDATE conversations SET metadata=?2 WHERE id=?1 AND started=0",
+                params![target.id, serde_json::to_string(&metadata)?],
+            )?;
+            tx.execute(
+                "UPDATE conversations SET branch=?2 WHERE id=?1",
+                params![target.id, summary.branch],
+            )?;
+            tx.execute(
+                "INSERT INTO events(conversation, body) VALUES(?1, ?2)",
+                params![
+                    target.id,
+                    serde_json::to_string(
+                        &serde_json::json!({"discovered": metadata, "branch": summary.branch})
+                    )?
+                ],
+            )?;
+            targets.push(target);
         }
-        tx.execute(
-            "UPDATE conversations SET metadata=?2 WHERE id=?1 AND started=0",
-            params![target.id, serde_json::to_string(&metadata)?],
-        )?;
-        tx.execute(
-            "UPDATE conversations SET branch=?2 WHERE id=?1",
-            params![target.id, branch],
-        )?;
-        tx.execute(
-            "INSERT INTO events(conversation, body) VALUES(?1, ?2)",
-            params![
-                target.id,
-                serde_json::to_string(
-                    &serde_json::json!({"discovered": metadata, "branch": branch})
-                )?
-            ],
-        )?;
         tx.commit()?;
-        Ok(target)
+        Ok(targets)
     }
 
     pub(super) fn import_failed(&self, target: &SessionRef, issue: &str) -> Result<()> {
@@ -351,6 +330,17 @@ impl Conversations {
         }
         if let Some(response) = response {
             let mut metadata = response.thread.clone();
+            let previous: String = tx.query_row(
+                "SELECT metadata FROM conversations WHERE id=?1",
+                [&target.id],
+                |row| row.get(0),
+            )?;
+            let previous: Thread = serde_json::from_str(&previous)?;
+            metadata.submissions.extend(previous.submissions);
+            metadata.requests.extend(previous.requests);
+            if let Some(updated_at) = previous.updated_at {
+                metadata.updated_at = Some(updated_at.max(metadata.updated_at.unwrap_or_default()));
+            }
             if let Some((name, updated_at)) = manual_title(&tx, &target.id)? {
                 metadata.name = Some(name);
                 metadata.updated_at = Some(updated_at);
@@ -403,6 +393,26 @@ impl Conversations {
             thread.id.as_ref() == Some(target),
             "conversation identity does not match"
         );
+        thread.queued_inputs = {
+            let mut query = connection.prepare("SELECT execution, delivery FROM commands WHERE conversation=?1 AND queued=1 AND delivery IN ('\"queued\"','\"sending\"','\"unknown\"','\"rejected\"') ORDER BY queue_position, rowid")?;
+            query
+                .query_map([&target.id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .map(|row| {
+                    let (input, delivery) = row?;
+                    Ok(agent_protocol::queue::QueueEntry {
+                        submission: serde_json::from_str(&input)?,
+                        delivery: serde_json::from_str(&delivery)?,
+                    })
+                })
+                .collect::<Result<_>>()?
+        };
+        thread.queue_held = connection.query_row(
+            "SELECT queue_held FROM conversations WHERE id=?1",
+            [&target.id],
+            |row| row.get(0),
+        )?;
         let (turns, mut cursor) =
             read_page(&connection, &target.id, None, limit, include_activity)?;
         if cursor.is_none() && !imported && source_cursor.is_some() {
@@ -477,6 +487,47 @@ impl Conversations {
         read_turn(&connection, &target.id, position, true)
     }
 
+    /// A deferred live body is imported once. A concurrent stream change must
+    /// not be replaced by an older body read, including an older status/header.
+    pub(super) fn hydrate_item(
+        &self,
+        target: &SessionRef,
+        turn: &agent_protocol::ids::TurnId,
+        previous: &Item,
+        item: &Item,
+    ) -> Result<bool> {
+        ensure!(
+            item.id == previous.id && !item.is_deferred(),
+            "hydrated item identity or body is invalid"
+        );
+        let mut connection = self.lock();
+        let tx = connection.transaction()?;
+        let position = latest_turn(&tx, &target.id, turn)?.context("turn is not available")?;
+        let current = read_turn(&tx, &target.id, position, true)?;
+        if current
+            .items
+            .iter()
+            .flatten()
+            .find(|item| item.id == previous.id)
+            .map(AsRef::as_ref)
+            != Some(previous)
+        {
+            return Ok(false);
+        }
+        apply_change(
+            &tx,
+            target,
+            &SessionChange::Item {
+                turn_id: turn.clone(),
+                item: Arc::new(item.clone()),
+            },
+            recorded_at(),
+            false,
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     pub(super) fn titles(
         &self,
         provider: ProviderKind,
@@ -521,7 +572,7 @@ impl Conversations {
         let tx = connection.transaction()?;
         let recorded_at = recorded_at();
         for change in changes {
-            apply_change(&tx, target, change, recorded_at)?;
+            apply_change(&tx, target, change, recorded_at, true)?;
         }
         tx.commit()?;
         Ok(())
@@ -577,6 +628,7 @@ impl Conversations {
     pub(super) fn admit(
         &self,
         input: &agent_protocol::operations::Submission,
+        delivery: agent_protocol::session::SubmissionDelivery,
     ) -> Result<Option<agent_protocol::session::SubmissionDelivery>> {
         ensure!(
             !input.client_user_message_id.is_empty() && input.client_user_message_id.len() <= 256,
@@ -588,8 +640,18 @@ impl Conversations {
         if let Some(delivery) = previous_command(&tx, input)? {
             return Ok(Some(delivery));
         }
-        tx.execute("INSERT INTO commands(conversation, input_id, payload, delivery) VALUES(?1, ?2, ?3, ?4)",
-            params![input.thread_id.id, input.client_user_message_id.as_str(), payload, serde_json::to_string(&agent_protocol::session::SubmissionDelivery::Sending)?])?;
+        if delivery == agent_protocol::session::SubmissionDelivery::Queued {
+            ensure!(
+                tx.query_row(
+                    "SELECT COUNT(*) FROM commands WHERE conversation=?1 AND delivery='\"queued\"'",
+                    [&input.thread_id.id],
+                    |row| row.get::<_, i64>(0),
+                )? < 128,
+                "input queue capacity reached"
+            );
+        }
+        tx.execute("INSERT INTO commands(conversation, input_id, payload, execution, delivery, queue_position, queued) VALUES(?1, ?2, ?3, ?3, ?4, (SELECT COALESCE(MAX(queue_position), 0) + 1 FROM commands WHERE conversation=?1), ?5)",
+            params![input.thread_id.id, input.client_user_message_id.as_str(), payload, serde_json::to_string(&delivery)?, delivery == agent_protocol::session::SubmissionDelivery::Queued])?;
         let metadata: String = tx.query_row(
             "SELECT metadata FROM conversations WHERE id=?1",
             [&input.thread_id.id],
@@ -598,7 +660,7 @@ impl Conversations {
         let thread: Thread = serde_json::from_str(&metadata)?;
         let change = SessionChange::Submission {
             id: input.client_user_message_id.clone(),
-            delivery: agent_protocol::session::SubmissionDelivery::Sending,
+            delivery,
         };
         let mut next = change.apply(&thread)?;
         let recorded_at = recorded_at();
@@ -617,6 +679,220 @@ impl Conversations {
         tx.commit()?;
         Ok(None)
     }
+
+    #[cfg(test)]
+    pub(super) fn queued(
+        &self,
+        target: &SessionRef,
+    ) -> Result<Vec<agent_protocol::operations::Submission>> {
+        queued(&self.lock(), &target.id)
+    }
+
+    pub(super) fn has_queued(&self, target: &SessionRef) -> Result<bool> {
+        self.lock()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM commands WHERE conversation=?1 AND delivery='\"queued\"')",
+                [&target.id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub(super) fn queue_held(&self, target: &SessionRef) -> Result<bool> {
+        self.lock()
+            .query_row(
+                "SELECT queue_held FROM conversations WHERE id=?1",
+                [&target.id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    /// Queue control never starts provider work. Order and editable payload are
+    /// committed together; the original admission payload remains immutable.
+    pub(super) fn queue_control(
+        &self,
+        target: &SessionRef,
+        action: &agent_protocol::queue::QueueAction,
+    ) -> Result<()> {
+        use agent_protocol::queue::{QueueAction, move_before};
+        let mut connection = self.lock();
+        let tx = connection.transaction()?;
+        match action {
+            QueueAction::Pause | QueueAction::Resume => {
+                ensure!(
+                    tx.execute(
+                        "UPDATE conversations SET queue_held=?2 WHERE id=?1",
+                        params![target.id, matches!(action, QueueAction::Pause)]
+                    )? == 1,
+                    "conversation is not available"
+                );
+            }
+            QueueAction::Move { id, before } => {
+                let mut query = tx.prepare("SELECT input_id FROM commands WHERE conversation=?1 AND delivery='\"queued\"' ORDER BY queue_position, rowid")?;
+                let order = query
+                    .query_map([&target.id], |row| {
+                        Ok(agent_protocol::ids::ClientInputId::from(
+                            row.get::<_, String>(0)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                for (position, id) in move_before(&order, id, before.as_ref())
+                    .map_err(anyhow::Error::msg)?
+                    .iter()
+                    .enumerate()
+                {
+                    tx.execute("UPDATE commands SET queue_position=?3 WHERE conversation=?1 AND input_id=?2", params![target.id, id.as_str(), position])?;
+                }
+            }
+            QueueAction::Cancel { id } => {
+                let delivery: String = tx.query_row("SELECT delivery FROM commands WHERE conversation=?1 AND input_id=?2 AND queued=1",
+                    params![target.id, id.as_str()], |row| row.get(0))?;
+                let delivery: agent_protocol::session::SubmissionDelivery =
+                    serde_json::from_str(&delivery)?;
+                ensure!(
+                    !matches!(
+                        delivery,
+                        agent_protocol::session::SubmissionDelivery::Sending
+                            | agent_protocol::session::SubmissionDelivery::Accepted { .. }
+                    ),
+                    "input is already being delivered"
+                );
+                if delivery == agent_protocol::session::SubmissionDelivery::Queued {
+                    apply_change(
+                        &tx,
+                        target,
+                        &SessionChange::Submission {
+                            id: id.clone(),
+                            delivery: agent_protocol::session::SubmissionDelivery::Rejected,
+                        },
+                        recorded_at(),
+                        true,
+                    )?;
+                }
+                tx.execute(
+                    "UPDATE commands SET queued=0 WHERE conversation=?1 AND input_id=?2",
+                    params![target.id, id.as_str()],
+                )?;
+            }
+            QueueAction::Edit { id, text } => {
+                ensure!(
+                    !text.trim().is_empty() && text.len() <= 1024 * 1024,
+                    "queued text must contain between 1 byte and 1 MiB"
+                );
+                let payload: String = tx
+                    .query_row("SELECT execution FROM commands WHERE conversation=?1 AND input_id=?2 AND delivery='\"queued\"'", params![target.id, id.as_str()], |row| row.get(0))
+                    .optional()?
+                    .context("queued input is no longer available")?;
+                let mut input: agent_protocol::operations::Submission =
+                    serde_json::from_str(&payload)?;
+                input
+                    .input
+                    .retain(|part| !matches!(part, agent_protocol::operations::Input::Text { .. }));
+                input.input.insert(
+                    0,
+                    agent_protocol::operations::Input::Text { text: text.clone() },
+                );
+                tx.execute(
+                    "UPDATE commands SET execution=?3 WHERE conversation=?1 AND input_id=?2",
+                    params![target.id, id.as_str(), serde_json::to_string(&input)?],
+                )?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO events(conversation, body) VALUES(?1, ?2)",
+            params![
+                target.id,
+                serde_json::to_string(
+                    &serde_json::json!({"queue": action, "recordedAt": recorded_at()})
+                )?
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Claim immediately before native IO. A crash after this commit is Unknown,
+    /// never an automatic second execution of the same input.
+    pub(super) fn claim_queued(
+        &self,
+        target: &SessionRef,
+    ) -> Result<Option<agent_protocol::operations::Submission>> {
+        let mut connection = self.lock();
+        let tx = connection.transaction()?;
+        let held: bool = tx.query_row(
+            "SELECT queue_held FROM conversations WHERE id=?1",
+            [&target.id],
+            |row| row.get(0),
+        )?;
+        if held {
+            return Ok(None);
+        }
+        let payload: Option<String> = tx
+            .query_row("SELECT execution FROM commands WHERE conversation=?1 AND delivery='\"queued\"' ORDER BY queue_position, rowid LIMIT 1", [&target.id], |row| row.get(0))
+            .optional()?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        let input: agent_protocol::operations::Submission = serde_json::from_str(&payload)?;
+        apply_change(
+            &tx,
+            target,
+            &SessionChange::Submission {
+                id: input.client_user_message_id.clone(),
+                delivery: agent_protocol::session::SubmissionDelivery::Sending,
+            },
+            recorded_at(),
+            true,
+        )?;
+        tx.commit()?;
+        Ok(Some(input))
+    }
+}
+
+fn bind(tx: &Transaction<'_>, native: &SessionRef, scope: &str) -> Result<SessionRef> {
+    native.validate().map_err(anyhow::Error::msg)?;
+    let provider = serde_json::to_string(&native.provider)?;
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT id FROM conversations WHERE provider=?1 AND scope=?2 AND native_id=?3",
+            params![provider, scope, native.id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            let metadata = Thread {
+                id: Some(SessionRef {
+                    provider: native.provider,
+                    id: id.clone(),
+                }),
+                ..Default::default()
+            };
+            tx.execute("INSERT INTO conversations(id, provider, scope, native_id, metadata, model) VALUES(?1, ?2, ?3, ?4, ?5, 'null')",
+                params![id, provider, scope, native.id, serde_json::to_string(&metadata)?])?;
+            tx.execute("INSERT INTO events(conversation, body) VALUES(?1, ?2)", params![id, serde_json::to_string(&serde_json::json!({"created": {"metadata": metadata, "native": native, "scope": scope}}))?])?;
+            id
+        }
+    };
+    Ok(SessionRef {
+        provider: native.provider,
+        id,
+    })
+}
+
+#[cfg(test)]
+fn queued(
+    connection: &Connection,
+    id: &str,
+) -> Result<Vec<agent_protocol::operations::Submission>> {
+    let mut query = connection.prepare("SELECT execution FROM commands WHERE conversation=?1 AND delivery='\"queued\"' ORDER BY queue_position, rowid")?;
+    query
+        .query_map([id], |row| row.get::<_, String>(0))?
+        .map(|row| Ok(serde_json::from_str(&row?)?))
+        .collect()
 }
 
 fn recorded_at() -> f64 {
@@ -638,6 +914,7 @@ fn apply_change(
     target: &SessionRef,
     change: &SessionChange,
     recorded_at: f64,
+    update_activity: bool,
 ) -> Result<()> {
     let metadata: String = tx.query_row(
         "SELECT metadata FROM conversations WHERE id=?1",
@@ -677,7 +954,7 @@ fn apply_change(
     }
     let mut next = change.apply(&thread)?;
     // Activity timestamps are owned by this Host; imports retain source dates.
-    if !matches!(change, SessionChange::TurnItems { .. }) {
+    if update_activity && !matches!(change, SessionChange::TurnItems { .. }) {
         next.updated_at = Some(recorded_at);
     }
     next.submissions.retain(|id, delivery| {
@@ -730,7 +1007,7 @@ fn apply_change(
         params![
             target.id,
             serde_json::to_string(
-                &serde_json::json!({"change": change, "recordedAt": recorded_at})
+                &serde_json::json!({"change": change, "recordedAt": recorded_at, "updateActivity": update_activity})
             )?
         ],
     )?;

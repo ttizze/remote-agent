@@ -75,6 +75,8 @@ contracts! {
     CreateSession, "host/session/create" => (op::CreateSession, s::OpenedSession),
     ForkSession, "host/session/fork" => (op::ForkSession, m::ThreadResponse) [clone, op::ForkSession::validate],
     Submit, "host/session/submit" => (op::Submission, op::SubmissionReceipt) [clone],
+    QueueInput, "host/session/queue/add" => (op::Submission, op::SubmissionReceipt),
+    QueueControl, "host/session/queue/control" => (crate::queue::QueueControl, m::Empty) [clone],
     Interrupt, "host/session/interrupt" => (op::Interrupt, m::Empty) [clone],
     ReadPermissionSettings, "host/permissions/read" => (crate::permissions::ReadPermissionSettings, crate::permissions::PermissionSettings) [clone],
     UpdatePermissionSettings, "host/permissions/update" => (crate::permissions::UpdatePermissionSettings, crate::permissions::PermissionSettings) [clone],

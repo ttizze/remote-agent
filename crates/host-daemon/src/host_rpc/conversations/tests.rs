@@ -62,6 +62,45 @@ fn input(target: &SessionRef) -> agent_protocol::operations::Submission {
 }
 
 #[test]
+fn catalog_pages_commit_identity_metadata_and_journal_together() {
+    use super::super::agent::SessionSummary;
+    let store = Conversations::memory();
+    let page = ["healthy", ""].map(|id| SessionSummary {
+        thread: Thread {
+            id: Some(native(id)),
+            name: Some(id.into()),
+            ..Default::default()
+        },
+        branch: Some("feature".into()),
+    });
+    assert!(store.discover_page(&page, "scope").is_err());
+    assert!(
+        store
+            .titles(ProviderKind::Codex, "scope", "")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .lock()
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let targets = store.discover_page(&page[..1], "scope").unwrap();
+    assert_eq!(targets, store.discover_page(&page[..1], "scope").unwrap());
+    let summaries = store.titles(ProviderKind::Codex, "scope", "").unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].thread.name.as_deref(), Some("healthy"));
+    assert_eq!(summaries[0].branch.as_deref(), Some("feature"));
+    assert_eq!(
+        store.native(&targets[0], "scope").unwrap(),
+        native("healthy")
+    );
+}
+
+#[test]
 fn manual_titles_survive_discovery_import_and_provider_auto_titles() {
     let store = Conversations::memory();
     let source = Thread {
@@ -69,14 +108,32 @@ fn manual_titles_survive_discovery_import_and_provider_auto_titles() {
         name: Some("Source title".into()),
         ..Default::default()
     };
-    let target = store.discover(&source, "scope", None).unwrap();
+    let target = store
+        .discover_page(
+            &[super::super::agent::SessionSummary {
+                thread: source.clone(),
+                branch: None,
+            }],
+            "scope",
+        )
+        .unwrap()
+        .remove(0);
     store.rename(&target, "My title", true).unwrap();
     let renamed_at = store
         .open_thread(&target, 5, false)
         .unwrap()
         .thread
         .updated_at;
-    store.discover(&source, "scope", None).unwrap();
+    store
+        .discover_page(
+            &[super::super::agent::SessionSummary {
+                thread: source.clone(),
+                branch: None,
+            }],
+            "scope",
+        )
+        .unwrap()
+        .remove(0);
     first_page(&store, &target, vec![], None);
     store.rename(&target, "Provider auto title", false).unwrap();
     let metadata = store.open_thread(&target, 5, false).unwrap().thread;
@@ -114,7 +171,16 @@ fn new_host_activity_moves_a_conversation_above_source_history_and_reading_does_
         updated_at: Some(9999.),
         ..Default::default()
     };
-    let recent = store.discover(&recent_source, "scope", None).unwrap();
+    let recent = store
+        .discover_page(
+            &[super::super::agent::SessionSummary {
+                thread: recent_source,
+                branch: None,
+            }],
+            "scope",
+        )
+        .unwrap()
+        .remove(0);
     let target = store.bind(&native("old"), "scope").unwrap();
     first_page(&store, &target, vec![turn("old-turn", "old")], None);
     assert_eq!(
@@ -124,7 +190,9 @@ fn new_host_activity_moves_a_conversation_above_source_history_and_reading_does_
             .as_ref(),
         Some(&recent)
     );
-    store.admit(&input(&target)).unwrap();
+    store
+        .admit(&input(&target), SubmissionDelivery::Sending)
+        .unwrap();
     assert_eq!(
         store.titles(ProviderKind::Codex, "scope", "").unwrap()[0]
             .thread
@@ -403,7 +471,10 @@ fn changes_and_command_receipts_survive_restart_and_payload_reuse_is_rejected() 
     let target = store.bind(&native("source"), "scope").unwrap();
     first_page(&store, &target, vec![turn("run", "prefix")], None);
     let input = input(&target);
-    assert_eq!(store.admit(&input).unwrap(), None);
+    assert_eq!(
+        store.admit(&input, SubmissionDelivery::Sending).unwrap(),
+        None
+    );
     assert_eq!(
         store
             .open_thread(&target, 5, true)
@@ -438,10 +509,13 @@ fn changes_and_command_receipts_survive_restart_and_payload_reuse_is_rejected() 
     store.rename(&target, "New title", true).unwrap();
     drop(store);
     let store = Conversations::open(&path).unwrap();
-    assert_eq!(store.admit(&input).unwrap(), Some(accepted));
+    assert_eq!(
+        store.admit(&input, SubmissionDelivery::Sending).unwrap(),
+        Some(accepted)
+    );
     let mut changed = input.clone();
     changed.effort = Some("high".into());
-    assert!(store.admit(&changed).is_err());
+    assert!(store.admit(&changed, SubmissionDelivery::Sending).is_err());
     let thread = store.open_thread(&target, 5, true).unwrap().thread;
     assert_eq!(thread.name.as_deref(), Some("New title"));
     assert_eq!(
@@ -456,7 +530,7 @@ fn a_receipt_after_the_finished_echo_retires_visible_delivery_but_keeps_replay_e
     let target = store.bind(&native("source"), "scope").unwrap();
     first_page(&store, &target, vec![], None);
     let input = input(&target);
-    store.admit(&input).unwrap();
+    store.admit(&input, SubmissionDelivery::Sending).unwrap();
     let mut echo = Item::new(
         "echo".into(),
         agent_protocol::execution::ItemStatus::Completed,
@@ -516,7 +590,9 @@ fn restart_interrupts_owned_execution_and_keeps_uncertain_inputs_from_replaying(
     let store = Conversations::open(&path).unwrap();
     let target = store.bind(&native("source"), "scope").unwrap();
     first_page(&store, &target, vec![], None);
-    store.admit(&input(&target)).unwrap();
+    store
+        .admit(&input(&target), SubmissionDelivery::Sending)
+        .unwrap();
     store
         .apply(
             &target,
@@ -532,7 +608,9 @@ fn restart_interrupts_owned_execution_and_keeps_uncertain_inputs_from_replaying(
     drop(store);
     let store = Conversations::open(&path).unwrap();
     assert_eq!(
-        store.admit(&input(&target)).unwrap(),
+        store
+            .admit(&input(&target), SubmissionDelivery::Sending)
+            .unwrap(),
         Some(SubmissionDelivery::Unknown)
     );
     let thread = store.open_thread(&target, 5, true).unwrap().thread;
@@ -740,6 +818,336 @@ fn an_exact_history_window_has_no_empty_continuation_page() {
     assert_eq!(
         thread.history_read_state.unwrap().kind,
         HistoryReadKind::Complete
+    );
+}
+
+#[test]
+fn held_queue_keeps_edits_order_and_admission_identity_across_restart() {
+    use agent_protocol::queue::QueueAction;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("queue.sqlite");
+    let store = Conversations::open(&path).unwrap();
+    let target = store.bind(&native("source"), "scope").unwrap();
+    first_page(&store, &target, vec![], None);
+    let originals = ["first", "second", "third"].map(|id| {
+        let mut input = input(&target);
+        input.client_user_message_id = id.into();
+        input
+            .input
+            .push(agent_protocol::operations::Input::Text { text: id.into() });
+        input
+            .input
+            .push(agent_protocol::operations::Input::LocalImage {
+                path: "/isolated/image.png".into(),
+            });
+        input
+    });
+    for input in &originals {
+        store.admit(input, SubmissionDelivery::Queued).unwrap();
+    }
+    store.queue_control(&target, &QueueAction::Pause).unwrap();
+    store
+        .queue_control(
+            &target,
+            &QueueAction::Move {
+                id: "third".into(),
+                before: Some("first".into()),
+            },
+        )
+        .unwrap();
+    store
+        .queue_control(
+            &target,
+            &QueueAction::Edit {
+                id: "third".into(),
+                text: "edited message".into(),
+            },
+        )
+        .unwrap();
+    assert!(store.claim_queued(&target).unwrap().is_none());
+    drop(store);
+    let store = Conversations::open(&path).unwrap();
+    let thread = store.open_thread(&target, 5, false).unwrap().thread;
+    assert!(thread.queue_held);
+    assert_eq!(
+        thread
+            .queued_inputs
+            .iter()
+            .map(|entry| entry.submission.client_user_message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["third", "first", "second"]
+    );
+    assert_eq!(
+        thread.queued_inputs[0].submission.input[0],
+        agent_protocol::operations::Input::Text {
+            text: "edited message".into()
+        }
+    );
+    assert_eq!(
+        thread.queued_inputs[0].submission.input[1],
+        originals[2].input[1]
+    );
+    assert_eq!(
+        store.previous_command(&originals[2]).unwrap(),
+        Some(SubmissionDelivery::Queued)
+    );
+    assert!(
+        store
+            .previous_command(&thread.queued_inputs[0].submission)
+            .is_err(),
+        "editing must not replace the deduplication fingerprint"
+    );
+    assert!(store.claim_queued(&target).unwrap().is_none());
+    store.queue_control(&target, &QueueAction::Resume).unwrap();
+    let sent = store.claim_queued(&target).unwrap().unwrap();
+    assert_eq!(sent.client_user_message_id.as_str(), "third");
+    assert!(
+        store
+            .queue_control(
+                &target,
+                &QueueAction::Edit {
+                    id: "third".into(),
+                    text: "must not change a claimed input".into()
+                }
+            )
+            .is_err()
+    );
+    drop(store);
+    let store = Conversations::open(&path).unwrap();
+    assert_eq!(
+        store.previous_command(&originals[2]).unwrap(),
+        Some(SubmissionDelivery::Unknown)
+    );
+    let thread = store.open_thread(&target, 5, false).unwrap().thread;
+    assert!(thread.queue_held);
+    assert!(
+        thread
+            .queued_inputs
+            .iter()
+            .any(
+                |entry| entry.submission.client_user_message_id == sent.client_user_message_id
+                    && entry.delivery == SubmissionDelivery::Unknown
+            ),
+        "the unconfirmed input and its text remain visible"
+    );
+    assert_eq!(
+        store
+            .queued(&target)
+            .unwrap()
+            .iter()
+            .map(|input| input.client_user_message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+}
+
+#[test]
+fn importing_a_live_body_keeps_newer_stream_updates_and_the_activity_date() {
+    let store = Conversations::memory();
+    let target = store.bind(&native("source"), "scope").unwrap();
+    first_page(&store, &target, vec![], None);
+    let full = turn("run", "full native output").items.as_ref().unwrap()[0]
+        .as_ref()
+        .clone();
+    let mut previous = full.clone();
+    previous.defer();
+    let turn_id: agent_protocol::ids::TurnId = "run".into();
+    store
+        .apply(
+            &target,
+            [&SessionChange::Turn {
+                turn: Turn {
+                    id: turn_id.clone(),
+                    status: TurnStatus::Running,
+                    items: Some(vec![Arc::new(previous.clone())]),
+                    ..Default::default()
+                },
+                completed: false,
+            }],
+        )
+        .unwrap();
+    let date = store
+        .open_thread(&target, 5, true)
+        .unwrap()
+        .thread
+        .updated_at;
+    assert!(
+        store
+            .hydrate_item(&target, &turn_id, &previous, &full)
+            .unwrap()
+    );
+    let thread = store.open_thread(&target, 5, true).unwrap().thread;
+    assert_eq!(thread.updated_at, date);
+    assert_eq!(
+        thread.turns.unwrap()[0].items.as_ref().unwrap()[0].as_ref(),
+        &full
+    );
+    let mut newest = turn("run", "newer stream summary").items.as_ref().unwrap()[0]
+        .as_ref()
+        .clone();
+    newest.defer();
+    store
+        .apply(
+            &target,
+            [&SessionChange::Item {
+                turn_id: turn_id.clone(),
+                item: Arc::new(newest.clone()),
+            }],
+        )
+        .unwrap();
+    let events: i64 = store
+        .lock()
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    assert!(
+        !store
+            .hydrate_item(&target, &turn_id, &previous, &full)
+            .unwrap()
+    );
+    assert_eq!(
+        store.turn(&target, &turn_id).unwrap().items.unwrap()[0].as_ref(),
+        &newest
+    );
+    assert_eq!(
+        store
+            .lock()
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        events
+    );
+}
+
+#[test]
+fn queue_mutations_are_atomic_and_cancellation_releases_only_the_selected_message() {
+    use agent_protocol::queue::QueueAction;
+    let store = Conversations::memory();
+    let target = store.bind(&native("source"), "scope").unwrap();
+    first_page(&store, &target, vec![], None);
+    let first = input(&target);
+    let mut second = first.clone();
+    second.client_user_message_id = "second".into();
+    for input in [&first, &second] {
+        store.admit(input, SubmissionDelivery::Queued).unwrap();
+    }
+    let before = store.queued(&target).unwrap();
+    store.lock().execute_batch("CREATE TRIGGER reject_queue_journal BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'isolated storage failure'); END;").unwrap();
+    assert!(
+        store
+            .queue_control(
+                &target,
+                &QueueAction::Move {
+                    id: "second".into(),
+                    before: Some(first.client_user_message_id.clone())
+                }
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .queue_control(
+                &target,
+                &QueueAction::Edit {
+                    id: "second".into(),
+                    text: "changed".into()
+                }
+            )
+            .is_err()
+    );
+    assert!(store.claim_queued(&target).is_err());
+    assert_eq!(store.queued(&target).unwrap(), before);
+    store
+        .lock()
+        .execute_batch("DROP TRIGGER reject_queue_journal;")
+        .unwrap();
+    store
+        .queue_control(
+            &target,
+            &QueueAction::Cancel {
+                id: first.client_user_message_id.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store.previous_command(&first).unwrap(),
+        Some(SubmissionDelivery::Rejected)
+    );
+    let thread = store.open_thread(&target, 5, false).unwrap().thread;
+    assert_eq!(thread.queued_inputs.len(), 1);
+    assert_eq!(store.claim_queued(&target).unwrap(), Some(second));
+}
+
+#[test]
+fn queue_capacity_counts_waiting_inputs_and_releases_claimed_slots() {
+    let store = Conversations::memory();
+    let target = store.bind(&native("source"), "scope").unwrap();
+    first_page(&store, &target, vec![], None);
+    assert!(!store.has_queued(&target).unwrap());
+    for position in 0..128 {
+        let mut input = input(&target);
+        input.client_user_message_id = position.to_string().into();
+        store.admit(&input, SubmissionDelivery::Queued).unwrap();
+    }
+    assert!(store.has_queued(&target).unwrap());
+    let mut next = input(&target);
+    next.client_user_message_id = "next".into();
+    assert!(store.admit(&next, SubmissionDelivery::Queued).is_err());
+    assert!(store.previous_command(&next).unwrap().is_none());
+    let claimed = store.claim_queued(&target).unwrap().unwrap();
+    assert_eq!(claimed.client_user_message_id.as_str(), "0");
+    store.admit(&next, SubmissionDelivery::Queued).unwrap();
+    assert_eq!(store.queued(&target).unwrap().len(), 128);
+    assert_eq!(store.queued(&target).unwrap().last(), Some(&next));
+    assert!(
+        store
+            .admit(&claimed, SubmissionDelivery::Queued)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(store.queued(&target).unwrap().len(), 128);
+}
+
+#[test]
+fn queue_discard_never_turns_an_uncertain_write_into_a_safe_retry() {
+    use agent_protocol::queue::QueueAction;
+    let store = Conversations::memory();
+    let target = store.bind(&native("source"), "scope").unwrap();
+    let input = input(&target);
+    store.admit(&input, SubmissionDelivery::Queued).unwrap();
+    let date = store
+        .open_thread(&target, 1, false)
+        .unwrap()
+        .thread
+        .updated_at;
+    first_page(&store, &target, vec![], None);
+    let thread = store.open_thread(&target, 1, false).unwrap().thread;
+    assert_eq!(thread.updated_at, date);
+    assert_eq!(
+        thread.submissions[&input.client_user_message_id],
+        SubmissionDelivery::Queued
+    );
+    store.claim_queued(&target).unwrap().unwrap();
+    let cancel = QueueAction::Cancel {
+        id: input.client_user_message_id.clone(),
+    };
+    assert!(store.queue_control(&target, &cancel).is_err());
+    store.recover().unwrap();
+    assert_eq!(
+        store.previous_command(&input).unwrap(),
+        Some(SubmissionDelivery::Unknown)
+    );
+    store.queue_control(&target, &cancel).unwrap();
+    assert!(
+        store
+            .open_thread(&target, 1, false)
+            .unwrap()
+            .thread
+            .queued_inputs
+            .is_empty()
+    );
+    assert_eq!(
+        store.previous_command(&input).unwrap(),
+        Some(SubmissionDelivery::Unknown)
     );
 }
 

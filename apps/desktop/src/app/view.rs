@@ -4,6 +4,7 @@ mod media;
 mod model_settings;
 mod onboarding;
 mod permissions;
+mod queue;
 mod settings;
 mod sidebar;
 mod workbench;
@@ -25,7 +26,7 @@ fn file_name(path: &str) -> String {
         .to_owned()
 }
 
-const CHAT_WIDTH: f32 = 780.;
+const CHAT_WIDTH: f32 = 736.;
 
 fn new_chat_icon() -> Icon {
     Icon::default().path("bex/square-pen.svg")

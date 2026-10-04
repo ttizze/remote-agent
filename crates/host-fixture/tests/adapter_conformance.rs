@@ -131,6 +131,7 @@ async fn scenarios(provider: ProviderKind) {
     );
     // Creation, sending, typed streamed output, history, and client reconnection.
     let session = create(&local.peer, provider, &root).await;
+    let native_id = host_fixture::test_support::native_id(&root, &session);
     let (_, mut events) = open(&local.peer, &session).await;
     let first = submission(&session, "first input");
     assert!(local.peer.call(&first).await.unwrap().turn_id.is_some());
@@ -181,7 +182,7 @@ async fn scenarios(provider: ProviderKind) {
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
     if provider == ProviderKind::Claude {
         let received: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(root.join(format!("claude-session-{}.json", session.id))).unwrap(),
+            &std::fs::read(root.join(format!("claude-session-{native_id}.json"))).unwrap(),
         )
         .unwrap();
         let text = received.as_array().unwrap().last().unwrap()["content"]
@@ -202,7 +203,7 @@ async fn scenarios(provider: ProviderKind) {
         // Codex's fixture loads archived native state from this file;
         // Claude's fixture writes its native transcript during the first run.
         std::fs::write(root.join("list-fixture.json"), serde_json::json!([{
-            "id":session.id,"cwd":root,"historyMode":"paginated","status":{"type":"notLoaded"},
+            "id":native_id,"cwd":root,"historyMode":"paginated","status":{"type":"notLoaded"},
             "turns":[{"id":"archived-turn","status":"completed","items":[
                 {"id":"archived-user","type":"userMessage","content":[{"type":"text","text":"first input"}]},
                 {"id":"archived-answer","type":"agentMessage","text":"saved reply","phase":"final_answer"}
@@ -475,6 +476,15 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
     assert_eq!(listing.data.len(), 102);
     assert!(listing.provider_errors.is_none());
     std::fs::write(root.join("repeat-list-cursor"), []).unwrap();
+    assert!(
+        local
+            .peer
+            .request::<agent_protocol::models::Empty>(&Call::ImportHistory(
+                agent_protocol::models::Empty {}
+            ))
+            .await
+            .is_err()
+    );
     let listing = local.peer.call(&query).await.unwrap();
     assert!(
         listing
@@ -484,8 +494,8 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
     );
     assert_eq!(
         listing.data.len(),
-        101,
-        "keep the earlier healthy Codex page"
+        102,
+        "keep every committed conversation when a later catalog scan fails"
     );
     assert_eq!(
         listing.provider_errors.unwrap()["codex"]["code"],
@@ -496,7 +506,7 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_order() {
+async fn imported_title_lists_page_and_search_without_reading_provider_history() {
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();
     let threads: Vec<_> = (0..2000)
@@ -534,11 +544,15 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         .unwrap();
     assert_eq!(listing.data[0].id.as_ref(), Some(&session));
     assert_eq!(listing.data.len(), 5);
-    assert_eq!(listing.data[1].id.as_ref().unwrap().id, "page-1999");
-    assert_eq!(listing.data[4].id.as_ref().unwrap().id, "page-1996");
+    assert_eq!(listing.data[1].name.as_deref(), Some("Conversation 1999"));
+    assert_eq!(listing.data[4].name.as_deref(), Some("Conversation 1996"));
     assert!(listing.has_more_chats);
     assert!(listing.provider_errors.is_none());
-    assert_eq!(page_reads(), 1, "initial list must not fetch all 20 pages");
+    assert_eq!(
+        page_reads(),
+        20,
+        "initial import catalogs every source page"
+    );
 
     let expanded = local
         .peer
@@ -550,13 +564,12 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         .unwrap();
     assert_eq!(expanded.data.len(), 150);
     assert_eq!(expanded.data[0].id.as_ref(), Some(&session));
-    assert_eq!(expanded.data[149].id.as_ref().unwrap().id, "page-1851");
-    assert!(expanded.has_more_chats);
     assert_eq!(
-        page_reads(),
-        3,
-        "expansion needs only two additional page reads"
+        expanded.data[149].name.as_deref(),
+        Some("Conversation 1851")
     );
+    assert!(expanded.has_more_chats);
+    assert_eq!(page_reads(), 20, "expansion reads the Host database");
 
     let found = local
         .peer
@@ -567,34 +580,49 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         .await
         .unwrap();
     assert_eq!(found.data.len(), 1);
-    assert_eq!(found.data[0].id.as_ref().unwrap().id, "page-1900");
+    assert_eq!(found.data[0].name.as_deref(), Some("Conversation 1900"));
     assert!(!found.has_more_chats);
-    assert_eq!(page_reads(), 4);
+    assert_eq!(page_reads(), 20, "search reads the Host database");
 
     let tied: Vec<_> = (0..250).rev().map(|index| serde_json::json!({
         "id":format!("equal-{index:03}"),"cwd":root,"name":"Equal timestamps","updatedAt":100,
     })).collect();
     std::fs::write(&fixture, serde_json::to_vec(&tied).unwrap()).unwrap();
-    let listing = local
+    local
         .peer
-        .call(&op::ListSessions::new(Default::default()))
+        .request::<agent_protocol::models::Empty>(&Call::ImportHistory(
+            agent_protocol::models::Empty {},
+        ))
         .await
         .unwrap();
-    assert_eq!(listing.data[0].id.as_ref(), Some(&session));
+    let tied_query = op::ListSessions::new(agent_protocol::models::ListQuery {
+        search_term: "Equal timestamps".into(),
+        chat_limit: 300,
+        ..Default::default()
+    });
+    let ties = local.peer.call(&tied_query).await.unwrap();
+    assert_eq!(ties.data.len(), 250);
+    assert!(!ties.has_more_chats);
+    assert!(ties.data.windows(2).all(|pair| pair[0].id < pair[1].id));
     assert_eq!(
-        listing
+        ties.data
+            .iter()
+            .map(|thread| &thread.id)
+            .collect::<Vec<_>>(),
+        local
+            .peer
+            .call(&tied_query)
+            .await
+            .unwrap()
             .data
             .iter()
-            .skip(1)
-            .map(|thread| thread.id.as_ref().unwrap().id.as_str())
-            .collect::<Vec<_>>(),
-        ["equal-000", "equal-001", "equal-002", "equal-003"]
+            .map(|thread| &thread.id)
+            .collect::<Vec<_>>()
     );
-    assert!(listing.has_more_chats);
     assert_eq!(
         page_reads(),
-        7,
-        "finish timestamp ties across native page boundaries"
+        23,
+        "catalog import consumes every timestamp tie page once"
     );
 
     let projects: Vec<_> = (0..3)
@@ -611,10 +639,17 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     )
     .unwrap();
     let scoped: Vec<_> = (0..2000).map(|index| serde_json::json!({
-        "id":format!("scoped-{index:04}"), "name":"Scoped conversation", "updatedAt":index,
+        "id":format!("scoped-{index:04}"), "name":"Scoped conversation", "updatedAt":index + 10000,
         "cwd":if index % 4 == 3 { root.clone() } else { root.join(format!("project-{}", index % 4)) },
     })).collect();
     std::fs::write(&fixture, serde_json::to_vec(&scoped).unwrap()).unwrap();
+    local
+        .peer
+        .request::<agent_protocol::models::Empty>(&Call::ImportHistory(
+            agent_protocol::models::Empty {},
+        ))
+        .await
+        .unwrap();
     let listing = local
         .peer
         .call(&op::ListSessions::new(Default::default()))
@@ -633,8 +668,8 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
     assert!(listing.has_more_chats);
     assert_eq!(
         page_reads(),
-        8,
-        "stop when all visible sections have their lookahead"
+        43,
+        "all source pages are imported independently of visible sections"
     );
     let expanded = local
         .peer
@@ -645,12 +680,15 @@ async fn title_lists_stop_after_visible_sections_and_merge_provider_pages_in_ord
         .await
         .unwrap();
     assert_eq!(expanded.data.len(), 165);
-    assert_eq!(expanded.data[159].id.as_ref().unwrap().id, "scoped-1400");
+    assert_eq!(
+        host_fixture::test_support::native_id(&root, expanded.data[159].id.as_ref().unwrap()),
+        "scoped-1400"
+    );
     assert_eq!(expanded.data[160].id.as_ref(), Some(&session));
     assert_eq!(
         page_reads(),
-        15,
-        "expand only the requested project before stopping"
+        43,
+        "expanding a project never rescans provider history"
     );
     local.close().await;
     host.close().await.unwrap();
@@ -690,26 +728,37 @@ async fn codex_queues_when_the_native_turn_is_not_observed() {
     .await
     .unwrap();
     let local = host.local().await.unwrap();
-    local
+    let listing = local
         .peer
         .call(&op::ListSessions::new(Default::default()))
         .await
         .unwrap();
-    let session = SessionRef::new(ProviderKind::Codex, "external".into()).unwrap();
+    let session = listing.data[0].id.clone().unwrap();
+    assert_eq!(
+        host_fixture::test_support::native_id(&root, &session),
+        "external"
+    );
     let input = submission(&session, "queued for unobserved turn");
     assert!(local.peer.call(&input).await.unwrap().turn_id.is_none());
     let (opened, _) = open(&local.peer, &session).await;
-    assert!(opened.response.thread.turns.iter().flatten().any(|turn| {
-        turn.items
-            .iter()
-            .flatten()
-            .any(|item| item.client_input_id.as_ref() == Some(&input.client_user_message_id))
-    }));
+    assert_eq!(opened.response.thread.queued_inputs.len(), 1);
+    let queued = &opened.response.thread.queued_inputs[0];
+    assert_eq!(queued.submission, input);
+    assert_eq!(
+        queued.delivery,
+        agent_protocol::session::SubmissionDelivery::Queued
+    );
     let trace = std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap();
-    assert!(trace.lines().any(|line| {
-        let event: serde_json::Value = serde_json::from_str(line).unwrap();
-        event["method"] == "thread/queue/add" && event["hasExpectedTurnId"] == false
-    }));
+    assert!(
+        !trace.lines().any(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            matches!(
+                event["method"].as_str(),
+                Some("thread/queue/add" | "turn/start")
+            )
+        }),
+        "the Host queues input without writing to the running native session"
+    );
     local.close().await;
     host.close().await.unwrap();
 }

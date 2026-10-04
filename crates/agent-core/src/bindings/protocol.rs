@@ -2,8 +2,40 @@
 
 use crate::{models::*, session::*};
 use agent_protocol::permissions::*;
+use agent_protocol::queue::{QueueAction, QueueControl};
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
+#[uniffi::remote(Enum)]
+enum QueueAction {
+    Pause,
+    Resume,
+    Cancel {
+        id: agent_protocol::ids::ClientInputId,
+    },
+    Move {
+        id: agent_protocol::ids::ClientInputId,
+        before: Option<agent_protocol::ids::ClientInputId>,
+    },
+    Edit {
+        id: agent_protocol::ids::ClientInputId,
+        text: String,
+    },
+}
+#[uniffi::remote(Record)]
+struct QueueControl {
+    session: SessionRef,
+    action: QueueAction,
+}
+#[uniffi::remote(Enum)]
+enum SubmissionDelivery {
+    Queued,
+    Sending,
+    Accepted {
+        turn_id: Option<agent_protocol::ids::TurnId>,
+    },
+    Unknown,
+    Rejected,
+}
 use std::collections::BTreeMap;
 #[uniffi::remote(Enum)]
 enum WorktreeStatus {

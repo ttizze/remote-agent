@@ -22,6 +22,7 @@ pub struct NativePalette {
     pub border: u32,
     pub user_bubble: u32,
     pub selected: u32,
+    pub composer: u32,
     pub error: u32,
 }
 
@@ -39,6 +40,7 @@ pub fn native_palette(platform: ThemePlatform, dark: bool) -> NativePalette {
             border: 0x191919,
             user_bubble: if mobile { 0x161616 } else { 0x141414 },
             selected: if mobile { 0x1a1b1b } else { 0x141414 },
+            composer: if mobile { 0x181919 } else { 0x111111 },
             error: 0xff6467,
         }
     } else {
@@ -56,6 +58,7 @@ pub fn native_palette(platform: ThemePlatform, dark: bool) -> NativePalette {
             border: 0xe4e4e7,
             user_bubble: if mobile { 0xefeff1 } else { 0xf4f4f5 },
             selected: 0xffffff,
+            composer: if mobile { 0xf4f4f5 } else { 0xffffff },
             error: 0xc10007,
         }
     }

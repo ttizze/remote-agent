@@ -14,6 +14,27 @@ use std::{
 use tokio_util::sync::{CancellationToken, DropGuard};
 use zeroize::Zeroizing;
 
+/// Native fixture files and setup commands use provider identity; production
+/// clients only receive the independent Host conversation identity.
+pub fn native_id(directory: &Path, session: &agent_protocol::session::SessionRef) -> String {
+    let connection = rusqlite::Connection::open_with_flags(
+        directory.join("bex-conversations.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+        .query_row(
+            "SELECT native_id FROM conversations WHERE id=?1 AND provider=?2",
+            rusqlite::params![
+                session.id,
+                serde_json::to_string(&session.provider).unwrap()
+            ],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 #[derive(Default)]
 pub struct Memory {
     bytes: Mutex<Option<Zeroizing<Vec<u8>>>>,

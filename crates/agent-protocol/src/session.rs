@@ -153,6 +153,7 @@ pub enum SessionChange {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SubmissionDelivery {
+    Queued,
     Sending,
     Accepted { turn_id: Option<crate::ids::TurnId> },
     Unknown,
@@ -421,20 +422,22 @@ pub fn submission_confirmed(
     delivery: &SubmissionDelivery,
     turns: &[Arc<Turn>],
 ) -> bool {
-    *delivery != SubmissionDelivery::Sending
-        && turns
-            .iter()
-            .filter(|turn| {
-                matches!(
-                    turn.status,
-                    TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
-                )
-            })
-            .flat_map(|turn| turn.items.iter().flatten())
-            .any(|item| {
-                matches!(item.body(), ItemBody::UserMessage { .. })
-                    && item.client_input_id.as_ref() == Some(id)
-            })
+    !matches!(
+        delivery,
+        SubmissionDelivery::Queued | SubmissionDelivery::Sending
+    ) && turns
+        .iter()
+        .filter(|turn| {
+            matches!(
+                turn.status,
+                TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
+            )
+        })
+        .flat_map(|turn| turn.items.iter().flatten())
+        .any(|item| {
+            matches!(item.body(), ItemBody::UserMessage { .. })
+                && item.client_input_id.as_ref() == Some(id)
+        })
 }
 
 fn merge_fields(previous: &Turn, incoming: &Turn) -> Turn {

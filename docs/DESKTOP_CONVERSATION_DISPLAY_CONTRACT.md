@@ -643,3 +643,7 @@ Acceptance: core `composer::tests`,
 `invocation_completion_preserves_suffix_and_does_not_accept_ime`,
 `completion_candidates_keep_names_and_descriptions_on_one_line`, and iOS
 `testSimulatorSelectsPluginAndSkillFromComposer`.
+
+Live provider events may publish a deferred body before the full tool output is available. Reading that body imports it once into the Host database, after native IO completes outside the event pump. The import compares the stored item with the requested version; a newer streamed item cannot be replaced by an older full body. Reading or hydrating details does not change conversation activity time.
+
+Queued input belongs to the Host, remains separate from executed turns, and is durable before its receipt is returned. Pause/resume, edit, reorder and removal operate on that queue. Restart preserves order and edits and holds undelivered input. A claimed write becomes Unknown after a restart; removing its visible queue row does not change that outcome or make resending the same input safe.

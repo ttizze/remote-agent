@@ -11,7 +11,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("long-conversation")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-long-history")]
+        let row = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-long-history")]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitForExistence(timeout: 30))
@@ -66,7 +66,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("viewport-conversation")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-viewport-history")]
+        let row = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-viewport-history")]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitForExistence(timeout: 30))
@@ -84,7 +84,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("long-conversation")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-long-history")]
+        let row = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-long-history")]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let latest = app.descendants(matching: .any)["item.long-9-0"]
         XCTAssertTrue(latest.waitForExistence(timeout: 20))
@@ -119,7 +119,7 @@ extension BexLaunchUITests {
         app.terminate(); app.launch()
         expandSimulatorProject(app)
 
-        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-long-history")]
+        let row = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-long-history")]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let detail = app.descendants(matching: .any)["task.detail"]
         XCTAssertTrue(detail.waitForExistence(timeout: 30))
@@ -174,7 +174,7 @@ extension BexLaunchUITests {
         let app = try connectedSimulatorApp()
         try useSimulatorListFixture("repeated-history")
         app.buttons["tasks.menu"].tap(); app.buttons["tasks.refresh"].tap()
-        let row = try app.descendants(matching: .any)[simulatorConversationRow("fixture-repeated-history")]
+        let row = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-repeated-history")]
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         let composer = app.textFields["task.message"]
         XCTAssertTrue(composer.waitForExistence(timeout: 15)); composer.tap()
@@ -366,7 +366,7 @@ extension BexLaunchUITests {
         try useSimulatorListFixture("completed-history")
         app.terminate(); app.launch()
         expandSimulatorProject(app)
-        let persisted = try app.descendants(matching: .any)[simulatorConversationRow("fixture-thread-persisted")]
+        let persisted = try app.descendants(matching: .any)[simulatorConversationElementID("fixture-thread-persisted")]
         XCTAssertTrue(persisted.waitForExistence(timeout: 20)); persisted.tap()
         let persistedActivity = app.buttons["turn.activity.fixture-turn-persisted"]
         XCTAssertTrue(persistedActivity.waitForExistence(timeout: 20))
