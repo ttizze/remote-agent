@@ -28,7 +28,7 @@ internal class AndroidCredentialStore(context: Context, reference: String) {
         require(identity.size == IdentityBytes) { "Invalid device identity" }
         var saved = false
         try {
-            writeFile(encrypt(identity))
+            encryptedFile.writeSynced(encrypt(identity))
             saved = true
             return identity
         } finally {
@@ -87,19 +87,6 @@ internal class AndroidCredentialStore(context: Context, reference: String) {
         encryptedFile.openRead().use { input ->
             input.readBytes().also { require(it.size <= MaximumEncryptedBytes) { "Unreadable device identity" } }
         }
-
-    private fun writeFile(bytes: ByteArray) {
-        val output = encryptedFile.startWrite()
-        var committed = false
-        try {
-            output.write(bytes)
-            output.fd.sync()
-            encryptedFile.finishWrite(output)
-            committed = true
-        } finally {
-            if (!committed) encryptedFile.failWrite(output)
-        }
-    }
 
     private companion object {
         const val HEADER_BYTES = 2

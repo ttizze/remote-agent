@@ -35,7 +35,7 @@ internal class AndroidMobileRepository(context: Context) {
     fun diagnosticsDirectory(id: String): String =
         File(
                 directory,
-                "connection-diagnostics/${Base64.getUrlEncoder().withoutPadding().encodeToString(id.toByteArray())}",
+                "connection-diagnostics/${encodedId(id)}",
             )
             .absolutePath
 
@@ -44,23 +44,25 @@ internal class AndroidMobileRepository(context: Context) {
         return if (file.baseFile.exists()) file.openRead().use { it.readBytes() } else byteArrayOf()
     }
 
-    fun save(id: String, bytes: ByteArray) {
-        val file = snapshotFile(id)
-        val output = file.startWrite()
-        var committed = false
-        try {
-            output.write(bytes)
-            output.fd.sync()
-            file.finishWrite(output)
-            committed = true
-        } finally {
-            if (!committed) file.failWrite(output)
-        }
-    }
+    fun save(id: String, bytes: ByteArray) = snapshotFile(id).writeSynced(bytes)
 
-    private fun snapshotFile(id: String): AtomicFile {
-        val name = Base64.getUrlEncoder().withoutPadding().encodeToString(id.encodeToByteArray())
-        return AtomicFile(File(directory, "agent-snapshot-$name.json"))
+    private fun snapshotFile(id: String) = AtomicFile(File(directory, "agent-snapshot-${encodedId(id)}.json"))
+
+    private fun encodedId(id: String): String =
+        Base64.getUrlEncoder().withoutPadding().encodeToString(id.encodeToByteArray())
+}
+
+/** Replaces the file only after the new bytes reach storage. */
+internal fun AtomicFile.writeSynced(bytes: ByteArray) {
+    val output = startWrite()
+    var committed = false
+    try {
+        output.write(bytes)
+        output.fd.sync()
+        finishWrite(output)
+        committed = true
+    } finally {
+        if (!committed) failWrite(output)
     }
 }
 
