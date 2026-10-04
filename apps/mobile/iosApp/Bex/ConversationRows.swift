@@ -209,51 +209,52 @@ struct ThreadItemRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if item.data.collapsible {
-                Button(action: toggleExpanded) {
-                    HStack {
-                        Label {
-                            if let title = item.data.title {
-                                Text(title).lineLimit(1)
-                            }
-                        } icon: { Image(systemName: icon) }
-                        Spacer()
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    }
-                    .font(.system(size: 17))
-                    .foregroundColor(.secondary)
-                    .padding(.vertical, 5)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("item.\(item.data.id)")
-                .accessibilityValue(isExpanded ? "展開中" : "折りたたみ")
-                if isExpanded {
-                    let body = item.data.deferred ? "" : item.source.expandedBody()
-                    if item.data.deferred {
-                        VStack(alignment: .leading, spacing: 10) {
-                            if let detailError {
-                                Text(detailError).font(.caption).foregroundColor(.red)
-                                Button("再読み込み") { retry += 1 }
-                            } else {
-                                ProgressView("詳細を読み込み中…")
-                            }
+                DisclosureGroup(isExpanded: Binding(
+                    get: { isExpanded },
+                    set: {
+                        if $0 != isExpanded {
+                            toggleExpanded()
                         }
-                        .task(id: retry) {
-                            detailError = nil
-                            let error = await loadDetails()
-                            guard !Task.isCancelled else { return }
-                            detailError = error
+                    }
+                )) {
+                    if isExpanded {
+                        let body = item.data.deferred ? "" : item.source.expandedBody()
+                        if item.data.deferred {
+                            VStack(alignment: .leading, spacing: 10) {
+                                if let detailError {
+                                    Text(detailError).font(.caption).foregroundColor(.red)
+                                    Button("再読み込み") { retry += 1 }
+                                } else {
+                                    ProgressView("詳細を読み込み中…")
+                                }
+                            }
+                            .task(id: retry) {
+                                detailError = nil
+                                let error = await loadDetails()
+                                guard !Task.isCancelled else { return }
+                                detailError = error
+                            }
+                            .id(ObjectIdentifier(item))
                         }
-                        .id(ObjectIdentifier(item))
+                        if !body.isEmpty {
+                            Text(body).font(.system(.subheadline, design: .monospaced)).textSelection(.enabled)
+                                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                                .background(
+                                    Color(UIColor.secondarySystemBackground),
+                                    in: RoundedRectangle(cornerRadius: 12)
+                                )
+                        }
                     }
-                    if !body.isEmpty {
-                        Text(body).font(.system(.subheadline, design: .monospaced)).textSelection(.enabled)
-                            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(
-                                Color(UIColor.secondarySystemBackground),
-                                in: RoundedRectangle(cornerRadius: 12)
-                            )
-                    }
+                } label: {
+                    Label {
+                        if let title = item.data.title {
+                            Text(title).lineLimit(1)
+                        }
+                    } icon: { Image(systemName: icon) }
+                        .font(.system(size: 17))
+                        .foregroundColor(.secondary)
+                        .padding(.vertical, 5)
+                        .accessibilityIdentifier("item.\(item.data.id)")
                 }
             } else {
                 ConversationMarkdown(blocks: item.markdown, media: media, selection: selection)

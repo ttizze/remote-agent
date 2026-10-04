@@ -166,6 +166,16 @@ extension BexLaunchUITests {
         }
     }
 
+    private func assertBrowserStartup(_ open: XCUIElement, notice: XCUIElement) {
+        let ready = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: open)
+        let startup = XCTWaiter.wait(for: [ready], timeout: 20)
+        if startup != .completed {
+            _ = notice.waitForExistence(timeout: 15)
+        }
+        XCTAssertEqual(startup, .completed,
+                       "Browser startup: \(notice.exists ? notice.label : "no error"); enabled=\(open.isEnabled)")
+    }
+
     func testSimulatorBrowserIsSeparateFromConversationAndPreservesPage() throws {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "Browser sharing fixture")
@@ -175,8 +185,7 @@ extension BexLaunchUITests {
         let address = app.textFields["browser.address"]
         XCTAssertTrue(address.waitForExistence(timeout: 10))
         let open = app.buttons["browser.open"]
-        let ready = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: open)
-        wait(for: [ready], timeout: 20)
+        assertBrowserStartup(open, notice: app.staticTexts["notice"])
         XCTAssertFalse(app.buttons["browser.take"].exists)
         XCTAssertFalse(app.buttons["browser.release"].exists)
         replaceFieldText(app, field: address, text: "file:///etc/passwd")
@@ -219,7 +228,7 @@ extension BexLaunchUITests {
     private func replaceFieldText(_ app: XCUIApplication, field: XCUIElement, text: String) {
         field.tap()
         if let value = field.value as? String, !value.isEmpty, value != field.placeholderValue {
-            field.press(forDuration: 1.2)
+            field.doubleTap()
             let selectAll = app.descendants(matching: .any)
                 .matching(NSPredicate(format: "label == 'Select All' OR label == 'すべてを選択'")).firstMatch
             XCTAssertTrue(selectAll.waitForExistence(timeout: 5))

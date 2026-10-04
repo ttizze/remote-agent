@@ -138,7 +138,6 @@ private struct WorkspaceToolsScreen: View {
 private struct WorkspaceBrowserScreen: View {
     @ObservedObject var model: BexAppViewModel
     let thread: SessionRef
-    @Environment(\.scenePhase) private var scenePhase
     @State private var frame: BrowserFrame?
     @State private var image: UIImage?
     @State private var address = ""
@@ -152,7 +151,7 @@ private struct WorkspaceBrowserScreen: View {
     @State private var dialogText = ""
 
     private var acceptsInput: Bool {
-        frame != nil && !sending && scenePhase == .active && connectionError == nil
+        frame != nil && !sending && UIApplication.shared.applicationState == .active && connectionError == nil
     }
 
     var body: some View {
@@ -226,14 +225,14 @@ private struct WorkspaceBrowserScreen: View {
                 }.padding(.horizontal).padding(.bottom, 8)
             }
         }
-        .task(id: scenePhase == .active) {
-            guard scenePhase == .active else { return }
+        .task {
             while !Task.isCancelled {
-                if !sending {
+                let active = UIApplication.shared.applicationState == .active
+                if active, !sending {
                     await perform(.read)
                 }
                 do {
-                    try await Task.sleep(for: .milliseconds(connectionError == nil ? 250 : 1500))
+                    try await Task.sleep(for: .milliseconds(active && connectionError == nil ? 250 : 1500))
                 } catch { return }
             }
         }
@@ -270,7 +269,7 @@ private struct WorkspaceBrowserScreen: View {
                 threadId: thread,
                 tabId: frame?.tabId ?? "", imageId: frame?.imageId ?? "", action: action
             ))
-            guard !Task.isCancelled, requestId == id, scenePhase == .active else { return }
+            guard !Task.isCancelled, requestId == id, UIApplication.shared.applicationState == .active else { return }
             frame = result
             if !result.image.isEmpty {
                 image = UIImage(data: result.image)
