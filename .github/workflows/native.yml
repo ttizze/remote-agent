@@ -163,10 +163,11 @@ jobs:
           set -o pipefail
           mkdir -p target/qa
           if [[ "$BEX_QUALITY_LANGUAGE" == swift ]]; then
+            "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" --version
             # Use Chrome's automation keychain for disposable CI profiles.
             cat > target/qa/chrome-ci <<'SH'
           #!/bin/sh
-          exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --use-mock-keychain "$@" 2>> "$BEX_CHROME_LOG"
+          exec "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" --use-mock-keychain "$@" 2>> "$BEX_CHROME_LOG"
           SH
             chmod 700 target/qa/chrome-ci
             export BEX_BROWSER_EXECUTABLE="$PWD/target/qa/chrome-ci"

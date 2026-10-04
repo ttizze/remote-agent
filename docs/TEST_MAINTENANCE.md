@@ -179,6 +179,7 @@ transfer server just to delete that check would reverse A14.
   before claiming full verification. Manual check commands remain for
   debugging. Apple CI uses five Apple Silicon `macos-26` runners with Xcode 26.6.
   It selects the image's preinstalled Xcode directly.
+  iPhone browser acceptance uses the image's preinstalled Chrome for Testing.
   The Mac runner uses `nix develop . --command just quality rust` for Rust
   contracts and Mac Browser E2E. Four iPhone runners use
   `nix develop . --command just quality swift` for Swift checks and acceptance.
