@@ -19,7 +19,8 @@ if [[ $language == kotlin ]]; then
     ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt --continue --console=plain || failed=1
     just android-e2e || failed=1
 fi
-if [[ $language == apple || $language == swift ]]; then
+# Every shard runs acceptance; shared Swift checks run on the first shard only.
+if [[ ( $language == apple || $language == swift ) && ${BEX_IOS_TEST_SHARD:-0} == 0 ]]; then
     swiftformat --lint apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests || failed=1
     swiftlint lint --strict || failed=1
     if [[ $language == swift ]]; then

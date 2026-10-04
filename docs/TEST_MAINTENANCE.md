@@ -188,6 +188,8 @@ transfer server just to delete that check would reverse A14.
   Simulator/Host pair; an omitted shard setting selects the complete list.
   The maintained list interleaves long and short tests based on CI durations
   so equal test counts do not leave one runner with all the slow cases.
+  Swift formatting, linting and headless Markdown checks run on shard zero;
+  all four shards run their selected Simulator acceptance tests.
   Each runner has separate processes,
   memory and logs. Mac and iPhone Rust dependency caches are separate; only
   shard zero saves each cache. All iPhone shards restore the Swift bindings,
