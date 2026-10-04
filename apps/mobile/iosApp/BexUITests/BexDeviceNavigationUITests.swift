@@ -86,8 +86,8 @@ extension BexLaunchUITests {
         app.buttons["workbench.terminal"].tap()
         assertTerminalReady(app)
         XCTAssertEqual(terminal.frame.width, app.frame.width, accuracy: 2)
-        let back = app.navigationBars.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 1))
-            .withOffset(CGVector(dx: 0, dy: 20))
+        // Begin in the empty navigation-bar edge, outside the tabs and terminal gestures.
+        let back = app.navigationBars.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.5))
         back.press(forDuration: 0.1, thenDragTo: back.withOffset(CGVector(dx: terminal.frame.width * 0.9, dy: 0)),
                    withVelocity: .fast, thenHoldForDuration: 0)
         XCTAssertTrue(app.buttons["task.tools"].waitForExistence(timeout: 5))
