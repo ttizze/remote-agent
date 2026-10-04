@@ -18,4 +18,4 @@ required-features = ["bindgen"]
 
 [dependencies]
 agent-core = { path = "../agent-core", features = ["bindings"] }
-uniffi = { version = "=0.32.0" }
+uniffi = { version = "=0.32.2" }
