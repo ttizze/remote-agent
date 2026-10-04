@@ -51,44 +51,7 @@ impl Operation for ListSessions {
         snapshot.list_query = Arc::new(self.query.clone());
         Ok(())
     }
-    fn apply(self, snapshot: &mut Snapshot, mut threads: Self::Output) -> Vec<Effect> {
-        if let Some(errors) = threads.provider_errors.as_ref()
-            && let Some(previous) = &snapshot.threads
-        {
-            for cached in &previous.data {
-                let Some(id) = cached.id.as_ref() else {
-                    continue;
-                };
-                let provider = match id.provider {
-                    crate::session::ProviderKind::Codex => "codex",
-                    crate::session::ProviderKind::Claude => "claude",
-                };
-                if errors.contains_key(provider)
-                    && !threads
-                        .data
-                        .iter()
-                        .any(|thread| thread.id.as_ref() == Some(id))
-                {
-                    let mut cached = cached.clone();
-                    cached.list_stale = Some(true);
-                    cached.status = crate::models::SessionStatus::Unknown;
-                    threads.data.push(cached);
-                }
-            }
-            for project in &previous.projects {
-                if !threads
-                    .projects
-                    .iter()
-                    .any(|current| current.id == project.id)
-                    && threads
-                        .data
-                        .iter()
-                        .any(|thread| thread.project_id.as_ref() == Some(&project.id))
-                {
-                    threads.projects.push(project.clone());
-                }
-            }
-        }
+    fn apply(self, snapshot: &mut Snapshot, threads: Self::Output) -> Vec<Effect> {
         for summary in &threads.data {
             if let Some(id) = &summary.id
                 && snapshot

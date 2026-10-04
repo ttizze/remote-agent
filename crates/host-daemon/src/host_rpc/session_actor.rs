@@ -8,6 +8,7 @@ pub(super) struct SessionActor {
         std::collections::BTreeMap<agent_protocol::ids::RequestId, super::requests::RequestOrigin>,
     pub(super) leases: usize,
     pub(super) submission_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+    pub(super) import_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     pub(super) subscriptions: std::collections::HashMap<
         uuid::Uuid,
         (super::routing::SessionId, super::routing::Outbound),

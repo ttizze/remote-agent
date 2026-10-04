@@ -76,8 +76,14 @@ fn catalog_pages_commit_identity_metadata_and_journal_together() {
     assert!(store.discover_page(&page, "scope").is_err());
     assert!(
         store
-            .titles(ProviderKind::Codex, "scope", "")
+            .title_list(
+                &[(ProviderKind::Codex, "scope".into())],
+                &Default::default(),
+                &Default::default()
+            )
             .unwrap()
+            .0
+            .data
             .is_empty()
     );
     assert_eq!(
@@ -88,16 +94,239 @@ fn catalog_pages_commit_identity_metadata_and_journal_together() {
             .unwrap(),
         0
     );
-    let targets = store.discover_page(&page[..1], "scope").unwrap();
-    assert_eq!(targets, store.discover_page(&page[..1], "scope").unwrap());
-    let summaries = store.titles(ProviderKind::Codex, "scope", "").unwrap();
-    assert_eq!(summaries.len(), 1);
-    assert_eq!(summaries[0].thread.name.as_deref(), Some("healthy"));
-    assert_eq!(summaries[0].branch.as_deref(), Some("feature"));
-    assert_eq!(
-        store.native(&targets[0], "scope").unwrap(),
-        native("healthy")
+    store.discover_page(&page[..1], "scope").unwrap();
+    let target = store.bind(&native("healthy"), "scope").unwrap();
+    store.discover_page(&page[..1], "scope").unwrap();
+    let (page, branches) = store
+        .title_list(
+            &[(ProviderKind::Codex, "scope".into())],
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+    assert_eq!(page.data.len(), 1);
+    assert_eq!(page.data[0].name.as_deref(), Some("healthy"));
+    assert_eq!(branches.get(&target).map(String::as_str), Some("feature"));
+    assert_eq!(page.data[0].id.as_ref(), Some(&target));
+    assert_eq!(store.native(&target, "scope").unwrap(), native("healthy"));
+}
+
+#[test]
+fn title_projection_is_globally_ordered_scoped_and_omits_command_and_request_payloads() {
+    use super::super::agent::SessionSummary;
+    let store = Conversations::memory();
+    let rows: Vec<_> = (0..200)
+        .map(|index| SessionSummary {
+            thread: Thread {
+                id: Some(SessionRef {
+                    provider: if index % 2 == 0 {
+                        ProviderKind::Codex
+                    } else {
+                        ProviderKind::Claude
+                    },
+                    id: format!("native-{index}"),
+                }),
+                name: Some(if index == 199 {
+                    "Ä検索対象".into()
+                } else {
+                    format!("Title {index}")
+                }),
+                updated_at: Some(if index < 10 { 200. } else { index as f64 }),
+                ..Default::default()
+            },
+            branch: Some(format!("branch-{index}")),
+        })
+        .collect();
+    store.discover_page(&rows, "scope").unwrap();
+    store
+        .discover_page(
+            &[SessionSummary {
+                thread: Thread {
+                    id: Some(native("inactive")),
+                    name: Some("Inactive account".into()),
+                    updated_at: Some(10000.),
+                    ..Default::default()
+                },
+                branch: None,
+            }],
+            "inactive",
+        )
+        .unwrap();
+    let areas = [
+        (ProviderKind::Claude, "scope".into()),
+        (ProviderKind::Codex, "scope".into()),
+    ];
+    let (page, branches) = store
+        .title_list(&areas, &Default::default(), &Default::default())
+        .unwrap();
+    assert_eq!(page.data.len(), 5);
+    assert!(page.has_more_chats);
+    assert!(
+        branches.len() == 6,
+        "retain branches only for visible rows and their lookahead"
     );
+    assert!(
+        page.data
+            .iter()
+            .all(|thread| thread.id.as_ref().unwrap().provider == ProviderKind::Codex)
+    );
+    for thread in &page.data {
+        let index = thread
+            .name
+            .as_ref()
+            .unwrap()
+            .strip_prefix("Title ")
+            .unwrap();
+        assert_eq!(
+            branches.get(thread.id.as_ref().unwrap()),
+            Some(&format!("branch-{index}"))
+        );
+    }
+    let mut expected: Vec<_> = page
+        .data
+        .iter()
+        .map(|thread| thread.id.as_ref().unwrap())
+        .collect();
+    expected.sort();
+    assert_eq!(
+        page.data
+            .iter()
+            .map(|thread| thread.id.as_ref().unwrap())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(
+        !page
+            .data
+            .iter()
+            .any(|thread| thread.name.as_deref() == Some("Inactive account"))
+    );
+    let query = agent_protocol::models::ListQuery {
+        chat_limit: 500,
+        ..Default::default()
+    };
+    let (all, _) = store
+        .title_list(&areas, &Default::default(), &query)
+        .unwrap();
+    assert_eq!(all.data.len(), 200);
+    assert!(!all.has_more_chats);
+    assert_eq!(all.data[10].name.as_deref(), Some("Ä検索対象"));
+    for pair in all.data.windows(2) {
+        assert!(pair[0].updated_at >= pair[1].updated_at);
+        if pair[0].updated_at == pair[1].updated_at {
+            assert!(pair[0].id < pair[1].id);
+        }
+    }
+    let target = page.data[0].id.as_ref().unwrap();
+    let command = input(target);
+    store.admit(&command, SubmissionDelivery::Queued).unwrap();
+    let request = agent_protocol::requests::Request {
+        id: "request".into(),
+        target: agent_protocol::requests::RequestTarget::Session,
+        delivery: agent_protocol::session::RequestDelivery::Awaiting,
+        body: agent_protocol::requests::RequestBody::Permission {
+            description: "Fixture approval".into(),
+            details: "Request payload belongs to the conversation detail".into(),
+            choices: Vec::new(),
+        },
+    };
+    store
+        .apply(
+            target,
+            &[SessionChange::Request {
+                request: request.clone(),
+            }],
+        )
+        .unwrap();
+    let (page, _) = store
+        .title_list(&areas, &Default::default(), &Default::default())
+        .unwrap();
+    assert_eq!(page.data[0].id.as_ref(), Some(target));
+    assert!(page.data.iter().all(|thread| thread.turns.is_none()
+        && thread.requests.is_empty()
+        && thread.submissions.is_empty()
+        && thread.queued_inputs.is_empty()));
+    let detail = store.open_thread(target, 5, false).unwrap().thread;
+    assert_eq!(detail.submissions.len(), 1);
+    assert_eq!(
+        detail.requests.get(&request.id).map(Arc::as_ref),
+        Some(&request)
+    );
+    let query = agent_protocol::models::ListQuery {
+        search_term: "ä検索".into(),
+        ..Default::default()
+    };
+    let (filtered, _) = store
+        .title_list(&areas, &Default::default(), &query)
+        .unwrap();
+    assert_eq!(filtered.data.len(), 1);
+    assert_eq!(filtered.data[0].name.as_deref(), Some("Ä検索対象"));
+}
+
+#[test]
+fn pending_imports_are_bounded_scoped_and_resume_after_committed_pages() {
+    let store = Conversations::memory();
+    let targets: Vec<_> = (0..70)
+        .map(|index| {
+            store
+                .bind(&native(&format!("source-{index}")), "scope")
+                .unwrap()
+        })
+        .collect();
+    for index in [2, 31, 69] {
+        first_page(&store, &targets[index], vec![], None);
+    }
+    store
+        .import_failed(&targets[4], "a recoverable source read error")
+        .unwrap();
+    store.bind(&native("other-scope"), "different").unwrap();
+    store
+        .bind(
+            &SessionRef {
+                provider: ProviderKind::Claude,
+                id: "other-provider".into(),
+            },
+            "scope",
+        )
+        .unwrap();
+    let mut after = 0;
+    let mut found = Vec::new();
+    loop {
+        let page = store
+            .pending_imports(ProviderKind::Codex, "scope", after)
+            .unwrap();
+        assert!(page.len() <= 32);
+        if page.is_empty() {
+            break;
+        }
+        for (position, target) in page {
+            assert!(position > after);
+            assert_eq!(target.provider, ProviderKind::Codex);
+            found.push(target);
+            after = position;
+        }
+    }
+    let expected: Vec<_> = targets
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, target)| (![2, 31, 69].contains(&index)).then_some(target))
+        .collect();
+    assert_eq!(found, expected);
+    let first = store
+        .pending_imports(ProviderKind::Codex, "scope", 0)
+        .unwrap();
+    assert_eq!(first.len(), 32);
+    assert_eq!(first[0].1, expected[0]);
+    assert!(
+        first.iter().any(|(_, target)| target == &expected[3]),
+        "a new pass retries failed imports"
+    );
+    let appended = store.bind(&native("appended"), "scope").unwrap();
+    let page = store
+        .pending_imports(ProviderKind::Codex, "scope", after)
+        .unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].1, appended);
 }
 
 #[test]
@@ -108,7 +337,7 @@ fn manual_titles_survive_discovery_import_and_provider_auto_titles() {
         name: Some("Source title".into()),
         ..Default::default()
     };
-    let target = store
+    store
         .discover_page(
             &[super::super::agent::SessionSummary {
                 thread: source.clone(),
@@ -116,8 +345,8 @@ fn manual_titles_survive_discovery_import_and_provider_auto_titles() {
             }],
             "scope",
         )
-        .unwrap()
-        .remove(0);
+        .unwrap();
+    let target = store.bind(source.id.as_ref().unwrap(), "scope").unwrap();
     store.rename(&target, "My title", true).unwrap();
     let renamed_at = store
         .open_thread(&target, 5, false)
@@ -132,8 +361,7 @@ fn manual_titles_survive_discovery_import_and_provider_auto_titles() {
             }],
             "scope",
         )
-        .unwrap()
-        .remove(0);
+        .unwrap();
     first_page(&store, &target, vec![], None);
     store.rename(&target, "Provider auto title", false).unwrap();
     let metadata = store.open_thread(&target, 5, false).unwrap().thread;
@@ -143,9 +371,17 @@ fn manual_titles_survive_discovery_import_and_provider_auto_titles() {
     store.rename(&target, "Revised", true).unwrap();
     assert_eq!(
         store
-            .titles(ProviderKind::Codex, "scope", "revised")
-            .unwrap()[0]
-            .thread
+            .title_list(
+                &[(ProviderKind::Codex, "scope".into())],
+                &Default::default(),
+                &agent_protocol::models::ListQuery {
+                    search_term: "revised".into(),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .0
+            .data[0]
             .name
             .as_deref(),
         Some("Revised")
@@ -171,7 +407,7 @@ fn new_host_activity_moves_a_conversation_above_source_history_and_reading_does_
         updated_at: Some(9999.),
         ..Default::default()
     };
-    let recent = store
+    store
         .discover_page(
             &[super::super::agent::SessionSummary {
                 thread: recent_source,
@@ -179,13 +415,20 @@ fn new_host_activity_moves_a_conversation_above_source_history_and_reading_does_
             }],
             "scope",
         )
-        .unwrap()
-        .remove(0);
+        .unwrap();
+    let recent = store.bind(&native("recent"), "scope").unwrap();
     let target = store.bind(&native("old"), "scope").unwrap();
     first_page(&store, &target, vec![turn("old-turn", "old")], None);
     assert_eq!(
-        store.titles(ProviderKind::Codex, "scope", "").unwrap()[0]
-            .thread
+        store
+            .title_list(
+                &[(ProviderKind::Codex, "scope".into())],
+                &Default::default(),
+                &Default::default()
+            )
+            .unwrap()
+            .0
+            .data[0]
             .id
             .as_ref(),
         Some(&recent)
@@ -194,8 +437,15 @@ fn new_host_activity_moves_a_conversation_above_source_history_and_reading_does_
         .admit(&input(&target), SubmissionDelivery::Sending)
         .unwrap();
     assert_eq!(
-        store.titles(ProviderKind::Codex, "scope", "").unwrap()[0]
-            .thread
+        store
+            .title_list(
+                &[(ProviderKind::Codex, "scope".into())],
+                &Default::default(),
+                &Default::default()
+            )
+            .unwrap()
+            .0
+            .data[0]
             .id
             .as_ref(),
         Some(&target)

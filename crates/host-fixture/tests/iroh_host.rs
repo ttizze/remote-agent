@@ -39,26 +39,34 @@ async fn start_host(directory: &Path) -> HostFixture {
     .unwrap()
 }
 async fn imported_codex_session(peer: &Client, title: &str) -> agent_protocol::session::SessionRef {
-    let list: models::ThreadList = peer
-        .request(&agent_protocol::protocol::Call::ListSessions(
-            rpc::ListSessions::new(models::ListQuery {
-                search_term: title.into(),
-                ..Default::default()
-            }),
-        ))
-        .await
-        .unwrap();
-    list.data
-        .into_iter()
-        .find(|thread| {
-            thread.name.as_deref() == Some(title)
-                && thread
-                    .id
-                    .as_ref()
-                    .is_some_and(|id| id.provider == agent_protocol::session::ProviderKind::Codex)
-        })
-        .and_then(|thread| thread.id)
-        .expect("imported conversation must be listed")
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let list = peer
+                .call(&rpc::ListSessions::new(models::ListQuery {
+                    search_term: title.into(),
+                    ..Default::default()
+                }))
+                .await
+                .unwrap();
+            if let Some(id) = list
+                .data
+                .into_iter()
+                .find(|thread| {
+                    thread.name.as_deref() == Some(title)
+                        && thread.id.as_ref().is_some_and(|id| {
+                            id.provider == agent_protocol::session::ProviderKind::Codex
+                        })
+                })
+                .and_then(|thread| thread.id)
+            {
+                return id;
+            }
+            assert!(list.importing, "finished catalog does not contain {title}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("automatic conversation discovery exceeded its deadline")
 }
 async fn wait_for_import(peer: &Client, target: &agent_protocol::session::SessionRef) {
     tokio::time::timeout(Duration::from_secs(30), async {
@@ -1620,6 +1628,205 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn initial_catalog_returns_committed_pages_while_another_page_is_blocked() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        use agent_protocol::session::ProviderKind;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let rows: Vec<_> = (0..260)
+            .map(|index| {
+                json!({
+                    "id":format!("native-{index}"), "name":format!("Codex {index:03}"),
+                    "updatedAt":index, "cwd":root,
+                })
+            })
+            .collect();
+        std::fs::write(
+            root.join("list-fixture.json"),
+            serde_json::to_vec(&rows).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(root.join("hold-catalog-reads"), []).unwrap();
+        std::fs::write(root.join("hold-history-reads"), []).unwrap();
+        let claude = root.join("claude-native/projects/example");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(
+            claude.join("12345678-1234-4234-8234-123456789abc.jsonl"),
+            include_str!("../../host-daemon/tests/fixtures/claude-2.1.266.jsonl"),
+        )
+        .unwrap();
+        let program = host_fixture::fixture::Config {
+            trace: true,
+            ..Default::default()
+        }
+        .install(Path::new(env!("CARGO_BIN_EXE_bex-codex-fixture")), root)
+        .unwrap();
+        let fixture = HostFixture::start(
+            root,
+            AppServerConfig {
+                program,
+                ..Default::default()
+            },
+            Arc::new(Memory::default()),
+            "catalog fixture",
+            false,
+            Some(Path::new(env!("CARGO_BIN_EXE_bex-claude-fixture"))),
+        )
+        .await
+        .unwrap();
+        let local = fixture.local().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !root.join("catalog-read-held").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the second source page must be held");
+        let query = models::ListQuery {
+            chat_limit: 1000,
+            ..Default::default()
+        };
+        let first = tokio::time::timeout(
+            Duration::from_secs(3),
+            local.peer.call(&rpc::ListSessions::new(query.clone())),
+        )
+        .await
+        .expect("list reads must not wait for the held source page")
+        .unwrap();
+        assert!(first.importing);
+        assert_eq!(
+            first
+                .data
+                .iter()
+                .filter(|row| row.id.as_ref().unwrap().provider == ProviderKind::Codex)
+                .count(),
+            100
+        );
+        assert!(
+            first
+                .data
+                .iter()
+                .any(|row| row.name.as_deref() == Some("Codex 259"))
+        );
+        assert!(
+            !first
+                .data
+                .iter()
+                .any(|row| row.name.as_deref() == Some("Codex 000"))
+        );
+        let target = first
+            .data
+            .iter()
+            .find(|row| row.name.as_deref() == Some("Codex 259"))
+            .unwrap()
+            .id
+            .clone()
+            .unwrap();
+        let open = || {
+            agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
+                session: target.clone(),
+                limit: 5,
+                include_activity: false,
+            })
+        };
+        for _ in 0..3 {
+            let (opened, _) = tokio::time::timeout(
+                Duration::from_secs(3),
+                local
+                    .peer
+                    .request_stream::<agent_protocol::session::OpenedSession>(&open()),
+            )
+            .await
+            .expect("opening metadata must not wait for source history")
+            .unwrap();
+            assert_eq!(
+                opened.response.thread.history_read_state.unwrap().kind,
+                agent_protocol::session::HistoryReadKind::Importing
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !root.join("history-read-held").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("history should import in the background");
+        let trace = std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap();
+        assert_eq!(
+            trace
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|event| event["method"] == "thread/read")
+                .count(),
+            1,
+            "reopening a conversation must coalesce an existing history import"
+        );
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let page = local
+                    .peer
+                    .call(&rpc::ListSessions::new(query.clone()))
+                    .await
+                    .unwrap();
+                if page
+                    .data
+                    .iter()
+                    .any(|row| row.id.as_ref().unwrap().provider == ProviderKind::Claude)
+                {
+                    assert!(
+                        page.importing,
+                        "the held Codex source must not block Claude discovery"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a healthy provider must be imported independently");
+        std::fs::remove_file(root.join("hold-catalog-reads")).unwrap();
+        std::fs::remove_file(root.join("hold-history-reads")).unwrap();
+        let complete = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let page = local
+                    .peer
+                    .call(&rpc::ListSessions::new(query.clone()))
+                    .await
+                    .unwrap();
+                if !page.importing {
+                    break page;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the automatic catalog scan must finish after release");
+        assert_eq!(complete.data.len(), 261);
+        assert!(
+            complete
+                .data
+                .iter()
+                .any(|row| row.name.as_deref() == Some("Codex 000"))
+        );
+        let trace = std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap();
+        let source_lists: Vec<_> = trace
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|record| record["method"] == "thread/list")
+            .collect();
+        assert_eq!(
+            source_lists.len(),
+            3,
+            "client list refreshes must only read the Host DB"
+        );
+        local.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("automatic catalog progress deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let directory = tempfile::tempdir().unwrap();
@@ -1654,6 +1861,9 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         let fixture = start_host(directory.path()).await;
         let mobile = fixture.local().await.unwrap();
 
+        // This test asserts the final ordering of every source page. Progress
+        // and a blocked first scan are covered separately above.
+        mobile.peer.request::<models::Empty>(&agent_protocol::protocol::Call::ImportHistory(models::Empty {})).await.unwrap();
         let request = |project_limit, chat_limit, thread_limit| json!({"projectLimit":project_limit,"chatLimit":chat_limit,"projectThreadLimits":{"project-5":thread_limit}});
         let start = std::time::Instant::now();
         let first = mobile.peer.request::<models::ThreadList>(&agent_protocol::protocol::Call::ListSessions(agent_protocol::operations::ListSessions { query: serde_json::from_value::<models::ListQuery>((request(5, 5, 5)).clone()).unwrap() })).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();

@@ -5,8 +5,6 @@ use agent_protocol::operations as op;
 
 use agent_protocol::models::ListQuery;
 
-use agent_protocol::models::Thread;
-
 use agent_protocol::models::ThreadResponse;
 
 use agent_protocol::protocol::{Body, Call, Response};
@@ -88,9 +86,10 @@ struct ServiceInner {
     projects: ProjectStore,
     router: SessionRouter,
     conversations: Arc<Conversations>,
-    initial_import: tokio::sync::OnceCell<()>,
-    catalog_import: tokio::sync::Mutex<()>,
+    initial_import: OnceLock<()>,
+    catalog_import: Arc<tokio::sync::Mutex<()>>,
     catalog_errors: std::sync::RwLock<HashMap<ProviderKind, Failure>>,
+    body_imports: std::sync::Mutex<HashMap<ProviderKind, bool>>,
     event_pumps: std::sync::Mutex<std::collections::HashSet<ProviderKind>>,
     files: crate::workspace_files::WorkspaceFiles,
     worktrees: crate::worktrees::Worktrees,
@@ -130,6 +129,7 @@ impl HostRpcService {
                 initial_import: Default::default(),
                 catalog_import: Default::default(),
                 catalog_errors: Default::default(),
+                body_imports: Default::default(),
                 event_pumps: Default::default(),
                 files,
             }),
@@ -209,11 +209,23 @@ impl HostRpcService {
         target: &agent_protocol::session::SessionRef,
         max_pages: usize,
     ) -> Result<(), Failure> {
-        let _lease = self
+        let lease = self
             .inner
             .router
             .retain_execution(target.clone())
             .map_err(|error| Failure::new("invalid_session", error))?;
+        let importing = self.inner.router.import_lock(target).lock_owned().await;
+        self.import_locked(target, max_pages, lease, importing)
+            .await
+    }
+
+    async fn import_locked(
+        &self,
+        target: &agent_protocol::session::SessionRef,
+        max_pages: usize,
+        _lease: super::routing::SessionLease,
+        _importing: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<(), Failure> {
         let native = self.native_session(target)?;
         let agent = self.agent(target.provider)?;
         for _ in 0..max_pages {
@@ -224,9 +236,6 @@ impl HostRpcService {
                 .import_state(target)
                 .map_err(|error| Failure::new("history_import_failed", error))?;
             if complete {
-                return Ok(());
-            }
-            if started && max_pages == 1 {
                 return Ok(());
             }
             let (response, mut page) = if started {
@@ -270,27 +279,61 @@ impl HostRpcService {
                 .conversations
                 .import_page(target, response.as_ref(), &page)
                 .map_err(|error| Failure::new("history_import_failed", error))?;
+            self.history_changed(target);
         }
         Ok(())
     }
 
-    async fn import_provider(
+    fn start_history_import(
         &self,
-        provider: ProviderKind,
-        agent: &dyn Agent,
-    ) -> (Vec<agent_protocol::session::SessionRef>, Option<Failure>) {
-        let mut targets = Vec::new();
+        target: &agent_protocol::session::SessionRef,
+    ) -> Result<(), Failure> {
+        let lease = self
+            .inner
+            .router
+            .retain_execution(target.clone())
+            .map_err(|error| Failure::new("invalid_session", error))?;
+        let Ok(importing) = self.inner.router.import_lock(target).try_lock_owned() else {
+            return Ok(());
+        };
+        let service = self.clone();
+        let target = target.clone();
+        tokio::spawn(async move {
+            if let Err(error) = service
+                .import_locked(&target, usize::MAX, lease, importing)
+                .await
+            {
+                service.record_import_failure(&target, &error);
+            }
+        });
+        Ok(())
+    }
+
+    fn record_import_failure(&self, target: &agent_protocol::session::SessionRef, error: &Failure) {
+        if let Err(commit) = self
+            .inner
+            .conversations
+            .import_failed(target, &error.to_string())
+        {
+            tracing::error!(target: "bex", operation = "history.import_commit", message = %commit);
+        }
+        tracing::warn!(target: "bex", operation = "history.import", code = error.code, message = %error);
+        self.history_changed(target);
+    }
+
+    async fn import_provider(&self, provider: ProviderKind, agent: &dyn Agent) -> Option<Failure> {
         let result = async {
             let scope = self.storage_scope(provider)?;
             let pages = session_pages(agent, "");
             futures_util::pin_mut!(pages);
             while let Some(page) = pages.try_next().await? {
-                targets.extend(
-                    self.inner
-                        .conversations
-                        .discover_page(&page, &scope)
-                        .map_err(|error| Failure::new("history_import_failed", error))?,
-                );
+                self.inner
+                    .conversations
+                    .discover_page(&page, &scope)
+                    .map_err(|error| Failure::new("history_import_failed", error))?;
+                self.inner
+                    .router
+                    .broadcast(agent_protocol::protocol::Notification::CatalogChanged {});
             }
             Ok::<_, Failure>(())
         }
@@ -311,49 +354,120 @@ impl HostRpcService {
         self.inner
             .router
             .broadcast(agent_protocol::protocol::Notification::CatalogChanged {});
-        (targets, result.err())
+        self.import_bodies(provider);
+        result.err()
     }
 
-    async fn initial_import(&self) {
-        self.inner.initial_import.get_or_init(|| async {
-            if let Err(error) = self.refresh_import().await {
-                tracing::warn!(target: "bex", operation = "history.import", code = error.code, message = %error);
+    fn initial_import(&self) {
+        self.inner.initial_import.get_or_init(|| {
+            // A manual scan already owns the first import if it acquired the
+            // lock before startup. Acquire before spawning so the first list
+            // response accurately reports import progress.
+            if let Ok(catalog) = self.inner.catalog_import.clone().try_lock_owned() {
+                let service = self.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = service.scan_import().await {
+                        tracing::warn!(target: "bex", operation = "history.import", code = error.code, message = %error);
+                    }
+                    drop(catalog);
+                    service.inner.router.broadcast(
+                        agent_protocol::protocol::Notification::CatalogChanged {},
+                    );
+                });
             }
-        }).await;
+        });
     }
 
     async fn refresh_import(&self) -> Result<(), Failure> {
-        let _catalog = self.inner.catalog_import.lock().await;
-        let mut targets = Vec::new();
-        let mut failure = None;
-        for (provider, agent) in self.agents() {
-            let (discovered, error) = self.import_provider(provider, agent.as_ref()).await;
-            targets.extend(discovered);
-            if failure.is_none() {
-                failure = error;
+        let catalog = self.inner.catalog_import.lock().await;
+        let result = self.scan_import().await;
+        drop(catalog);
+        self.inner
+            .router
+            .broadcast(agent_protocol::protocol::Notification::CatalogChanged {});
+        result
+    }
+
+    async fn scan_import(&self) -> Result<(), Failure> {
+        let providers = self.agents();
+        let failures = futures_util::future::join_all(
+            providers
+                .iter()
+                .map(|(provider, agent)| self.import_provider(*provider, agent.as_ref())),
+        )
+        .await;
+        failures.into_iter().flatten().next().map_or(Ok(()), Err)
+    }
+
+    fn import_bodies(&self, provider: ProviderKind) {
+        {
+            let mut workers = self
+                .inner
+                .body_imports
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(refresh) = workers.get_mut(&provider) {
+                *refresh = true;
+                return;
             }
+            workers.insert(provider, false);
         }
         let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
-            for target in targets {
-                let Some(inner) = inner.upgrade() else { break };
-                let service = Self { inner };
-                if let Err(error) = service.import_conversation(&target, usize::MAX).await {
-                    if let Err(commit) = service
+            let mut after = 0;
+            loop {
+                let Some(current) = inner.upgrade() else {
+                    return;
+                };
+                let service = Self { inner: current };
+                let pending = service.storage_scope(provider).and_then(|scope| {
+                    service
                         .inner
                         .conversations
-                        .import_failed(&target, &error.to_string())
-                    {
-                        tracing::error!(target: "bex", operation = "history.import_commit", message = %commit);
+                        .pending_imports(provider, &scope, after)
+                        .map_err(|error| Failure::new("history_import_failed", error))
+                });
+                let pending = match pending {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        service
+                            .inner
+                            .body_imports
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .remove(&provider);
+                        tracing::warn!(target: "bex", operation = "history.import", code = error.code, message = %error);
+                        return;
                     }
-                    tracing::warn!(target: "bex", operation = "history.import", code = error.code, message = %error);
+                };
+                if pending.is_empty() {
+                    let mut workers = service
+                        .inner
+                        .body_imports
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    if workers.get_mut(&provider).is_some_and(std::mem::take) {
+                        // Catalog refreshes during this pass require one more
+                        // pass from the beginning, including earlier failures.
+                        after = 0;
+                        continue;
+                    }
+                    workers.remove(&provider);
+                    return;
                 }
-                service.inner.router.broadcast(
-                    agent_protocol::protocol::Notification::HistoryChanged { session: target },
-                );
+                drop(service);
+                for (position, target) in pending {
+                    let Some(current) = inner.upgrade() else {
+                        return;
+                    };
+                    let service = Self { inner: current };
+                    if let Err(error) = service.import_conversation(&target, usize::MAX).await {
+                        service.record_import_failure(&target, &error);
+                    }
+                    after = position;
+                }
             }
         });
-        failure.map_or(Ok(()), Err)
     }
 
     fn agent(&self, provider: ProviderKind) -> Result<Arc<dyn Agent>, Failure> {
@@ -596,10 +710,7 @@ impl HostRpcService {
 
     pub fn start(&self) {
         self.start_event_pumps();
-        let service = self.clone();
-        tokio::spawn(async move {
-            service.initial_import().await;
-        });
+        self.initial_import();
     }
 
     /// Dispatch a classified message from an authenticated session.
@@ -641,6 +752,15 @@ impl HostRpcService {
                 tokio::spawn(async move { service.execute_submission(&input, force_queue).await })
                     .await
                     .map_err(|error| Failure::unknown("submission_outcome_unknown", error))
+                    .and_then(|result| result)
+                    .map(Into::into)
+            }
+            Call::Interrupt(params) => {
+                let service = self.clone();
+                let params = params.clone();
+                tokio::spawn(async move { service.interrupt_session(&params).await })
+                    .await
+                    .map_err(|error| Failure::unknown("interrupt_outcome_unknown", error))
                     .and_then(|result| result)
                     .map(Into::into)
             }
@@ -756,7 +876,7 @@ impl HostRpcService {
                     SubmissionDelivery::Queued,
                 )
                 .map_err(|error| Failure::unknown("input_admission_unknown", error))?;
-            self.queue_changed(target);
+            self.history_changed(target);
             self.wake_queue(target.clone());
             return Ok(op::SubmissionReceipt { turn_id: None });
         }
@@ -865,12 +985,45 @@ impl HostRpcService {
             .await
     }
 
-    fn queue_changed(&self, target: &agent_protocol::session::SessionRef) {
+    fn history_changed(&self, target: &agent_protocol::session::SessionRef) {
         self.inner
             .router
             .broadcast(agent_protocol::protocol::Notification::HistoryChanged {
                 session: target.clone(),
             });
+    }
+
+    async fn interrupt_session(
+        &self,
+        params: &op::Interrupt,
+    ) -> Result<agent_protocol::models::Empty, Failure> {
+        let target = &params.thread_id;
+        let _execution = self
+            .inner
+            .router
+            .retain_execution(target.clone())
+            .map_err(|error| Failure::new("invalid_session", error))?;
+        let _serial = self.inner.router.submission_lock(target).lock_owned().await;
+        let native = self.native_session(target)?;
+        let response = self
+            .agent(target.provider)?
+            .interrupt(&native.id, &params.turn_id)
+            .await?;
+        // Completion wakes a queue worker, but the serial guard keeps it from
+        // claiming another input before this hold is committed.
+        if self
+            .inner
+            .conversations
+            .has_queued(target)
+            .map_err(|error| Failure::new("queue_read_failed", error))?
+        {
+            self.inner
+                .conversations
+                .queue_control(target, &agent_protocol::queue::QueueAction::Pause)
+                .map_err(|error| Failure::new("queue_pause_failed", error))?;
+            self.history_changed(target);
+        }
+        Ok(response)
     }
 
     fn wake_queue(&self, target: agent_protocol::session::SessionRef) {
@@ -892,7 +1045,7 @@ impl HostRpcService {
                 {
                     tracing::error!(target: "bex", operation = "queue.pause_failed", message = %commit);
                 }
-                service.queue_changed(&target);
+                service.history_changed(&target);
                 tracing::warn!(target: "bex", operation = "queue.delivery_failed", code = error.code, message = %error);
             }
         });
@@ -943,7 +1096,7 @@ impl HostRpcService {
         else {
             return Ok(());
         };
-        self.queue_changed(target);
+        self.history_changed(target);
         let id = input.client_user_message_id.as_str();
         let result = match self.inner.router.publish_submission(
             target,
@@ -954,7 +1107,7 @@ impl HostRpcService {
             Err(error) => Err(Failure::unknown("submission_outcome_unknown", error)),
         };
         self.finish_input(target, id, &result)?;
-        self.queue_changed(target);
+        self.history_changed(target);
         result.map(|_| ())
     }
 
@@ -1008,19 +1161,16 @@ impl HostRpcService {
                 .retain_execution(target.clone())
                 .map_err(anyhow::Error::msg)?;
             let started = std::time::Instant::now();
-            if let Err(error) = self.import_conversation(&target, 1).await {
-                self.inner.conversations.import_failed(&target, &error.to_string())?;
-            }
             let mut response = self.inner.conversations.open_thread(&target, limit, params.include_activity)?;
+            if response.thread.history_read_state.as_ref().is_some_and(|state| state.kind == agent_protocol::session::HistoryReadKind::Importing) {
+                self.start_history_import(&target)?;
+            }
             let native_ms = started.elapsed().as_millis();
             if response.thread.id.as_ref() != Some(&target) {
                 return Err(anyhow::anyhow!("conversation identity changed"));
             }
-            describe_thread(
-                &mut response.thread,
-                agent.capabilities(),
-                &self.project_snapshot().await?,
-            );
+            response.thread.project_id = self.project_snapshot().await?.project_membership(response.thread.cwd.as_deref());
+            response.thread.capabilities = Some(host_capabilities(agent.capabilities()));
             let project_ms = started.elapsed().as_millis() - native_ms;
             let more = response.thread.history_has_more == Some(true);
             response.thread.history_has_more = Some(more);
@@ -1398,7 +1548,7 @@ impl HostRpcService {
                     .conversations
                     .queue_control(&params.session, &params.action)
                     .map_err(|error| Failure::new("queue_update_failed", error))?;
-                self.queue_changed(&params.session);
+                self.history_changed(&params.session);
                 self.wake_queue(params.session.clone());
                 agent_protocol::models::Empty {}.into()
             }
@@ -1490,20 +1640,6 @@ impl HostRpcService {
                 })
                 .await?
                 .into()
-            }
-            Call::Interrupt(params) => {
-                let target = target_session.expect("session-scoped interrupt");
-                let _serial = self.inner.router.submission_lock(target).lock_owned().await;
-                let native = self.native_session(target)?;
-                self.inner
-                    .conversations
-                    .queue_control(target, &agent_protocol::queue::QueueAction::Pause)
-                    .map_err(|error| Failure::new("queue_pause_failed", error))?;
-                self.queue_changed(target);
-                self.agent(target.provider)?
-                    .interrupt(&native.id, &params.turn_id)
-                    .await?
-                    .into()
             }
             Call::RenameSession(params) => {
                 let target = target_session.expect("session-scoped rename");
@@ -1772,37 +1908,28 @@ impl HostRpcService {
         &self,
         query: ListQuery,
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
-        self.initial_import().await;
+        self.initial_import();
         let snapshot = self.project_snapshot().await?;
-        let mut titles = crate::projects::titles::TitleList::new(&snapshot.projects, &query);
-        let mut threads = Vec::new();
-        let mut branches = HashMap::new();
-        for (provider, agent) in self.agents() {
-            let scope = self.storage_scope(provider)?;
-            for summary in self
-                .inner
-                .conversations
-                .titles(provider, &scope, &query.search_term)
-                .map_err(|error| Failure::new("sessions_unavailable", error))?
+        let providers = self.agents();
+        let areas = providers
+            .iter()
+            .map(|(provider, _)| {
+                self.storage_scope(*provider)
+                    .map(|scope| (*provider, scope))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (mut page, mut branches) = self
+            .inner
+            .conversations
+            .title_list(&areas, &snapshot, &query)
+            .map_err(|error| Failure::new("sessions_unavailable", error))?;
+        for thread in &mut page.data {
+            if let Some(id) = &thread.id
+                && let Some((_, agent)) = providers
+                    .iter()
+                    .find(|(provider, _)| *provider == id.provider)
             {
-                let mut thread = summary.thread;
-                if let (Some(id), Some(branch)) = (&thread.id, summary.branch) {
-                    branches.insert(id.clone(), branch);
-                }
-                describe_thread(&mut thread, agent.capabilities(), &snapshot);
-                threads.push(thread);
-            }
-        }
-        threads.sort_by(|a, b| {
-            b.updated_at
-                .unwrap_or_default()
-                .total_cmp(&a.updated_at.unwrap_or_default())
-                .then(a.id.cmp(&b.id))
-        });
-        for thread in threads {
-            titles.push(thread);
-            if titles.complete() {
-                break;
+                thread.capabilities = Some(host_capabilities(agent.capabilities()));
             }
         }
         let provider_errors = self
@@ -1810,7 +1937,7 @@ impl HostRpcService {
             .as_object()
             .cloned()
             .unwrap_or_default();
-        let mut page = titles.finish();
+        page.importing = self.inner.catalog_import.try_lock().is_err();
         let sources: Vec<_> = page
             .data
             .iter()
@@ -1945,11 +2072,11 @@ impl HostRpcService {
         {
             browser.bind_scope(scope, id.to_string()).await;
         }
-        describe_thread(
-            &mut response.thread,
-            agent.capabilities(),
-            &self.project_snapshot().await?,
-        );
+        response.thread.project_id = self
+            .project_snapshot()
+            .await?
+            .project_membership(response.thread.cwd.as_deref());
+        response.thread.capabilities = Some(host_capabilities(agent.capabilities()));
         Ok(response)
     }
 
@@ -2168,18 +2295,16 @@ fn provider_key(provider: ProviderKind) -> String {
         .to_owned()
 }
 
-fn describe_thread(
-    thread: &mut Thread,
+fn host_capabilities(
     mut capabilities: agent_protocol::session::Capabilities,
-    projects: &crate::projects::state::Snapshot,
-) {
+) -> agent_protocol::session::Capabilities {
     capabilities.rename = true;
-    thread.project_id = projects.project_membership(thread.cwd.as_deref());
-    thread.capabilities = Some(capabilities);
+    capabilities
 }
 
 #[cfg(test)]
 mod tests {
+    use agent_protocol::models::Thread;
     #[test]
     fn worktree_activity_requires_finished_delivery_and_no_other_live_work() {
         use super::worktree_active;
@@ -2617,6 +2742,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_interrupt_keeps_waiting_inputs_and_queue_state_unchanged() {
+        use super::*;
+        use agent_protocol::session::{SessionRef, SubmissionDelivery};
+        let root = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            Err("not available".into()),
+            ProjectStore::new(root.path().join("worktrees.json")),
+        )
+        .unwrap();
+        service
+            .enable_claude(
+                root.path().join("missing-cli"),
+                root.path().join("claude"),
+                Some(root.path().join("native")),
+            )
+            .await
+            .unwrap();
+        let target = service
+            .inner
+            .conversations
+            .bind(
+                &SessionRef {
+                    provider: ProviderKind::Claude,
+                    id: "source".into(),
+                },
+                &service.storage_scope(ProviderKind::Claude).unwrap(),
+            )
+            .unwrap();
+        let input = op::Submission {
+            thread_id: target.clone(),
+            client_user_message_id: "waiting".into(),
+            input: vec![op::Input::Text {
+                text: "waiting input".into(),
+            }],
+            model: None,
+            effort: None,
+            service_tier: None,
+        };
+        service
+            .inner
+            .conversations
+            .admit(&input, SubmissionDelivery::Queued)
+            .unwrap();
+        assert!(
+            service
+                .interrupt_session(&op::Interrupt {
+                    thread_id: target.clone(),
+                    turn_id: "stale".into(),
+                })
+                .await
+                .is_err()
+        );
+        let thread = service
+            .inner
+            .conversations
+            .open_thread(&target, 5, false)
+            .unwrap()
+            .thread;
+        assert!(!thread.queue_held);
+        assert_eq!(thread.queued_inputs.len(), 1);
+        assert_eq!(thread.queued_inputs[0].submission, input);
+        assert_eq!(thread.queued_inputs[0].delivery, SubmissionDelivery::Queued);
+    }
+
+    #[tokio::test]
     async fn held_queue_admits_once_without_a_provider_process() {
         use super::*;
         use agent_protocol::{
@@ -2809,6 +2999,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stored_lists_do_not_wait_for_a_catalog_scan_and_expose_its_progress() {
+        use super::*;
+        let root = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            Err("unavailable".into()),
+            ProjectStore::new(root.path().join("bex-worktrees.json")),
+        )
+        .unwrap();
+        let source = agent_protocol::session::SessionRef {
+            provider: ProviderKind::Codex,
+            id: "saved".into(),
+        };
+        service
+            .inner
+            .conversations
+            .discover_page(
+                &[super::super::agent::SessionSummary {
+                    thread: Thread {
+                        id: Some(source),
+                        name: Some("Saved before startup".into()),
+                        ..Default::default()
+                    },
+                    branch: None,
+                }],
+                &service.storage_scope(ProviderKind::Codex).unwrap(),
+            )
+            .unwrap();
+        let catalog = service.inner.catalog_import.lock().await;
+        let page = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.host_title_list(Default::default()),
+        )
+        .await
+        .expect("a list must not await a blocked catalog scan")
+        .unwrap();
+        assert!(page.importing);
+        assert_eq!(page.data.len(), 1);
+        assert_eq!(page.data[0].name.as_deref(), Some("Saved before startup"));
+        drop(catalog);
+        assert!(service.refresh_import().await.is_err());
+        let page = service.host_title_list(Default::default()).await.unwrap();
+        assert!(!page.importing);
+        assert_eq!(page.data.len(), 1);
+        assert!(page.provider_errors.unwrap().contains_key("codex"));
+    }
+
+    #[tokio::test]
     async fn first_import_preserves_claude_history_without_starting_a_cli() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
@@ -2834,7 +3071,6 @@ mod tests {
             )
             .await
             .unwrap();
-        service.initial_import().await;
         let target = service
             .inner
             .conversations
@@ -2846,13 +3082,50 @@ mod tests {
                 &service.storage_scope(ProviderKind::Claude).unwrap(),
             )
             .unwrap();
+        let serial = service
+            .inner
+            .router
+            .submission_lock(&target)
+            .lock_owned()
+            .await;
+        service.initial_import();
+        drop(service.inner.catalog_import.lock().await);
+        assert!(
+            service
+                .inner
+                .catalog_errors
+                .read()
+                .unwrap()
+                .contains_key(&ProviderKind::Codex)
+        );
         let session = service.open_session();
         let call =
             agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
                 include_activity: false,
-                session: target,
+                session: target.clone(),
                 limit: 5,
             });
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.dispatch(session.id(), &call),
+        )
+        .await
+        .expect("opening committed metadata must not wait for source history")
+        .unwrap();
+        let opened = agent_protocol::protocol::decode::<
+            Response<agent_protocol::session::OpenedSession>,
+        >(&response.initial)
+        .unwrap()
+        .into_value();
+        assert_eq!(
+            opened["result"]["response"]["thread"]["historyReadState"]["type"],
+            "importing"
+        );
+        drop(serial);
+        service
+            .import_conversation(&target, usize::MAX)
+            .await
+            .unwrap();
         let response = service.dispatch(session.id(), &call).await.unwrap();
         let reply = agent_protocol::protocol::decode::<
             agent_protocol::protocol::Response<agent_protocol::session::OpenedSession>,

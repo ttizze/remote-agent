@@ -82,7 +82,7 @@ internal fun ThreadListScreen(
         items(threads.filter { it.projectId == null }, key = { it.id.listKey }) { SummaryRow(it, openConversation) }
         if (list?.hasMoreChats == true)
             item { TextButton(onClick = { perform(Intent.ExpandThreadList(null, false)) }) { Text("もっと見る") } }
-        if (list != null && threads.isEmpty()) item { Text("タスクがありません。") }
+        if (list != null && !list.importing && threads.isEmpty()) item { Text("タスクがありません。") }
     }
 }
 

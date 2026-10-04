@@ -11,7 +11,12 @@ use agent_protocol::{
 };
 use agent_transport::{client::Client, framing::Reader};
 use host_fixture::test_support::{HostFixture, Memory};
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 async fn open(client: &Client, session: &SessionRef) -> (OpenedSession, Reader) {
     client
@@ -259,11 +264,16 @@ async fn scenarios(provider: ProviderKind) {
     }
 
     // Additional input is accepted once while the initial turn is still live.
-    // Native adapters may steer or queue; the Host's routing matrix is tested separately.
+    // Codex steers the live turn; Claude starts a queued input after approval completes it.
     for interrupt in [false, true] {
         let session = create(&local.peer, provider, &root).await;
         let (_, mut events) = open(&local.peer, &session).await;
-        let initial = submission(&session, prompt(provider, "wait"));
+        let scenario = if !interrupt && provider == ProviderKind::Claude {
+            "approval"
+        } else {
+            "wait"
+        };
+        let initial = submission(&session, prompt(provider, scenario));
         let turn = local.peer.call(&initial).await.unwrap().turn_id.unwrap();
         loop {
             if matches!(
@@ -292,30 +302,54 @@ async fn scenarios(provider: ProviderKind) {
             if provider == ProviderKind::Codex {
                 std::fs::write(root.join("release-inputs"), "").unwrap();
             }
-            // Native completion and a deferred input echo may arrive independently.
-            // Both must be observed before checking the persisted conversation.
-            let mut completed = None;
-            let mut echoed = false;
-            while completed.is_none() || !echoed {
-                let items = match change(&mut events).await {
+            let mut completed = BTreeSet::new();
+            let mut echoed_turn = None;
+            while !echoed_turn
+                .as_ref()
+                .is_some_and(|id| completed.contains(id))
+            {
+                let (turn_id, items) = match change(&mut events).await {
                     SessionChange::Turn {
                         turn,
                         completed: done,
                     } => {
                         if done {
                             assert_eq!(turn.status, TurnStatus::Completed);
-                            completed = Some(turn.id);
+                            completed.insert(turn.id.clone());
                         }
-                        turn.items.unwrap_or_default()
+                        (Some(turn.id), turn.items.unwrap_or_default())
                     }
-                    SessionChange::Item { item, .. } => vec![item],
-                    _ => Vec::new(),
+                    SessionChange::Item { turn_id, item } => (Some(turn_id), vec![item]),
+                    SessionChange::Request { request } => {
+                        let RequestBody::Approval { choices, .. } = &request.body else {
+                            panic!("expected approval");
+                        };
+                        local
+                            .peer
+                            .request::<Empty>(&Call::AnswerSession(op::SessionAnswer {
+                                request_id: request.id,
+                                answer: Answer::Approval {
+                                    choice_id: choices
+                                        .iter()
+                                        .find(|choice| choice.label == "承認")
+                                        .unwrap()
+                                        .id
+                                        .clone(),
+                                },
+                            }))
+                            .await
+                            .unwrap();
+                        (None, Vec::new())
+                    }
+                    _ => (None, Vec::new()),
                 };
-                echoed |= items.iter().any(|item| {
+                if items.iter().any(|item| {
                     item.client_input_id.as_ref() == Some(&additional.client_user_message_id)
-                });
+                }) {
+                    echoed_turn = turn_id;
+                }
             }
-            let turn_id = completed.unwrap();
+            let turn_id = echoed_turn.unwrap();
             let (history, _) = open(&local.peer, &session).await;
             let turn = history
                 .response
@@ -472,6 +506,11 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
         chat_limit: 200,
         ..Default::default()
     });
+    local
+        .peer
+        .request::<Empty>(&Call::ImportHistory(Empty {}))
+        .await
+        .unwrap();
     let listing = local.peer.call(&query).await.unwrap();
     assert_eq!(listing.data.len(), 102);
     assert!(listing.provider_errors.is_none());
@@ -537,6 +576,11 @@ async fn imported_title_lists_page_and_search_without_reading_provider_history()
             .filter(|entry| entry["method"] == "thread/list")
             .count()
     };
+    local
+        .peer
+        .request::<Empty>(&Call::ImportHistory(Empty {}))
+        .await
+        .unwrap();
     let listing = local
         .peer
         .call(&op::ListSessions::new(Default::default()))

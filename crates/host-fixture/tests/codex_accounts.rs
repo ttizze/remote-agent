@@ -207,6 +207,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert_eq!(call(&service, &mut session, "host/session/submit", json!({"threadId":{"provider":"codex","id":thread},"clientUserMessageId":"unavailable-account","input":[{"text":{"text":"must not use a different account"}}]})).await["error"]["code"], "account_unavailable");
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
         let started = call(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":home})).await;
+        assert!(started.get("error").is_none(), "{started}");
         completed_turn(&service, &mut session, started["result"]["thread"]["id"]["id"].as_str().unwrap(), "recovered account").await;
         let logged_out = call(&service, &mut session, "host/account/logout", json!({"accountId":second})).await;
         assert!(logged_out.get("error").is_none(), "{logged_out}");

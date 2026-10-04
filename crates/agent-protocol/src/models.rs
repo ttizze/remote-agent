@@ -107,7 +107,6 @@ pub struct Thread {
     pub history_has_more: Option<bool>,
     pub history_cursor: Option<String>,
     pub history_limit: Option<u64>,
-    pub list_stale: Option<bool>,
     pub agent_id: Option<String>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -195,6 +194,8 @@ pub struct ThreadList {
     pub more_project_ids: Vec<String>,
     pub has_more_chats: bool,
     pub has_more_projects: bool,
+    #[serde(default)]
+    pub importing: bool,
     #[serde(default)]
     #[serde(with = "crate::protocol::json")]
     pub provider_errors: Option<Map<String, Value>>,

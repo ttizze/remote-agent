@@ -78,15 +78,21 @@ impl Context {
         self.write(&Reply { id, result })
     }
 
-    fn respond_history(&self, id: &Value, result: &impl Serialize) -> Result<()> {
-        let gate = self.home.join("hold-history-reads");
+    fn respond_gated(
+        &self,
+        id: &Value,
+        result: &impl Serialize,
+        gate: &str,
+        held: &str,
+    ) -> Result<()> {
+        let gate = self.home.join(gate);
         if !gate.exists() {
             return self.respond(id, result);
         }
         let response = serde_json::to_string(&json!({"id":id,"result":result}))?;
         let id = id.clone();
         let output = self.output.clone();
-        fs::write(self.home.join("history-read-held"), [])?;
+        fs::write(self.home.join(held), [])?;
         tokio::spawn(async move {
             let released = tokio::time::timeout(std::time::Duration::from_secs(25), async {
                 while gate.exists() {
@@ -97,7 +103,7 @@ impl Context {
             let response = if released.is_ok() {
                 response
             } else {
-                json!({"id":id,"error":{"code":-32000,"message":"fixture history gate timed out"}})
+                json!({"id":id,"error":{"code":-32000,"message":"fixture import gate timed out"}})
                     .to_string()
             };
             let _ = output.send(Output::Message(response));
@@ -238,6 +244,28 @@ impl Context {
     }
 }
 
+fn allocate_thread<'a>(
+    home: &std::path::Path,
+    ids: impl Iterator<Item = &'a str>,
+) -> Result<(String, u64)> {
+    let path = home.join("next-thread-id");
+    let previous: u64 = match fs::read_to_string(&path) {
+        Ok(value) => value.parse()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
+    };
+    let occupied = ids
+        .filter_map(|id| id.strip_prefix("fixture-thread-")?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    let sequence = previous
+        .max(occupied)
+        .checked_add(1)
+        .ok_or("fixture thread ID overflow")?;
+    fs::write(path, sequence.to_string())?;
+    Ok((format!("fixture-thread-{sequence}"), sequence))
+}
+
 pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
     tokio::task::LocalSet::new().run_until(async move {
         let peer = Arc::new(RpcPeer::open(agent_transport::peer::JsonlReader::new(tokio::io::stdin()), tokio::io::stdout(),
@@ -260,7 +288,6 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
         let mut threads = IndexMap::<String, SharedThread>::new();
         let mut saved_threads = None;
         let mut list_contents = None;
-        let mut next_thread = 0;
         loop {
             let line = tokio::select! {
                 result = &mut writer => { result??; break; }
@@ -386,7 +413,12 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     let next_cursor = if context.home.join("repeat-list-cursor").exists() {
                         Some(offset.to_string())
                     } else { (end < ordered.len()).then(|| end.to_string()) };
-                    context.respond(id, &Page { data: &page, next_cursor })?;
+                    let page = Page { data: &page, next_cursor };
+                    if offset > 0 {
+                        context.respond_gated(id, &page, "hold-catalog-reads", "catalog-read-held")?;
+                    } else {
+                        context.respond(id, &page)?;
+                    }
                 }
                 "thread/start" => {
                     let failure = context.home.join("fail-next-thread-start");
@@ -407,18 +439,14 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     if !matches || !cwd.as_str().is_some_and(|cwd| !cwd.is_empty()) {
                         context.error(id, -32602, "invalid cwd")?; continue;
                     }
-                    let thread_id = loop {
-                        next_thread += 1;
-                        let id = format!("fixture-thread-{next_thread}");
-                        if !threads.contains_key(&id) { break id; }
-                    };
+                    let (thread_id, sequence) = allocate_thread(&context.home, threads.keys().map(String::as_str))?;
                     let mut thread = Thread::new(thread_id.clone(), cwd);
                     if context.config.deferred_thread_metadata { thread.metadata.insert("name".into(), Value::Null); }
                     thread.metadata.insert("path".into(), context.home.join(format!("{thread_id}.jsonl")).into_os_string().into_string().unwrap().into());
                     thread.metadata.insert("historyMode".into(), "paginated".into());
                     thread.metadata.insert("model".into(), params["model"].take());
-                    thread.metadata.insert("createdAt".into(), next_thread.into());
-                    thread.metadata.insert("updatedAt".into(), next_thread.into());
+                    thread.metadata.insert("createdAt".into(), sequence.into());
+                    thread.metadata.insert("updatedAt".into(), sequence.into());
                     #[derive(Serialize)] struct Started<'a> { thread: &'a Thread }
                     context.respond(id, &Started { thread: &thread })?;
                     threads.insert(thread_id, Rc::new(RefCell::new(thread)));
@@ -434,13 +462,12 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     if source.turns[boundary].borrow()["status"] == "inProgress" {
                         context.error(id, -32602, "completed turn required")?; continue;
                     }
-                    next_thread += 1;
-                    let thread_id = format!("fixture-thread-{next_thread}");
+                    let (thread_id, sequence) = allocate_thread(&context.home, threads.keys().map(String::as_str))?;
                     let mut thread = Thread { metadata: source.metadata.clone(),
                         turns: source.turns[..=boundary].iter().map(|turn| Rc::new(RefCell::new(turn.borrow().clone()))).collect() };
                     thread.metadata.insert("id".into(), thread_id.clone().into());
-                    thread.metadata.insert("createdAt".into(), next_thread.into());
-                    thread.metadata.insert("updatedAt".into(), next_thread.into());
+                    thread.metadata.insert("createdAt".into(), sequence.into());
+                    thread.metadata.insert("updatedAt".into(), sequence.into());
                     thread.metadata.insert("status".into(), json!({"type":"idle"}));
                     #[derive(Serialize)] struct Forked<'a> { thread: ThreadView<'a> }
                     context.respond(id, &Forked { thread: ThreadView { metadata: &thread.metadata,
@@ -571,7 +598,7 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                         } else {
                             let response = Read { thread: &ThreadView { metadata: &thread.metadata,
                                 turns: if method == "thread/read" { &[] } else { &thread.turns } } };
-                            if method == "thread/read" { context.respond_history(id, &response)?; }
+                            if method == "thread/read" { context.respond_gated(id, &response, "hold-history-reads", "history-read-held")?; }
                             else { context.respond(id, &response)?; }
                         }
                     }

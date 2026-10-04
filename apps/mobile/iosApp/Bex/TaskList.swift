@@ -104,7 +104,7 @@ struct ThreadsScreen: View {
                 .listSectionSeparator(.hidden)
             }
 
-            if model.threadLoadState == .ready, (model.list?.projects ?? []).isEmpty {
+            if model.threadLoadState == .ready, model.list?.importing != true, (model.list?.projects ?? []).isEmpty {
                 Section {
                     Text("Codexに登録されたプロジェクトはありません")
                         .font(.subheadline)
@@ -115,7 +115,7 @@ struct ThreadsScreen: View {
             }
 
             Section {
-                if model.threadLoadState == .ready, chats.isEmpty {
+                if model.threadLoadState == .ready, model.list?.importing != true, chats.isEmpty {
                     Text("プロジェクトに属さないチャットはありません")
                         .font(.subheadline)
                         .foregroundColor(.secondary)

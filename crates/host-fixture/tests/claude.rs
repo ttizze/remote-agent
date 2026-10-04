@@ -583,6 +583,10 @@ async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_inter
                 .label(),
             "running"
         );
+        assert!(
+            !store.snapshot().conversations[&id].queue_held,
+            "a rejected stale stop must not hold waiting inputs"
+        );
         store
             .dispatch(Intent::Interrupt(op::Interrupt {
                 thread_id: id.clone(),
@@ -591,6 +595,20 @@ async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_inter
             .await
             .unwrap();
         completed(&store, &id, 4, "interrupted").await;
+        let snapshot = until(&store, |snapshot| snapshot.conversations[&id].queue_held).await;
+        assert_eq!(snapshot.conversations[&id].queued_inputs.len(), 1);
+        for action in [
+            agent_protocol::queue::QueueAction::Cancel { id: "busy".into() },
+            agent_protocol::queue::QueueAction::Resume,
+        ] {
+            store
+                .dispatch(Intent::QueueControl(agent_protocol::queue::QueueControl {
+                    session: id.clone(),
+                    action,
+                }))
+                .await
+                .unwrap();
+        }
         send(&store, "after interruption", "recovered").await;
         let snapshot = completed(&store, &id, 5, "completed").await;
         assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
@@ -1718,6 +1736,10 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
             .unwrap();
         let snapshot = completed(&store, &id, 3, "interrupted").await;
         assert!(snapshot.requests().next().is_none());
+        assert!(
+            !snapshot.conversations[&id].queue_held,
+            "stopping an empty queue must allow the next input"
+        );
         // A settings change replaces the retained CLI. The same native
         // conversation must resume after its background work was stopped.
         store
@@ -1857,7 +1879,10 @@ async fn claude_host_queue_preserves_edits_order_and_hold_across_restart() {
             .all(|entry| entry.delivery == SubmissionDelivery::Queued)
     );
     let native_id = host_fixture::test_support::native_id(root.path(), &id);
-    let native_inputs = root.path().join(format!("claude-session-{native_id}.json"));
+    let native_inputs = root
+        .path()
+        .join("claude-native/projects/fixture-native-project")
+        .join(format!("{native_id}.inputs.json"));
     let inputs: Vec<Value> =
         serde_json::from_slice(&std::fs::read(&native_inputs).unwrap()).unwrap();
     assert_eq!(

@@ -40,7 +40,7 @@ impl<'a> TitleList<'a> {
             .max(1) as usize
     }
 
-    pub(crate) fn push(&mut self, mut thread: Thread) {
+    pub(crate) fn push(&mut self, mut thread: Thread) -> bool {
         let project_id = thread
             .project_id
             .as_deref()
@@ -55,7 +55,7 @@ impl<'a> TitleList<'a> {
             };
             // A new project encountered later cannot outrank visible projects.
             if position >= self.project_limit {
-                return;
+                return false;
             }
             let maximum = self.thread_limit(project_id);
             if self
@@ -63,12 +63,12 @@ impl<'a> TitleList<'a> {
                 .get(project_id)
                 .is_some_and(|entries| entries.len() > maximum)
             {
-                return;
+                return false;
             }
             self.threads.entry(project_id).or_default()
         } else {
             if self.chats.len() > self.chat_limit {
-                return;
+                return false;
             }
             &mut self.chats
         };
@@ -97,6 +97,7 @@ impl<'a> TitleList<'a> {
         thread.history_limit = None;
         thread.agent_id = None;
         target.push(thread);
+        true
     }
 
     pub(crate) fn complete(&self) -> bool {
@@ -148,6 +149,7 @@ impl<'a> TitleList<'a> {
         self.chats.truncate(self.chat_limit);
         data.extend(self.chats);
         ThreadList {
+            importing: false,
             provider_errors: None,
             data,
             projects: projects.into_iter().cloned().collect(),
@@ -182,9 +184,14 @@ mod tests {
         let mut list = TitleList::new(&projects, &query);
         for index in 0..9 {
             for project in (1..=7).rev() {
-                list.push(thread(json!({"id":{"provider":"codex","id":format!("p{project}-{index}")},"projectId":format!("p{project}"),"name":"title","preview":"long body".repeat(10000),"turns":[{"id":"turn"}]})));
+                let retained = list.push(thread(json!({"id":{"provider":"codex","id":format!("p{project}-{index}")},"projectId":format!("p{project}"),"name":"title","preview":"long body".repeat(10000),"turns":[{"id":"turn"}]})));
+                assert_eq!(
+                    retained,
+                    project >= 3 && index <= 5,
+                    "retain only five visible titles and one lookahead per visible project"
+                );
             }
-            list.push(thread(json!({"id":{"provider":"codex","id":format!("chat-{index}")},"preview":"\nFirst line\nprivate body","cwd":"/other"})));
+            assert_eq!(list.push(thread(json!({"id":{"provider":"codex","id":format!("chat-{index}")},"preview":"\nFirst line\nprivate body","cwd":"/other"}))), index <= 5);
         }
         assert!(list.complete());
         let page = list.finish();
@@ -196,6 +203,14 @@ mod tests {
         assert_eq!(data[4]["id"]["id"], "p7-4");
         assert_eq!(data[25]["id"]["id"], "chat-0");
         assert_eq!(data[29]["id"]["id"], "chat-4");
+        for (offset, project) in (3..=7).rev().enumerate() {
+            for index in 0..5 {
+                assert_eq!(
+                    data[offset * 5 + index]["id"]["id"],
+                    format!("p{project}-{index}")
+                );
+            }
+        }
         assert_eq!(data[25]["name"], "First line");
         assert!(
             data.iter()

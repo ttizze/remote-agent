@@ -69,6 +69,7 @@ impl Conversations {
                 cursor TEXT, oldest INTEGER NOT NULL DEFAULT 1, branch TEXT, import_issue TEXT,
                 manual_title INTEGER NOT NULL DEFAULT 0, queue_held INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(provider, scope, native_id));
+             CREATE INDEX IF NOT EXISTS unfinished_imports ON conversations(provider, scope, imported);
              CREATE TABLE IF NOT EXISTS turns (
                 conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
                 position INTEGER NOT NULL, native_id TEXT NOT NULL, body TEXT NOT NULL,
@@ -222,10 +223,9 @@ impl Conversations {
         &self,
         page: &[super::agent::SessionSummary],
         scope: &str,
-    ) -> Result<Vec<SessionRef>> {
+    ) -> Result<()> {
         let mut connection = self.lock();
         let tx = connection.transaction()?;
-        let mut targets = Vec::with_capacity(page.len());
         for summary in page {
             let Some(native) = &summary.thread.id else {
                 continue;
@@ -255,10 +255,38 @@ impl Conversations {
                     )?
                 ],
             )?;
-            targets.push(target);
         }
         tx.commit()?;
-        Ok(targets)
+        Ok(())
+    }
+
+    /// Walk unfinished imports in insertion order without retaining the whole
+    /// catalog. A later refresh retries failures; this pass visits each once.
+    pub(super) fn pending_imports(
+        &self,
+        provider: ProviderKind,
+        scope: &str,
+        after: i64,
+    ) -> Result<Vec<(i64, SessionRef)>> {
+        let connection = self.lock();
+        let mut query = connection.prepare(
+            "SELECT rowid, id FROM conversations WHERE provider=?1 AND scope=?2 AND imported=0 AND rowid>?3 ORDER BY rowid LIMIT 32",
+        )?;
+        query
+            .query_map(
+                params![serde_json::to_string(&provider)?, scope, after],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        SessionRef {
+                            provider,
+                            id: row.get(1)?,
+                        },
+                    ))
+                },
+            )?
+            .map(|row| row.map_err(Into::into))
+            .collect()
     }
 
     pub(super) fn import_failed(&self, target: &SessionRef, issue: &str) -> Result<()> {
@@ -528,37 +556,65 @@ impl Conversations {
         Ok(true)
     }
 
-    pub(super) fn titles(
+    pub(super) fn title_list(
         &self,
-        provider: ProviderKind,
-        scope: &str,
-        search: &str,
-    ) -> Result<Vec<super::agent::SessionSummary>> {
+        areas: &[(ProviderKind, String)],
+        projects: &crate::projects::state::Snapshot,
+        params: &agent_protocol::models::ListQuery,
+    ) -> Result<(
+        agent_protocol::models::ThreadList,
+        std::collections::HashMap<SessionRef, String>,
+    )> {
+        let mut areas = areas.to_vec();
+        areas.sort();
+        areas.dedup();
         let connection = self.lock();
-        let mut query = connection.prepare("SELECT metadata, branch FROM conversations WHERE provider=?1 AND scope=?2 ORDER BY json_extract(metadata, '$.updatedAt') DESC, id")?;
-        let rows = query.query_map(params![serde_json::to_string(&provider)?, scope], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })?;
-        let search = search.trim().to_lowercase();
-        rows.map(|row| {
-            let (metadata, branch) = row?;
-            Ok(super::agent::SessionSummary {
-                thread: serde_json::from_str::<Thread>(&metadata)?,
-                branch,
-            })
-        })
-        .filter(|summary: &Result<super::agent::SessionSummary>| {
-            summary.as_ref().map_or(true, |summary| {
-                search.is_empty()
-                    || summary
-                        .thread
-                        .name
-                        .iter()
-                        .chain(summary.thread.preview.iter())
-                        .any(|text| text.to_lowercase().contains(&search))
-            })
-        })
-        .collect()
+        // Select only title fields. Receipts, requests, queues and timeline
+        // bodies remain in the DB. The connection lock keeps this iterator on
+        // one catalog snapshot, and the selector retains only visible rows.
+        let mut query = connection.prepare(
+            "SELECT json_object('id', json_extract(c.metadata, '$.id'),
+                'name', json_extract(c.metadata, '$.name'),
+                'cwd', json_extract(c.metadata, '$.cwd'),
+                'status', json_extract(c.metadata, '$.status'),
+                'preview', json_extract(c.metadata, '$.preview'),
+                'updatedAt', json_extract(c.metadata, '$.updatedAt')), c.branch
+             FROM conversations c JOIN json_each(?1) area
+                ON c.provider=json_quote(json_extract(area.value, '$[0]'))
+                AND c.scope=json_extract(area.value, '$[1]')
+             ORDER BY COALESCE(CAST(json_extract(c.metadata, '$.updatedAt') AS REAL), 0) DESC,
+                CAST(area.key AS INTEGER), c.id",
+        )?;
+        let mut rows = query.query([serde_json::to_string(&areas)?])?;
+        let search = params.search_term.trim().to_lowercase();
+        let mut titles = crate::projects::titles::TitleList::new(&projects.projects, params);
+        let mut branches = std::collections::HashMap::new();
+        while let Some(row) = rows.next()? {
+            let mut thread: Thread = serde_json::from_str(&row.get::<_, String>(0)?)?;
+            if !search.is_empty()
+                && !thread
+                    .name
+                    .iter()
+                    .chain(thread.preview.iter())
+                    .any(|text| text.to_lowercase().contains(&search))
+            {
+                continue;
+            }
+            thread.project_id = projects.project_membership(thread.cwd.as_deref());
+            let id = thread
+                .id
+                .clone()
+                .context("stored title identity is missing")?;
+            if titles.push(thread)
+                && let Some(branch) = row.get::<_, Option<String>>(1)?
+            {
+                branches.insert(id, branch);
+            }
+            if titles.complete() {
+                break;
+            }
+        }
+        Ok((titles.finish(), branches))
     }
 
     /// Journal and projection are committed before the router publishes a change.

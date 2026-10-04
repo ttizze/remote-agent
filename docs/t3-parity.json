@@ -2687,5 +2687,32 @@
       "path": "apps/mobile/src/features/usage/UsageRouteScreen.tsx",
       "state": "unreviewed"
     }
-  ]
+  ],
+  "rewrite_foundation": {
+    "state": "implemented",
+    "scope": [
+      "Host-owned conversation identity and persisted source mapping",
+      "durable conversation snapshots, events and input receipts",
+      "Host-owned input queues and interruption",
+      "incremental automatic Codex and Claude catalog discovery",
+      "bounded database title projection and incremental source body import"
+    ],
+    "verification": {
+      "local_unit_tests": "434 passed, 3 existing skips",
+      "rust_clippy": "passed",
+      "swift_lint_and_format": "passed",
+      "kotlin_detekt_and_format": "passed",
+      "ios_app_and_ui_test_bundle_build": "passed without executing acceptance",
+      "focused_import_and_title_mutations": "29 caught, 8 unviable; 0 missed or timed out",
+      "native_acceptance": "pending",
+      "all_client_visual_comparison": "pending"
+    },
+    "remaining": [
+      "provider instances",
+      "Codex history import without a working CLI",
+      "complete T3 feature parity",
+      "all native views and interactions matched to T3",
+      "signed Nightly artifacts, updates and publication"
+    ]
+  }
 }

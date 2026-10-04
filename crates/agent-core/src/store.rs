@@ -1513,6 +1513,7 @@ mod tests {
             }),
             ("threads", |snapshot| {
                 snapshot.threads = Some(Arc::new(crate::models::ThreadList {
+                    importing: false,
                     data: Vec::new(),
                     projects: Vec::new(),
                     more_project_ids: Vec::new(),

@@ -286,6 +286,9 @@ impl SessionRouter {
     pub(super) fn submission_lock(&self, target: &SessionRef) -> Arc<tokio::sync::Mutex<()>> {
         lock_state(&self.actor(target)).submission_lock.clone()
     }
+    pub(super) fn import_lock(&self, target: &SessionRef) -> Arc<tokio::sync::Mutex<()>> {
+        lock_state(&self.actor(target)).import_lock.clone()
+    }
     pub(crate) fn overlay_execution(&self, target: &SessionRef, mut thread: Thread) -> Thread {
         if let Some(actor) = self.existing(target) {
             thread = lock_state(&actor).overlay(thread);
