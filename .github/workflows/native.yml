@@ -94,6 +94,13 @@ jobs:
         run: nix develop .#native --command cargo build --locked -p host-fixture -p codex-app-server -p bex-process --bins
       - name: Android emulator acceptance
         run: nix develop .#android-test --command bash scripts/android-e2e.sh
+      - name: Retain Android acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: android-acceptance
+          path: target/qa/android-*
+          retention-days: 7
   macos:
     runs-on: macos-26
     timeout-minutes: 120
@@ -101,6 +108,7 @@ jobs:
       BEX_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       # Keep every test, but avoid two Simulators competing on this 7 GiB runner.
       BEX_IOS_TEST_WORKERS: 1
+      BEX_BROWSER_LOG_DIR: ${{ github.workspace }}/target/qa/browser
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -129,6 +137,19 @@ jobs:
           path: target/qa/ios-derived-data
           key: ios-xcode-26.6-${{ hashFiles('flake.lock', 'Cargo.lock', 'apps/mobile/iosApp/Bex/**', 'apps/mobile/iosApp/BexUITests/**', 'apps/mobile/iosApp/Bex.xcodeproj/**') }}
           restore-keys: ios-xcode-26.6-
+      - name: Capture isolated Chrome startup diagnostics
+        run: |
+          BEX_BROWSER_EXECUTABLE="$RUNNER_TEMP/bex-ci-chrome"
+          mkdir -p "$BEX_BROWSER_LOG_DIR"
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version > "$BEX_BROWSER_LOG_DIR/version.txt"
+          cat > "$BEX_BROWSER_EXECUTABLE" <<'CHROME'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          log=$(mktemp "${BEX_BROWSER_LOG_DIR:?}/chrome.XXXXXX")
+          exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "$@" 2>"$log"
+          CHROME
+          chmod u+x "$BEX_BROWSER_EXECUTABLE"
+          printf 'BEX_BROWSER_EXECUTABLE=%s\n' "$BEX_BROWSER_EXECUTABLE" >> "$GITHUB_ENV"
       - name: Mac contracts and concurrent Mac/iPhone E2E
         run: |
           set -o pipefail
@@ -142,6 +163,7 @@ jobs:
           path: |
             target/qa/quality.log
             target/qa/Bex-*
+            target/qa/browser
           retention-days: 7
   windows:
     needs: toolchain
@@ -162,7 +184,8 @@ jobs:
       - name: Build desktop, Host and CLI
         run: cargo build --locked -p codex-app-server -p bex-process -p bex-desktop -p host-daemon -p agent-cli
       - name: Core contracts and isolated iroh Host
-        run: cargo test --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
+        # Keep concurrency within each test while isolating independent heavy fixtures.
+        run: cargo test --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask -- --test-threads=1
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
         run: cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored

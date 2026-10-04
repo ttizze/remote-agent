@@ -44,7 +44,12 @@ class NetworkPermissionTest {
             assertTrue(device.wait(Until.hasObject(By.text("アプリの設定を開く")), 10_000))
             assertFalse(device.hasObject(By.text("PCとペアリング")))
             assertThrows(IOException::class.java) { readLocalHost() }
-            device.findObject(By.text("アプリの設定を開く")).click()
+            val settingsButton = device.wait(Until.findObject(By.text("アプリの設定を開く")), 10_000)
+            if (settingsButton == null) {
+                device.dumpWindowHierarchy(System.out)
+                throw AssertionError("App settings button did not reappear after the denied local-network probe")
+            }
+            settingsButton.click()
             assertTrue(device.wait(Until.hasObject(By.pkg("com.android.settings")), 10_000))
             device.pressBack()
             assertTrue(device.wait(Until.hasObject(By.text("インターネット経由で接続")), 10_000))
