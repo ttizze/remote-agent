@@ -994,8 +994,7 @@ async fn run(
     let mut terminal_commands = VecDeque::new();
     let mut item_reads = ItemReads::default();
     let mut terminal_running = BTreeSet::new();
-    let mut list_running = false;
-    let mut pending_list: Option<Scheduled> = None;
+    let mut latest_reads: BTreeMap<op::OperationKey, Option<Scheduled>> = BTreeMap::new();
     let mut disconnected = None;
     let reason = loop {
         let unused: Vec<_> = subscriptions
@@ -1013,17 +1012,18 @@ async fn run(
             subscriptions.remove(&id);
         }
         for mut scheduled in std::mem::take(&mut effects) {
-            let limit = match &scheduled.effect.scheduling {
-                op::Scheduling::LatestList(_) if list_running => {
-                    if let Some(previous) = pending_list.take() {
-                        let receipt = scheduled.complete.get_or_insert_default();
-                        if let Some(complete) = previous.complete {
-                            receipt.join(complete);
-                        }
-                    }
-                    pending_list = Some(scheduled);
-                    continue;
+            if let Some(key) = scheduled.effect.scheduling.latest_key()
+                && let Some(pending) = latest_reads.get_mut(&key)
+            {
+                if let Some(previous) = pending.take()
+                    && let Some(complete) = previous.complete
+                {
+                    scheduled.complete.get_or_insert_default().join(complete);
                 }
+                *pending = Some(scheduled);
+                continue;
+            }
+            let limit = match &scheduled.effect.scheduling {
                 op::Scheduling::Terminal { .. } => {
                     if terminal_commands.len() >= MAX_TERMINAL_QUEUE {
                         effects.extend(finish(&updates, rejected(scheduled, busy_error())));
@@ -1040,14 +1040,16 @@ async fn run(
                     continue;
                 }
                 op::Scheduling::Control => MAX_RPC_JOBS + CONTROL_RESERVE,
-                op::Scheduling::Concurrent | op::Scheduling::LatestList(_) => MAX_RPC_JOBS,
+                op::Scheduling::Concurrent
+                | op::Scheduling::LatestList(_)
+                | op::Scheduling::LatestReview => MAX_RPC_JOBS,
             };
             if jobs.len() >= limit {
                 effects.extend(finish(&updates, rejected(scheduled, busy_error())));
                 continue;
             }
-            if matches!(scheduled.effect.scheduling, op::Scheduling::LatestList(_)) {
-                list_running = true;
+            if let Some(key) = scheduled.effect.scheduling.latest_key() {
+                latest_reads.insert(key, None);
             }
             jobs.push(perform(Some(peer), session.as_ref(), scheduled));
         }
@@ -1131,9 +1133,9 @@ async fn run(
                     Err(std::io::Error::other("subscription ended"))
                 })).boxed()); }
                 if let Some(handle) = result.scheduling.terminal() { terminal_running.remove(handle); }
-                if result.scheduling.query().is_some() {
-                    list_running = false;
-                    if let Some(scheduled) = pending_list.take() { effects.push(scheduled); }
+                if let Some(key) = result.scheduling.latest_key()
+                    && let Some(Some(scheduled)) = latest_reads.remove(&key) {
+                    effects.push(scheduled);
                 }
                 effects.extend(item_reads.finish(&updates, result));
             }

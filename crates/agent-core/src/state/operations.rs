@@ -246,10 +246,18 @@ pub enum Scheduling {
     Concurrent,
     Control,
     LatestList(crate::models::ListQuery),
+    LatestReview,
     Item(ReadItem),
     Terminal { handle: String, starts: bool },
 }
 impl Scheduling {
+    pub(crate) fn latest_key(&self) -> Option<OperationKey> {
+        match self {
+            Self::LatestList(_) => Some(OperationKey::SessionList),
+            Self::LatestReview => Some(OperationKey::WorkspaceReview),
+            _ => None,
+        }
+    }
     pub(crate) fn item(&self) -> Option<&ReadItem> {
         if let Self::Item(item) = self {
             Some(item)

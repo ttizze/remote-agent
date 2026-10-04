@@ -178,6 +178,8 @@ transfer server just to delete that check would reverse A14.
   Require successful CI checks for the current commit and a clean working tree
   before claiming full verification. Manual check commands remain for
   debugging. Apple CI uses five Apple Silicon `macos-26` runners with Xcode 26.6.
+  Main and manual runs may use all five Apple slots; optional PRs run one Apple
+  job at a time so they do not occupy every slot while main is waiting.
   It selects the image's preinstalled Xcode directly.
   The Mac runner uses `nix develop . --command just quality rust` for Rust
   contracts and Mac Browser E2E. Four iPhone runners use
@@ -209,7 +211,9 @@ transfer server just to delete that check would reverse A14.
   alongside Chrome stderr. Browser diagnostics record startup phases and slow
   or interrupted CDP methods without page URLs, input or image payloads.
   If Chrome has not published its endpoint after six seconds, CI retains a
-  bounded startup stack sample and memory counters under `qa/chrome-startup-*`.
+  bounded startup stack sample, sampler output, memory counters, and process
+  memory usage under `qa/chrome-startup-*`. Process arguments are not recorded.
+  Xcode collects verbose diagnostics on test failure in the retained result bundle.
   Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.
