@@ -6,10 +6,11 @@ export CARGO_INCREMENTAL=0
 failed=0
 if [[ $language == apple || $language == rust ]]; then
     actionlint || failed=1
+    nix build .#agent-peer --no-link || failed=1
     cargo fmt --all --check || failed=1
     cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings || failed=1
     just unit-tests || failed=1
-    cargo test --locked --no-fail-fast --workspace --features agent-core/bindings,agent-ffi/bindgen \
+    cargo test --locked --no-fail-fast --workspace --features agent-core/bindings \
         --test errors --test iroh --test iroh_host --test browser_bridge \
         --test management --test codex_accounts --test claude --test adapter_conformance \
         --test crate_boundaries --test build_cleanup --test diagnostics || failed=1
