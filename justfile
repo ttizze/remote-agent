@@ -83,6 +83,8 @@ conversation-ui:
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
         testSimulatorFillsInitialHistoryViewportWithoutScrolling \
         testSimulatorReopensRunningLongHistoryWithoutBlankViewport \
+        testSimulatorKeepsLatestVisibleAcrossRepeatedLongHistorySubmissions \
+        testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
         testSimulatorRendersMarkdownTableAndReopensIt \
         testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
         testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \

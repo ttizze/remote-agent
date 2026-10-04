@@ -3,6 +3,44 @@ import XCTest
 
 /// XCTest selectors remain on BexLaunchUITests for the fixture runner.
 extension BexLaunchUITests {
+    func testSimulatorKeepsLatestVisibleAcrossRepeatedLongHistorySubmissions() throws {
+        let app = try connectedSimulatorApp()
+        try useSimulatorListFixture("long-conversation")
+        app.terminate(); app.launch()
+        expandSimulatorProject(app)
+        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-long-history"]
+        XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["item.long-9-0"].waitForExistence(timeout: 20))
+        let message = app.descendants(matching: .any)["task.message"]
+        let latestButton = app.buttons["task.latest"]
+        let approval = app.buttons["request.accept"]
+        let answers = app.textViews.matching(NSPredicate(format: "value == %@", "シミュレータで完了しました。"))
+        for attempt in 0 ..< 3 {
+            // A multiline draft makes both the keyboard and composer shrink on send.
+            let prompt = "[approval] Followup \(attempt)\n" + String(
+                repeating: "Keep the latest message visible.\n",
+                count: 6
+            )
+            message.tap(); message.typeText(prompt)
+            XCTAssertTrue(app.keyboards.firstMatch.exists)
+            app.buttons["task.send"].tap()
+            let keyboardHidden = expectation(for: NSPredicate(format: "exists == false"),
+                                             evaluatedWith: app.keyboards.firstMatch)
+            wait(for: [keyboardHidden], timeout: 5)
+            XCTAssertTrue(approval.waitForExistence(timeout: 20))
+            XCTAssertTrue(approval.isHittable, "New rows must stay visible after the keyboard and draft shrink")
+            XCTAssertFalse(latestButton.exists, "Sending at the bottom must continue following the latest content")
+            captureScreen(app, named: "Long history submission \(attempt) remains visible")
+            approval.tap()
+            let finished = expectation(for: NSPredicate { _, _ in
+                !self.prefixedButton(app, prefix: "turn.interrupt.").exists &&
+                    answers.allElementsBoundByIndex.contains { $0.isHittable }
+            }, evaluatedWith: app)
+            wait(for: [finished], timeout: 20)
+            XCTAssertFalse(latestButton.exists, "The completed answer must remain at the bottom")
+        }
+    }
+
     func testSimulatorSelectsPluginAndSkillFromComposer() throws {
         let app = try connectedSimulatorApp()
         let compose = app.buttons["tasks.new.project.simulator-project"]

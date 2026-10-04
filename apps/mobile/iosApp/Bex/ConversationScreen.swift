@@ -142,6 +142,9 @@ struct ThreadScreen: View {
                         })
                     }
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
+                    // Keep resizing in the scroll view's layout pass. Scrolling to a
+                    // lazy row after every size change can invalidate its measurements.
+                    .defaultScrollAnchor(isFollowingLatest ? .bottom : nil, for: .sizeChanges)
                     .accessibilityIdentifier("task.detail")
                     .accessibilityValue(threadAccessibilityValue(thread))
                     .buttonStyle(.plain)
@@ -171,13 +174,6 @@ struct ThreadScreen: View {
                         latestHistoryRowVisible = latestVisible
                         loadVisibleHistory()
                     }
-                    // Offset changes must not request another scroll. Follow only content
-                    // growth; lazy row measurement can otherwise keep re-entering layout.
-                    .onScrollGeometryChange(for: CGSize.self) { $0.contentSize } action: { _, _ in
-                        if isFollowingLatest, let latestRowId {
-                            proxy.scrollTo(latestRowId, anchor: .bottom)
-                        }
-                    }
                     .overlay(alignment: .bottom) {
                         if !latestHistoryRowVisible {
                             Button {
@@ -200,16 +196,6 @@ struct ThreadScreen: View {
                     .onChange(of: model.loadingHistory) {
                         if !$0 {
                             loadVisibleHistory()
-                        }
-                    }
-                    .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { _, _ in
-                        if isFollowingLatest, let latestRowId {
-                            proxy.scrollTo(latestRowId, anchor: .bottom)
-                        }
-                    }
-                    .onChange(of: latestRowId) { id in
-                        if isFollowingLatest, let id {
-                            proxy.scrollTo(id, anchor: .bottom)
                         }
                     }
                     .onChange(of: thread.id) { _ in
