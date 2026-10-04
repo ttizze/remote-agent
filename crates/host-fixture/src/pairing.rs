@@ -298,7 +298,10 @@ fn merge_worktree(root: &Path, path: &str) -> Result<()> {
         "/merge-worktree/dirty" => fs::write(checkout.join("pending.txt"), "pending\n")?,
         "/merge-worktree/clean" => fs::remove_file(checkout.join("pending.txt"))?,
         _ => {
-            git(&checkout, &["commit", "--allow-empty", "-m", "new work"])?;
+            // Unmerged status tracks net file changes, not empty commits.
+            fs::write(checkout.join("new-work.txt"), "new work\n")?;
+            git(&checkout, &["add", "new-work.txt"])?;
+            git(&checkout, &["commit", "-m", "new work"])?;
         }
     }
     write_json(

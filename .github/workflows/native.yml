@@ -131,6 +131,7 @@ jobs:
           restore-keys: ios-xcode-26.6-
       - name: Mac contracts and concurrent Mac/iPhone E2E
         run: |
+          set -o pipefail
           mkdir -p target/qa
           nix develop . --command just quality 2>&1 | tee target/qa/quality.log
       - name: Retain Apple acceptance logs and result bundles
