@@ -81,6 +81,7 @@ conversation-ui:
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
         testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
+        testSimulatorFillsInitialHistoryViewportWithoutScrolling \
         testSimulatorReopensRunningLongHistoryWithoutBlankViewport \
         testSimulatorRendersMarkdownTableAndReopensIt \
         testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \

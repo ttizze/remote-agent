@@ -662,6 +662,24 @@ impl HostRpcService {
             }
         }
         let response = match request {
+            Call::ReadHistory(params) => {
+                let mut page = self
+                    .agent(params.session.provider)?
+                    .read_history(&params.session.id, &params.cursor)
+                    .await?;
+                agent_protocol::models::defer_item_details(
+                    &mut page.turns,
+                    agent_protocol::models::MAX_INLINE_ITEM_BYTES,
+                );
+                if agent_protocol::protocol::encode(Response::Success { result: &page })
+                    .map_err(|error| Failure::new("invalid_thread_history", error))?
+                    .len()
+                    > agent_protocol::protocol::MAX_FRAME_BYTES
+                {
+                    agent_protocol::models::defer_item_details(&mut page.turns, 0);
+                }
+                page.into()
+            }
             Call::ReadPermissionSettings(params) => {
                 let _guard = self.inner.permission_settings_access.lock().await;
                 self.agent(params.provider)?

@@ -56,9 +56,6 @@ pub struct ConversationRow {
 #[derive(Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum ConversationRowContent {
-    OlderItems {
-        turn_id: agent_protocol::ids::TurnId,
-    },
     User {
         item: Arc<RenderedItem>,
     },
@@ -109,6 +106,19 @@ pub fn activity_is_expanded(
         .map_or(activity.activity_initially_expanded, |choice| {
             choice.expanded
         })
+}
+
+/// Fill the viewport on opening and continue at the oldest visible boundary.
+/// Wait for latest-message positioning before paging a scrollable initial page.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn should_load_history(
+    has_more: bool,
+    loading: bool,
+    oldest_visible: bool,
+    latest_visible: bool,
+    following_latest: bool,
+) -> bool {
+    has_more && !loading && oldest_visible && (!following_latest || latest_visible)
 }
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
@@ -431,7 +441,6 @@ fn render_turn(
             }
             ActivityHeader { activity } => activity.id.clone(),
             PendingRequest { request } => format!("history-request:{}", request.id),
-            OlderItems { turn_id } => format!("history-gap:{turn_id}"),
             Error { .. } => format!("history-error:{}", source.id),
             InProgress { turn_id } => format!("in-progress:{turn_id}"),
         };
@@ -440,20 +449,6 @@ fn render_turn(
         *occurrence += 1;
         rows.push(ConversationRow { id, content });
     };
-    if let Some(item) = source
-        .opening_user_message
-        .as_ref()
-        .filter(|item| !native.iter().any(|native| native.id == item.id))
-    {
-        push(User {
-            item: render_native(item),
-        });
-    }
-    if source.items_has_more.unwrap_or(false) {
-        push(OlderItems {
-            turn_id: source.id.clone(),
-        });
-    }
     for segment in project_items(&source, order.len(), metadata) {
         let segment = &segment;
         let group = |role| {
@@ -744,6 +739,34 @@ mod tests {
     use serde_json::json;
     use std::collections::HashSet;
 
+    #[rstest::rstest]
+    #[case::initial_viewport_needs_more(true, false, true, true, true, true)]
+    #[case::wait_for_initial_latest_position(true, false, true, false, true, false)]
+    #[case::older_boundary_is_visible(true, false, true, false, false, true)]
+    #[case::viewport_is_filled(true, false, false, true, true, false)]
+    #[case::reading_the_middle(true, false, false, false, false, false)]
+    #[case::request_in_flight(true, true, true, true, true, false)]
+    #[case::all_history_loaded(false, false, true, true, true, false)]
+    fn history_pages_follow_the_viewport(
+        #[case] has_more: bool,
+        #[case] loading: bool,
+        #[case] oldest_visible: bool,
+        #[case] latest_visible: bool,
+        #[case] following_latest: bool,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            should_load_history(
+                has_more,
+                loading,
+                oldest_visible,
+                latest_visible,
+                following_latest
+            ),
+            expected
+        );
+    }
+
     fn fixture() -> Snapshot {
         let thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"turns":[{"id":"done","status":"completed","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"earlier","phase":"unknown"}}}}}]},{"id":"live","status":"running","items":[{"id":"user","status":"unknown","clientInputId":"accepted","body":{"inline":{"body":{"userMessage":{"text":"question","content":[]}}}}},{"id":"command","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":"/fixture","exitCode":null,"durationMs":null}}}}},{"id":"stream","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"hello","phase":"unknown"}}}}}]}]})).unwrap();
         Snapshot {
@@ -909,23 +932,13 @@ mod tests {
         });
         let turn = Arc::make_mut(&mut thread.turns.as_mut().unwrap()[1]);
         turn.items_has_more = Some(true);
-        turn.opening_user_message = Some(Arc::new(
-            serde_json::from_value(json!({"id":"opening","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":"first","content":[]}}}}}))
-                .unwrap(),
-        ));
         let rendered = project_snapshot(snapshot.clone(), None);
         let rows = rendered.turns[1].conversation_rows();
         let ids: Vec<_> = rows.iter().map(|row| row.id.as_str()).collect();
         assert!(
-            matches!(&rows[0].content, ConversationRowContent::User { item } if item.data.native_id.as_deref() == Some("opening"))
+            matches!(&rows[0].content, ConversationRowContent::User { item } if item.data.native_id.as_deref() == Some("user"))
         );
-        assert!(
-            matches!(&rows[1].content, ConversationRowContent::OlderItems { turn_id } if turn_id.as_str() == "live")
-        );
-        assert!(
-            matches!(&rows[2].content, ConversationRowContent::User { item } if item.data.native_id.as_deref() == Some("user"))
-        );
-        let accepted_id = ids[2].to_owned();
+        let accepted_id = ids[0].to_owned();
         assert_eq!(ids.iter().copied().collect::<HashSet<_>>().len(), ids.len());
         assert!(rows.iter().any(|row| matches!(&row.content, ConversationRowContent::Activity { item, .. } if item.data.native_id.as_deref() == Some("command"))));
         assert!(rows.iter().all(|row| !matches!(

@@ -1795,6 +1795,16 @@ impl Agent for Claude {
             .await
             .map_err(|e| Failure::new("session_read_failed", e))
     }
+    async fn read_history(
+        &self,
+        _id: &str,
+        _cursor: &str,
+    ) -> Result<agent_protocol::session::HistoryPage, Failure> {
+        Err(Failure::new(
+            "invalid_cursor",
+            "Claude history does not issue timeline cursors",
+        ))
+    }
     async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure> {
         Claude::read_item(self, params).await.map_err(Into::into)
     }
