@@ -191,8 +191,9 @@ transfer server just to delete that check would reverse A14.
   Swift formatting, linting and headless Markdown checks run on shard zero;
   all four shards run their selected Simulator acceptance tests.
   Each runner has separate processes,
-  memory and logs. Mac and iPhone Rust dependency caches are separate; only
-  shard zero saves each cache. All iPhone shards restore the Swift bindings,
+  memory and logs. iPhone acceptance uses the Host's normal preinstalled Google
+  Chrome, matching Mac acceptance. Mac and iPhone Rust dependency caches are
+  separate; only shard zero saves each cache. All iPhone shards restore the Swift bindings,
   headless Markdown build and Xcode DerivedData cache, with one shard saving
   it even when acceptance fails. Builders check the current source/toolchain
   hashes before reusing Swift outputs, and still rebuild and exercise current

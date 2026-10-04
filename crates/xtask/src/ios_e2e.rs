@@ -346,26 +346,7 @@ async fn worker(
             arguments.push("test-without-building".into());
             let setup_seconds = started.elapsed().as_secs_f64();
             println!("{label}: Simulator and Host ready in {setup_seconds:.2}s");
-            let testing = supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, BUILD_TIMEOUT);
-            tokio::pin!(testing);
-            let status = if std::env::var("CI").as_deref() == Ok("true") {
-                tokio::select! {
-                    status = &mut testing => status,
-                    _ = async {
-                        loop {
-                            tokio::time::sleep(Duration::from_secs(10)).await;
-                            let output = fs::read_to_string(prefix.with_extension("log")).unwrap_or_default();
-                            if output.contains("App event loop idle notification not received") {
-                                let _ = supervision::run(
-                                    &args!["/usr/bin/sample", "Bex", "2", "-file", prefix.with_extension("hang.sample.txt")],
-                                    &cwd, Io::Log(&log), &cancel, Duration::from_secs(10),
-                                ).await;
-                                break;
-                            }
-                        }
-                    } => testing.await,
-                }
-            } else { testing.await };
+            let status = supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, BUILD_TIMEOUT).await;
             if *cancel.borrow() { return Err(supervision::interrupted()); }
             let summary = supervision::run(&args!["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", &bundle, "--format", "json"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
             let summary: Value = serde_json::from_slice(&summary.stdout)?;
