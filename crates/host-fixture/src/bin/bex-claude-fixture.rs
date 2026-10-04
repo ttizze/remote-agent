@@ -19,7 +19,7 @@ fn native(mut value: Value) {
             value["status"].as_str().unwrap(),
             value["summary"].as_str().unwrap()
         );
-        value = json!({"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":prompt}});
+        value = json!({"type":"user","origin":{"kind":"task-notification"},"promptSource":"system","turnOrigin":"task_notification","queueSkipAttachments":true,"message":{"role":"user","content":prompt}});
     }
     if !matches!(
         value["type"].as_str(),
