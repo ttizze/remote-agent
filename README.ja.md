@@ -197,7 +197,7 @@ scripts/dev-env.sh just quality [apple|rust|kotlin|swift]  # 既定はMac Host�
 
 Claudeの契約テストは`scripts/dev-env.sh cargo test --locked -p host-fixture --test claude`です。先に監視用実行ファイルをビルドしてください。決定的に動作する外部CLI境界と、実際のStore・iroh・Hostルーティング・ネイティブ会話ファイル・隔離Git環境を使います。Claude Code 2.1.266の匿名化した記録でもネイティブ形式との互換性を確認します。任意実行の`live_claude_subscription_completes_and_resumes_through_store_and_host`は実際の認証済みCLIを使います。`BEX_LIVE_CLAUDE_PROGRAM`に絶対パスを設定し、`-- --ignored --exact`を付けて実行すると、サブスクリプションでの推論、Host再起動後の再開、中断、中断後の入力を確認できます。
 
-`scripts/dev-env.sh just unit-tests`で全ローカルユニットテストを実行してから、mainへのPRを作成します。Native clients GitHub ActionsはPR、mainへのpush、手動実行で全検証を行います。mainへの統合には`Native verification`の成功とレビュー会話の解決が必要です。force push・main削除は管理者を含め全員に禁止します。個人管理のリポジトリなので、他人の承認は必須にしません。検証完了を報告するには、対象コミットのCI成功と、変更のない作業ツリーが必要です。コミットでローカルのバックグラウンド検証は起動しません。ユニットテストと手動の調査コマンドはローカルで使えます。Linux CIはGitHubホストのUbuntu 24.04と`nix develop .#native`を使い、同じ基準でツールチェーンを取得します。Windowsも固定したflakeのRustバージョンを使います。Lintはベースラインなしの既定基準で、ルールの例外にはレビューが必要です。
+`scripts/dev-env.sh just unit-tests`で全ローカルユニットテストを実行してから、PR作成やCI完了待ちを必須にせず、mainへ直接統合します。Native clients GitHub Actionsはmainへのpush、任意のPR、手動実行で全検証を行い、CIの失敗はmain上で修正します。force push・main削除は管理者を含め全員に禁止します。検証完了を報告するには、対象コミットのCI成功と、変更のない作業ツリーが必要です。コミットでローカルのバックグラウンド検証は起動しません。ユニットテストと手動の調査コマンドはローカルで使えます。Linux CIはGitHubホストのUbuntu 24.04と`nix develop .#native`を使い、同じ基準でツールチェーンを取得します。Windowsも固定したflakeのRustバージョンを使います。Lintはベースラインなしの既定基準で、ルールの例外にはレビューが必要です。
 
 Android CIは、固定したNix SDKとUbuntu 24.04でKotlinのチェック・ユニットテスト、アプリ・計装テストAPKのビルド、KVMを使ったエミュレーター受け入れテストを行います。Apple CIはXcode 26.6の`macos-26` Apple Siliconランナーで、ローカルと同じ既定の`just quality`を実行します。共通Rust・Swiftチェックの後、Mac Browser E2EとiPhoneの会話テストを並行実行し、iPhoneは2組の隔離Simulator・Hostを使います。CargoとXcodeのderived dataをキャッシュし、失敗時を含めログとXcode結果バンドルを7日間保持します。Linux・Windows・Android・Mac・iPhoneの検証はNative clients CIで実行します。Androidの調査には`just android-e2e`・`just quality kotlin`も使えます。
 
@@ -223,9 +223,9 @@ Unixの隔離Hostフィクスチャは、直接の`cargo test`でも、接続開
 
 ## GitHubの保守
 
-[mainのルールセット](.github/main-ruleset.json)に、GitHubへ適用する保護設定を記録しています。Bexのマージ済みワークツリー整理でコミットの祖先関係を保つため、統合にはマージコミットを使い、squash・rebaseによるマージは無効にしています。
+[mainのルールセット](.github/main-ruleset.json)に、GitHubへ適用する保護設定を記録しています。mainへの直接pushを許可します。任意のPRでは、Bexのマージ済みワークツリー整理でコミットの祖先関係を保つため、マージコミットを使い、squash・rebaseによるマージは無効にしています。
 
-[Dependabot](.github/dependabot.yml)は毎週月曜09:00（日本時間）に、Cargo（ワークスペース・agent-peer）、Gradle、XcodeのSwiftパッケージ、npm、2つのNix flake、GitHub Actionsを確認します。マイナー・パッチ更新はエコシステムごとにまとめ、メジャー更新は個別PRにします。Nixの入力はまとめます。通常のバージョン更新は公開から7日待ち、セキュリティ更新にはこの待機を適用しません。更新PRも通常の変更と同じネイティブ検証を実行し、保守担当者が確認して統合します。担当者がPRで有効にすると自動マージを利用できますが、ボットが自分で有効にすることはありません。統合済みのリモートブランチは自動削除します。
+[Dependabot](.github/dependabot.yml)は毎週月曜09:00（日本時間）に、Cargo（ワークスペース・agent-peer）、Gradle、XcodeのSwiftパッケージ、npm、2つのNix flake、GitHub Actionsを確認します。マイナー・パッチ更新はエコシステムごとにまとめ、メジャー更新は個別PRにします。Nixの入力はまとめます。通常のバージョン更新は公開から7日待ち、セキュリティ更新にはこの待機を適用しません。更新PRも通常の変更と同じネイティブ検証を実行し、保守担当者が確認してCI成功後に統合します。自動マージは無効です。統合済みのリモートブランチは自動削除します。
 
 Lucideの更新は[可視化ランタイムのREADME](crates/host-daemon/src/visualize/README.md)のコマンドで生成し、同READMEのバージョン・取得元・チェックサムも更新してください。npmのmanifest・lockfileと一緒に、生成したバンドル・ライセンスをコミットします。CIは再生成して古いバンドルを検出します。リポジトリ内へ取り込んだRust・Androidソースと、固定したnetwatchの回復パッチは、上流の変更を手動で確認する必要があります。
 

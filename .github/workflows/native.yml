@@ -165,14 +165,3 @@ jobs:
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
         run: cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
-  verification:
-    name: Native verification
-    if: always()
-    needs: [repository, toolchain, linux, android, macos, windows]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    env:
-      JOB_RESULTS: ${{ toJSON(needs) }}
-    steps:
-      - name: Require every verification job to succeed
-        run: jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"
