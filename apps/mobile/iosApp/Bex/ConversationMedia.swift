@@ -50,6 +50,7 @@ struct ConversationImage: View {
     let label: String
     let identifier: String
     let media: ConversationMediaAccess
+    var contentMode: ContentMode = .fit
     @State private var image: UIImage?
     @State private var original: Data?
     @State private var previewURL: URL?
@@ -63,7 +64,7 @@ struct ConversationImage: View {
     var body: some View {
         Group {
             if let image {
-                Image(uiImage: image).resizable().scaledToFit()
+                Image(uiImage: image).resizable().aspectRatio(contentMode: contentMode)
                     .frame(maxWidth: .infinity, maxHeight: 420)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .accessibilityLabel(label.isEmpty ? "画像" : label)

@@ -522,6 +522,9 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
 - Desktop draft image thumbnails are 120 px squares with rounded corners. Only
   the hovered thumbnail shows its small white circular remove button, overlapping
   the top-right corner without being clipped by the image's rounded bounds.
+- iPhone and Android draft image thumbnails use the same 120 pt/dp square layout.
+  Their white circular remove buttons stay visible at the top-right corner,
+  outside the image clipping, with native 44 pt/48 dp tap targets.
 - iOS `testSimulatorCanAddASecondPhoto` verifies decoded thumbnails, removal
   placement and draft preservation in addition to separate photo selections.
 
