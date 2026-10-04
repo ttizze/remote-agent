@@ -17,9 +17,9 @@ agent-core = { path = "../../crates/agent-core" }
 host-daemon = { path = "../../crates/host-daemon" }
 directories = "6"
 rfd = "0.17.2"
-gpui-kit = { version = "=0.6.0", features = ["tree-sitter-languages"] }
+gpui-kit = { version = "=0.6.1", features = ["tree-sitter-languages"] }
 gpui-http = { package = "gpui-pre-reqwest-client", version = "0.3.4" }
-gpui-wry = "=0.6.0"
+gpui-wry = "=0.6.1"
 wry = { package = "lb-wry", version = "0.53.3" }
 uuid = { version = "1", features = ["v4"] }
 serde_json.workspace = true
@@ -51,7 +51,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = ["std", 
 block2 = "0.6"
 
 [dev-dependencies]
-gpui-kit = { version = "=0.6.0", features = ["test-support"] }
+gpui-kit = { version = "=0.6.1", features = ["test-support"] }
 proptest = "1.11"
 
 [[bin]]
