@@ -28,7 +28,7 @@ extension BexLaunchUITests {
         XCTAssertFalse((input.value as? String ?? "").contains("Start the simulator conversation"))
         XCTAssertFalse(app.staticTexts["notice"].exists, "Successful completion must not leave an error")
         app.buttons["task.new"].tap()
-        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["task.empty"].waitForExistence(timeout: 10))
         XCTAssertTrue(input.isHittable)
         XCTAssertFalse(app.descendants(matching: .any)["task.detail"].exists)
         XCTAssertFalse(app.staticTexts["新しいタスク"].exists)

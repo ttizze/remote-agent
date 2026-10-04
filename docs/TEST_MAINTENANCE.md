@@ -179,7 +179,6 @@ transfer server just to delete that check would reverse A14.
   before claiming full verification. Manual check commands remain for
   debugging. Apple CI uses five Apple Silicon `macos-26` runners with Xcode 26.6.
   It selects the image's preinstalled Xcode directly.
-  iPhone browser acceptance uses the image's preinstalled Chrome for Testing.
   The Mac runner uses `nix develop . --command just quality rust` for Rust
   contracts and Mac Browser E2E. Four iPhone runners use
   `nix develop . --command just quality swift` for Swift checks and acceptance.
@@ -193,13 +192,24 @@ transfer server just to delete that check would reverse A14.
   Swift formatting, linting and headless Markdown checks run on shard zero;
   all four shards run their selected Simulator acceptance tests.
   Each runner has separate processes,
-  memory and logs. Mac and iPhone Rust dependency caches are separate; only
-  shard zero saves each cache. All iPhone shards restore the Swift bindings,
+  memory and logs. iPhone acceptance uses the Host's normal preinstalled Google
+  Chrome with unchanged launch arguments, retaining its startup time and stderr
+  in `qa/chrome.log`. Mac and iPhone Rust dependency caches are separate;
+  only shard zero saves each cache. All iPhone shards restore the Swift bindings,
   headless Markdown build and Xcode DerivedData cache, with one shard saving
   it even when acceptance fails. Builders check the current source/toolchain
   hashes before reusing Swift outputs, and still rebuild and exercise current
   Rust code. Hosted CI creates each disposable Simulator directly from the
   runtime, avoiding a template migration followed by a second worker boot.
+  Simulator fixtures follow the selected tests: only photo-picker tests seed
+  photos and video, only the image-saving test grants Photos add permission, and
+  only the file-upload test writes its document fixture. Preparation logs name
+  boot, media import, installation and permission operations and their failures.
+  UI fixture Hosts use the production diagnostic log; iPhone bundles retain it
+  alongside Chrome stderr. Browser diagnostics record startup phases and slow
+  or interrupted CDP methods without page URLs, input or image payloads.
+  If Chrome has not published its endpoint after six seconds, CI retains a
+  bounded startup stack sample and memory counters under `qa/chrome-startup-*`.
   Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.

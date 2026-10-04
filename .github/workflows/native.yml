@@ -182,18 +182,27 @@ jobs:
           set -o pipefail
           mkdir -p target/qa
           if [[ "$BEX_QUALITY_LANGUAGE" == swift ]]; then
-            "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" --version
-            # Use Chrome's automation keychain for disposable CI profiles.
-            cat > target/qa/chrome-ci <<'SH'
-          #!/bin/sh
-          exec 2>> "$BEX_CHROME_LOG"
-          printf 'CI Chrome launch: %s; pid=%s; args=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$$" "$*" >&2
-          (sleep 2; /usr/bin/sample "$$" 1 -file "$BEX_CHROME_LOG.$$.sample.txt") &
-          exec "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" --enable-logging=stderr --use-mock-keychain "$@"
-          SH
-            chmod 700 target/qa/chrome-ci
-            export BEX_BROWSER_EXECUTABLE="$PWD/target/qa/chrome-ci"
-            export BEX_CHROME_LOG="$PWD/target/qa/chrome.log"
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version
+            export BEX_BROWSER_LOG="$PWD/target/qa/chrome.log"
+            export BEX_BROWSER_EXECUTABLE="$RUNNER_TEMP/bex-ci-chrome"
+            cat > "$BEX_BROWSER_EXECUTABLE" <<'CHROME'
+          #!/bin/bash
+          printf 'Chrome start %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$BEX_BROWSER_LOG"
+          chrome_pid=$$
+          chrome_profile=
+          for arg in "$@"; do
+            case "$arg" in --user-data-dir=*) chrome_profile=${arg#--user-data-dir=} ;; esac
+          done
+          (
+            sleep 6
+            if [[ -n "$chrome_profile" && ! -s "$chrome_profile/DevToolsActivePort" ]]; then
+              vm_stat > "${BEX_BROWSER_LOG%.log}-startup-${chrome_pid}-memory.txt"
+              sample "$chrome_pid" 3 -file "${BEX_BROWSER_LOG%.log}-startup-${chrome_pid}-sample.txt" >/dev/null 2>&1
+            fi
+          ) </dev/null &
+          exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "$@" 2>> "$BEX_BROWSER_LOG"
+          CHROME
+            chmod +x "$BEX_BROWSER_EXECUTABLE"
           fi
           nix develop . --command just quality "$BEX_QUALITY_LANGUAGE" 2>&1 | tee target/qa/quality.log
       - name: Save iPhone Swift builds once for all shards
@@ -210,7 +219,7 @@ jobs:
           path: |
             target/qa/quality.log
             target/qa/chrome.log
-            target/qa/chrome.log.*.sample.txt
+            target/qa/chrome-startup-*.txt
             target/qa/Bex-*
           retention-days: 7
   windows:

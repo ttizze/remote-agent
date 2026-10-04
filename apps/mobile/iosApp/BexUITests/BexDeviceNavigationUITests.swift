@@ -86,8 +86,10 @@ extension BexLaunchUITests {
         app.buttons["workbench.terminal"].tap()
         assertTerminalReady(app)
         XCTAssertEqual(terminal.frame.width, app.frame.width, accuracy: 2)
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.22))
-            .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.22)))
+        let back = app.navigationBars.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 1))
+            .withOffset(CGVector(dx: 0, dy: 20))
+        back.press(forDuration: 0.1, thenDragTo: back.withOffset(CGVector(dx: terminal.frame.width * 0.9, dy: 0)),
+                   withVelocity: .fast, thenHoldForDuration: 0)
         XCTAssertTrue(app.buttons["task.tools"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["workbench.terminal"].exists)
         XCTAssertFalse(terminal.exists)
@@ -136,7 +138,12 @@ extension BexLaunchUITests {
         XCTAssertTrue(navigationBar.waitForExistence(timeout: 5))
         let start = navigationBar.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 1))
             .withOffset(CGVector(dx: 0, dy: 100))
-        start.press(forDuration: 0.1, thenDragTo: start.withOffset(CGVector(dx: 280, dy: 0)))
+        start.press(
+            forDuration: 0.1,
+            thenDragTo: start.withOffset(CGVector(dx: navigationBar.frame.width * 0.9, dy: 0)),
+            withVelocity: .fast,
+            thenHoldForDuration: 0
+        )
         XCTAssertTrue(app.buttons["file.hello.txt"].waitForExistence(timeout: 10))
         XCTAssertFalse(child.exists)
         try verifyAbsoluteDirectoryNavigation(app, child: child)
@@ -166,16 +173,6 @@ extension BexLaunchUITests {
         }
     }
 
-    private func assertBrowserStartup(_ open: XCUIElement, notice: XCUIElement) {
-        let ready = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: open)
-        let startup = XCTWaiter.wait(for: [ready], timeout: 20)
-        if startup != .completed {
-            _ = notice.waitForExistence(timeout: 15)
-        }
-        XCTAssertEqual(startup, .completed,
-                       "Browser startup: \(notice.exists ? notice.label : "no error"); enabled=\(open.isEnabled)")
-    }
-
     func testSimulatorBrowserIsSeparateFromConversationAndPreservesPage() throws {
         let app = try connectedSimulatorApp()
         try startSimulatorConversation(app, promptText: "Browser sharing fixture")
@@ -185,7 +182,9 @@ extension BexLaunchUITests {
         let address = app.textFields["browser.address"]
         XCTAssertTrue(address.waitForExistence(timeout: 10))
         let open = app.buttons["browser.open"]
-        assertBrowserStartup(open, notice: app.staticTexts["notice"])
+        let ready = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: open)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 20), .completed,
+                       "Browser startup must enable input")
         XCTAssertFalse(app.buttons["browser.take"].exists)
         XCTAssertFalse(app.buttons["browser.release"].exists)
         replaceFieldText(address, text: "file:///etc/passwd")

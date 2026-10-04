@@ -4,8 +4,9 @@ import UIKit
 
 /// History and row presentation
 extension ThreadScreen {
-    func activityIsExpanded(_ activity: ActivityPresentation) -> Bool {
-        AgentCore.activityIsExpanded(activity: activity, choice: activityExpansionOverrides[activity.id])
+    func followLatest(to id: String?, using proxy: ScrollViewProxy) {
+        guard isFollowingLatest, let id else { return }
+        proxy.scrollTo(id, anchor: .bottom)
     }
 
     @ViewBuilder
@@ -69,7 +70,7 @@ extension ThreadScreen {
             selection: selectionActions,
             isExpanded: expandedItemIds.contains(item.data.id),
             toggleExpanded: {
-                scrollPosition = ScrollPosition(idType: String.self)
+                isFollowingLatest = false
                 if expandedItemIds.contains(item.data.id) {
                     expandedItemIds.remove(item.data.id)
                 } else {
@@ -88,10 +89,10 @@ extension ThreadScreen {
 
     @ViewBuilder
     func activityHeader(_ turn: ActivityPresentation) -> some View {
-        let expanded = activityIsExpanded(turn)
+        let expanded = AgentCore.activityIsExpanded(activity: turn, choice: activityExpansionOverrides[turn.id])
         if turn.activityCanCollapse {
             Button {
-                scrollPosition = ScrollPosition(idType: String.self)
+                isFollowingLatest = false
                 activityExpansionOverrides[turn.id] = ActivityExpansion(status: turn.status, expanded: !expanded)
                 if !expanded, let params = turn.loadItems {
                     model.perform(.loadTurnItems(params))
@@ -107,14 +108,19 @@ extension ThreadScreen {
     }
 
     func loadVisibleHistory() {
-        guard isVisible, conversation?.id == model.selectedThreadId,
-              model.notice == nil, AgentCore.shouldLoadHistory(
-                  hasMore: conversation?.source.hasMoreHistory() == true,
-                  loading: model.loadingHistory,
-                  oldestVisible: oldestHistoryRowVisible,
-                  latestVisible: latestHistoryRowVisible,
-                  followingLatest: scrollPosition.edge == .bottom
-              ) else { return }
+        guard isVisible, let thread = conversation, thread.id == model.selectedThreadId,
+              model.notice == nil else { return }
+        let oldestVisible = visibleHistoryRows?.threadId == thread.id &&
+            conversationRows(thread.rows, expansion: activityExpansionOverrides).first.map {
+                visibleHistoryRows?.rowIds.contains($0.id) == true
+            } == true
+        guard AgentCore.shouldLoadHistory(
+            hasMore: thread.source.hasMoreHistory(),
+            loading: model.loadingHistory,
+            oldestVisible: oldestVisible,
+            latestVisible: latestHistoryRowVisible,
+            followingLatest: isFollowingLatest
+        ) else { return }
         model.loadOlderHistory()
     }
 
@@ -130,10 +136,16 @@ extension ThreadScreen {
     }
 }
 
-func conversationRows(_ thread: ConversationPresentation,
+struct ConversationScrollMetrics: Equatable {
+    let content: CGSize
+    let container: CGSize
+    let latestVisible: Bool
+}
+
+func conversationRows(_ rows: [ThreadConversationRow],
                       expansion: [String: ActivityExpansion]) -> [ThreadConversationRow] {
     var expanded = false
-    return thread.rows.filter { row in
+    return rows.filter { row in
         guard case let .native(native, _) = row.content else { return true }
         switch native.content {
         case let .activityHeader(activity):
