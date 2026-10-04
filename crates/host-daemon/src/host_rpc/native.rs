@@ -479,13 +479,6 @@ pub(crate) fn codex_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
             })
             .transpose()?,
         items_has_more: field(&value, "itemsHasMore")?,
-        opening_user_message: value
-            .get_mut("openingUserMessage")
-            .filter(|v| !v.is_null())
-            .map(Value::take)
-            .map(codex_item)
-            .map(|v| v.map(Arc::new))
-            .transpose()?,
         started_at: field(&value, "startedAt")?,
         completed_at: field(&value, "completedAt")?,
         duration_ms: field(&value, "durationMs")?,
@@ -552,24 +545,6 @@ pub(super) fn deserialize_item<'de, D: Deserializer<'de>>(
         .map(Arc::new)
         .map_err(serde::de::Error::custom)
 }
-#[derive(Debug)]
-pub(super) struct NativeTurn {
-    pub turn: Arc<Turn>,
-    pub items_loaded: bool,
-}
-impl<'de> Deserialize<'de> for NativeTurn {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let value = Value::deserialize(d)?;
-        let items_loaded = value["items"].is_array() && value["itemsView"] != "notLoaded";
-        codex_turn(value)
-            .map(|turn| Self {
-                turn: Arc::new(turn),
-                items_loaded,
-            })
-            .map_err(serde::de::Error::custom)
-    }
-}
-
 /// Codex's native tagged input is constructed only at the provider IO boundary.
 pub(super) fn codex_input(input: &[agent_protocol::operations::Input]) -> Vec<Value> {
     use agent_protocol::operations::Input;

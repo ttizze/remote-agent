@@ -49,8 +49,8 @@ The session architecture, limits, local data and verification matrix are documen
 The Host needs Git and at least one available agent for conversations. Codex is optional; the Host prefers Codex bundled with ChatGPT Desktop on macOS, then `codex` on PATH; `--codex <path>` is authoritative.
 
 ```sh
-nix develop . --command cargo build --locked -p bex-process --bin bex-provider-supervisor
-nix develop . --command cargo run -p host-daemon -- --name 'BEX Host'
+scripts/dev-env.sh cargo build --locked -p bex-process --bin bex-provider-supervisor
+scripts/dev-env.sh cargo run -p host-daemon -- --name 'BEX Host'
 ```
 
 | Flag | Meaning |
@@ -97,7 +97,7 @@ Keep the default iroh relays enabled for Internet access. Run the service as the
 
 For a trusted shared workspace, Codex can use a team API key configured with `codex login --with-api-key` through standard input. The Host discovers this as an **API key** account and retains its selection across restarts. API billing is separate from ChatGPT subscription usage, so no subscription allowance is shown. Set `forced_login_method = "api"` in the shared Codex configuration to keep it on API authentication. Each paired device shares the Host's accounts and credentials; separate task worktrees isolate source changes.
 
-Host preferences for worktrees (`bex-worktrees.json`) and the directory for chats without a project (`bex-chats/`) live beside the Codex project state, normally `$CODEX_HOME` or `~/.codex`. New worktrees default to `<original-repository>/.worktree/session-XXXXX/<repository-name>`; a custom directory replaces `.worktree` as the storage root. The repository name remains the checkout folder name, including when starting from another worktree. Existing worktrees stay in place. The default `.worktree` directory is excluded through Git’s local `info/exclude`. Worktree settings are edited from Mac **設定 → ワークツリー** or iPhone **タスク一覧 → … → ワークツリー設定**.
+Host preferences for worktrees (`bex-worktrees.json`) and the directory for chats without a project (`bex-chats/`) live beside the Codex project state, normally `$CODEX_HOME` or `~/.codex`. New worktrees default to `<original-repository>/.worktree/session-XXXXX/<repository-name>`; a custom directory replaces `.worktree` as the storage root. The repository name remains the checkout folder name, including when starting from another worktree. Existing worktrees stay in place. The default `.worktree` directory is excluded through Git’s local `info/exclude`. Worktree settings are edited from Mac **設定 → ワークツリー** or iPhone **タスク一覧 → … → 設定 → ワークツリー**.
 
 To remove a saved PC on iPhone, open **タスク一覧 → PC一覧 → 接続を解除** and confirm. This deletes its authentication key on that iPhone and prevents reconnection after relaunch, while retaining Host conversation data. On Mac, **設定 → 端末と接続 → 接続を解除** revokes the device’s access and closes active connections. Pair again to reconnect. Removing a PC on iPhone does not remove the old device entry from the Mac.
 
@@ -105,19 +105,19 @@ To remove a saved PC on iPhone, open **タスク一覧 → PC一覧 → 接続�
 
 ```sh
 # Mac (requires a signing certificate; BEX_CODE_SIGN_IDENTITY selects it)
-nix develop . --command just build-desktop-macos && open target/Bex.app
+scripts/dev-env.sh just build-desktop-macos && open target/Bex.app
 
 # iPhone (iOS 26): build Simulator libraries, then open Xcode
-nix develop . --command scripts/build-agent-ios.sh simulator
+scripts/dev-env.sh scripts/build-agent-ios.sh simulator
 open apps/mobile/iosApp/Bex.xcodeproj
 
 # Android 17 (API 37)
-nix develop . --command ./gradlew :apps:mobile:assembleDebug
+scripts/dev-env.sh ./gradlew :apps:mobile:assembleDebug
 ```
 
 Rerun the iOS library build after changing Rust sources. Desktop drafts and logs use `BEX_STATE_DIR`; Host discovery may select a different credential directory. An isolated desktop requires both `BEX_ISOLATED_HOST=1` and `BEX_STATE_DIR`; use a separate Codex home or fixture executable as well so tests cannot read personal provider state.
 
-Run `nix develop . --command just dev` for a separate local Host with shared
+Run `scripts/dev-env.sh just dev` for a separate local Host with shared
 provider accounts and conversation history. Check active tasks and stop the old
 development Host before rebuilding; closing its window does not stop it. Avoid
 running the same conversation on both Hosts at once.
@@ -144,11 +144,13 @@ Mac conversation file links open the Host's parent directory and file editor in 
 
 On Mac, open **ブラウザ → Chromeから取り込む** and select a Chrome profile to copy its cookies into Bex's browser. Allow the macOS Keychain prompt for **Chrome Safe Storage** when requested. The import leaves Chrome's database unchanged, merges cookies by domain/name/path, and reloads the current page after checking the saved cookies. Persistent cookies retain their expiration across Bex restarts; session cookies remain session-only. This is a one-time copy: repeat the import to refresh a login. Expired cookies and cookies partitioned by top-level site are excluded and counted. Cookie-independent sign-in state (such as local storage or device-bound credentials) is not copied, so some sites still require signing in inside Bex.
 
-Cookie import supports macOS Chrome database versions 23 and 24. Reader and native-attribute regressions run with `nix develop . --command cargo test --locked -p bex-desktop --bin bex-desktop chrome_tests`. On macOS 26, `nix develop . --command just macos-e2e` exercises the real Browser view, encrypted fixture database, denied-access retry, authenticated HTTP, HttpOnly protection, and persistence in a fresh process using a disposable WebKit data store. The test also records the domain-scope loss in the pinned lb-wry `set_cookie` implementation, which is why import uses WebKit's native cookie store directly.
+Cookie import supports macOS Chrome database versions 23 and 24. Reader and native-attribute regressions run with `scripts/dev-env.sh cargo test --locked -p bex-desktop --bin bex-desktop chrome_tests`. On macOS 26, `scripts/dev-env.sh just macos-e2e` exercises the real Browser view, encrypted fixture database, denied-access retry, authenticated HTTP, HttpOnly protection, and persistence in a fresh process using a disposable WebKit data store. The test also records the domain-scope loss in the pinned lb-wry `set_cookie` implementation, which is why import uses WebKit's native cookie store directly.
 
 Desktop conversation lists and titles refresh after messages and completed turns. The execution header shows elapsed time and the latest action; command output has a copy control. Click the change summary or a changed file to open the diff, choose files from its selector, and expand long unchanged sections. During dictation the composer shows a microphone waveform with cancel, stop, and send controls; Escape cancels recording and preserves the draft.
 
-Mac settings list Bex-created worktrees and their conversations. Move to another conversation before deleting its worktree, then confirm removal. The Host refuses removal when turns or tracked terminal processes are active, files have changes (including untracked or ignored files), the worktree is locked, or HEAD is detached. Removal retains branches, conversation history, and the worktree’s entry in the list. Sending another message automatically recreates a deleted worktree at the same path, with a new branch based on the original repository’s local `main`. Only the worktree path and its original project path are persisted; the previous branch and deletion status are not stored. This requires the updated Host (`host/worktree/list` and `host/worktree/remove`).
+Mac settings list Bex-created worktrees and their conversations under **作成済みのワークツリー**. Move to another conversation before deleting its worktree, then confirm removal. The Host refuses removal when turns, unanswered requests, unresolved submissions or tracked terminal processes are active, files have changes (including untracked or ignored files), the worktree is locked, or HEAD is detached. Removal retains branches, conversation history, and the worktree’s entry in the list. Sending another message automatically recreates a deleted worktree at the same path, with a new branch based on the original repository’s local `main`. Only the worktree path and its original project path are persisted; the previous branch and deletion status are not stored.
+
+The **マージ済みを自動削除** preference is disabled by default. When enabled, the Host checks Bex-created worktrees every minute and removes clean, unused checkouts whose branch has commits beyond its creation point and whose current HEAD is contained in local `main`. The same removal protections apply, including running sessions not yet present in the provider's history list. Busy worktrees are reconsidered on later checks; a new unmerged commit cancels eligibility. If activity or Git state cannot be checked, the checkout stays. Automatic removal preserves branches and conversations and supports the same recreation on the next message.
 
 Voice input appends recognized text on Stop or submits it with the draft and attachments on Send. Successful transcription with no recognized text ends quietly and leaves drafts and attachments unchanged, even if Send was pressed. Recording, connection, malformed-response, and transcription failures still report errors without discarding the draft.
 
@@ -191,27 +193,40 @@ authentication remain machine-local; see the standalone README for details.
 ## Verify
 
 ```sh
-nix develop . --command just unit-tests                  # all unit tests; no Simulator or emulator
-nix develop . --command cargo test --workspace            # Rust, including the behavior corpus
-nix develop . --command just iroh-e2e                     # real daemon over isolated iroh sessions
-nix develop . --command just android-e2e                  # fresh Android 17 emulator: network permission, Markdown, persistence and Host recovery
-nix develop . --command just ios-e2e [TestMethod…]        # Simulator XCUITest against a fixture Host
-nix develop . --command just conversation-ui             # selection, side chat, and activity regressions
-nix develop . --command just macos-e2e                   # native Browser authentication and persistence
-nix develop . --command just quality [apple|rust|kotlin|swift]  # default: Mac Host/desktop and iPhone checks
+scripts/dev-env.sh just unit-tests                  # all unit tests; no Simulator or emulator
+scripts/dev-env.sh cargo test --workspace            # Rust, including the behavior corpus
+scripts/dev-env.sh just iroh-e2e                     # real daemon over isolated iroh sessions
+scripts/dev-env.sh just android-e2e                  # fresh Android 17 emulator: network permission, Markdown, persistence and Host recovery
+scripts/dev-env.sh just ios-e2e [TestMethod…]        # Simulator XCUITest against a fixture Host
+scripts/dev-env.sh just conversation-ui             # selection, side chat, and activity regressions
+scripts/dev-env.sh just macos-e2e                   # native Browser authentication and persistence
+scripts/dev-env.sh just quality [apple|rust|kotlin|swift]  # default: Mac Host/desktop and iPhone checks
 ```
 
-Claude contracts run with `nix develop . --command cargo test --locked -p host-fixture --test claude`. Build the companion supervisor first (see above). The tests use a deterministic external CLI boundary with real Store, iroh, Host routing, native transcript files and isolated Git/filesystem state. An anonymized transcript from Claude Code 2.1.266 also exercises native format compatibility. The opt-in `live_claude_subscription_completes_and_resumes_through_store_and_host` test uses the real authenticated CLI; set `BEX_LIVE_CLAUDE_PROGRAM` to its absolute path and run that test with `-- --ignored --exact` to verify subscription inference, resumption across a Host restart, interruption and successful input after interruption.
+Claude contracts run with `scripts/dev-env.sh cargo test --locked -p host-fixture --test claude`. Build the companion supervisor first (see above). The tests use a deterministic external CLI boundary with real Store, iroh, Host routing, native transcript files and isolated Git/filesystem state. An anonymized transcript from Claude Code 2.1.266 also exercises native format compatibility. The opt-in `live_claude_subscription_completes_and_resumes_through_store_and_host` test uses the real authenticated CLI; set `BEX_LIVE_CLAUDE_PROGRAM` to its absolute path and run that test with `-- --ignored --exact` to verify subscription inference, resumption across a Host restart, interruption and successful input after interruption.
 
-Run all local unit tests with `nix develop . --command just unit-tests`, then integrate into main without requiring a PR or waiting for CI. Native clients GitHub Actions runs full verification after pushes to main, or through manual workflow dispatch; fix CI failures on main. Require successful CI for the current commit and a clean working tree before claiming full verification. Commits do not launch local background checks. Unit tests and manual debugging commands remain available locally. Linux CI uses GitHub-hosted Ubuntu 24.04 runners and the `nix develop .#native` shell. Toolchain lookup runs on the same Ubuntu baseline, and Windows consumes the Rust version from the pinned flake. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
+Run all local unit tests with `scripts/dev-env.sh just unit-tests`, then integrate into main without requiring a PR or waiting for CI. Native clients GitHub Actions runs full verification after pushes to main, or through manual workflow dispatch; fix CI failures on main. Require successful CI for the current commit and a clean working tree before claiming full verification. Commits do not launch local background checks. Unit tests and manual debugging commands remain available locally. Linux CI uses GitHub-hosted Ubuntu 24.04 runners and the `nix develop .#native` shell. Toolchain lookup runs on the same Ubuntu baseline, and Windows consumes the Rust version from the pinned flake. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
 
 Android CI runs on GitHub-hosted Ubuntu 24.04 with the pinned Nix SDK. It runs Kotlin checks and unit tests, builds app and instrumentation APKs, and runs emulator acceptance with KVM. Apple CI runs the same default `just quality` suite as local verification on one `macos-26` Apple Silicon runner with Xcode 26.6. After shared Rust and Swift checks, the native Mac Browser E2E and iPhone conversation acceptance run concurrently; iPhone tests use two isolated Simulator/Host pairs. Cargo and Xcode derived data are cached, and logs and Xcode result bundles are retained for seven days, including failed runs. Linux, Windows, Android, Mac and iPhone verification runs in Native clients CI. `just android-e2e` and `just quality kotlin` remain available for focused Android debugging.
 
 Development and test builds keep filename/line-number backtraces without full variable debug information. Use `CARGO_PROFILE_DEV_DEBUG=full` when a debugger needs variables. Quality checks disable Rust incremental compilation; normal local builds retain it.
 
-`just unit-tests` runs all Rust workspace library and binary tests with native bindings enabled, verifies the standalone agent-peer package, and runs the headless Swift Markdown tests on macOS. Rust tests use the Nix-pinned cargo-nextest runner to execute across crates in parallel; Swift tests run concurrently, and the command waits for both results and collects failures. Android currently has no JVM unit tests; its instrumentation tests run in CI. Build caches are reused. CI runs the same command before integration and E2E checks, using the same Rust feature configuration to share dependency builds. The supervisor is built before tests start. Build cleanup, connection diagnostics and native test runners are Rust commands in `cargo xtask`. On macOS, the Nix shells select the operating system's `lsof` for kernel process inspection; Linux uses Nix's `lsof`. Swift Markdown tests reuse a compiled build only when sources, bindings, compiler, SDK and runner match; every invocation still runs the assertions against the current Rust library. iOS UI checks use one isolated Simulator/Host pair and clone an initialized empty Simulator template; set `BEX_IOS_TEST_WORKERS=1`–`10` to control concurrency. A repository-wide lock serializes iOS checks across worktrees and Cargo targets.
+`just unit-tests` runs all Rust workspace library and binary tests with native bindings enabled, the standalone agent-peer CLI assertions with Cargo, and the headless Swift Markdown tests on macOS. Rust tests use the Nix-pinned cargo-nextest runner to execute across crates in parallel; Swift tests run concurrently, and the command waits for both results and collects failures. Android currently has no JVM unit tests; its instrumentation tests run in CI. CI runs the same command before integration and E2E checks, using the same Rust feature configuration to share dependency builds, and also verifies the Nix agent-peer package. The supervisor is built before tests start. Enable the `agent-ffi/bindgen` CLI feature only for binding generation; it contains no unit assertions, and enabling it in workspace tests needlessly replaces the native library with a different dependency configuration. Build cleanup, connection diagnostics and native test runners are Rust commands in `cargo xtask`. On macOS, the Nix shells select the operating system's `lsof` for kernel process inspection; Linux uses Nix's `lsof`. Swift Markdown tests reuse a compiled build only when sources, bindings, compiler, SDK and runner match; every invocation still runs the assertions against the current Rust library. iOS UI checks use one isolated Simulator/Host pair and clone an initialized empty Simulator template; set `BEX_IOS_TEST_WORKERS=1`–`10` to control concurrency. A repository-wide lock serializes iOS checks across worktrees and Cargo targets.
 
-Every completed `just quality` run prunes inactive Cargo outputs across registered worktrees. Profiles last modified more than 3 days ago are removed; otherwise the oldest profiles are removed until inactive outputs total at most 32 GiB. Run `nix develop . --command just clean-builds --dry-run` to inspect the JSON plan, or omit `--dry-run` to apply it. Cleanup scans conventional `target` directories and their direct nested Cargo caches; it does not follow symlinked caches.
+`scripts/dev-env.sh` reuses a fixed Nix environment across worktrees when `flake.nix`, `flake.lock` and the platform match; cached runs do not invoke Nix. Its shared profile protects the pinned tools from garbage collection. Cargo indexes, locks and `target` belong to each worktree; tests and dev builds within that worktree use the same Cargo cache and outputs. Only locked dependency sources and archives are seeded from existing caches, using APFS copy-on-write or reflinks where available to share their bytes. Changed test/code sources still require compilation; unchanged outputs are reused. Tests build their required helpers and bindings, while dev app builds, installation and restarts happen when applying changes to dev.
+
+To place new worktrees' build outputs on an external disk, create a directory on
+the mounted disk and set `git config --local bex.buildRoot /absolute/path/to/builds`.
+This local setting is shared by the repository's worktrees. `scripts/dev-env.sh`
+creates each new `target` as a symlink to a separate directory there, preserving
+the paths used by Cargo, Xcode, generated bindings and tooling caches. Existing
+targets stay in place; move them only while unused, then replace their original
+paths with symlinks. The configured build root must already exist; commands fail
+when it is unavailable, including when the disk is unplugged. Remove the setting
+with `git config --local --unset bex.buildRoot` to use local targets for new
+worktrees again.
+
+Every completed `just quality` run prunes inactive Cargo outputs across registered worktrees. Profiles last modified more than 3 days ago are removed; otherwise the oldest profiles are removed until inactive outputs total at most 32 GiB. Run `scripts/dev-env.sh just clean-builds --dry-run` to inspect the JSON plan, or omit `--dry-run` to apply it. Cleanup scans conventional `target` directories and their direct nested Cargo caches; it does not follow symlinked caches.
 
 Cleanup holds Cargo's build/artifact locks and preserves their inodes. Running binaries, active worktree processes and locked builds are excluded from the idle budget. This is a post-check retention policy, not a hard disk quota: active builds can temporarily exceed it. Only recognized Cargo `debug`/`release` output directories are disposable; keep application backups and verification records outside those directories. Bundled apps, `target/qa` results, summaries and source files are retained. Rebuilding a cleaned profile regenerates its outputs.
 

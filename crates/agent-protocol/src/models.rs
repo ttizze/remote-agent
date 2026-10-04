@@ -103,6 +103,7 @@ pub struct Thread {
     pub created_at: Option<f64>,
     pub updated_at: Option<f64>,
     pub history_has_more: Option<bool>,
+    pub history_cursor: Option<String>,
     pub history_limit: Option<u64>,
     pub list_stale: Option<bool>,
     pub agent_id: Option<String>,
@@ -115,7 +116,6 @@ pub struct Turn {
     pub status: TurnStatus,
     pub items: Option<Vec<Arc<Item>>>,
     pub items_has_more: Option<bool>,
-    pub opening_user_message: Option<Arc<Item>>,
     pub started_at: Option<f64>,
     pub completed_at: Option<f64>,
     pub duration_ms: Option<u64>,
@@ -139,26 +139,27 @@ impl Thread {
 impl Thread {
     /// Keep RPC snapshots small; item reads recover every deferred body.
     pub fn defer_item_details(&mut self, max_inline_bytes: usize) {
-        for turn in self.turns.iter_mut().flatten() {
-            let turn = Arc::make_mut(turn);
-            for item in turn.items.iter_mut().flatten() {
-                let limit = if matches!(
-                    item.body(),
-                    ItemBody::UserMessage { .. }
-                        | ItemBody::AssistantText { .. }
-                        | ItemBody::ImageGeneration { .. }
-                ) {
-                    max_inline_bytes
-                } else {
-                    512.min(max_inline_bytes)
-                };
-                if !item.id.is_empty() && !fits_inline(item, limit) {
-                    Arc::make_mut(item).defer();
-                }
-            }
-            if let Some(item) = &mut turn.opening_user_message
-                && !fits_inline(item, max_inline_bytes)
-            {
+        if let Some(turns) = &mut self.turns {
+            defer_item_details(turns, max_inline_bytes);
+        }
+    }
+}
+
+pub fn defer_item_details(turns: &mut [Arc<Turn>], max_inline_bytes: usize) {
+    for turn in turns {
+        let turn = Arc::make_mut(turn);
+        for item in turn.items.iter_mut().flatten() {
+            let limit = if matches!(
+                item.body(),
+                ItemBody::UserMessage { .. }
+                    | ItemBody::AssistantText { .. }
+                    | ItemBody::ImageGeneration { .. }
+            ) {
+                max_inline_bytes
+            } else {
+                512.min(max_inline_bytes)
+            };
+            if !item.id.is_empty() && !fits_inline(item, limit) {
                 Arc::make_mut(item).defer();
             }
         }
@@ -302,6 +303,7 @@ pub struct WorktreeSettings {
     pub copy_on_create: bool,
     pub copy_paths: Vec<String>,
     pub worktree_directory: String,
+    pub delete_merged: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -344,16 +346,14 @@ mod tests {
     proptest! {
         #[test]
         fn worktree_status_distinguishes_pending_work_from_integrated_history(
-            changed in any::<bool>(),
-            history_known in any::<bool>(),
-            contained in any::<bool>(),
             dirty in any::<bool>(),
+            unmerged_changes in any::<bool>(),
+            merged_history in any::<bool>(),
         ) {
-            let head = if changed { "work" } else { "base" };
-            let status = worktree_branch_status(head, history_known.then_some("base"), contained, dirty);
-            let expected = match (dirty, contained, history_known, changed) {
-                (true, _, _, _) | (_, false, _, _) => Some(WorktreeStatus::Unmerged),
-                (false, true, true, true) => Some(WorktreeStatus::Merged),
+            let status = worktree_branch_status(dirty, unmerged_changes, merged_history);
+            let expected = match (dirty, unmerged_changes, merged_history) {
+                (true, _, _) | (_, true, _) => Some(WorktreeStatus::Unmerged),
+                (false, false, true) => Some(WorktreeStatus::Merged),
                 _ => None,
             };
             prop_assert_eq!(status, expected);
@@ -444,16 +444,15 @@ pub enum WorktreeStatus {
     Merged,
 }
 
-/// Uncommitted edits take priority over previously integrated branch work.
+/// Pending file changes take priority over previously integrated branch work.
 pub fn worktree_branch_status(
-    head: &str,
-    initial: Option<&str>,
-    contained_in_main: bool,
     has_uncommitted_changes: bool,
+    has_unmerged_changes: bool,
+    has_merged_history: bool,
 ) -> Option<WorktreeStatus> {
-    if has_uncommitted_changes || !contained_in_main {
+    if has_uncommitted_changes || has_unmerged_changes {
         Some(WorktreeStatus::Unmerged)
-    } else if initial.is_some_and(|initial| initial != head) {
+    } else if has_merged_history {
         Some(WorktreeStatus::Merged)
     } else {
         None

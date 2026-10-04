@@ -54,6 +54,16 @@ hydration must not change this default.
 
 - Load the latest bounded page first; request older pages using the server's
   opaque cursor. A refresh must not fetch the entire conversation.
+- Codex timeline pages define one continuous history window. Show only turns
+  represented in that window. Do not
+  create empty turn placeholders or fetch detached opening questions. Continue
+  from the native timeline cursor without rereading the latest page.
+- Do not show history-loading buttons or placeholder conversation rows. Load
+  the next bounded page automatically while the oldest loaded boundary is in
+  the viewport, including on initial display when the page does not fill the
+  screen. Latest-message positioning must settle before paging a scrollable
+  initial page. Preserve latest following and the reader's position when
+  prepending older pages; never request duplicate pages while a read is pending.
 - Retain cached history only when its suffix matches the refreshed page's
   prefix in order. Apply the same rule to turns and to items within a turn,
   preserving repeated occurrences from the server page. A shared ID elsewhere
@@ -169,6 +179,14 @@ duplicate selections, and navigation races. Host registration and workspace
 matching are covered by `projects` tests.
 
 ## Workspace folder labels
+
+Desktop shows the selected folder, execution Host and current Git branch in one
+compact row immediately above the composer, for new and existing conversations.
+Each has an icon; Host and branch have menu chevrons. Local execution is labeled
+`Local`, and remote execution uses the registered Host name. Folder selection
+retains its new-chat behavior. The branch comes from the shared workspace review,
+is hidden when unavailable, and offers the existing changes view and refresh.
+Long labels truncate within the row while tooltips expose the full values.
 
 New managed worktrees use `<original-repository>/.worktree/session-XXXXX/<repository-name>`.
 A custom storage root replaces `<original-repository>/.worktree`. The folder label
@@ -392,7 +410,7 @@ final-message identity, terminal state, or collapse eligibility.
 
 `RenderedTurn` stores one flat layout, shared by Desktop and the mobile
 `conversation_rows` getter, with core-owned row order and identities,
-including partial-history boundaries, activity membership, pending requests,
+including activity membership, pending requests,
 errors, and the last response eligible for a fork. Activity rows follow their
 header consecutively; clients filter them using that header's expansion state.
 Native clients cache rows while the rendered turn is unchanged. `activity_is_expanded` applies a
@@ -440,9 +458,10 @@ results after navigation.
 
 ### セッション一覧の変更・マージ表示
 
-- 実行ディレクトリが linked worktree のセッションは、ローカル `main` に未マージのコミット、未コミットの編集、ステージ済み変更、未追跡ファイルがあれば、オレンジの Lucide `diff`（＋／−）アイコンを表示する。変更がなく作業ブランチの先端が `main` に取り込まれていれば、紫の既存 Lucide `git-merge` アイコンを表示する（チェックの合成は行わない）。実行中のローディング／完了・未確認表示の右に並べ、両方の状態を保持する。PC・iOS・Android は共有 `ThreadSummary.worktree_status` を表示する。
+- 実行ディレクトリが linked worktree のセッションは、ローカル `main` との分岐点からブランチに残っているファイル差分、未コミットの編集、ステージ済み変更、未追跡ファイルがあれば、オレンジの Lucide `diff`（＋／−）アイコンを表示する。未マージのコミットがあっても、空コミットや変更の取り消しでファイル差分が残っていなければ表示しない。`main` 側だけにある更新は差分に数えない。変更がなく作業ブランチの先端が `main` に取り込まれていれば、紫の既存 Lucide `git-merge` アイコンを表示する（チェックの合成は行わない）。実行中のローディング／完了・未確認表示の右に並べ、両方の状態を保持する。PC・iOS・Android は共有 `ThreadSummary.worktree_status` を表示する。
 - 作成直後で変更のないブランチ、main 自体、detached HEAD、Git の確認失敗では表示しない。マージ済みの判定は、ブランチの reflog の最古のコミットと先端が異なることを作業履歴の条件にする。作成履歴が不明でも未反映の変更は表示できる。squash/rebase による別コミットへの置換は判定対象外。
-- 一覧の再取得時（既存の実行状態通知・画面復帰・手動更新）に再判定する。マージ済みのあとに追加コミットや編集があれば差分アイコンに切り替え、編集を取り消すとマージ済みに戻る。Git の状態をプロジェクト設定のキャッシュに保存しない。
+- Bex が管理する作業フォルダを削除したあとも、会話のネイティブ履歴に保存されたブランチと元リポジトリの対応から、残ったブランチの差分・マージ済みを判定する。作業フォルダがある場合は現在の Git 状態を優先する。保存ブランチや元リポジトリが不明、ブランチが削除済みの場合は表示しない。
+- 一覧の再取得時（既存の実行状態通知・画面復帰・手動更新）に再判定する。マージ済みのあとにファイル差分を追加すれば差分アイコンに切り替え、未コミットの編集を取り消すとマージ済みに戻る。Git の状態をプロジェクト設定のキャッシュに保存しない。
 - 受け入れ確認: core の `list_preserves_worktree_status_alongside_activity_after_serialization_and_refresh`、実 Git と Host/Store の `session_list_tracks_real_worktree_changes_and_merges_through_host_and_store`、iOS の `testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus`、Android の `worktreeMarksCoexistWithRunningAndUnreadUsingTheCoreAdapter`。
 
 ## Immediate submission feedback

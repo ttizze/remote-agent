@@ -14,7 +14,7 @@ use agent_transport::peer::RpcMessageError;
 use codex_app_server::CodexAppServer;
 use serde::Serialize;
 
-use super::agent::{Agent, Identity, session_pages};
+use super::agent::{Agent, Identity, SessionSummary, session_pages};
 use futures_util::{StreamExt, TryStreamExt};
 use std::collections::HashMap;
 
@@ -371,6 +371,8 @@ impl HostRpcService {
                 message,
                 Call::Submit(_)
                     | Call::CreateSession(_)
+                    | Call::ForkSession(_)
+                    | Call::AnswerSession(_)
                     | Call::StartTerminal(_)
                     | Call::WriteFile(_)
                     | Call::Upload(_)
@@ -449,22 +451,7 @@ impl HostRpcService {
                 "native session identity changed",
             ));
         }
-        let workspace = if let Some(cwd) = response.thread.cwd.as_deref() {
-            Some(
-                tokio::fs::canonicalize(cwd)
-                    .await
-                    .unwrap_or_else(|_| cwd.into()),
-            )
-        } else {
-            None
-        };
-        self.inner.router.execution_workspace(
-            target,
-            workspace
-                .as_deref()
-                .and_then(|path| dunce::simplified(path).to_str()),
-        );
-        self.inner.router.overlay_execution(target, &mut response);
+        response.thread = self.inner.router.overlay_execution(target, response.thread);
         let running_turn = response
             .thread
             .turns
@@ -675,6 +662,24 @@ impl HostRpcService {
             }
         }
         let response = match request {
+            Call::ReadHistory(params) => {
+                let mut page = self
+                    .agent(params.session.provider)?
+                    .read_history(&params.session.id, &params.cursor)
+                    .await?;
+                agent_protocol::models::defer_item_details(
+                    &mut page.turns,
+                    agent_protocol::models::MAX_INLINE_ITEM_BYTES,
+                );
+                if agent_protocol::protocol::encode(Response::Success { result: &page })
+                    .map_err(|error| Failure::new("invalid_thread_history", error))?
+                    .len()
+                    > agent_protocol::protocol::MAX_FRAME_BYTES
+                {
+                    agent_protocol::models::defer_item_details(&mut page.turns, 0);
+                }
+                page.into()
+            }
             Call::ReadPermissionSettings(params) => {
                 let _guard = self.inner.permission_settings_access.lock().await;
                 self.agent(params.provider)?
@@ -854,7 +859,7 @@ impl HostRpcService {
             Call::ListWorktrees(_) => (self.worktree_list().await?).into(),
             Call::RemoveWorktree(params) => {
                 let _exclusive = self.inner.worktree_access.write().await;
-                (self.remove_worktree(params.clone()).await?).into()
+                (self.remove_worktree(params.path.clone()).await?).into()
             }
 
             Call::CreateSession(params) => (self.create_session(params.clone()).await?).into(),
@@ -986,7 +991,7 @@ impl HostRpcService {
             futures_util::pin_mut!(pages);
             while let Some(result) = pages.next().await {
                 match result {
-                    Ok(page) => threads.extend(page),
+                    Ok(page) => threads.extend(page.into_iter().map(|summary| summary.thread)),
                     Err(error) if error.code == "invalid_session_list" => return Err(error),
                     Err(error) => {
                         for w in &mut worktrees {
@@ -1001,7 +1006,7 @@ impl HostRpcService {
         let mut active_sessions = std::collections::HashSet::new();
         for worktree in &mut worktrees {
             let directory = std::path::Path::new(&worktree.path);
-            let mut active = self.inner.router.active_sessions_in(directory);
+            let mut active = std::collections::HashSet::new();
             for (_, agent) in &agents {
                 match agent.active_sessions_in(directory).await {
                     Ok(sessions) => active.extend(sessions),
@@ -1019,8 +1024,50 @@ impl HostRpcService {
             }
             active_sessions.extend(active);
         }
+        // Providers can omit a first, still-running turn from their history list.
+        // Resolve every retained execution before allowing any checkout removal.
+        for target in self.inner.router.execution_targets() {
+            if threads
+                .iter()
+                .any(|thread| thread.id.as_ref() == Some(&target))
+            {
+                continue;
+            }
+            let response = self
+                .agent(target.provider)?
+                .state(&target.id)
+                .await?
+                .response;
+            if response.thread.id.as_ref() != Some(&target) {
+                return Err(Failure::new(
+                    "invalid_thread",
+                    "native session identity changed",
+                ));
+            }
+            threads.push(response.thread);
+        }
         for thread in threads {
-            let Some(cwd) = thread.cwd.as_deref() else {
+            let thread = match thread.id.clone() {
+                Some(id) => self.inner.router.overlay_execution(&id, thread),
+                None => thread,
+            };
+            let active = thread
+                .id
+                .as_ref()
+                .is_some_and(|id| active_sessions.contains(id))
+                || worktree_active(
+                    thread.status,
+                    thread.turns.as_deref().unwrap_or_default(),
+                    !thread.requests.is_empty(),
+                    thread.submissions.values(),
+                );
+            let Some(cwd) = thread.cwd.as_deref().filter(|cwd| !cwd.trim().is_empty()) else {
+                if active {
+                    return Err(Failure::new(
+                        "worktree_activity_unknown",
+                        "実行中の会話の作業場所を確認できないため削除できません。",
+                    ));
+                }
                 continue;
             };
             let cwd = tokio::fs::canonicalize(cwd)
@@ -1031,10 +1078,9 @@ impl HostRpcService {
                 if !cwd.starts_with(&worktree.path) {
                     continue;
                 }
-                let active = thread
-                    .id
-                    .as_ref()
-                    .is_some_and(|id| active_sessions.contains(id));
+                if active {
+                    worktree.blocked_reason = Some("このワークツリーで作業を実行中です。完了または停止してから削除してください。".into());
+                }
                 if let Some(id) = &thread.id {
                     worktree
                         .threads
@@ -1069,11 +1115,11 @@ impl HostRpcService {
         Ok(worktrees)
     }
 
-    async fn remove_worktree(&self, params: op::RemoveWorktree) -> Result<(), Failure> {
+    async fn remove_worktree(&self, path: String) -> Result<(), Failure> {
         let entries = self.worktree_list().await?;
         let entry = entries
             .iter()
-            .find(|entry| entry.path == params.path)
+            .find(|entry| entry.path == path)
             .ok_or_else(|| {
                 Failure::new(
                     "worktree_remove_failed",
@@ -1085,9 +1131,38 @@ impl HostRpcService {
         }
         self.inner
             .worktrees
-            .remove(params.path)
+            .remove(path, false)
             .await
             .map_err(|error| Failure::new("worktree_remove_failed", error))
+    }
+
+    pub(crate) async fn cleanup_merged_worktrees(&self) -> anyhow::Result<()> {
+        if !self.inner.worktrees.settings(None).await?.delete_merged {
+            return Ok(());
+        }
+        let _exclusive = self.inner.worktree_access.write().await;
+        let entries = self.worktree_list().await?;
+        let statuses = crate::worktrees::directory_statuses(
+            entries
+                .iter()
+                .filter(|entry| entry.blocked_reason.is_none())
+                .map(|entry| crate::worktrees::StatusSource {
+                    cwd: entry.path.clone(),
+                    checkout: None,
+                    repository: None,
+                    branch: None,
+                })
+                .collect(),
+        )
+        .await?;
+        for (source, status) in statuses {
+            if status == agent_protocol::models::WorktreeStatus::Merged
+                && let Err(error) = self.inner.worktrees.remove(source.cwd, true).await
+            {
+                tracing::warn!(target: "bex", operation = "host.worktree.cleanup", message = %error);
+            }
+        }
+        Ok(())
     }
 
     async fn project_snapshot(&self) -> Result<crate::projects::state::Snapshot, Failure> {
@@ -1123,11 +1198,12 @@ impl HostRpcService {
             .as_object()
             .cloned()
             .unwrap_or_default();
+        let mut branches = std::collections::HashMap::new();
         let successful = listings.iter().any(|(_, _, _, head)| head.is_ok());
         while let Some(newest) = listings
             .iter()
             .filter_map(|(_, _, _, head)| head.as_ref().ok()?.as_ref())
-            .map(|thread| thread.updated_at.unwrap_or_default())
+            .map(|summary| summary.thread.updated_at.unwrap_or_default())
             .max_by(f64::total_cmp)
         {
             // Native pages guarantee descending timestamps, but equal timestamps
@@ -1136,7 +1212,11 @@ impl HostRpcService {
             for (_, capabilities, threads, head) in &mut listings {
                 while head.as_ref().is_ok_and(|thread| {
                     thread.as_ref().is_some_and(|thread| {
-                        thread.updated_at.unwrap_or_default().total_cmp(&newest)
+                        thread
+                            .thread
+                            .updated_at
+                            .unwrap_or_default()
+                            .total_cmp(&newest)
                             == std::cmp::Ordering::Equal
                     })
                 }) {
@@ -1144,8 +1224,12 @@ impl HostRpcService {
                     *head = next_title(threads, deadline).await;
                 }
             }
-            group.sort_by(|(a, _), (b, _)| a.id.cmp(&b.id));
-            for (mut thread, capabilities) in group {
+            group.sort_by(|(a, _), (b, _)| a.thread.id.cmp(&b.thread.id));
+            for (summary, capabilities) in group {
+                let mut thread = summary.thread;
+                if let (Some(id), Some(branch)) = (&thread.id, summary.branch) {
+                    branches.insert(id.clone(), branch);
+                }
                 describe_thread(&mut thread, capabilities, &snapshot);
                 titles.push(thread);
                 if titles.complete() {
@@ -1168,19 +1252,28 @@ impl HostRpcService {
             ));
         }
         let mut page = titles.finish();
-        let statuses = crate::worktrees::directory_statuses(
-            page.data
-                .iter()
-                .filter_map(|thread| thread.cwd.clone())
-                .collect(),
-        )
-        .await
-        .map_err(|error| Failure::new("worktree_status_failed", error))?;
-        for thread in &mut page.data {
-            thread.worktree_status = thread
-                .cwd
+        let sources: Vec<_> = page
+            .data
+            .iter()
+            .map(|thread| {
+                let cwd = thread.cwd.as_ref()?;
+                let mapping = snapshot.worktree_mapping(std::path::Path::new(cwd));
+                Some(crate::worktrees::StatusSource {
+                    cwd: cwd.clone(),
+                    checkout: mapping.map(|(checkout, _)| checkout.to_owned()),
+                    repository: mapping.map(|(_, repository)| repository.to_owned()),
+                    branch: thread.id.as_ref().and_then(|id| branches.remove(id)),
+                })
+            })
+            .collect();
+        let statuses =
+            crate::worktrees::directory_statuses(sources.iter().flatten().cloned().collect())
+                .await
+                .map_err(|error| Failure::new("worktree_status_failed", error))?;
+        for (thread, source) in page.data.iter_mut().zip(sources) {
+            thread.worktree_status = source
                 .as_ref()
-                .and_then(|cwd| statuses.get(cwd))
+                .and_then(|source| statuses.get(source))
                 .copied();
         }
         if !provider_errors.is_empty() {
@@ -1282,6 +1375,35 @@ impl HostRpcService {
     }
 }
 
+fn worktree_active<'a>(
+    status: agent_protocol::models::SessionStatus,
+    turns: &[Arc<agent_protocol::models::Turn>],
+    has_requests: bool,
+    mut submissions: impl Iterator<Item = &'a agent_protocol::session::SubmissionDelivery>,
+) -> bool {
+    use agent_protocol::{
+        execution::TurnStatus, models::SessionStatus, session::SubmissionDelivery,
+    };
+    status == SessionStatus::Running
+        || has_requests
+        || turns.iter().any(|turn| turn.status == TurnStatus::Running)
+        || submissions.any(|delivery| match delivery {
+            SubmissionDelivery::Rejected => false,
+            SubmissionDelivery::Accepted { turn_id: Some(id) } => {
+                // Completed receipts can remain for replay after interruption.
+                // Only a known finished turn proves that input no longer owns work.
+                !turns.iter().any(|turn| {
+                    &turn.id == id
+                        && matches!(
+                            turn.status,
+                            TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
+                        )
+                })
+            }
+            _ => true,
+        })
+}
+
 fn invalid_message(error: impl std::fmt::Display) -> String {
     format!("invalid request: {error}")
 }
@@ -1332,9 +1454,9 @@ fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRe
 }
 
 async fn next_title(
-    threads: &mut futures_util::stream::BoxStream<'_, Result<Thread, Failure>>,
+    threads: &mut futures_util::stream::BoxStream<'_, Result<SessionSummary, Failure>>,
     deadline: tokio::time::Instant,
-) -> Result<Option<Thread>, Failure> {
+) -> Result<Option<SessionSummary>, Failure> {
     tokio::time::timeout_at(deadline, threads.try_next())
         .await
         .unwrap_or_else(|_| {
@@ -1364,6 +1486,69 @@ fn describe_thread(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn worktree_activity_requires_finished_delivery_and_no_other_live_work() {
+        use super::worktree_active;
+        use agent_protocol::{
+            execution::TurnStatus, models::SessionStatus, session::SubmissionDelivery,
+        };
+        let receipt = SubmissionDelivery::Accepted {
+            turn_id: Some("accepted".into()),
+        };
+        for status in [
+            TurnStatus::Running,
+            TurnStatus::Unknown,
+            TurnStatus::Completed,
+            TurnStatus::Failed,
+            TurnStatus::Interrupted,
+        ] {
+            let turns = [std::sync::Arc::new(agent_protocol::models::Turn {
+                id: "accepted".into(),
+                status,
+                ..Default::default()
+            })];
+            let busy = |session, requests, deliveries: &[SubmissionDelivery]| {
+                worktree_active(session, &turns, requests, deliveries.iter())
+            };
+            assert_eq!(
+                busy(SessionStatus::Idle, false, &[]),
+                status == TurnStatus::Running
+            );
+            assert_eq!(
+                busy(SessionStatus::Idle, false, std::slice::from_ref(&receipt)),
+                matches!(status, TurnStatus::Running | TurnStatus::Unknown)
+            );
+            assert!(busy(SessionStatus::Running, false, &[]));
+            assert!(busy(SessionStatus::Idle, true, &[]));
+            for unresolved in [
+                SubmissionDelivery::Sending,
+                SubmissionDelivery::Unknown,
+                SubmissionDelivery::Accepted { turn_id: None },
+                SubmissionDelivery::Accepted {
+                    turn_id: Some("other".into()),
+                },
+            ] {
+                assert!(busy(
+                    SessionStatus::Idle,
+                    false,
+                    &[receipt.clone(), unresolved]
+                ));
+            }
+        }
+        assert!(!worktree_active(
+            SessionStatus::Idle,
+            &[],
+            false,
+            [SubmissionDelivery::Rejected].iter()
+        ));
+        assert!(worktree_active(
+            SessionStatus::Idle,
+            &[],
+            false,
+            [receipt].iter()
+        ));
+    }
+
     use agent_protocol::session::ProviderKind;
 
     #[tokio::test(start_paused = true)]
@@ -1374,7 +1559,10 @@ mod tests {
         let mut threads = futures_util::stream::iter([4, 2])
             .then(|seconds| async move {
                 tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
-                Ok(Thread::default())
+                Ok(SessionSummary {
+                    thread: Thread::default(),
+                    branch: None,
+                })
             })
             .boxed();
         assert!(next_title(&mut threads, deadline).await.unwrap().is_some());
@@ -1473,16 +1661,8 @@ mod tests {
             },
         };
         let delivery = |id: &agent_protocol::ids::RequestId| {
-            let mut response = ThreadResponse {
-                thread: Thread::default(),
-                model: None,
-            };
-            router.overlay_execution(&target, &mut response);
-            response
-                .thread
-                .requests
-                .get(id)
-                .map(|request| request.delivery)
+            let thread = router.overlay_execution(&target, Thread::default());
+            thread.requests.get(id).map(|request| request.delivery)
         };
         for native in ["cancelled", "interrupted", "written"] {
             let adapted = super::super::requests::claude(uuid::Uuid::new_v4().to_string().into(), &"unrelated".into(), &serde_json::json!({"subtype":"elicitation","mcp_server_name":"server","requested_schema":{"type":"object","properties":{}}})).unwrap();
@@ -1652,16 +1832,12 @@ mod tests {
                     agent_transport::peer::Delivery::NotSent,
                     "{case}"
                 );
-                let mut response = ThreadResponse {
-                    thread: Thread::default(),
-                    model: None,
-                };
-                service
+                let thread = service
                     .inner
                     .router
-                    .overlay_execution(&target, &mut response);
+                    .overlay_execution(&target, Thread::default());
                 assert_eq!(
-                    response.thread.requests[&id].delivery,
+                    thread.requests[&id].delivery,
                     agent_protocol::session::RequestDelivery::Awaiting,
                     "{case}"
                 );

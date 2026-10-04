@@ -88,6 +88,12 @@ impl Trace {
         self.enabled && Instant::now() <= self.state.lock().unwrap().until
     }
 
+    #[cfg(test)]
+    pub(crate) fn finish_window(&self) {
+        self.state.lock().unwrap().until = Instant::now();
+        self.sampler.lock().unwrap().take();
+    }
+
     pub fn elapsed_at(&self, at: Instant) -> u64 {
         at.saturating_duration_since(self.origin).as_micros() as u64
     }

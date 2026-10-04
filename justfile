@@ -11,9 +11,9 @@ unit-tests:
     set -uo pipefail
     failed=0
     cargo build --locked -p bex-process --bin bex-provider-supervisor || failed=1
-    cargo nextest run --locked --no-fail-fast --workspace --lib --bins --features agent-core/bindings,agent-ffi/bindgen &
+    cargo nextest run --locked --no-fail-fast --workspace --lib --bins --features agent-core/bindings &
     rust_pid=$!
-    nix build .#agent-peer --no-link || failed=1
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}" cargo test --locked --no-fail-fast --manifest-path tools/agent-peer/Cargo.toml || failed=1
     if [[ $(uname -s) == Darwin ]]; then
         cargo xtask ios-markdown || failed=1
     fi
@@ -81,6 +81,7 @@ conversation-ui:
         testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
         testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
         testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
+        testSimulatorFillsInitialHistoryViewportWithoutScrolling \
         testSimulatorReopensRunningLongHistoryWithoutBlankViewport \
         testSimulatorRendersMarkdownTableAndReopensIt \
         testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \

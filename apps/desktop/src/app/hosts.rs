@@ -499,6 +499,7 @@ impl Hosts {
         owner: &Entity<Self>,
         id: &'static str,
         current: Option<&str>,
+        fallback_name: &str,
         disabled: bool,
         cx: &App,
     ) -> impl IntoElement {
@@ -506,15 +507,25 @@ impl Hosts {
         let hosts = &view.snapshot.management.remotes;
         let name: SharedString = current
             .and_then(|id| hosts.iter().find(|host| host.id == id))
-            .map_or_else(|| "この端末".into(), |host| host.name.clone().into());
+            .map_or_else(
+                || fallback_name.to_owned().into(),
+                |host| host.name.clone().into(),
+            );
         let current = current.map(str::to_owned);
         let hosts = hosts.clone();
         let owner = owner.downgrade();
         Button::new(id)
+            .debug_selector(move || id.into())
             .disabled(disabled)
+            .accessibility_label(format!("実行先: {name}"))
+            .tooltip(format!("実行先: {name}"))
             .label(name)
+            .icon(Icon::default().path("bex/monitor.svg"))
             .dropdown_caret(true)
-            .small()
+            .h_8()
+            .min_w_0()
+            .max_w(px(200.))
+            .flex_shrink_1()
             .ghost()
             .dropdown_menu(move |mut menu, _, _| {
                 let local = owner.clone();

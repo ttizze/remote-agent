@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reuse fixed Nix tooling across worktrees without entering Nix on each local test run. Keep Cargo locks, indexes and build outputs local while cloning locked dependency data with copy-on-write. Run agent-peer assertions directly with Cargo locally and retain Nix package checks in CI. Keep the UniFFI CLI feature limited to binding generation so unit tests do not replace its native library. Use controlled virtual time for long unit-test delays and parallelize foreground cases.
+
 - Run all local Rust unit tests across crates in parallel with Nix-pinned cargo-nextest, concurrently with headless Swift Markdown tests, while collecting failures from both suites.
 
 - Run all unit tests locally with `just unit-tests` before integrating into main, then run full Native clients CI after pushes to main without requiring a PR. Run native Mac Browser E2E concurrently with iPhone conversation acceptance on two isolated Simulator/Host pairs within one Apple Silicon Mac. Remove Lefthook, the local background QA worker, its queue/status commands and its shared Cargo cache integration; retain manual debugging commands and workflow dispatch.

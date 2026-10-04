@@ -54,6 +54,7 @@ import dev.remoteagent.core.Respond
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.activityIsExpanded
 import dev.remoteagent.core.insertInvocation
+import dev.remoteagent.core.shouldLoadHistory
 import java.util.UUID
 import kotlinx.coroutines.launch
 
@@ -71,13 +72,7 @@ internal fun ThreadDetailScreen(
     val listState = rememberLazyListState()
     var activityExpansion by remember(threadId) { mutableStateOf(emptyMap<String, ActivityExpansion>()) }
     var following by remember(threadId) { mutableStateOf(true) }
-    val loadOlder = older?.let { load ->
-        {
-            following = false
-            load()
-        }
-    }
-    ObserveFollowing(listState, snapshot, following && older != null, { following = it }, scrollToTopRequest)
+    ObserveFollowing(listState, snapshot, following, { following = it }, scrollToTopRequest, older)
     Column(modifier.fillMaxSize()) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
@@ -89,17 +84,12 @@ internal fun ThreadDetailScreen(
                 threadId?.let(snapshot::conversation)?.historyNotice()?.let { notice ->
                     item(key = "history:read-state") { Text(notice) }
                 }
-                if (threadId?.let(snapshot::conversation)?.hasMoreHistory() == true)
-                    item(key = "history:turns") {
-                        Button(onClick = { loadOlder?.invoke() }, enabled = loadOlder != null) { Text("以前の会話を読み込む") }
-                    }
                 val renderRow: @Composable (ConversationRowContent) -> Unit = { content ->
                     ConversationContent(
                         content,
                         threadId,
                         snapshot.navigation().cwd,
                         perform,
-                        older = loadOlder,
                         activityHeader = { activity ->
                             ActivityHeader(activity, activityExpansion[activity.id]) { choice ->
                                 activityExpansion = activityExpansion + (activity.id to choice)
@@ -168,12 +158,9 @@ private fun ConversationContent(
     threadId: dev.remoteagent.core.SessionRef?,
     cwd: String,
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-    older: (() -> Unit)? = null,
     activityHeader: @Composable (ActivityPresentation) -> Unit,
 ) {
     when (content) {
-        is ConversationRowContent.OlderItems ->
-            Button(onClick = { older?.invoke() }, enabled = older != null) { Text("途中の履歴を読み込む") }
         is ConversationRowContent.User -> ThreadMessageCard(content.item, true, cwd, perform)
         is ConversationRowContent.Response -> ThreadMessageCard(content.item, false, cwd, perform)
         is ConversationRowContent.Activity ->
@@ -323,6 +310,7 @@ private fun ObserveFollowing(
     following: Boolean,
     follow: (Boolean) -> Unit,
     scrollToTopRequest: Int,
+    older: (() -> Unit)?,
 ) {
     LaunchedEffect(scrollToTopRequest) {
         if (scrollToTopRequest > 0) {
@@ -335,6 +323,21 @@ private fun ObserveFollowing(
             withFrameNanos {}
             listState.scrollToLatest()
         }
+    }
+    LaunchedEffect(snapshot, following, older) {
+        val hasMore = snapshot.navigation().threadId?.let(snapshot::conversation)?.hasMoreHistory() == true
+        snapshotFlow {
+            shouldLoadHistory(
+                hasMore,
+                older == null || snapshot.error() != null,
+                listState.layoutInfo.viewportEndOffset > listState.layoutInfo.viewportStartOffset &&
+                    listState.firstVisibleItemIndex == 0 &&
+                    listState.firstVisibleItemScrollOffset <
+                        (listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset) * 0.6,
+                !listState.canScrollForward,
+                following,
+            )
+        }.collect { needed -> if (needed) older?.invoke() }
     }
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress to !listState.canScrollForward }
