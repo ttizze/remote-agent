@@ -438,6 +438,16 @@ mod tests {
                 connection_id: peer.diagnostic_id,
                 ..Default::default()
             });
+            tokio::pin!(upload);
+            // Advance only the collection delay; keep real QUIC I/O on real time.
+            tokio::time::pause();
+            assert!(futures_util::poll!(&mut upload).is_pending());
+            tokio::time::advance(crate::diagnostics::connection::WINDOW).await;
+            assert!(futures_util::poll!(&mut upload).is_pending());
+            // The diagnostic sampler uses the real monotonic clock.
+            trace.finish_window();
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::time::resume();
             let receiver = async {
                 for recovered in [false, true] {
                     let IncomingRequest::Call(request) = incoming.accept_request().await.unwrap()

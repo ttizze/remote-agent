@@ -1,5 +1,5 @@
 //! Live execution and unconfirmed input delivery. Native history is never retained here.
-use agent_protocol::models::{Thread, ThreadResponse};
+use agent_protocol::models::Thread;
 
 #[derive(Default)]
 pub(super) struct SessionActor {
@@ -58,11 +58,11 @@ impl SessionActor {
                 .is_some_and(|turns| !turns.is_empty())
     }
 
-    pub(super) fn overlay(&self, response: &mut ThreadResponse) {
+    pub(super) fn overlay(&self, mut thread: Thread) -> Thread {
         for turn in self.live.turns.iter().flatten() {
             // Native transcripts do not identify a still-running local process.
             // Its owned turn is authoritative, even if persisted messages look complete.
-            let turns = response.thread.turns.get_or_insert_default();
+            let turns = thread.turns.get_or_insert_default();
             if let Some(index) = turns.iter().rposition(|old| old.id == turn.id) {
                 turns[index] = turn.clone();
             } else {
@@ -70,14 +70,15 @@ impl SessionActor {
             }
         }
         if self.live.status != agent_protocol::models::SessionStatus::Unknown {
-            response.thread.status = self.live.status;
+            thread.status = self.live.status;
         }
-        response.thread.requests = self
+        thread.requests = self
             .pending_requests
             .iter()
             .map(|(id, pending)| (id.clone(), std::sync::Arc::new(pending.request.clone())))
             .collect();
-        response.thread.submissions = self.live.submissions.clone();
+        thread.submissions = self.live.submissions.clone();
+        thread
     }
 }
 

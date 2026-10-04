@@ -32,6 +32,17 @@ extension BexLaunchUITests {
                              "Scrolling upward must load older items without tapping a button")
         XCTAssertFalse(latest.isHittable, "Prepending history must not jump back to the latest message")
         captureScreen(app, named: "Older history loaded by scrolling")
+        assertHistoryTopNavigation(app, latest: latest)
+        XCTAssertTrue(latest.isHittable)
+        for _ in 0 ..< 4 {
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+            XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+            XCTAssertTrue(latest.waitForExistence(timeout: 20))
+            XCTAssertTrue(latest.isHittable, "Every reopen must render the latest message in the viewport")
+        }
+    }
+
+    private func assertHistoryTopNavigation(_ app: XCUIApplication, latest: XCUIElement) {
         let latestButton = app.buttons["task.latest"]
         XCTAssertTrue(latestButton.waitForExistence(timeout: 5))
         latestButton.tap()
@@ -44,16 +55,28 @@ extension BexLaunchUITests {
             XCTAssertFalse(latestButton.exists)
             scrollToTop()
             XCTAssertTrue(latestButton.waitForExistence(timeout: 5))
+            XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "history.")).count, 0)
             XCTAssertFalse(latest.isHittable, "Top navigation must not snap back to the latest message")
             latestButton.tap()
         }
-        XCTAssertTrue(latest.isHittable)
-        for _ in 0 ..< 4 {
-            app.navigationBars.buttons.element(boundBy: 0).tap()
-            XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
-            XCTAssertTrue(latest.waitForExistence(timeout: 20))
-            XCTAssertTrue(latest.isHittable, "Every reopen must render the latest message in the viewport")
-        }
+    }
+
+    func testSimulatorFillsInitialHistoryViewportWithoutScrolling() throws {
+        let app = try connectedSimulatorApp()
+        try useSimulatorListFixture("viewport-conversation")
+        app.terminate(); app.launch()
+        expandSimulatorProject(app)
+        let row = app.descendants(matching: .any)["tasks.row.codex:fixture-viewport-history"]
+        XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
+        let detail = app.descendants(matching: .any)["task.detail"]
+        XCTAssertTrue(detail.waitForExistence(timeout: 30))
+        let latest = app.descendants(matching: .any)["item.long-latest-message"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 20))
+        let filled = expectation(for: NSPredicate { _, _ in self.loadedItems(in: detail) > 100 }, evaluatedWith: detail)
+        wait(for: [filled], timeout: 20)
+        XCTAssertTrue(latest.isHittable, "Automatic initial paging must keep the latest message visible")
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "history.")).count, 0)
+        captureScreen(app, named: "Initial history fills the viewport without a loading button")
     }
 
     func testSimulatorReopensRunningLongHistoryWithoutBlankViewport() throws {

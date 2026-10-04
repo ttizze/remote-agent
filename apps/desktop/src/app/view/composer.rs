@@ -1,32 +1,93 @@
 use super::*;
 
 impl Desktop {
-    pub(super) fn host_menu(&self, id: &'static str, cx: &Context<Self>) -> AnyElement {
+    fn composer_context(&self, cx: &Context<Self>) -> AnyElement {
+        let mut row = h_flex()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .px_2()
+            .child(self.composer_folder(cx));
         if let Some(hosts) = &self.hosts {
-            Hosts::menu(
+            row = row.child(Hosts::menu(
                 hosts,
-                id,
+                "composer-host",
                 self.remote.as_ref().map(|remote| remote.id.as_str()),
+                self.remote
+                    .as_ref()
+                    .map_or("Local", |remote| remote.name.as_str()),
                 self.busy > 0 || self.dictation.is_some(),
                 cx,
-            )
-            .into_any_element()
+            ));
         } else {
-            div()
-                .child(
-                    self.remote
-                        .as_ref()
-                        .map_or("この端末", |remote| remote.name.as_str())
-                        .to_owned(),
-                )
-                .into_any_element()
+            let name = self
+                .remote
+                .as_ref()
+                .map_or("Local", |remote| remote.name.as_str())
+                .to_owned();
+            row = row.child(
+                h_flex()
+                    .id("composer-host")
+                    .min_w_0()
+                    .max_w(px(200.))
+                    .h_8()
+                    .px_2()
+                    .gap_2()
+                    .tooltip({
+                        let name = name.clone();
+                        move |window, cx| {
+                            tooltip::Tooltip::new(format!("実行先: {name}")).build(window, cx)
+                        }
+                    })
+                    .child(Icon::default().path("bex/monitor.svg").size_4())
+                    .child(div().min_w_0().text_ellipsis().child(name)),
+            );
         }
+        if let Some(review) = self
+            .snapshot
+            .workspace
+            .review
+            .as_ref()
+            .filter(|review| !review.branch.is_empty())
+        {
+            let entity = cx.entity().downgrade();
+            row = row.child(
+                Button::new("composer-branch")
+                    .debug_selector(|| "composer-branch".into())
+                    .label(review.branch.clone())
+                    .icon(Icon::default().path("bex/branch.svg"))
+                    .accessibility_label(format!("現在のブランチ: {}", review.branch))
+                    .tooltip(format!("現在のブランチ: {}", review.branch))
+                    .dropdown_caret(true)
+                    .h_8()
+                    .min_w_0()
+                    .max_w(px(260.))
+                    .flex_shrink_1()
+                    .ghost()
+                    .disabled(!self.snapshot.connected || self.dictation.is_some())
+                    .dropdown_menu(move |menu, _, _| {
+                        let refresh = entity.clone();
+                        let changes = entity.clone();
+                        menu.item(PopupMenuItem::new("変更を表示").on_click(move |_, _, cx| {
+                            let _ = changes.update(cx, |s, cx| {
+                                s.open_review(None, cx);
+                                cx.notify();
+                            });
+                        }))
+                        .item(PopupMenuItem::new("更新").on_click(move |_, _, cx| {
+                            let _ = refresh.update(cx, |s, _| s.refresh_review());
+                        }))
+                    }),
+            );
+        }
+        row.into_any_element()
     }
 
-    pub(super) fn composer_folder(&self, cx: &Context<Self>) -> AnyElement {
+    fn composer_folder(&self, cx: &Context<Self>) -> AnyElement {
         let selected_directory = self.snapshot.selected_directory();
         let entity = cx.entity().downgrade();
         Button::new("composer-folder")
+            .debug_selector(|| "composer-folder".into())
             .label(if selected_directory.is_empty() {
                 "チャット".into()
             } else {
@@ -38,8 +99,15 @@ impl Desktop {
                 format!("フォルダ: {}", selected_directory)
             })
             .icon(IconName::Folder)
-            .dropdown_caret(true)
-            .h(px(44.))
+            .tooltip(if selected_directory.is_empty() {
+                "チャット".into()
+            } else {
+                selected_directory.clone()
+            })
+            .h_8()
+            .min_w_0()
+            .max_w(px(260.))
+            .flex_shrink_1()
             .ghost()
             .disabled(self.busy > 0 || self.dictation.is_some())
             .dropdown_menu(move |mut menu, _, cx| {
@@ -122,25 +190,6 @@ impl Desktop {
         let history = list(self.list.clone(), move |index, _, cx| {
             entity
                 .update(cx, |view, cx| match view.rows.get(index).cloned() {
-                    Some(ConversationRow::History) => {
-                        if !view.has_older_history() {
-                            return div().into_any_element();
-                        }
-                        let label = if view.history_loading {
-                            "履歴を読み込み中…".into()
-                        } else if !view.history_error.is_empty() {
-                            format!("{} · 再試行", view.history_error)
-                        } else {
-                            "以前の履歴を読み込む".into()
-                        };
-                        h_flex()
-                            .justify_center()
-                            .p_4()
-                            .child(view.button("older-history", label, cx, |view, window, cx| {
-                                view.older(window, cx)
-                            }))
-                            .into_any_element()
-                    }
                     Some(ConversationRow::Turn(turn)) => {
                         let session = view
                             .rendered
@@ -422,16 +471,7 @@ impl Desktop {
         let controls = v_flex()
             .w_full()
             .max_w(px(CHAT_WIDTH))
-            .gap_3()
-            .when(self.selected().is_none(), |column| {
-                column.child(
-                    v_flex()
-                        .items_start()
-                        .gap_1()
-                        .child(self.host_menu("composer-host", cx))
-                        .child(self.composer_folder(cx)),
-                )
-            })
+            .gap_1()
             .when(
                 !self.selected().is_none()
                     && self
@@ -442,6 +482,7 @@ impl Desktop {
                         .is_some_and(|review| !review.files.is_empty()),
                 |column| column.child(self.review_card(cx)),
             )
+            .child(self.composer_context(cx))
             .child(composer);
         body.child(
             h_flex()

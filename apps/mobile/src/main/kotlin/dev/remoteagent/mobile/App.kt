@@ -411,6 +411,7 @@ internal fun AndroidAppModel.showHosts() {
 }
 
 internal fun AndroidAppModel.older() {
+    if (loadingHistory) return
     val id = snapshot.navigation().threadId ?: return
     loadingHistory = true
     perform(Intent.ReadOlder(id)) { loadingHistory = false }

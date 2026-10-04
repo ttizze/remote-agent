@@ -35,32 +35,40 @@ case $(uname -m) in arm64|aarch64) abi=arm64-v8a ;; *) abi=x86_64 ;; esac
 avd="bex-os-$$"
 avdmanager create avd --name "$avd" --package "system-images;android-37.0;google_apis;$abi" --device pixel_7 <<< no
 log="$target/qa/android-$(date +%s)-$$"
-emulator -avd "$avd" -report-console "unix:$fixture/console.sock,server,max=30" -no-window -no-audio -no-snapshot -no-boot-anim >"$log.emulator.log" 2>&1 &
+# Headless automatic graphics use CPU rendering on macOS and compete with builds.
+gpu=auto
+if [[ $(uname) == Darwin ]]; then gpu=host; fi
+emulator -avd "$avd" -gpu "$gpu" -report-console "unix:$fixture/console.sock,server,max=30" -no-window -no-audio -no-snapshot -no-boot-anim >"$log.emulator.log" 2>&1 &
 emulator_pid=$!
 port=$(cargo xtask android-console "$fixture/console.sock")
 serial="emulator-$port"
-for ((attempt=0; attempt<180; attempt++)); do
+boot_deadline=$((SECONDS + 300))
+boot_completed=''
+while ((SECONDS < boot_deadline)); do
     kill -0 "$emulator_pid" 2>/dev/null || { cat "$log.emulator.log" >&2; exit 1; }
-    [[ $(adb -P "$server_port" -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r') == 1 ]] && break
+    boot_completed=$(timeout 5 adb -P "$server_port" -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r') || boot_completed=''
+    [[ $boot_completed == 1 ]] && break
     sleep 1
 done
-[[ $(adb -P "$server_port" -s "$serial" shell getprop sys.boot_completed | tr -d '\r') == 1 ]]
+[[ $boot_completed == 1 ]] || { echo "Android emulator did not complete boot" >&2; exit 1; }
 [[ $(adb -P "$server_port" -s "$serial" shell getprop ro.build.version.sdk | tr -d '\r') == 37 ]]
 [[ $(adb -P "$server_port" -s "$serial" shell getprop ro.build.version.codename | tr -d '\r') == REL ]]
 adb -P "$server_port" -s "$serial" shell input keyevent 82
 adb -P "$server_port" -s "$serial" install apps/mobile/build/outputs/apk/debug/mobile-debug.apk
 adb -P "$server_port" -s "$serial" install apps/mobile/build/outputs/apk/androidTest/debug/mobile-debug-androidTest.apk
+adb -P "$server_port" -s "$serial" shell am start -W -a android.intent.action.MAIN -c android.intent.category.HOME | tee "$log.home.log"
+grep -qx 'Status: ok' "$log.home.log"
 if [[ $mode == terminal ]]; then
     adb -P "$server_port" -s "$serial" shell pm grant dev.remoteagent.mobile android.permission.ACCESS_LOCAL_NETWORK
 else
 test_status=0
 cargo xtask android-network-permission "$serial" "$log.network.log" "$server_port" || test_status=$?
+adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission.png "$log.permission.png" || test_status=1
 if [[ $test_status != 0 ]]; then
     adb -P "$server_port" -s "$serial" exec-out screencap -p >"$log.startup-failure.png" || true
     adb -P "$server_port" -s "$serial" logcat -d -t 150 -s AndroidRuntime ActivityManager >"$log.startup-failure.log" || true
     exit "$test_status"
 fi
-adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission.png "$log.permission.png"
 adb -P "$server_port" -s "$serial" pull /sdcard/Android/data/dev.remoteagent.mobile/files/network-permission-granted.png "$log.granted.png"
 fi
 # The permission test starts denied and leaves LAN access granted for the real Host checks.

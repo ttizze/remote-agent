@@ -75,6 +75,9 @@ impl Desktop {
                         hosts,
                         "settings-scope-environment",
                         self.remote.as_ref().map(|host| host.id.as_str()),
+                        self.remote
+                            .as_ref()
+                            .map_or("Local", |host| host.name.as_str()),
                         self.busy > 0
                             || self.worktree_dirty
                             || self.worktree_saving
@@ -263,7 +266,7 @@ impl Desktop {
                         .checked(settings.is_some_and(|settings| settings.create_on_new_session))
                         .disabled(disabled || self.worktree_saving)
                         .on_click(cx.listener(|s, checked, _, cx| {
-                            s.save_worktree_settings(Some((true, *checked)), cx);
+                            s.save_worktree_settings(Some(WorktreeToggle::Create(*checked)), cx);
                             cx.notify();
                         }))))
                 .child(v_flex().gap_2()
@@ -279,7 +282,7 @@ impl Desktop {
                         .checked(settings.is_some_and(|settings| settings.copy_on_create))
                         .disabled(disabled || self.worktree_saving)
                         .on_click(cx.listener(|s, checked, _, cx| {
-                            s.save_worktree_settings(Some((false, *checked)), cx);
+                            s.save_worktree_settings(Some(WorktreeToggle::Copy(*checked)), cx);
                             cx.notify();
                         }))))
                 .child(v_flex().gap_2()
@@ -287,6 +290,17 @@ impl Desktop {
                     .child(Textarea::new(&self.worktree_copy_paths).aria_label("コピー対象").readonly(disabled))
                     .child(div().text_xs().text_color(rgb(0x949ca8)).child("リポジトリからの相対パスを1行に1つ入力します。例: .env.local、config/local。存在しないパスはスキップし、シンボリックリンクはコピーしません。")))
                 .child(div().text_xs().text_color(rgb(0x949ca8)).child("最初のメッセージ送信時に作成・コピーします。指定ファイルはコピー元の内容で置き換え、既存セッションでは再実行しません。")))
+            .child(h_flex().gap_5().items_center().pt_6().border_t_1().border_color(rgb(0x2b2f35))
+                .child(section_heading("マージ済みを自動削除", "main に取り込まれた作業場所を毎分確認します。実行中・回答待ち・ターミナル使用中・ローカル変更ありの場合は保留し、後で再確認します。ブランチと会話履歴は残ります。")
+                    .flex_1().min_w_0())
+                .child(switch::Switch::new("worktree-delete-merged")
+                    .accessibility_label("マージ済みワークツリーを自動削除")
+                    .checked(settings.is_some_and(|settings| settings.delete_merged))
+                    .disabled(disabled || self.worktree_saving)
+                    .on_click(cx.listener(|s, checked, _, cx| {
+                        s.save_worktree_settings(Some(WorktreeToggle::DeleteMerged(*checked)), cx);
+                        cx.notify();
+                    }))))
             .child(div().text_xs().text_color(rgb(0x949ca8)).child(if self.worktree_saved { "保存しました" } else { "変更は自動で保存されます。既存のワークツリーは移動しません。" }))
             .child(div().pt_6().border_t_1().border_color(rgb(0x2b2f35)).child(self.managed_worktrees(cx)))
             .into_any_element()

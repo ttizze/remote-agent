@@ -31,7 +31,7 @@ with `cargo test`. Use ordinary functions for setup that does not need fixtures.
 
 Use `insta` JSON snapshots for structured expected output. Review the
 expected values in the adjacent `snapshots/*.snap` files; preserve explicit
-behavioral assertions alongside snapshots. Run `nix develop . --command cargo test --locked --features agent-core/bindings -p agent-protocol -p agent-transport -p agent-core`
+behavioral assertions alongside snapshots. Run `scripts/dev-env.sh cargo test --locked --features agent-core/bindings -p agent-protocol -p agent-transport -p agent-core`
 to verify them. A snapshot mismatch is a failure, not permission to accept changed
 behavior; update expectations only after reviewing the product contract.
 
@@ -170,7 +170,7 @@ transfer server just to delete that check would reverse A14.
 ## Execution
 
 - Native clients CI owns automated verification; commits do not queue local QA.
-  Run all local unit tests with `nix develop . --command just unit-tests`,
+  Run all local unit tests with `scripts/dev-env.sh just unit-tests`,
   then integrate into main
   without requiring a PR or waiting for CI. Pushing main runs full CI;
   fix failures on main.
@@ -183,17 +183,27 @@ transfer server just to delete that check would reverse A14.
   Simulator/Host pairs for iPhone tests. Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.
-- `nix develop . --command just unit-tests` runs every Rust workspace library
-  and binary test with native bindings, verifies the standalone agent-peer
-  package, and runs headless Swift Markdown tests on macOS. Nix-pinned
+- `scripts/dev-env.sh just unit-tests` runs every Rust workspace library
+  and binary test with native bindings, runs the standalone agent-peer CLI
+  assertions with Cargo, and runs headless Swift Markdown tests on macOS. Nix-pinned
   cargo-nextest runs Rust tests across crates in parallel while the headless
   Swift tests run concurrently; both results are awaited and failures retained.
   It starts no client,
   Simulator or emulator and reuses build caches. Android currently has no JVM
-  unit tests; instrumentation acceptance remains in CI.
-- `nix develop . --command just quality rust` checks formatting, workspace
+  unit tests; instrumentation acceptance remains in CI. The environment wrapper
+  shares a fixed, garbage-collection-rooted Nix environment across worktrees,
+  keyed by the flake, lockfile and platform; cached runs do not enter Nix.
+  Cargo indexes, locks and build outputs remain worktree-local. Locked dependency
+  sources and archives are seeded from existing caches with copy-on-write on
+  APFS or reflinks where supported, preserving timestamps. Tests recompile
+  changed code and reuse unchanged artifacts; they do not build, install or
+  restart the dev app. Keep unit tests close to the implementation they verify.
+  Enable the UniFFI CLI feature only when generating bindings, so an empty CLI
+  test harness cannot replace the native library with test dependency features.
+- `scripts/dev-env.sh just quality rust` checks formatting, workspace
   Clippy, core library tests including the UniFFI bindings, and desktop rendering/input tests.
-  It runs `just unit-tests` and the selected CLI, Host integration and native
+  It also verifies the Nix agent-peer package, runs `just unit-tests` and the
+  selected CLI, Host integration and native
   runner tests, sharing one feature configuration and dependency build.
   The Rust `xtask` tests exercise build cleanup with real Cargo locks, active
   processes, symlinks and Git worktrees; native runner tests retain configuration,
@@ -201,15 +211,15 @@ transfer server just to delete that check would reverse A14.
   Proptests remain ordinary tests; failures do not stop the rest of the suite.
   The Native clients CI also enables `agent-core/bindings` to run the native
   connection and foreground recovery regressions.
-- `nix develop . --command just macos-e2e` exercises the production Browser view
+- `scripts/dev-env.sh just macos-e2e` exercises the production Browser view
   and WebKit through encrypted fixture cookie import, denied-access recovery,
   authenticated HTTP, HttpOnly protection and persistence across fresh native
   processes. Both `quality rust` and the default Apple quality suite include it
   on macOS. It owns disposable storage and uses no personal browser credentials.
-- `nix develop . --command cargo test --locked --features agent-core/bindings -p agent-protocol -p agent-transport -p agent-core -p codex-app-server
+- `scripts/dev-env.sh cargo test --locked --features agent-core/bindings -p agent-protocol -p agent-transport -p agent-core -p codex-app-server
   -p host-daemon -p host-fixture` covers the integration tests omitted by the
   selected quality targets.
-- `nix develop . --command just conversation-ui` runs the maintained native
+- `scripts/dev-env.sh just conversation-ui` runs the maintained native
   conversation contracts on one fresh isolated Simulator/Host pair.
   Each pair owns its history, failure controls and app storage.
   Set `BEX_IOS_TEST_WORKERS=1` for a serial audit, or 2–10 for parallel runs.

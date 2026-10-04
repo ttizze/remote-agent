@@ -3888,3 +3888,97 @@ async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries()
     );
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn cursor_history_retry_preserves_the_window_and_late_pages_cannot_replace_a_refresh() {
+    let id = SessionRef::new(ProviderKind::Codex, "history".into()).unwrap();
+    let item = |id: &str| {
+        json!({"id":id,"status":"unknown","clientInputId":null,
+        "body":{"inline":{"body":{"assistantText":{"text":id,"phase":"unknown"}}}}})
+    };
+    let initial: Thread = serde_json::from_value(
+        json!({"id":id,"historyCursor":"oldest-A","historyHasMore":true,
+        "turns":[{"id":"turn","status":"completed","itemsHasMore":true,"items":[item("tail")]}]}),
+    )
+    .unwrap();
+    let (store, mut reader, writer) = setup(Snapshot {
+        conversations: Arc::new(BTreeMap::from([(id.clone(), Arc::new(initial))])),
+        ..Default::default()
+    })
+    .await;
+    let cached = store.snapshot().conversations.clone();
+    let failed = store.dispatch(Intent::ReadOlder {
+        thread_id: id.clone(),
+    });
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/session/history/read");
+    assert_eq!(request["params"], json!({"session":id,"cursor":"oldest-A"}));
+    writer
+        .reply(
+            &request,
+            json!({"error":{"code":"request_failed","message":"temporary history failure"}}),
+        )
+        .await
+        .unwrap();
+    assert!(failed.await.is_err());
+    assert_eq!(store.snapshot().conversations, cached);
+
+    let retry = store.dispatch(Intent::ReadOlder {
+        thread_id: id.clone(),
+    });
+    let request = read(&mut reader).await;
+    assert_eq!(request["params"]["cursor"], "oldest-A");
+    writer
+        .reply(
+            &request,
+            json!({"result":{"nextCursor":"oldest-B",
+        "turns":[{"id":"turn","status":"unknown","itemsHasMore":false,"items":[item("head")]}]}}),
+        )
+        .await
+        .unwrap();
+    retry.await.unwrap();
+    let joined = store.snapshot();
+    let thread = &joined.conversations[&id];
+    assert_eq!(thread.history_cursor.as_deref(), Some("oldest-B"));
+    let turn = &thread.turns.as_ref().unwrap()[0];
+    assert_eq!(
+        turn.status,
+        agent_protocol::execution::TurnStatus::Completed
+    );
+    assert_eq!(
+        turn.items
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["head", "tail"]
+    );
+
+    let pending = store.dispatch(Intent::ReadOlder {
+        thread_id: id.clone(),
+    });
+    let old_request = read(&mut reader).await;
+    assert_eq!(old_request["params"]["cursor"], "oldest-B");
+    let refresh = store.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone())));
+    let request = read(&mut reader).await;
+    writer.reply(&request, json!({"result":{"thread":{"id":id,"historyCursor":"fresh-C","historyHasMore":true,
+        "turns":[{"id":"turn","status":"completed","itemsHasMore":true,"items":[item("fresh-tail")]}]}}})).await.unwrap();
+    refresh.await.unwrap();
+    let refreshed = store.snapshot().conversations.clone();
+    writer.reply(&old_request, json!({"result":{"nextCursor":null,
+        "turns":[{"id":"stale-turn","status":"completed","itemsHasMore":false,"items":[item("stale")]}]}})).await.unwrap();
+    pending.await.unwrap();
+    assert_eq!(
+        store.snapshot().conversations,
+        refreshed,
+        "an older-page reply belongs to its original cursor and subscription"
+    );
+    assert_eq!(
+        store.snapshot().conversations[&id]
+            .history_cursor
+            .as_deref(),
+        Some("fresh-C")
+    );
+    store.close().await.unwrap();
+}

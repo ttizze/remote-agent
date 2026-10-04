@@ -12,14 +12,15 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
     let id = thread.metadata["id"].as_str().unwrap();
     let cwd = thread.metadata["cwd"].as_str().unwrap();
     let gallery = thread.metadata.get("gallery") == Some(&Value::Bool(true));
-    if id != "fixture-long-history"
+    let long_history = matches!(id, "fixture-long-history" | "fixture-viewport-history");
+    if !long_history
         && !cwd.ends_with("large-history")
         && !cwd.ends_with("oversized-history")
         && !gallery
     {
         return None;
     }
-    let mut turns = if id == "fixture-long-history" {
+    let mut turns = if long_history {
         let sizes = [286, 6, 325, 393, 859, 424, 21, 609, 641, 154];
         let inputs = [4, 1, 6, 8, 1, 2, 1, 4, 1, 2];
         let statuses = [
@@ -68,11 +69,17 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
     } else {
         thread.turns.clone()
     };
-    if id == "fixture-long-history" {
+    if long_history {
         let mut last = turns.last().unwrap().borrow_mut();
+        if id == "fixture-viewport-history" {
+            last["status"] = "completed".into();
+        }
         let item = last["items"].as_array_mut().unwrap().last_mut().unwrap();
         item["id"] = "long-latest-message".into();
         item["text"] = "Latest interrupted conversation message is visible.".into();
+        if id == "fixture-viewport-history" {
+            item["phase"] = "final_answer".into();
+        }
         drop(last);
         // Keep turns started through the fixture when the client reopens history.
         // Only the list's placeholder turn is replaced by the synthetic archive.
@@ -80,7 +87,7 @@ pub(super) fn persisted(thread: &Thread) -> Option<Thread> {
             thread
                 .turns
                 .iter()
-                .filter(|turn| turn.borrow()["id"] != "turn-fixture-long-history")
+                .filter(|turn| turn.borrow()["id"] != format!("turn-{id}"))
                 .cloned(),
         );
     }

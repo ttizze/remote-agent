@@ -172,7 +172,8 @@
               ".env.example",
               "assets"
             ],
-            "worktreeDirectory": "/worktrees"
+            "worktreeDirectory": "/worktrees",
+            "deleteMerged": false
           }
         }
       }
@@ -184,7 +185,8 @@
         ".env.example",
         "assets"
       ],
-      "worktreeDirectory": "/worktrees"
+      "worktreeDirectory": "/worktrees",
+      "deleteMerged": false
     }
   },
   {
@@ -198,7 +200,8 @@
           ".env.example",
           "assets"
         ],
-        "worktreeDirectory": "/worktrees"
+        "worktreeDirectory": "/worktrees",
+        "deleteMerged": true
       }
     },
     "exchanges": [
@@ -211,7 +214,8 @@
             ".env.example",
             "assets"
           ],
-          "worktreeDirectory": "/worktrees"
+          "worktreeDirectory": "/worktrees",
+          "deleteMerged": true
         },
         "response": {
           "result": {
@@ -221,7 +225,8 @@
               ".env.example",
               "assets"
             ],
-            "worktreeDirectory": "/worktrees"
+            "worktreeDirectory": "/worktrees",
+            "deleteMerged": true
           }
         }
       }
@@ -233,7 +238,8 @@
         ".env.example",
         "assets"
       ],
-      "worktreeDirectory": "/worktrees"
+      "worktreeDirectory": "/worktrees",
+      "deleteMerged": true
     }
   },
   {
