@@ -68,7 +68,7 @@
           };
           native = pkgs.mkShell {
             RUST_TOOLCHAIN_VERSION = rustToolchain.version;
-            packages = with pkgs; [ rustToolchain sccache cargo-mutants cargo-nextest just jq git pkg-config cmake clang ]
+            packages = with pkgs; [ rustToolchain sccache cargo-mutants cargo-nextest just jq git pkg-config cmake clang actionlint nodejs ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 lsof
                 alsa-lib fontconfig freetype libxkbcommon wayland libGL vulkan-loader
@@ -93,6 +93,7 @@
               jq
               shellcheck
               actionlint
+              nodejs
               rustToolchain
               sccache
               cargo-mutants

@@ -2,6 +2,8 @@ name: Native clients
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
@@ -12,6 +14,20 @@ env:
   CARGO_BUILD_JOBS: 2
   CARGO_INCREMENTAL: 0
 jobs:
+  repository:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - name: Check workflows and vendored visualization assets
+        run: |
+          nix develop .#native --command actionlint
+          nix develop .#native --command npm --prefix crates/host-daemon/src/visualize ci --ignore-scripts --no-audit
+          nix develop .#native --command npm --prefix crates/host-daemon/src/visualize run vendor
+          git diff --exit-code -- crates/host-daemon/src/visualize
   toolchain:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -149,3 +165,14 @@ jobs:
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
         run: cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
+  verification:
+    name: Native verification
+    if: always()
+    needs: [repository, toolchain, linux, android, macos, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      JOB_RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - name: Require every verification job to succeed
+        run: jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"
