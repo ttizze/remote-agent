@@ -231,20 +231,12 @@ extension BexAppViewModel {
 
     func download(_ path: String) async throws -> URL {
         let host = selectedProfileId
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            UUID().uuidString,
-            isDirectory: true
-        )
-        let target = directory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
-        do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return try await inTemporaryDirectory { directory in
+            let target = directory.appendingPathComponent(URL(fileURLWithPath: path).lastPathComponent)
             _ = try await outcome(for: .downloadFile(DownloadFile(source: path, destination: target.path)))
             guard selectedProfileId == host else { throw CancellationError() }
             try Task.checkCancellation()
             return target
-        } catch {
-            try? FileManager.default.removeItem(at: directory)
-            throw error
         }
     }
 

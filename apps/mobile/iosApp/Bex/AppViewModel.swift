@@ -47,13 +47,7 @@ final class BexAppViewModel: ObservableObject {
         if selectedProfileId == id, store != nil {
             connect(); return
         }
-        persist()
-        connection?.cancel()
-        observation?.cancel()
-        cancelInitialization()
-        let old = store
-        store = nil
-        isConnecting = false
+        let old = detachStore()
         selectedProfileId = id
         UserDefaults.standard.set(id, forKey: "bex.selected-host")
         publish(AgentCore.Snapshot.empty())
@@ -70,15 +64,9 @@ final class BexAppViewModel: ObservableObject {
             let remaining = profiles.filter { $0.id != id }
             try DeviceIdentity.remove(id)
             if selectedProfileId == id {
-                persist()
-                connection?.cancel()
-                observation?.cancel()
-                cancelInitialization()
-                let old = store
-                store = nil
+                let old = detachStore()
                 selectedProfileId = nil
                 UserDefaults.standard.removeObject(forKey: "bex.selected-host")
-                isConnecting = false
                 notice = nil
                 publish(AgentCore.Snapshot.empty())
                 Task { [weak self] in
@@ -89,6 +77,18 @@ final class BexAppViewModel: ObservableObject {
             try HostProfile.save(profiles)
             screen = .profiles
         } catch { notice = error.localizedDescription }
+    }
+
+    /// Save and stop the current Host's work; the caller shuts down the returned store.
+    private func detachStore() -> AgentStore? {
+        persist()
+        connection?.cancel()
+        observation?.cancel()
+        cancelInitialization()
+        let old = store
+        store = nil
+        isConnecting = false
+        return old
     }
 
     private func cancelInitialization() {

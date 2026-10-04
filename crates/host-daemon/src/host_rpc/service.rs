@@ -380,9 +380,7 @@ impl HostRpcService {
             .await;
             return match result {
                 Ok(reply) => Ok(reply),
-                Err(error) => Ok(Response::from_result::<(), _>(Err(error))
-                    .map_err(invalid_message)?
-                    .into()),
+                Err(error) => Ok(Response::from_result::<(), _>(Err(error)).into()),
             };
         }
         let result = async {
@@ -453,9 +451,7 @@ impl HostRpcService {
                 &serde_json::value::to_raw_value(error).map_err(invalid_message)?,
             );
         }
-        Ok(Response::from_result(result)
-            .map_err(invalid_message)?
-            .into())
+        Ok(Response::from_result(result).into())
     }
 
     async fn submit_input(
@@ -608,9 +604,7 @@ impl HostRpcService {
             Err(error) => {
                 let message = format!("{error:#}");
                 tracing::error!(target: "bex", operation = "history.open", message);
-                Ok(Response::error("session_open_failed", &message)
-                    .map_err(invalid_message)?
-                    .into())
+                Ok(Response::error("session_open_failed", &message).into())
             }
         }
     }
@@ -974,25 +968,11 @@ impl HostRpcService {
             Call::ForkSession(params) => {
                 let target = target_session.expect("session-scoped fork");
                 let agent = self.agent(target.provider)?;
-                let scope = uuid::Uuid::new_v4().to_string();
-                let mut response = agent
-                    .fork(
-                        &target.id,
-                        &params.last_turn_id,
-                        self.browser_config(&scope)?,
-                    )
-                    .await?;
-                if let Some(browser) = self.inner.browser.get()
-                    && let Some(id) = &response.thread.id
-                {
-                    browser.bind_scope(scope, id.to_string()).await;
-                }
-                describe_thread(
-                    &mut response.thread,
-                    agent.capabilities(),
-                    &self.project_snapshot().await?,
-                );
-                response.into()
+                self.start_thread(agent.as_ref(), |browser| {
+                    agent.fork(&target.id, &params.last_turn_id, browser)
+                })
+                .await?
+                .into()
             }
             Call::Interrupt(params) => {
                 let target = target_session.expect("session-scoped interrupt");
@@ -1389,14 +1369,27 @@ impl HostRpcService {
                 Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
             }
         }
-        let scope = uuid::Uuid::new_v4().to_string();
-        let mut response = agent
-            .create(
+        self.start_thread(agent.as_ref(), |browser| {
+            agent.create(
                 params.cwd.as_deref().unwrap_or_default(),
                 params.model.as_ref().map(|m| m.id.as_str()),
-                self.browser_config(&scope)?,
+                browser,
             )
-            .await?;
+        })
+        .await
+    }
+
+    /// New threads browse under a provisional scope until their native ID exists.
+    async fn start_thread<F>(
+        &self,
+        agent: &dyn Agent,
+        start: impl FnOnce(Option<serde_json::Value>) -> F,
+    ) -> Result<ThreadResponse, Failure>
+    where
+        F: std::future::Future<Output = Result<ThreadResponse, Failure>>,
+    {
+        let scope = uuid::Uuid::new_v4().to_string();
+        let mut response = start(self.browser_config(&scope)?).await?;
         if let Some(browser) = self.inner.browser.get()
             && let Some(id) = &response.thread.id
         {

@@ -470,6 +470,26 @@ pub struct HistoryPage {
     pub next_cursor: Option<String>,
 }
 
+impl HistoryPage {
+    /// Join this older page before the thread's turns and advance its cursor.
+    pub fn prepend_to(&self, thread: &mut crate::models::Thread) {
+        thread.turns = Some(prepend_history(
+            &self.turns,
+            thread.turns.as_deref().unwrap_or_default(),
+        ));
+        thread.history_cursor = self.next_cursor.clone();
+        thread.history_has_more = Some(thread.history_cursor.is_some());
+        thread.history_read_state = Some(HistoryReadState::new(
+            if thread.history_cursor.is_some() {
+                HistoryReadKind::Partial
+            } else {
+                HistoryReadKind::Complete
+            },
+            Vec::new(),
+        ));
+    }
+}
+
 /// Native turn cursors prove adjacency; repeated IDs remain separate occurrences.
 pub fn prepend_history(older: &[Arc<Turn>], current: &[Arc<Turn>]) -> Vec<Arc<Turn>> {
     older.iter().chain(current).cloned().collect()
