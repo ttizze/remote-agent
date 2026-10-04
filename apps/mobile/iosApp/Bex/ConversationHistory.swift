@@ -61,7 +61,7 @@ extension ThreadScreen {
             selection: selectionActions,
             isExpanded: expandedItemIds.contains(item.data.id),
             toggleExpanded: {
-                isFollowingLatest = false
+                scrollPosition = ScrollPosition(idType: String.self)
                 if expandedItemIds.contains(item.data.id) {
                     expandedItemIds.remove(item.data.id)
                 } else {
@@ -83,7 +83,7 @@ extension ThreadScreen {
         let expanded = activityIsExpanded(turn)
         if turn.activityCanCollapse {
             Button {
-                isFollowingLatest = false
+                scrollPosition = ScrollPosition(idType: String.self)
                 activityExpansionOverrides[turn.id] = ActivityExpansion(status: turn.status, expanded: !expanded)
                 if !expanded, let params = turn.loadItems {
                     model.perform(.loadTurnItems(params))
@@ -105,7 +105,7 @@ extension ThreadScreen {
                   loading: model.loadingHistory,
                   oldestVisible: oldestHistoryRowVisible,
                   latestVisible: latestHistoryRowVisible,
-                  followingLatest: isFollowingLatest
+                  followingLatest: scrollPosition.edge == .bottom
               ) else { return }
         model.loadOlderHistory()
     }
