@@ -3,6 +3,22 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 bex_root=$PWD
+bex_build_root=$(git config --path --get bex.buildRoot || true)
+if [[ -n $bex_build_root ]]; then
+    # Keep conventional target paths for Cargo, Xcode and generated bindings.
+    # Never create the root: an unplugged build volume must fail visibly.
+    if [[ $bex_build_root != /* || ! -d $bex_build_root ]]; then
+        printf 'Build storage is unavailable: %s\n' "$bex_build_root" >&2
+        exit 1
+    fi
+    if [[ ! -e $bex_root/target && ! -L $bex_root/target ]]; then
+        bex_build_key=$(printf '%s\n' "$bex_root" | git hash-object --stdin)
+        mkdir -p "$bex_build_root/$bex_build_key"
+        # Do not follow a directory link created by a concurrent invocation.
+        ln -sn "$bex_build_root/$bex_build_key" "$bex_root/target" ||
+            [[ -L $bex_root/target && $(readlink "$bex_root/target") == "$bex_build_root/$bex_build_key" ]]
+    fi
+fi
 bex_seed_cargo=${CARGO_HOME:-$HOME/.cargo}
 export XDG_CACHE_HOME="$bex_root/target/tool-cache"
 bex_env_key=$({ git hash-object flake.nix flake.lock; uname -sm; } | git hash-object --stdin)

@@ -1,4 +1,4 @@
-/target/
+/target
 /output/
 node_modules/
 /apps/mobile/src/androidMain/jniLibs/
