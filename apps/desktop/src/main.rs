@@ -31,6 +31,10 @@ impl DesktopAssets {
                 "../../mobile/iosApp/Bex/Assets.xcassets/anthropic.imageset/anthropic.svg"
             ),
         ),
+        (
+            "bex/claude.svg",
+            include_bytes!("../../mobile/iosApp/Bex/Assets.xcassets/claude.imageset/claude.svg"),
+        ),
         ("bex/shield.svg", include_bytes!("../assets/shield.svg")),
         ("bex/bolt.svg", include_bytes!("../assets/bolt.svg")),
         (

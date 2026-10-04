@@ -252,14 +252,14 @@ extension ThreadScreen {
         var preparation: DictationPreparation?
         dictation.start(started: { [weak model] in
             preparation = model?.store?.prepareDictation()
-        }) { [weak model] result in
+        }, completion: { [weak model] result in
             guard let model, model.draftKey == key else { return }
             switch result {
             case let .success(audio): model.transcribe(audio, draftKey: key, sendImmediately: sendIntent.wrappedValue,
                                                        preparation: preparation)
             case let .failure(error): model.transferError = error.localizedDescription
             }
-        }
+        })
     }
 
     var messageField: some View {

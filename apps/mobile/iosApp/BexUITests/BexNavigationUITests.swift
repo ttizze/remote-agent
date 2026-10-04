@@ -188,7 +188,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(app.buttons["model.account.desktop"].exists)
         choice.tap()
         captureScreen(app, named: "Claude models without Codex")
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         let message = app.textFields["task.message"]
         message.tap()
         message.typeText("Claude standalone")
@@ -218,6 +218,26 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.textFields["model.search"].waitForExistence(timeout: 15))
     }
 
+    func dismissModelSettings(_ app: XCUIApplication) {
+        if app.buttons["model.close"].exists {
+            app.buttons["model.close"].tap()
+        } else if app.buttons["settings.close"].exists {
+            app.buttons["settings.close"].tap()
+        } else {
+            let picker = app.descendants(matching: .any)["model.picker"]
+            XCTAssertTrue(picker.waitForExistence(timeout: 10))
+            let handle = picker.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0))
+                .withOffset(CGVector(dx: 0, dy: -12))
+            handle.press(
+                forDuration: 0.1,
+                thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
+            )
+        }
+        let dismissed = expectation(for: NSPredicate(format: "exists == false"),
+                                    evaluatedWith: app.textFields["model.search"])
+        wait(for: [dismissed], timeout: 10)
+    }
+
     func chooseFixtureEffort(_ app: XCUIApplication, _ value: String) {
         let control = app.buttons["model.effort"]
         XCTAssertTrue(control.waitForExistence(timeout: 10)); control.tap()
@@ -229,7 +249,7 @@ extension BexLaunchUITests {
         openModelChoices(app)
         let choice = app.buttons["model.choice.fixture-model"]
         XCTAssertTrue(choice.waitForExistence(timeout: 10)); choice.tap()
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         chooseFixtureEffort(app, "high")
     }
 
@@ -242,7 +262,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(choice.waitForExistence(timeout: 10))
         XCTAssertEqual(choice.value as? String, "選択中")
         captureScreen(app, named: "Restored model and account picker")
-        app.buttons["model.close"].tap()
+        dismissModelSettings(app)
         XCTAssertEqual(app.buttons["model.effort"].value as? String, "high")
         chooseFixtureEffort(app, "medium")
         XCTAssertEqual(app.buttons["model.effort"].value as? String, "medium")

@@ -1,5 +1,6 @@
 use super::*;
 use agent_protocol::session::ProviderKind;
+use gpui_kit::Rgba;
 
 fn provider_icon(provider: ProviderKind) -> Icon {
     Icon::default().path(match provider {
@@ -244,9 +245,9 @@ impl Desktop {
         let entity = cx.entity().downgrade();
         let opening = entity.clone();
         popover::Popover::new("model-controls")
-            .bg(rgb(0x171819))
+            .bg(rgb(0x171717))
             .rounded(px(10.))
-            .border_color(rgb(0x2a2c2e))
+            .border_color(rgb(0x282828))
             // Open toward the conversation. Native terminal/browser views in
             // the right panel sit above GPUI's in-window popup layer.
             .anchor(Anchor::BottomRight)
@@ -755,7 +756,7 @@ fn account_usage_view(usage: Option<&agent_protocol::operations::AccountUsage>) 
 
 impl Desktop {
     fn model_panel_content(&self, cx: &Context<Self>) -> AnyElement {
-        let mut body = v_flex().w_full().gap_2();
+        let mut body = v_flex().flex_1().min_w_0().gap_2();
         if self.model_panel != ModelPanel::Models {
             let title = if self.model_panel == ModelPanel::Accounts {
                 "アカウント"
@@ -786,6 +787,7 @@ impl Desktop {
                 )
                 .child(div().text_base().child(title));
             return body
+                .w_full()
                 .child(header)
                 .child(
                     div()
@@ -801,71 +803,55 @@ impl Desktop {
             || self.busy > 0
             || !self.snapshot.connected
             || self.snapshot.account.login.is_some();
-        let entity = cx.entity().downgrade();
-        body = body.child(
-            h_flex()
-                .w_full()
-                .h(px(44.))
-                .px_2()
-                .justify_between()
-                .border_b_1()
-                .border_color(rgb(0x2a2c2e))
-                .child(
-                    div()
-                        .id("model-agent-label")
-                        .debug_selector(|| "model-agent-label".into())
-                        .text_base()
-                        .line_height(px(20.))
-                        .font_weight(FontWeight::NORMAL)
-                        .child("エージェント"),
-                )
-                .child(
-                    Button::new("model-agent")
-                        .accessibility_label("エージェントを選択")
-                        .child(
-                            div()
-                                .text_base()
-                                .line_height(px(20.))
-                                .font_weight(FontWeight::NORMAL)
-                                .child(match provider {
-                                    ProviderKind::Codex => "Codex",
-                                    ProviderKind::Claude => "Claude Code",
-                                }),
-                        )
-                        .child(Icon::new(IconName::ChevronRight).size(px(16.)))
-                        .large()
-                        .px_0()
-                        .debug_selector(|| "model-agent".into())
-                        .ghost()
-                        .disabled(disabled)
-                        .dropdown_menu(move |mut menu, _, _| {
-                            for (provider, label) in [
-                                (ProviderKind::Codex, "Codex"),
-                                (ProviderKind::Claude, "Claude Code"),
-                            ] {
-                                let entity = entity.clone();
-                                menu = menu.item(PopupMenuItem::new(label).on_click(
-                                    move |_, _, cx| {
-                                        let _ = entity.update(cx, |s, cx| {
-                                            s.model_provider = Some(provider);
-                                            if let Some(model) = s
-                                                .snapshot
-                                                .model_for_provider(s.draft_key().clone(), provider)
-                                            {
-                                                s.dispatch(Intent::SelectModel {
-                                                    thread_id: s.draft_key().clone(),
-                                                    model,
-                                                });
-                                            }
-                                            cx.notify();
-                                        });
-                                    },
-                                ));
-                            }
-                            menu
-                        }),
-                ),
-        );
+        let mut agents = v_flex()
+            .w(px(52.))
+            .flex_shrink_0()
+            .gap_2()
+            .pr_2()
+            .border_r_1()
+            .border_color(rgb(0x282828));
+        for (value, label) in [
+            (ProviderKind::Codex, "Codex"),
+            (ProviderKind::Claude, "Claude"),
+        ] {
+            agents = agents.child(
+                Button::new(format!("model-agent-{label}"))
+                    .icon(
+                        if value == ProviderKind::Claude {
+                            Icon::default()
+                                .path("bex/claude.svg")
+                                .text_color(rgb(0xd97757))
+                        } else {
+                            provider_icon(value)
+                        }
+                        .size(px(24.)),
+                    )
+                    .ghost()
+                    .w(px(44.))
+                    .h(px(44.))
+                    .rounded(px(8.))
+                    .selected(provider == value)
+                    .when(provider == value, |button| button.bg(rgb(0x262626)))
+                    .accessibility_label(label)
+                    .tooltip(label)
+                    .debug_selector(move || format!("model-agent-{label}"))
+                    .disabled(disabled || self.selected().is_some())
+                    .on_click(cx.listener(move |s, _, window, cx| {
+                        s.model_provider = Some(value);
+                        s.model_search
+                            .update(cx, |input, cx| input.set_value("", window, cx));
+                        if let Some(model) =
+                            s.snapshot.model_for_provider(s.draft_key().clone(), value)
+                        {
+                            s.dispatch(Intent::SelectModel {
+                                thread_id: s.draft_key().clone(),
+                                model,
+                            });
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
         let account =
             self.snapshot
                 .account
@@ -904,21 +890,13 @@ impl Desktop {
                                 .line_height(px(20.))
                                 .font_weight(FontWeight::NORMAL)
                                 .child(
-                                    div()
-                                        .id("model-account-label")
-                                        .debug_selector(|| "model-account-label".into())
-                                        .flex_shrink_0()
-                                        .child("アカウント"),
-                                )
-                                .child(
                                     account_identity(
-                                        account.map(|a| a.provider),
+                                        None,
                                         account.map_or("未選択", |a| {
                                             a.email.as_deref().unwrap_or(&a.id)
                                         }),
                                     )
-                                    .flex_1()
-                                    .justify_end(),
+                                    .flex_1(),
                                 )
                                 .child(Icon::new(IconName::ChevronRight).size(px(16.))),
                         )
@@ -932,12 +910,11 @@ impl Desktop {
                 ),
         );
         body = body
-            .child(div().h(px(1.)).w_full().bg(rgb(0x2a2c2e)))
+            .child(div().h(px(1.)).w_full().bg(rgb(0x282828)))
             .child(
                 Input::new(&self.model_search)
                     .prefix(IconName::Search)
-                    .border_1()
-                    .border_color(rgb(0x2a2c2e))
+                    .appearance(false)
                     .large()
                     .aria_label("モデルを検索"),
             );
@@ -947,9 +924,8 @@ impl Desktop {
         );
         let mut list = v_flex()
             .id("model-catalog")
-            .max_h(px(240.))
-            .overflow_y_scroll()
-            .gap_1();
+            .max_h(px(264.))
+            .overflow_y_scroll();
         if models.is_empty() {
             list = list.child("利用可能なモデルがありません");
         }
@@ -973,7 +949,7 @@ impl Desktop {
                     .px_2()
                     .disabled(disabled)
                     .selected(selected)
-                    .when(selected, |button| button.bg(rgb(0x262b32)))
+                    .when(selected, |button| button.bg(rgb(0x222222)))
                     .child(
                         h_flex()
                             .w_full()
@@ -992,13 +968,14 @@ impl Desktop {
                                 row.child(
                                     Icon::new(IconName::Check)
                                         .size(px(20.))
-                                        .text_color(rgb(0x5aa2ff)),
+                                        .text_color(rgb(0x346bf1)),
                                 )
                             }),
                     ),
             );
         }
-        body.child(list)
+        body = body
+            .child(list)
             .children(
                 self.snapshot
                     .model_error_messages(Some(provider))
@@ -1018,13 +995,25 @@ impl Desktop {
                         .child(error_message(&self.error)),
                 )
             })
-            .child(
-                v_flex()
-                    .border_t_1()
-                    .border_color(rgb(0x2a2c2e))
-                    .child(self.effort_control("model-picker-effort", true, cx))
-                    .child(self.fast_control("model-picker-speed", true, cx)),
-            )
+            .when(
+                self.draft().model.as_ref().map(|model| model.provider) == Some(provider),
+                |body| {
+                    body.child(
+                        h_flex()
+                            .gap_3()
+                            .border_t_1()
+                            .border_color(rgb(0x282828))
+                            .child(self.effort_control("model-picker-effort", true, cx))
+                            .child(self.fast_control("model-picker-speed", true, cx)),
+                    )
+                },
+            );
+        h_flex()
+            .w_full()
+            .items_stretch()
+            .gap_3()
+            .child(agents)
+            .child(body)
             .into_any_element()
     }
 
@@ -1035,42 +1024,66 @@ impl Desktop {
         cx: &Context<Self>,
     ) -> AnyElement {
         let controls = self.snapshot.model_quick_controls(self.draft_key().clone());
-        let Some(next) = controls.toggle_fast_to else {
+        let (Some(next), Some(tier)) = (controls.toggle_fast_to, controls.fast_service_tier) else {
             return div().into_any_element();
         };
-        let label = if controls.fast {
+        let fast = controls.fast;
+        let label = if fast {
             "Fast：オン"
         } else {
             "Fast：オフ"
         };
-        Self::icon_button(id, fast_icon(controls.fast), label, cx, move |s, _, _| {
-            s.dispatch(Intent::SelectServiceTier {
-                thread_id: s.draft_key().clone(),
-                service_tier: next.clone(),
-            });
-        })
-        .debug_selector(move || id.into())
-        .when(!expanded, |button| button.w(px(40.)))
-        .when(expanded, |button| {
-            button.w_full().label(if controls.fast {
-                "速度：高速"
-            } else {
-                "速度：通常"
-            })
-        })
-        .h(px(44.))
-        .text_color(if controls.fast {
-            rgb(0x78adff)
+        let button = Button::new(id)
+            .icon(fast_icon(fast))
+            .ghost()
+            .accessibility_label(label)
+            .tooltip(label)
+            .debug_selector(move || id.into())
+            .h(px(44.))
+            .text_color(if fast { rgb(0x78adff) } else { rgb(0x999999) })
+            .disabled(
+                !self.snapshot.connected
+                    || self.account_busy
+                    || self.busy > 0
+                    || self.snapshot.account.login.is_some(),
+            );
+        if expanded {
+            let entity = cx.entity().downgrade();
+            button
+                .label(if fast { "高速" } else { "通常" })
+                .child(Icon::new(IconName::ChevronDown).size(px(14.)))
+                .dropdown_menu_with_anchor(Anchor::BottomRight, move |mut menu, _, _| {
+                    for (value, label) in [("default".to_owned(), "通常"), (tier.clone(), "高速")]
+                    {
+                        let entity = entity.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(label)
+                                .checked((value != "default") == fast)
+                                .on_click(move |_, _, cx| {
+                                    let _ = entity.update(cx, |s, cx| {
+                                        s.dispatch(Intent::SelectServiceTier {
+                                            thread_id: s.draft_key().clone(),
+                                            service_tier: value.clone(),
+                                        });
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                    menu
+                })
+                .into_any_element()
         } else {
-            rgb(0x999999)
-        })
-        .disabled(
-            !self.snapshot.connected
-                || self.account_busy
-                || self.busy > 0
-                || self.snapshot.account.login.is_some(),
-        )
-        .into_any_element()
+            button
+                .w(px(40.))
+                .on_click(cx.listener(move |s, _, _, _| {
+                    s.dispatch(Intent::SelectServiceTier {
+                        thread_id: s.draft_key().clone(),
+                        service_tier: next.clone(),
+                    });
+                }))
+                .into_any_element()
+        }
     }
 
     pub(super) fn effort_control(
@@ -1107,8 +1120,7 @@ impl Desktop {
             .when(!expanded, |button| button.w(px(44.)))
             .when(expanded, |button| {
                 button
-                    .w_full()
-                    .label(format!("思考の深さ：{}", controls.effort))
+                    .label(controls.effort.clone())
                     .child(Icon::new(IconName::ChevronDown).size(px(14.)))
             })
             .h(px(44.))
@@ -1162,7 +1174,8 @@ fn weekly_usage_view(windows: Vec<agent_protocol::operations::UsageWindow>) -> A
             h_flex()
                 .w_full()
                 .gap_3()
-                .child(usage_bar(window.remaining_percent).flex_1())
+                .child(div().text_xs().text_color(rgb(0xa3a3a3)).child("週間残量"))
+                .child(usage_bar(window.remaining_percent, rgb(0x346bf1)).flex_1())
                 .child(
                     div()
                         .line_height(px(20.))
@@ -1185,10 +1198,10 @@ fn usage_window_view(window: &agent_protocol::operations::UsageWindow) -> Div {
                 .child(window.label.clone())
                 .child(format!("残り {}%", window.remaining_percent)),
         )
-        .child(usage_bar(window.remaining_percent))
+        .child(usage_bar(window.remaining_percent, rgb(0x8acfac)))
 }
 
-fn usage_bar(remaining_percent: u32) -> Div {
+fn usage_bar(remaining_percent: u32, tint: Rgba) -> Div {
     div()
         .h(px(4.))
         .w_full()
@@ -1202,7 +1215,7 @@ fn usage_bar(remaining_percent: u32) -> Div {
                 .bg(if remaining_percent <= 20 {
                     rgb(0xe9b56f)
                 } else {
-                    rgb(0x8acfac)
+                    tint
                 }),
         )
 }
@@ -1286,16 +1299,29 @@ mod tests {
         let effort = window.debug_bounds("model-picker-effort").unwrap();
         let speed = window.debug_bounds("model-picker-speed").unwrap();
         assert!(model.bottom() <= effort.top());
-        assert!(effort.bottom() <= speed.top());
+        assert_eq!(effort.top(), speed.top());
+        assert!(effort.right() <= speed.left());
         assert!(window.debug_bounds("model-choice-claude:sonnet").is_none());
         assert!(window.debug_bounds("account-logout-0").is_none());
         let summary = window.debug_bounds("model-account-summary").unwrap();
-        let agent_label = window.debug_bounds("model-agent-label").unwrap();
-        let account_label = window.debug_bounds("model-account-label").unwrap();
-        assert!((agent_label.left() - account_label.left()).abs() <= px(1.));
-        assert_eq!(agent_label.size.height, account_label.size.height);
+        let codex = window.debug_bounds("model-agent-Codex").unwrap();
+        let claude = window.debug_bounds("model-agent-Claude").unwrap();
+        assert!(codex.right() <= summary.left());
+        assert!(codex.bottom() <= claude.top());
+        assert!(window.debug_bounds("model-agent-label").is_none());
+        assert!(window.debug_bounds("model-account-label").is_none());
         let account_row = window.debug_bounds("model-account-row").unwrap();
         assert!(account_row.size.width >= summary.size.width - px(24.));
+        window.simulate_click(claude.center(), Modifiers::default());
+        window.run_until_parked();
+        assert!(window.debug_bounds("model-choice-claude:sonnet").is_some());
+        assert!(window.debug_bounds("model-choice-gpt").is_none());
+        assert!(window.debug_bounds("model-picker-effort").is_none());
+        assert!(window.debug_bounds("model-picker-speed").is_none());
+        window.simulate_click(codex.center(), Modifiers::default());
+        window.run_until_parked();
+        assert!(window.debug_bounds("model-choice-gpt").is_some());
+        assert!(window.debug_bounds("model-picker-effort").is_some());
         window.simulate_click(summary.center(), Modifiers::default());
         window.run_until_parked();
         assert!(window.debug_bounds("account-choice-0").is_some());
@@ -1326,6 +1352,28 @@ mod tests {
         });
         window.run_until_parked();
         assert!(window.debug_bounds("model-choice-gpt").is_none());
+        window.update(|window, cx| {
+            view.read(cx).0.clone().update(cx, |view, cx| {
+                let draft = view.draft().clone();
+                let session = agent_protocol::session::SessionRef {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    id: "existing".into(),
+                };
+                let snapshot = Arc::make_mut(&mut view.snapshot);
+                Arc::make_mut(&mut snapshot.navigation).thread_id = Some(session.clone());
+                Arc::make_mut(&mut snapshot.navigation).draft_key = session.clone().into();
+                Arc::make_mut(&mut snapshot.drafts).insert(session.into(), Arc::new(draft));
+                view.model_provider = None;
+                view.model_search
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                cx.notify();
+            })
+        });
+        window.run_until_parked();
+        let claude = window.debug_bounds("model-agent-Claude").unwrap();
+        window.simulate_click(claude.center(), Modifiers::default());
+        window.update(|_, cx| assert!(view.read(cx).0.read(cx).model_provider.is_none()));
+        assert!(window.debug_bounds("model-choice-gpt").is_some());
         window.update(|_, cx| {
             view.read(cx).0.clone().update(cx, |view, cx| {
                 view.model_panel = ModelPanel::Manage;

@@ -93,7 +93,8 @@ conversation-ui:
         testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
         testSimulatorCanStartAConversationInAProject \
         testSimulatorModelDefaultsPersistAndApplyOnlyToNewConversations \
-        testSimulatorSelectsModelScopeAndShowsUsageBeforeManagingAccounts \
+        testSimulatorModelDefaultsInheritAndPersistAcrossScopes \
+        testSimulatorModelPickerUsesAgentRailAndCompactControls \
         testSimulatorOpensTasksBeforeHistoryReadFinishes \
         testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
         testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
