@@ -31,10 +31,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.revenuecat.placeholder.PlaceholderDefaults
+import com.revenuecat.placeholder.placeholder
 import dev.remoteagent.core.Attachment
 import dev.remoteagent.core.DownloadFile
 import dev.remoteagent.core.DraftKey
@@ -47,6 +50,25 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 private const val THUMBNAIL_MAX_PIXELS = 512
+
+@Composable
+internal fun ImageSkeleton(
+    modifier: Modifier,
+    label: String = "画像を読み込み中",
+    tag: String = "image.loading.skeleton",
+) {
+    Box(
+        modifier
+            .placeholder(
+                enabled = true,
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(10.dp),
+                highlight = PlaceholderDefaults.pulse,
+            )
+            .semantics { contentDescription = label }
+            .testTag(tag)
+    )
+}
 
 @Composable
 internal fun DraftAttachments(
@@ -144,6 +166,7 @@ internal fun AttachmentThumbnail(
     Box(modifier, contentAlignment = Alignment.Center) {
         val loaded = bitmap
         if (loaded != null) Image(loaded, name, Modifier.fillMaxSize(), contentScale = contentScale)
-        else Text(if (failed) "画像を表示できません" else "読み込み中…", style = MaterialTheme.typography.labelSmall)
+        else if (failed) Text("画像を表示できません", style = MaterialTheme.typography.labelSmall)
+        else ImageSkeleton(Modifier.fillMaxSize())
     }
 }

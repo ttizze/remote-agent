@@ -520,8 +520,11 @@ Acceptance: `new_conversation_moves_draft_to_pending_before_creation_reply`,
   reopened history.
 - Desktop, iPhone and Android image generation without an image source shows a
   rounded skeleton with a pulse animation while the item is in progress. It fits
-  the conversation width (up to 320 px), yields to the image when available,
-  and disappears on completion or failure. Reduced motion keeps it static.
+  the conversation width (up to 320 px). Once a source arrives, image previews
+  keep a skeleton while fetching and decoding it, including reopened history
+  and gallery previews. The decoded image replaces the skeleton; loading failure
+  shows an error instead of leaving a blank preview. Generation without a source
+  ends its skeleton on completion or failure. Reduced motion keeps it static.
   While generating, omit the redundant “画像を生成中…” label.
 - Desktop image previews expose decrease, percentage/reset, and increase controls
   (25–400% of the fitted view). Enlarged images scroll in both directions; selecting

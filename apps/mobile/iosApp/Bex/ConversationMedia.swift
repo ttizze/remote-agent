@@ -2,6 +2,7 @@ import AgentCore
 import ImageIO
 import Photos
 import QuickLook
+import SkeletonUI
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -45,6 +46,24 @@ struct ConversationMediaAccess {
     let visualization: @MainActor (String) async throws -> String
 }
 
+struct ConversationImageSkeleton: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var label = "画像を読み込み中"
+    var identifier = "image.loading.skeleton"
+
+    var body: some View {
+        Color.clear
+            .skeleton(with: true, animation: reduceMotion ? .none : .pulse(),
+                      appearance: .solid(color: Color.primary.opacity(0.08),
+                                         background: Color(UIColor.secondarySystemBackground)),
+                      shape: .rounded(.radius(10)))
+            .frame(maxWidth: 320)
+            .frame(height: 320)
+            .accessibilityLabel(label)
+            .accessibilityIdentifier(identifier)
+    }
+}
+
 struct ConversationImage: View {
     let source: SessionImage
     let label: String
@@ -84,7 +103,7 @@ struct ConversationImage: View {
                 Label("画像を表示できません: \(error)", systemImage: "photo")
                     .font(.caption).foregroundColor(.secondary)
             } else {
-                ProgressView("画像を読み込み中…").frame(height: 120)
+                ConversationImageSkeleton()
             }
         }
         .alert(
@@ -268,7 +287,7 @@ private struct ConversationImagePreview: View {
             } else if loadFailed {
                 Text("画像ファイルを読み込めません。")
             } else {
-                ProgressView("画像を読み込み中…")
+                ConversationImageSkeleton()
             }
         }
         .task(id: url) {
