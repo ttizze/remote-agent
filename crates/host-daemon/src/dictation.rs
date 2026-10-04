@@ -181,11 +181,9 @@ async fn transcribe_request(
             transcribe_recording(&key, RecordingService::OpenAi, pcm, API_TRANSCRIBE_URL).await?
         }
         AuthToken::ChatGpt(token) => {
-            let audio = Zeroizing::new(STANDARD.encode(pcm));
             transcribe_authenticated(
                 &token,
                 &app_server.initialize_response().user_agent,
-                &audio,
                 pcm,
                 DICTATION_URL,
                 TRANSCRIBE_URL,
@@ -208,7 +206,6 @@ fn install_tls_provider() {
 async fn transcribe_authenticated(
     token: &str,
     user_agent: &str,
-    audio: &str,
     pcm: &[u8],
     stream_url: &str,
     recording_url: &str,
@@ -216,6 +213,7 @@ async fn transcribe_authenticated(
 ) -> Result<String, String> {
     // Keep complete PCM for file transcription if the WebSocket attempts fail.
     let stream_result = tokio::time::timeout(Duration::from_secs(18), async {
+        let audio = Zeroizing::new(STANDARD.encode(pcm));
         // Preparation shares the stream budget so file fallback still has
         // time to finish within the overall transcription timeout.
         let socket = match prepared {
@@ -227,14 +225,14 @@ async fn transcribe_authenticated(
             None => None,
         };
         if let Some(socket) = socket
-            && let Ok(text) = transcribe_socket(socket, audio).await
+            && let Ok(text) = transcribe_socket(socket, &audio).await
         {
             return Ok(text);
         }
         // An idle prepared connection may have expired. Retry with all of
         // the same recording before falling back to the file endpoint.
         let socket = connect_stream(token, user_agent, stream_url).await?;
-        transcribe_socket(socket, audio).await
+        transcribe_socket(socket, &audio).await
     })
     .await
     .unwrap_or_else(|_| Err("音声ストリームがタイムアウトしました。".into()));
@@ -550,7 +548,7 @@ mod tests {
                     Ok(PreparedConnection { token, socket })
                 });
                 warmed.await.unwrap();
-                transcribe_authenticated("isolated-token", "isolated-codex/1.0", "AQD/fw==",
+                transcribe_authenticated("isolated-token", "isolated-codex/1.0",
                     &[1, 0, 255, 127], &url, "http://127.0.0.1:1/unused", Some(prepared)).await.unwrap()
             };
             let (text, ()) = tokio::join!(operation, provider);
@@ -587,7 +585,7 @@ mod tests {
                     Ok(PreparedConnection { token, socket })
                 });
                 // Stop can precede completion of the initial handshake.
-                transcribe_authenticated("isolated-token", "isolated-codex/1.0", "AQD/fw==",
+                transcribe_authenticated("isolated-token", "isolated-codex/1.0",
                     &[1, 0, 255, 127], &url, "http://127.0.0.1:1/unused", Some(prepared)).await.unwrap()
             };
             let (text, ()) = tokio::join!(operation, provider);
@@ -1015,7 +1013,7 @@ mod tests {
                     transcribe_recording(&token, RecordingService::OpenAi, &[1, 0, 255, 127], &recording_url).await
                 } else {
                     let prepared = pending_preparation.then(|| Prepared::new("delayed".into(), std::future::pending()));
-                    transcribe_authenticated(&token, "isolated-codex/1.0", "AQD/fw==", &[1, 0, 255, 127], &stream_url, &recording_url, prepared).await
+                    transcribe_authenticated(&token, "isolated-codex/1.0", &[1, 0, 255, 127], &stream_url, &recording_url, prepared).await
                 }
             };
             let (result, ()) = tokio::join!(operation, provider);
