@@ -94,6 +94,13 @@ jobs:
         run: nix develop .#native --command cargo build --locked -p host-fixture -p codex-app-server -p bex-process --bins
       - name: Android emulator acceptance
         run: nix develop .#android-test --command bash scripts/android-e2e.sh
+      - name: Retain Android acceptance diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: android-acceptance
+          path: target/qa/android-*
+          retention-days: 7
   macos:
     name: ${{ matrix.client }}
     strategy:
@@ -187,7 +194,8 @@ jobs:
       - name: Build desktop, Host and CLI
         run: cargo build --locked -p codex-app-server -p bex-process -p bex-desktop -p host-daemon -p agent-cli
       - name: Core contracts and isolated iroh Host
-        run: cargo test --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask
+        # Keep concurrency within each test while isolating independent heavy fixtures.
+        run: cargo test --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p agent-cli -p host-daemon -p host-fixture -p xtask -- --test-threads=1
       - name: Real-time passive approval soak
         if: github.event_name == 'workflow_dispatch'
         run: cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored

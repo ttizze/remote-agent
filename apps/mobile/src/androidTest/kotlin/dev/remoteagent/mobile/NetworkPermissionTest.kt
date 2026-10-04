@@ -2,10 +2,13 @@ package dev.remoteagent.mobile
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.SystemClock
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.uiautomator.By
+import androidx.test.uiautomator.Condition
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
 import java.io.File
@@ -37,14 +40,45 @@ class NetworkPermissionTest {
             assertTrue(permissionVisible)
             device.findObject(By.text("許可して接続")).click()
             val deny = By.res("com.android.permissioncontroller", "permission_deny_button")
-            val denyVisible = device.wait(Until.hasObject(deny), 10_000)
-            if (!denyVisible) device.dumpWindowHierarchy(System.out)
-            assertTrue("Local-network permission denial dialog did not appear", denyVisible)
-            device.findObject(deny).click()
-            assertTrue(device.wait(Until.hasObject(By.text("アプリの設定を開く")), 10_000))
+            val denyButton =
+                device.wait(Until.findObject(deny), 10_000)
+                    ?: throw permissionFailure(
+                        "Local-network permission denial dialog did not appear",
+                        activity,
+                        device,
+                    )
+            val denialDeadline = SystemClock.uptimeMillis() + 10_000
+            denyButton.clickAndWait(Until.newWindow(), 10_000)
+            // An app button can be visible underneath a permission dialog that is still closing.
+            val denialComplete =
+                device.wait(
+                    object : Condition<UiDevice, Boolean> {
+                        override fun apply(device: UiDevice): Boolean =
+                            activity.state == Lifecycle.State.RESUMED &&
+                                !device.hasObject(By.res("com.android.permissioncontroller", "grant_dialog")) &&
+                                device.hasObject(By.text("アプリの設定を開く"))
+                    },
+                    (denialDeadline - SystemClock.uptimeMillis()).coerceAtLeast(0),
+                )
+            if (!denialComplete) {
+                throw permissionFailure("Local-network permission denial did not finish", activity, device)
+            }
+            assertEquals(
+                PackageManager.PERMISSION_DENIED,
+                context.checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK),
+            )
             assertFalse(device.hasObject(By.text("PCとペアリング")))
-            assertThrows(IOException::class.java) { readLocalHost() }
-            device.findObject(By.text("アプリの設定を開く")).click()
+            val deniedSocketException = assertThrows(IOException::class.java) { readLocalHost() }
+            val settingsButton = device.wait(Until.findObject(By.text("アプリの設定を開く")), 10_000)
+            if (settingsButton == null) {
+                throw permissionFailure(
+                    "App settings button did not reappear after the denied local-network probe",
+                    activity,
+                    device,
+                    deniedSocketException,
+                )
+            }
+            settingsButton.click()
             assertTrue(device.wait(Until.hasObject(By.pkg("com.android.settings")), 10_000))
             device.pressBack()
             assertTrue(device.wait(Until.hasObject(By.text("インターネット経由で接続")), 10_000))
@@ -72,6 +106,36 @@ class NetworkPermissionTest {
             assertEquals("bex-os-network-ok", readLocalHost())
             assertTrue(device.takeScreenshot(File(context.getExternalFilesDir(null), "network-permission-granted.png")))
         }
+    }
+
+    private fun permissionFailure(
+        message: String,
+        activity: ActivityScenario<MainActivity>,
+        device: UiDevice,
+        deniedSocketException: IOException? = null,
+    ): AssertionError {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val state =
+            "permission=${context.checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK)}\n" +
+                "activityState=${activity.state}\n" +
+                "currentPackage=${device.currentPackageName}\n" +
+                "deniedSocketException=${deniedSocketException?.stackTraceToString() ?: "Not attempted"}"
+        val failure = AssertionError("$message\n$state")
+        runCatching {
+                check(
+                    device.takeScreenshot(File(context.getExternalFilesDir(null), "network-permission-failure.png"))
+                ) {
+                    "Could not capture the permission failure screenshot"
+                }
+            }
+            .onFailure { failure.addSuppressed(it) }
+        runCatching {
+                device.dumpWindowHierarchy(File(context.getExternalFilesDir(null), "network-permission-failure.xml"))
+            }
+            .onFailure { failure.addSuppressed(it) }
+        runCatching { File(context.getExternalFilesDir(null), "network-permission-failure.txt").writeText(state) }
+            .onFailure { failure.addSuppressed(it) }
+        return failure
     }
 
     private fun readLocalHost(): String? {

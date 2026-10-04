@@ -228,7 +228,7 @@ extension BexLaunchUITests {
     private func replaceFieldText(_ field: XCUIElement, text: String) {
         field.tap()
         if let value = field.value as? String, !value.isEmpty, value != field.placeholderValue {
-            field.tap(withNumberOfTaps: 3, numberOfTouches: 1)
+            field.typeKey("a", modifierFlags: .command)
         }
         field.typeText(XCUIKeyboardKey.delete.rawValue)
         XCTAssertEqual(field.value as? String, field.placeholderValue)
