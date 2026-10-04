@@ -105,16 +105,26 @@ jobs:
             shard: 0
             shards: 1
             artifact: apple-macos-acceptance
-          - client: iPhone 1/2
+          - client: iPhone 1/4
             language: swift
             shard: 0
-            shards: 2
+            shards: 4
             artifact: apple-iphone-1-acceptance
-          - client: iPhone 2/2
+          - client: iPhone 2/4
             language: swift
             shard: 1
-            shards: 2
+            shards: 4
             artifact: apple-iphone-2-acceptance
+          - client: iPhone 3/4
+            language: swift
+            shard: 2
+            shards: 4
+            artifact: apple-iphone-3-acceptance
+          - client: iPhone 4/4
+            language: swift
+            shard: 3
+            shards: 4
+            artifact: apple-iphone-4-acceptance
     runs-on: macos-26
     timeout-minutes: 120
     env:
