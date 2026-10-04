@@ -102,16 +102,27 @@ jobs:
         include:
           - client: Mac
             language: rust
+            shard: 0
+            shards: 1
             artifact: apple-macos-acceptance
-          - client: iPhone
+          - client: iPhone 1/2
             language: swift
-            artifact: apple-acceptance
+            shard: 0
+            shards: 2
+            artifact: apple-iphone-1-acceptance
+          - client: iPhone 2/2
+            language: swift
+            shard: 1
+            shards: 2
+            artifact: apple-iphone-2-acceptance
     runs-on: macos-26
     timeout-minutes: 120
     env:
       BEX_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
       # The iPhone runner has its own Host and one Simulator on a 7 GiB Mac.
       BEX_IOS_TEST_WORKERS: 1
+      BEX_IOS_TEST_SHARD: ${{ matrix.shard }}
+      BEX_IOS_TEST_SHARDS: ${{ matrix.shards }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

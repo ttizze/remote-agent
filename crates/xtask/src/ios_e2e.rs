@@ -61,6 +61,13 @@ fn check_summary(summary: &Value, expected: usize) -> Result<()> {
     Ok(())
 }
 
+fn partition_tests(tests: &[String], index: usize, count: usize) -> Result<Vec<String>> {
+    if index >= count || count > tests.len() {
+        return Err("Test partitions must be in range and nonempty".into());
+    }
+    Ok(tests.iter().skip(index).step_by(count).cloned().collect())
+}
+
 fn runtime(runtimes: &Value) -> Result<String> {
     let mut selected = None;
     for entry in runtimes["runtimes"]
@@ -359,6 +366,13 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
     {
         return Err("Select unique isolated Simulator tests".into());
     }
+    let shard = std::env::var("BEX_IOS_TEST_SHARD")
+        .unwrap_or_else(|_| "0".to_owned())
+        .parse::<usize>()?;
+    let shards = std::env::var("BEX_IOS_TEST_SHARDS")
+        .unwrap_or_else(|_| "1".to_owned())
+        .parse::<usize>()?;
+    let tests = partition_tests(&tests, shard, shards)?;
     let workers = std::env::var("BEX_IOS_TEST_WORKERS")
         .unwrap_or_else(|_| "1".to_owned())
         .parse::<usize>()?;
@@ -366,6 +380,9 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
         return Err("BEX_IOS_TEST_WORKERS must be between 1 and 10".into());
     }
     let workers = workers.min(tests.len());
+    let groups = (0..workers)
+        .map(|index| partition_tests(&tests, index, workers))
+        .collect::<Result<Vec<_>>>()?;
     let cancel = supervision::cancellation();
     let started = Instant::now();
     let cwd = std::env::current_dir()?;
@@ -530,9 +547,9 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
         records.display()
     );
     let mut pending = JoinSet::new();
-    for index in 0..workers {
+    for (index, tests) in groups.into_iter().enumerate() {
         pending.spawn(worker(
-            tests.iter().skip(index).step_by(workers).cloned().collect(),
+            tests,
             target.clone(),
             runs[0].clone(),
             template.clone(),
@@ -575,7 +592,33 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use serde_json::json;
+
+    proptest! {
+        #[test]
+        fn partitions_cover_every_test_once_and_balance_counts(length in 1usize..64, count in 1usize..16) {
+            let count = count.min(length);
+            let mut tests: Vec<_> = (0..length).map(|index| format!("testSimulator{index}")).collect();
+            let groups: Vec<_> = (0..count).map(|index| partition_tests(&tests, index, count).unwrap()).collect();
+            let sizes: Vec<_> = groups.iter().map(Vec::len).collect();
+            prop_assert!(*sizes.iter().min().unwrap() > 0);
+            prop_assert!(sizes.iter().max().unwrap() - sizes.iter().min().unwrap() <= 1);
+            let mut combined: Vec<_> = groups.into_iter().flatten().collect();
+            combined.sort();
+            tests.sort();
+            prop_assert_eq!(combined, tests);
+        }
+    }
+
+    #[test]
+    fn invalid_partitions_fail_before_starting_workers() {
+        let tests = vec!["first".to_owned(), "second".to_owned()];
+        for (index, count) in [(0, 0), (1, 1), (0, 3), (usize::MAX, 2), (0, usize::MAX)] {
+            assert!(partition_tests(&tests, index, count).is_err());
+        }
+        assert!(partition_tests(&[], 0, 1).is_err());
+    }
 
     #[test]
     fn device_ownership_uses_the_entire_name_across_runtimes() {

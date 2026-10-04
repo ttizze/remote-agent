@@ -177,11 +177,14 @@ transfer server just to delete that check would reverse A14.
   Manual workflow dispatch remains available for focused audits and the soak.
   Require successful CI checks for the current commit and a clean working tree
   before claiming full verification. Manual check commands remain for
-  debugging. Apple CI uses two Apple Silicon `macos-26` runners with Xcode 26.6.
+  debugging. Apple CI uses three Apple Silicon `macos-26` runners with Xcode 26.6.
   The Mac runner uses `nix develop . --command just quality rust` for Rust
-  contracts and Mac Browser E2E. The iPhone runner uses
-  `nix develop . --command just quality swift` for Swift checks and acceptance
-  with one isolated Simulator/Host pair. Each runner has separate processes,
+  contracts and Mac Browser E2E. Two iPhone runners use
+  `nix develop . --command just quality swift` for Swift checks and acceptance.
+  They partition the same maintained test list with `BEX_IOS_TEST_SHARDS=2`
+  and zero-based `BEX_IOS_TEST_SHARD` values 0 and 1. Each runs one isolated
+  Simulator/Host pair; an omitted shard setting selects the complete list.
+  Each runner has separate processes,
   memory and logs. Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.
