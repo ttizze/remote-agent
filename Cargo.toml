@@ -12,6 +12,7 @@ members = [
     "crates/xtask",
     "crates/host-fixture",
     "crates/orchestration",
+    "crates/provider-adapters",
 ]
 resolver = "2"
 

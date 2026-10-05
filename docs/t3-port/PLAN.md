@@ -121,3 +121,5 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 - 2026-10-05: native wire 契約の enum は Postcard が直接復号できる外部タグ形式を使う。T3 の識別子とイベント名・コマンド名は保持するが、T3 との wire 互換性は設けない。dynamic tool の任意 JSON だけをバイナリでは JSON 文字列で包む。
 - 2026-10-05: SQLite の書込と publish を同じ owner lock で直列化する。購読 receiver の登録と snapshot／replay 読出しもその lock 内で行い、登録時のイベント欠落と publish 順序逆転を防ぐ。effect は thread ごとに outbox の rowid 順で処理する。
 - 2026-10-05: ローカル開発環境は macOS 標準 Bash 3 では Nix が出力する `;&` を読み込めないため、flake の固定 Bash 5 で `scripts/dev-env.sh` を実行する。共有 dev-env キャッシュを修正せず、他の worktree に影響させない。
+- 2026-10-05: provider adapter は `crates/provider-adapters` に置く。`orchestration → agent-transport → agent-protocol → orchestration` という循環を避けるため。adapter は完全なイベントを送出し、Host が run／attempt の所有権を検証して store へ反映する。
+- 2026-10-05: Claude の ExitPlanMode は T3 と同じく、空でない計画を保存して `deny` を返し、後続ターンのユーザー指示を待たせる。AskUserQuestion の複数選択は CLI が要求する文字列へ変換する。native session の再開は CLI の `--resume` を使い、プロセスの終了確認まで capacity permit を保持する。
