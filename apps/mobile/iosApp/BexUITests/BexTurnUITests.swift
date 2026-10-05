@@ -91,7 +91,7 @@ extension BexLaunchUITests {
         captureScreen(app, named: "Assistant selection added to an existing draft")
         app.terminate()
         let reopened = try connectedSimulatorApp()
-        let row = prefixedElement(reopened, prefix: "tasks.row.codex:")
+        let row = prefixedElement(reopened, prefix: "tasks.row.")
         XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         let restored = reopened.textFields["task.message"]
         XCTAssertTrue(restored.waitForExistence(timeout: 10))
@@ -338,7 +338,7 @@ extension BexLaunchUITests {
 
         app.terminate()
         let reopened = try connectedSimulatorApp()
-        let row = prefixedElement(reopened, prefix: "tasks.row.codex:")
+        let row = prefixedElement(reopened, prefix: "tasks.row.")
         XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
         let restored = reopened.descendants(matching: .any)["task.message"]
         XCTAssertTrue(restored.waitForExistence(timeout: 10))

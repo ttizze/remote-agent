@@ -3,13 +3,13 @@ use agent_protocol::{
         AssistantPhase, ErrorCategory, ExecutionError, Item, ItemBody, ItemStatus, RetryEvidence,
         Thread, Turn, TurnStatus,
     },
-    session::{ProviderKind, SessionChange, SessionRef, TextField},
+    session::{SessionChange, SessionRef, TextField},
 };
 use serde_json::json;
 use std::sync::Arc;
 
 fn conversation() -> Thread {
-    serde_json::from_value(json!({"id":{"provider":"codex","id":"native"},"turns":[{"id":"run","status":"running","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"partial","phase":"unknown"}}}}}]}]})).unwrap()
+    serde_json::from_value(json!({"provider":"codex","id":{"id":"native"},"turns":[{"id":"run","status":"running","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"partial","phase":"unknown"}}}}}]}]})).unwrap()
 }
 
 #[rstest::rstest]
@@ -28,7 +28,7 @@ fn history_refresh_does_not_expand_its_request_to_the_cached_window(
         Snapshot,
         operations::{Operation, ReadThread},
     };
-    let id = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+    let id = SessionRef::new("native".into()).unwrap();
     let mut cached = conversation();
     cached.history_limit = history_limit;
     cached.turns = Some(
@@ -87,29 +87,23 @@ fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
     use agent_core::state::operations::ReadThread;
     use agent_core::state::reduce;
     use agent_protocol::session::OpenedSession;
-    let cached: Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"native"},"turns":[{"id":"A","status":"completed","items":[{"id":"past","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"cached history","phase":"unknown"}}}}}]},{"id":"stale","status":"running"}]})).unwrap();
+    let cached: Thread = serde_json::from_value(json!({"provider":"codex","id":{"id":"native"},"turns":[{"id":"A","status":"completed","items":[{"id":"past","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"cached history","phase":"unknown"}}}}}]},{"id":"stale","status":"running"}]})).unwrap();
     let mut snapshot = Snapshot::default();
     Arc::make_mut(&mut snapshot.conversations).insert(
         agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
             id: "native".into(),
         },
         Arc::new(cached),
     );
     let subscription = uuid::Uuid::new_v4();
-    let response = serde_json::from_value(json!({"thread":{"id":{"provider":"codex","id":"native"},"status":"running","historyReadState":{"type":"unavailable"},"turns":[{"id":"B","status":"running","items":[{"id":"latest","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"live","phase":"unknown"}}}}}]}],"requests":{"approval":{"id":"approval","target":{"turn":{"turnId":"B","itemId":null}},"delivery":"awaiting","body":{"approval":{"kind":"command","description":"run","details":"","choices":[]}}}}}})).unwrap();
+    let response = serde_json::from_value(json!({"thread":{"provider":"codex","id":{"id":"native"},"status":"running","historyReadState":{"type":"unavailable"},"turns":[{"id":"B","status":"running","items":[{"id":"latest","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"live","phase":"unknown"}}}}}]}],"requests":{"approval":{"id":"approval","target":{"turn":{"turnId":"B","itemId":null}},"delivery":"awaiting","body":{"approval":{"kind":"command","description":"run","details":"","choices":[]}}}}}})).unwrap();
     ReadThread::new(agent_protocol::session::SessionRef {
-        provider: agent_protocol::session::ProviderKind::Codex,
         id: "native".into(),
     })
     .apply(
         &mut snapshot,
         OpenedSession {
-            session: SessionRef::new(
-                agent_protocol::session::ProviderKind::Codex,
-                "native".to_string(),
-            )
-            .unwrap(),
+            session: SessionRef::new("native".to_string()).unwrap(),
             subscription_id: subscription,
             response,
         },
@@ -128,7 +122,6 @@ fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
         })),
     );
     let thread = &snapshot.conversations[&agent_protocol::session::SessionRef {
-        provider: agent_protocol::session::ProviderKind::Codex,
         id: "native".into(),
     }];
     let turns = thread.turns.as_ref().unwrap();
@@ -153,19 +146,6 @@ fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
     );
     assert!(thread.requests.contains_key("approval"));
     assert!(snapshot.request("approval").is_some());
-}
-
-#[test]
-fn provider_identity_keeps_the_complete_native_id() {
-    let native = "claude:01234567-89ab-cdef-0123-456789abcdef";
-    let claude = SessionRef::new(ProviderKind::Claude, native.into()).unwrap();
-    let codex = SessionRef::new(ProviderKind::Codex, native.into()).unwrap();
-    assert_eq!(claude.id, native);
-    assert_ne!(claude, codex);
-    assert_eq!(claude.to_string().parse::<SessionRef>().unwrap(), claude);
-    for id in ["", " native", "native "] {
-        assert!(SessionRef::new(ProviderKind::Codex, id.into()).is_err());
-    }
 }
 
 #[test]
@@ -270,14 +250,12 @@ fn storage_changes_keep_drafts_separate_and_restore_the_original_area() {
     };
     Arc::make_mut(&mut original.conversations).insert(
         agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
             id: "native".into(),
         },
         Arc::new(conversation()),
     );
     Arc::make_mut(&mut original.drafts).insert(
         agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
             id: "native".into(),
         }
         .into(),
@@ -292,7 +270,6 @@ fn storage_changes_keep_drafts_separate_and_restore_the_original_area() {
     assert_eq!(
         next.archived_scopes["host-key:area-a"].drafts[&agent_core::state::DraftKey::from(
             agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
                 id: "native".into()
             }
         )]
@@ -301,7 +278,6 @@ fn storage_changes_keep_drafts_separate_and_restore_the_original_area() {
     );
     Arc::make_mut(&mut next.drafts).insert(
         agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
             id: "native".into(),
         }
         .into(),
@@ -315,7 +291,6 @@ fn storage_changes_keep_drafts_separate_and_restore_the_original_area() {
     let (restored, _) = reduce(&saved, Event::StorageScope("host-key:area-a".into()));
     assert_eq!(
         restored.drafts[&agent_core::state::DraftKey::from(agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
             id: "native".into()
         })]
             .text,
@@ -324,7 +299,6 @@ fn storage_changes_keep_drafts_separate_and_restore_the_original_area() {
     assert_eq!(
         restored.archived_scopes["host-key:area-b"].drafts[&agent_core::state::DraftKey::from(
             agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
                 id: "native".into()
             }
         )]
@@ -334,7 +308,6 @@ fn storage_changes_keep_drafts_separate_and_restore_the_original_area() {
     assert!(restored.conversations.is_empty());
     assert_eq!(
         original.drafts[&agent_core::state::DraftKey::from(agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
             id: "native".into()
         })]
             .text,
@@ -401,24 +374,6 @@ fn large_images_are_deferred_without_truncating_base64_or_mutating_native_data()
 }
 
 #[test]
-fn native_session_ids_round_trip_without_provider_collisions() {
-    for id in ["same-native-id", "claude:native", "codex:native"] {
-        let codex = SessionRef {
-            provider: ProviderKind::Codex,
-            id: id.into(),
-        };
-        let claude = SessionRef {
-            provider: ProviderKind::Claude,
-            id: id.into(),
-        };
-        assert_ne!(codex.to_string(), claude.to_string());
-        for session in [codex, claude] {
-            assert_eq!(session.to_string().parse::<SessionRef>().unwrap(), session);
-        }
-    }
-}
-
-#[test]
 fn local_storage_keeps_user_work_without_host_caches() {
     use agent_core::state::{Draft, FileDraft, Navigation, PendingSubmission, Snapshot};
     let draft = Arc::new(Draft {
@@ -439,7 +394,6 @@ fn local_storage_keeps_user_work_without_host_caches() {
         conversations: Arc::new(
             [(
                 agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
                     id: "native".into(),
                 },
                 Arc::new(conversation()),
@@ -449,7 +403,6 @@ fn local_storage_keeps_user_work_without_host_caches() {
         drafts: Arc::new(
             [(
                 SessionRef {
-                    provider: ProviderKind::Codex,
                     id: "native".into(),
                 }
                 .into(),
@@ -463,7 +416,6 @@ fn local_storage_keeps_user_work_without_host_caches() {
                 Arc::new(PendingSubmission {
                     sequence: 0,
                     draft_key: SessionRef {
-                        provider: ProviderKind::Codex,
                         id: "native".into(),
                     }
                     .into(),
@@ -488,12 +440,10 @@ fn local_storage_keeps_user_work_without_host_caches() {
         ),
         navigation: Arc::new(Navigation {
             thread_id: Some(agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
                 id: "native".into(),
             }),
             cwd: "/project".into(),
             draft_key: SessionRef {
-                provider: ProviderKind::Codex,
                 id: "native".into(),
             }
             .into(),
@@ -504,12 +454,10 @@ fn local_storage_keeps_user_work_without_host_caches() {
     Arc::make_mut(&mut original.activity)
         .unread
         .insert(agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
             id: "native".into(),
         });
     Arc::make_mut(&mut original.activity).active.insert(
         agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
             id: "native".into(),
         },
         true,
@@ -530,17 +478,16 @@ fn local_storage_keeps_user_work_without_host_caches() {
             "archived_scopes",
             "drafts",
             "file_drafts",
+            "follow_up_behavior",
             "model_defaults",
             "navigation",
             "pending_submissions",
+            "queue_edits",
             "scoped_model_defaults",
             "storage_scope"
         ]
     );
-    assert_eq!(
-        saved["activity"],
-        json!({"unread":[{"provider":"codex","id":"native"}]})
-    );
+    assert_eq!(saved["activity"], json!({"unread":[{"id":"native"}]}));
     let restored = agent_core::persistence::decode(&bytes).unwrap();
     assert_eq!(restored.drafts, original.drafts);
     assert_eq!(restored.pending_submissions, original.pending_submissions);
@@ -558,16 +505,16 @@ fn local_storage_keeps_user_work_without_host_caches() {
 
 proptest::proptest! {
     #[test]
-    fn providers_with_the_same_native_id_keep_independent_history_and_drafts(
-        native in "[A-Za-z0-9:_-]{1,80}",
+    fn distinct_app_conversations_keep_independent_history_and_drafts(
+        id in "[A-Za-z0-9:_-]{1,80}",
         codex_text in "[^\\p{C}]{0,40}",
         claude_text in "[^\\p{C}]{0,40}",
         delta in "[^\\p{C}]{0,40}",
     ) {
         use agent_core::state::{Draft, Event, Snapshot, reduce};
         use agent_protocol::session::SessionUpdate;
-        let codex = SessionRef::new(ProviderKind::Codex, native.clone()).unwrap();
-        let claude = SessionRef::new(ProviderKind::Claude, native).unwrap();
+        let codex = SessionRef::new(format!("first-{id}")).unwrap();
+        let claude = SessionRef::new(format!("second-{id}")).unwrap();
         let codex_subscription = uuid::Uuid::new_v4();
         let claude_subscription = uuid::Uuid::new_v4();
         let make_thread = |session: &SessionRef, text: &str| Arc::new(Thread {

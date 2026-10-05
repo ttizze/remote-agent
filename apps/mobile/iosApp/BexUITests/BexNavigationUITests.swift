@@ -199,7 +199,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(app.staticTexts["notice"].exists)
         app.terminate()
         app.launch()
-        let row = prefixedElement(app, prefix: "tasks.row.claude:")
+        let row = prefixedElement(app, prefix: "tasks.row.")
         XCTAssertTrue(row.waitForExistence(timeout: 30)); row.tap()
         XCTAssertTrue(answer.waitForExistence(timeout: 20))
         message.tap()

@@ -13,7 +13,7 @@ use codex_app_server::CodexAppServer;
 use serde::Serialize;
 
 use super::agent::{Agent, Identity, session_pages};
-use super::conversations::Conversations;
+use super::conversations::{Conversations, NativeIdentity};
 use futures_util::{StreamExt, TryStreamExt};
 use std::collections::HashMap;
 
@@ -147,14 +147,23 @@ impl HostRpcService {
     fn native_session(
         &self,
         target: &agent_protocol::session::SessionRef,
-    ) -> Result<agent_protocol::session::SessionRef, Failure> {
+    ) -> Result<NativeIdentity, Failure> {
+        let provider = self
+            .inner
+            .conversations
+            .provider(target)
+            .map_err(|error| Failure::new("invalid_session", error))?;
         self.inner
             .conversations
-            .native(target, &self.storage_scope(target.provider)?)
+            .native(target, &self.storage_scope(provider)?)
             .map_err(|error| Failure::new("invalid_session", error))
     }
 
-    fn normalize_item(&self, item: &mut agent_protocol::models::Item) -> Result<(), Failure> {
+    fn normalize_item(
+        &self,
+        provider: ProviderKind,
+        item: &mut agent_protocol::models::Item,
+    ) -> Result<(), Failure> {
         if let agent_protocol::models::ItemBody::Subagent {
             sender,
             receivers,
@@ -170,7 +179,13 @@ impl HostRpcService {
                 *native = self
                     .inner
                     .conversations
-                    .bind(native, &self.storage_scope(native.provider)?)
+                    .bind(
+                        &NativeIdentity {
+                            provider,
+                            id: native.id.clone(),
+                        },
+                        &self.storage_scope(provider)?,
+                    )
                     .map_err(|error| Failure::new("invalid_session", error))?;
             }
         }
@@ -180,7 +195,7 @@ impl HostRpcService {
     async fn hydrate_history(
         &self,
         agent: &dyn Agent,
-        native: &agent_protocol::session::SessionRef,
+        native: &NativeIdentity,
         mut turns: Vec<Arc<agent_protocol::models::Turn>>,
     ) -> Result<Vec<Arc<agent_protocol::models::Turn>>, Failure> {
         for turn in &mut turns {
@@ -191,14 +206,9 @@ impl HostRpcService {
             }
             for item in turn.items.iter_mut().flatten() {
                 if item.is_deferred() {
-                    let params = op::ReadItem {
-                        thread_id: native.clone(),
-                        turn_id: turn.id.clone(),
-                        item_id: item.id.clone(),
-                    };
-                    *item = Arc::new(agent.read_item(&params).await?.item);
+                    *item = Arc::new(agent.read_item(&native.id, &turn.id, &item.id).await?.item);
                 }
-                self.normalize_item(Arc::make_mut(item))?;
+                self.normalize_item(native.provider, Arc::make_mut(item))?;
             }
         }
         Ok(turns)
@@ -227,7 +237,7 @@ impl HostRpcService {
         _importing: tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<(), Failure> {
         let native = self.native_session(target)?;
-        let agent = self.agent(target.provider)?;
+        let agent = self.agent(native.provider)?;
         for _ in 0..max_pages {
             let _serial = self.inner.router.submission_lock(target).lock_owned().await;
             let (complete, started, cursor) = self
@@ -260,7 +270,8 @@ impl HostRpcService {
                         "provider history is unavailable",
                     ));
                 }
-                if response.thread.id.as_ref() != Some(&native) {
+                if response.thread.id.as_ref().map(|id| id.id.as_str()) != Some(native.id.as_str())
+                {
                     return Err(Failure::new(
                         "invalid_history",
                         "provider history identity changed",
@@ -329,7 +340,7 @@ impl HostRpcService {
             while let Some(page) = pages.try_next().await? {
                 self.inner
                     .conversations
-                    .discover_page(&page, &scope)
+                    .discover_page(provider, &page, &scope)
                     .map_err(|error| Failure::new("history_import_failed", error))?;
                 self.inner
                     .router
@@ -813,7 +824,6 @@ impl HostRpcService {
             .router
             .retain_execution(target.clone())
             .map_err(|error| Failure::new("invalid_params", error))?;
-        self.native_session(target)?;
         if let Some(delivery) = self
             .inner
             .conversations
@@ -823,10 +833,11 @@ impl HostRpcService {
         {
             return replay_submission(delivery);
         }
+        let native = self.native_session(target)?;
         if input
             .model
             .as_ref()
-            .is_some_and(|model| model.provider != target.provider || model.id.trim().is_empty())
+            .is_some_and(|model| model.provider != native.provider || model.id.trim().is_empty())
         {
             return Err(Failure::new(
                 "provider_mismatch",
@@ -855,7 +866,7 @@ impl HostRpcService {
         let prepared = if force_queue || held {
             None
         } else {
-            self.agent(target.provider)?.availability()?;
+            self.agent(native.provider)?.availability()?;
             // Complete the source snapshot before native execution can move its
             // cursors. Admission to a held queue requires no provider process.
             drop(_serial_guard);
@@ -1009,12 +1020,12 @@ impl HostRpcService {
         &self,
         target: &agent_protocol::session::SessionRef,
     ) -> Result<(super::submission::SubmissionTarget, bool), Failure> {
-        let agent = self.agent(target.provider)?;
-        agent.availability()?;
         let native = self.native_session(target)?;
+        let agent = self.agent(native.provider)?;
+        agent.availability()?;
         let state = agent.state(&native.id).await?;
         let mut response = state.response;
-        if response.thread.id.as_ref() != Some(&native) {
+        if response.thread.id.as_ref().map(|id| id.id.as_str()) != Some(native.id.as_str()) {
             return Err(Failure::new(
                 "invalid_session",
                 "native session identity changed",
@@ -1062,11 +1073,11 @@ impl HostRpcService {
             }
             reload = true;
         }
-        let mut native_input = input.clone();
-        native_input.thread_id = self.native_session(target)?;
-        self.agent(target.provider)?
+        let native = self.native_session(target)?;
+        self.agent(native.provider)?
             .submit(
-                &native_input,
+                input,
+                &native.id,
                 route,
                 reload,
                 self.browser_config(&target.to_string())?,
@@ -1095,7 +1106,7 @@ impl HostRpcService {
         let _serial = self.inner.router.submission_lock(target).lock_owned().await;
         let native = self.native_session(target)?;
         let response = self
-            .agent(target.provider)?
+            .agent(native.provider)?
             .interrupt(&native.id, &params.turn_id)
             .await?;
         // Completion wakes a queue worker, but the serial guard keeps it from
@@ -1232,7 +1243,8 @@ impl HostRpcService {
                 anyhow::bail!("invalid session reference or zero history limit");
             }
             let target = params.session.clone();
-            let agent = self.agent(target.provider)?;
+            let provider = self.inner.conversations.provider(&target)?;
+            let capabilities = self.agent(provider).map(|agent| host_capabilities(agent.capabilities())).unwrap_or_default();
             let limit = params.limit;
             let read = self
                 .inner
@@ -1249,7 +1261,7 @@ impl HostRpcService {
                 return Err(anyhow::anyhow!("conversation identity changed"));
             }
             response.thread.project_id = self.project_snapshot().await?.project_membership(response.thread.cwd.as_deref());
-            response.thread.capabilities = Some(host_capabilities(agent.capabilities()));
+            response.thread.capabilities = Some(capabilities);
             let project_ms = started.elapsed().as_millis() - native_ms;
             let more = response.thread.history_has_more == Some(true);
             response.thread.history_has_more = Some(more);
@@ -1326,10 +1338,12 @@ impl HostRpcService {
         };
         if response.item.is_deferred() {
             let previous = response.item.clone();
-            let mut native = params.clone();
-            native.thread_id = self.native_session(target)?;
-            let mut hydrated = self.agent(target.provider)?.read_item(&native).await?;
-            self.normalize_item(&mut hydrated.item)?;
+            let native = self.native_session(target)?;
+            let mut hydrated = self
+                .agent(native.provider)?
+                .read_item(&native.id, &params.turn_id, &params.item_id)
+                .await?;
+            self.normalize_item(native.provider, &mut hydrated.item)?;
             if !self
                 .inner
                 .router
@@ -1386,9 +1400,12 @@ impl HostRpcService {
                 .await
                 .map(Into::into);
         }
-        if let Some(target) = target_session {
-            let capabilities = self.agent(target.provider)?.capabilities();
-            if matches!(request, Call::ForkSession(_)) && !capabilities.fork {
+        if let Some(target) = target_session
+            && matches!(request, Call::ForkSession(_))
+        {
+            let native = self.native_session(target)?;
+            let capabilities = self.agent(native.provider)?.capabilities();
+            if !capabilities.fork {
                 return Err(Failure::new(
                     "unsupported_operation",
                     format!("{method} is unsupported by this provider"),
@@ -1416,7 +1433,6 @@ impl HostRpcService {
                 agent_protocol::models::Empty {}.into()
             }
             Call::ReadHistory(params) => {
-                self.native_session(&params.session)?;
                 let mut page = self
                     .inner
                     .conversations
@@ -1611,7 +1627,6 @@ impl HostRpcService {
                 agent_protocol::models::Empty {}.into()
             }
             Call::QueueControl(params) => {
-                self.native_session(&params.session)?;
                 let _serial = self
                     .inner
                     .router
@@ -1708,9 +1723,9 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("file_operation_failed", error))?,
             Call::ForkSession(params) => {
                 let target = target_session.expect("session-scoped fork");
-                let agent = self.agent(target.provider)?;
                 let native = self.native_session(target)?;
-                self.start_thread(agent.as_ref(), |browser| {
+                let agent = self.agent(native.provider)?;
+                self.start_thread(native.provider, agent.as_ref(), |browser| {
                     agent.fork(&native.id, &params.last_turn_id, browser)
                 })
                 .await?
@@ -1718,7 +1733,6 @@ impl HostRpcService {
             }
             Call::RenameSession(params) => {
                 let target = target_session.expect("session-scoped rename");
-                self.native_session(target)?;
                 self.inner
                     .conversations
                     .rename(target, &params.name, true)
@@ -1768,7 +1782,7 @@ impl HostRpcService {
         }
         let mut threads = Vec::new();
         let agents = self.agents();
-        for (_, agent) in &agents {
+        for (provider, agent) in &agents {
             let pages = session_pages(agent.as_ref(), "");
             futures_util::pin_mut!(pages);
             while let Some(result) = pages.next().await {
@@ -1780,7 +1794,13 @@ impl HostRpcService {
                                 thread.id = Some(
                                     self.inner
                                         .conversations
-                                        .bind(native, &self.storage_scope(native.provider)?)
+                                        .bind(
+                                            &NativeIdentity {
+                                                provider: *provider,
+                                                id: native.id.clone(),
+                                            },
+                                            &self.storage_scope(*provider)?,
+                                        )
                                         .map_err(|error| Failure::new("invalid_thread", error))?,
                                 );
                             }
@@ -1802,14 +1822,20 @@ impl HostRpcService {
         for worktree in &mut worktrees {
             let directory = std::path::Path::new(&worktree.path);
             let mut active = std::collections::HashSet::new();
-            for (_, agent) in &agents {
+            for (provider, agent) in &agents {
                 match agent.active_sessions_in(directory).await {
                     Ok(sessions) => {
                         for native in sessions {
                             active.insert(
                                 self.inner
                                     .conversations
-                                    .bind(&native, &self.storage_scope(native.provider)?)
+                                    .bind(
+                                        &NativeIdentity {
+                                            provider: *provider,
+                                            id: native.id.clone(),
+                                        },
+                                        &self.storage_scope(*provider)?,
+                                    )
                                     .map_err(|error| Failure::new("invalid_thread", error))?,
                             );
                         }
@@ -1839,11 +1865,11 @@ impl HostRpcService {
             }
             let native = self.native_session(&target)?;
             let mut response = self
-                .agent(target.provider)?
+                .agent(native.provider)?
                 .state(&native.id)
                 .await?
                 .response;
-            if response.thread.id.as_ref() != Some(&native) {
+            if response.thread.id.as_ref().map(|id| id.id.as_str()) != Some(native.id.as_str()) {
                 return Err(Failure::new(
                     "invalid_thread",
                     "native session identity changed",
@@ -1986,23 +2012,14 @@ impl HostRpcService {
         self.initial_import();
         let snapshot = self.project_snapshot().await?;
         let providers = self.agents();
-        let areas = providers
-            .iter()
-            .map(|(provider, _)| {
-                self.storage_scope(*provider)
-                    .map(|scope| (*provider, scope))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         let (mut page, mut branches) = self
             .inner
             .conversations
-            .title_list(&areas, &snapshot, &query)
+            .title_list(&snapshot, &query)
             .map_err(|error| Failure::new("sessions_unavailable", error))?;
         for thread in &mut page.data {
-            if let Some(id) = &thread.id
-                && let Some((_, agent)) = providers
-                    .iter()
-                    .find(|(provider, _)| *provider == id.provider)
+            if let Some(kind) = thread.provider
+                && let Some((_, agent)) = providers.iter().find(|(provider, _)| *provider == kind)
             {
                 thread.capabilities = Some(host_capabilities(agent.capabilities()));
             }
@@ -2090,7 +2107,7 @@ impl HostRpcService {
                 Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
             }
         }
-        self.start_thread(agent.as_ref(), |browser| {
+        self.start_thread(provider, agent.as_ref(), |browser| {
             agent.create(
                 params.cwd.as_deref().unwrap_or_default(),
                 params.model.as_ref().map(|m| m.id.as_str()),
@@ -2103,6 +2120,7 @@ impl HostRpcService {
     /// New threads browse under a provisional scope until their native ID exists.
     async fn start_thread<F>(
         &self,
+        provider: ProviderKind,
         agent: &dyn Agent,
         start: impl FnOnce(Option<serde_json::Value>) -> F,
     ) -> Result<ThreadResponse, Failure>
@@ -2111,14 +2129,22 @@ impl HostRpcService {
     {
         let scope = uuid::Uuid::new_v4().to_string();
         let mut response = start(self.browser_config(&scope)?).await?;
-        let native =
-            response.thread.id.clone().ok_or_else(|| {
-                Failure::new("invalid_thread", "created thread identity is missing")
-            })?;
+        let native = NativeIdentity {
+            provider,
+            id: response
+                .thread
+                .id
+                .as_ref()
+                .ok_or_else(|| {
+                    Failure::new("invalid_thread", "created thread identity is missing")
+                })?
+                .id
+                .clone(),
+        };
         let target = self
             .inner
             .conversations
-            .bind(&native, &self.storage_scope(native.provider)?)
+            .bind(&native, &self.storage_scope(provider)?)
             .map_err(|error| Failure::new("session_create_failed", error))?;
         let page = agent_protocol::session::HistoryPage {
             turns: self
@@ -2174,6 +2200,18 @@ impl HostRpcService {
                         let service = Self { inner };
                         let mut change = event.change;
                         let result = async {
+                            if let super::agent::AgentChange::Request { origin, .. } = &change
+                                && origin.provider != provider
+                            {
+                                return Err("request source provider does not match adapter".into());
+                            }
+                            if let super::agent::AgentChange::Stopped {
+                                provider: stopped, ..
+                            } = &change
+                                && *stopped != provider
+                            {
+                                return Err("stopped provider does not match adapter".into());
+                            }
                             let renamed = match &change {
                                 super::agent::AgentChange::Renamed { name, .. } => {
                                     Some(name.clone())
@@ -2193,7 +2231,10 @@ impl HostRpcService {
                                     .inner
                                     .conversations
                                     .bind(
-                                        native,
+                                        &NativeIdentity {
+                                            provider,
+                                            id: native.id.clone(),
+                                        },
                                         &service
                                             .storage_scope(provider)
                                             .map_err(|error| error.to_string())?,
@@ -2224,7 +2265,7 @@ impl HostRpcService {
                                 };
                                 for item in items.into_iter().flatten() {
                                     service
-                                        .normalize_item(Arc::make_mut(item))
+                                        .normalize_item(provider, Arc::make_mut(item))
                                         .map_err(|error| error.to_string())?;
                                 }
                             }
@@ -2544,8 +2585,8 @@ mod tests {
             panic!("provider did not recover");
         };
         assert_eq!(
-            response.response.thread.id.unwrap().provider,
-            ProviderKind::Claude
+            response.response.thread.provider,
+            Some(ProviderKind::Claude)
         );
     }
 
@@ -2574,9 +2615,10 @@ mod tests {
             .unwrap();
         let connection = service.open_session();
         let router = &service.inner.router;
-        let target =
-            agent_protocol::session::SessionRef::new(ProviderKind::Claude, "native".into())
-                .unwrap();
+        let target = NativeIdentity {
+            provider: ProviderKind::Claude,
+            id: "native".into(),
+        };
         let target = service
             .inner
             .conversations
@@ -2705,8 +2747,10 @@ mod tests {
                     .await
                     .unwrap();
             }
-            let target =
-                agent_protocol::session::SessionRef::new(provider, "native".into()).unwrap();
+            let target = NativeIdentity {
+                provider,
+                id: "native".into(),
+            };
             let target = service
                 .inner
                 .conversations
@@ -2797,7 +2841,7 @@ mod tests {
         ] {
             for params in [
                 serde_json::json!({}),
-                serde_json::json!({"threadId":{"provider":"claude","id":"native"}}),
+                serde_json::json!({"threadId":{"id":"native"}}),
             ] {
                 assert!(
                     agent_protocol::protocol::json_boundary::call(method, params).is_err(),
@@ -2828,7 +2872,7 @@ mod tests {
             .inner
             .conversations
             .bind(
-                &agent_protocol::session::SessionRef {
+                &NativeIdentity {
                     provider: ProviderKind::Claude,
                     id: "native".into(),
                 },
@@ -2873,7 +2917,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_interrupt_keeps_waiting_inputs_and_queue_state_unchanged() {
         use super::*;
-        use agent_protocol::session::{SessionRef, SubmissionDelivery};
+        use agent_protocol::session::SubmissionDelivery;
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
             Err("not available".into()),
@@ -2893,7 +2937,7 @@ mod tests {
             .inner
             .conversations
             .bind(
-                &SessionRef {
+                &NativeIdentity {
                     provider: ProviderKind::Claude,
                     id: "source".into(),
                 },
@@ -2939,7 +2983,7 @@ mod tests {
     #[tokio::test]
     async fn concurrent_duplicate_waits_for_the_owner_and_replays_its_settled_receipt() {
         use super::*;
-        use agent_protocol::session::{SessionRef, SubmissionDelivery};
+        use agent_protocol::session::SubmissionDelivery;
         use futures_util::FutureExt;
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
@@ -2952,7 +2996,7 @@ mod tests {
             .inner
             .conversations
             .bind(
-                &SessionRef {
+                &NativeIdentity {
                     provider: ProviderKind::Codex,
                     id: "source".into(),
                 },
@@ -3011,7 +3055,7 @@ mod tests {
         use super::*;
         use agent_protocol::{
             queue::{QueueAction, SteerQueued},
-            session::{SessionRef, SubmissionDelivery},
+            session::SubmissionDelivery,
         };
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
@@ -3024,7 +3068,7 @@ mod tests {
             .inner
             .conversations
             .bind(
-                &SessionRef {
+                &NativeIdentity {
                     provider: ProviderKind::Codex,
                     id: "source".into(),
                 },
@@ -3108,10 +3152,7 @@ mod tests {
     #[tokio::test]
     async fn held_queue_admits_once_without_a_provider_process() {
         use super::*;
-        use agent_protocol::{
-            queue::QueueAction,
-            session::{SessionRef, SubmissionDelivery},
-        };
+        use agent_protocol::{queue::QueueAction, session::SubmissionDelivery};
         let root = tempfile::tempdir().unwrap();
         let service = HostRpcService::new(
             Err("not available".into()),
@@ -3123,7 +3164,7 @@ mod tests {
             .inner
             .conversations
             .bind(
-                &SessionRef {
+                &NativeIdentity {
                     provider: ProviderKind::Codex,
                     id: "source".into(),
                 },
@@ -3196,7 +3237,7 @@ mod tests {
             .inner
             .conversations
             .bind(
-                &agent_protocol::session::SessionRef {
+                &NativeIdentity {
                     provider: ProviderKind::Codex,
                     id: "native".into(),
                 },
@@ -3301,6 +3342,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persisted_conversation_reads_edits_and_receipts_do_not_require_its_native_home() {
+        use super::*;
+        use agent_protocol::{
+            models::{Turn, TurnStatus},
+            session::{HistoryPage, SubmissionDelivery},
+        };
+        async fn call<T: serde::de::DeserializeOwned>(
+            service: &HostRpcService,
+            connection: &HostSession,
+            request: Call,
+        ) -> T {
+            let reply = service.dispatch(connection.id(), &request).await.unwrap();
+            let Response::Success { result } =
+                agent_protocol::protocol::decode::<Response<T>>(&reply.initial).unwrap()
+            else {
+                panic!("stored conversation operation failed");
+            };
+            result
+        }
+        let root = tempfile::tempdir().unwrap();
+        let projects = ProjectStore::new(root.path().join("worktrees.json"));
+        let service = HostRpcService::new(
+            Err("unavailable".into()),
+            projects.clone(),
+            Some(root.path().join("first-home")),
+        )
+        .unwrap();
+        let target = service
+            .inner
+            .conversations
+            .bind(
+                &NativeIdentity {
+                    provider: ProviderKind::Codex,
+                    id: "native".into(),
+                },
+                &service.storage_scope(ProviderKind::Codex).unwrap(),
+            )
+            .unwrap();
+        service
+            .inner
+            .conversations
+            .import_page(
+                &target,
+                Some(&ThreadResponse {
+                    thread: Thread {
+                        id: Some(agent_protocol::session::SessionRef {
+                            id: "native".into(),
+                        }),
+                        provider: Some(ProviderKind::Claude),
+                        ..Default::default()
+                    },
+                    model: None,
+                }),
+                &HistoryPage {
+                    turns: (0..8)
+                        .map(|index| {
+                            Arc::new(Turn {
+                                id: format!("turn-{index}").into(),
+                                status: TurnStatus::Completed,
+                                items: Some(Vec::new()),
+                                ..Default::default()
+                            })
+                        })
+                        .collect(),
+                    next_cursor: None,
+                },
+            )
+            .unwrap();
+        let completed = op::Submission {
+            thread_id: target.clone(),
+            client_user_message_id: "completed".into(),
+            input: vec![op::Input::Text {
+                text: "once".into(),
+            }],
+            model: None,
+            effort: None,
+            service_tier: None,
+        };
+        service
+            .inner
+            .conversations
+            .admit(
+                &completed,
+                SubmissionDelivery::Accepted {
+                    turn_id: Some("turn-7".into()),
+                },
+            )
+            .unwrap();
+        let waiting = op::Submission {
+            client_user_message_id: "waiting".into(),
+            ..completed.clone()
+        };
+        service
+            .inner
+            .conversations
+            .admit(&waiting, SubmissionDelivery::Queued)
+            .unwrap();
+        drop(service);
+        let service = HostRpcService::new(
+            Err("unavailable".into()),
+            projects,
+            Some(root.path().join("different-home")),
+        )
+        .unwrap();
+        assert!(service.native_session(&target).is_err());
+        let connection = service.open_session();
+        let list: agent_protocol::models::ThreadList = call(
+            &service,
+            &connection,
+            Call::ListSessions(op::ListSessions::new(Default::default())),
+        )
+        .await;
+        assert_eq!(list.data[0].id.as_ref(), Some(&target));
+        assert_eq!(list.data[0].provider, Some(ProviderKind::Codex));
+        let opened: agent_protocol::session::OpenedSession = call(
+            &service,
+            &connection,
+            Call::OpenSession(agent_protocol::session::OpenSession {
+                session: target.clone(),
+                limit: 2,
+                include_activity: true,
+            }),
+        )
+        .await;
+        assert_eq!(opened.response.thread.turns.as_ref().unwrap().len(), 2);
+        let page: HistoryPage = call(
+            &service,
+            &connection,
+            Call::ReadHistory(agent_protocol::session::ReadHistory {
+                session: target.clone(),
+                cursor: opened.response.thread.history_cursor.unwrap(),
+                include_activity: true,
+            }),
+        )
+        .await;
+        assert!(!page.turns.is_empty());
+        let _: agent_protocol::models::Empty = call(
+            &service,
+            &connection,
+            Call::RenameSession(op::RenameSession {
+                thread_id: target.clone(),
+                name: "Saved title".into(),
+            }),
+        )
+        .await;
+        let _: agent_protocol::models::Empty = call(
+            &service,
+            &connection,
+            Call::QueueControl(agent_protocol::queue::QueueControl {
+                session: target.clone(),
+                action: agent_protocol::queue::QueueAction::Pause,
+            }),
+        )
+        .await;
+        assert!(service.inner.conversations.queue_held(&target).unwrap());
+        let receipt: op::SubmissionReceipt =
+            call(&service, &connection, Call::Submit(completed)).await;
+        assert_eq!(receipt.turn_id.as_deref(), Some("turn-7"));
+        assert_eq!(
+            service
+                .inner
+                .conversations
+                .open_thread(&target, 2, false)
+                .unwrap()
+                .thread
+                .name
+                .as_deref(),
+            Some("Saved title")
+        );
+    }
+
+    #[tokio::test]
     async fn stored_lists_do_not_wait_for_a_catalog_scan_and_expose_its_progress() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
@@ -3311,14 +3524,12 @@ mod tests {
             Some(root.path().join("codex-native")),
         )
         .unwrap();
-        let source = agent_protocol::session::SessionRef {
-            provider: ProviderKind::Codex,
-            id: "saved".into(),
-        };
+        let source = agent_protocol::session::SessionRef { id: "saved".into() };
         service
             .inner
             .conversations
             .discover_page(
+                ProviderKind::Codex,
                 &[super::super::agent::SessionSummary {
                     thread: Thread {
                         id: Some(source),
@@ -3379,7 +3590,7 @@ mod tests {
             .inner
             .conversations
             .bind(
-                &agent_protocol::session::SessionRef {
+                &NativeIdentity {
                     provider: ProviderKind::Codex,
                     id: native_id.into(),
                 },
@@ -3477,7 +3688,7 @@ mod tests {
             .inner
             .conversations
             .bind(
-                &agent_protocol::session::SessionRef {
+                &NativeIdentity {
                     provider: ProviderKind::Claude,
                     id: id.into(),
                 },

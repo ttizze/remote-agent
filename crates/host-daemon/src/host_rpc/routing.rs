@@ -556,7 +556,9 @@ impl SessionRouter {
         origin: RequestOrigin,
         request: agent_protocol::requests::Request,
     ) -> Result<(), String> {
-        if target.provider != origin.provider {
+        if let Some(store) = lock_state(&self.state).conversations.clone()
+            && store.provider(&target).map_err(|error| error.to_string())? != origin.provider
+        {
             return Err("request provider does not match session".into());
         }
         if !origin.source.is_alive() {
@@ -822,13 +824,24 @@ impl SessionRouter {
         provider: ProviderKind,
         message: &str,
     ) -> Result<(), String> {
-        let actors: Vec<_> = lock_state(&self.state)
-            .executions
-            .iter()
-            .filter(|(target, _)| target.provider == provider)
-            .map(|(target, actor)| (target.clone(), actor.clone()))
-            .collect();
+        let (store, actors) = {
+            let state = lock_state(&self.state);
+            (
+                state
+                    .conversations
+                    .clone()
+                    .ok_or("conversation store is unavailable")?,
+                state
+                    .executions
+                    .iter()
+                    .map(|(target, actor)| (target.clone(), actor.clone()))
+                    .collect::<Vec<_>>(),
+            )
+        };
         for (target, actor) in actors {
+            if store.provider(&target).map_err(|error| error.to_string())? != provider {
+                continue;
+            }
             let mut owned = lock_state(&actor);
             let mut changes: Vec<_> = owned
                 .timeline
@@ -976,7 +989,10 @@ mod tests {
         let store = Arc::new(super::super::conversations::Conversations::open(&path).unwrap());
         let target = store
             .bind(
-                &SessionRef::new(ProviderKind::Codex, "source".into()).unwrap(),
+                &super::super::conversations::NativeIdentity {
+                    provider: ProviderKind::Codex,
+                    id: "source".into(),
+                },
                 "scope",
             )
             .unwrap();
@@ -1054,7 +1070,10 @@ mod tests {
         let store = Arc::new(super::super::conversations::Conversations::open(&path).unwrap());
         let target = store
             .bind(
-                &SessionRef::new(ProviderKind::Codex, "source".into()).unwrap(),
+                &super::super::conversations::NativeIdentity {
+                    provider: ProviderKind::Codex,
+                    id: "source".into(),
+                },
                 "scope",
             )
             .unwrap();
@@ -1133,7 +1152,7 @@ mod tests {
         let router = SessionRouter::new();
         let first = router.open_session();
         let second = router.open_session();
-        let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+        let target = SessionRef::new("native".into()).unwrap();
         let response = ThreadResponse {
             thread: Thread {
                 id: Some(target.clone()),
@@ -1231,10 +1250,7 @@ mod tests {
 
     fn open(router: &SessionRouter, id: &str) -> SessionLease {
         router
-            .retain_execution(
-                SessionRef::new(agent_protocol::session::ProviderKind::Codex, id.to_string())
-                    .unwrap(),
-            )
+            .retain_execution(SessionRef::new(id.to_string()).unwrap())
             .unwrap()
     }
 
@@ -1242,7 +1258,6 @@ mod tests {
         router
             .session_change(
                 &SessionRef {
-                    provider: ProviderKind::Codex,
                     id: "native".into(),
                 },
                 SessionChange::Turn {
@@ -1274,8 +1289,8 @@ mod tests {
     #[test]
     fn a_busy_conversation_does_not_hold_the_registry_or_another_conversation() {
         let router = SessionRouter::new();
-        let a = SessionRef::new(ProviderKind::Codex, "A".into()).unwrap();
-        let b = SessionRef::new(ProviderKind::Codex, "B".into()).unwrap();
+        let a = SessionRef::new("A".into()).unwrap();
+        let b = SessionRef::new("B".into()).unwrap();
         let lease = router.retain_execution(a.clone()).unwrap();
         let guard = lock_state(&lease.actor);
         let stalled = std::thread::spawn({
@@ -1318,7 +1333,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_delta_keeps_all_subscriptions_and_the_last_valid_item() {
         let router = SessionRouter::new();
-        let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+        let target = SessionRef::new("native".into()).unwrap();
         let connections = [router.open_session(), router.open_session()];
         let response = ThreadResponse {
             thread: Thread {
@@ -1398,9 +1413,51 @@ mod tests {
     }
 
     #[test]
+    fn request_source_must_match_the_provider_owned_by_the_database() {
+        let store = Arc::new(super::super::conversations::Conversations::memory());
+        let target = store
+            .bind(
+                &super::super::conversations::NativeIdentity {
+                    provider: ProviderKind::Codex,
+                    id: "same-native-id".into(),
+                },
+                "scope",
+            )
+            .unwrap();
+        let router = SessionRouter::with_conversations(store);
+        let (input, _receiver) = tokio::sync::mpsc::channel(1);
+        let adapted = super::super::requests::claude(
+            "request".into(),
+            &"turn".into(),
+            &json!({"subtype":"elicitation","requested_schema":{"type":"object","properties":{}}}),
+        )
+        .unwrap();
+        let error = router
+            .request(
+                target.clone(),
+                crate::claude::request_origin(
+                    uuid::Uuid::new_v4(),
+                    json!("native-request"),
+                    input,
+                    adapted.answers,
+                ),
+                adapted.request,
+            )
+            .unwrap_err();
+        assert_eq!(error, "request provider does not match session");
+        assert!(!lock_state(&router.state).executions.contains_key(&target));
+        assert!(
+            router
+                .overlay_execution(&target, Thread::default())
+                .requests
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn resolving_unsubscribed_elicitation_releases_its_execution_immediately() {
         let router = SessionRouter::new();
-        let target = SessionRef::new(ProviderKind::Claude, "native".into()).unwrap();
+        let target = SessionRef::new("native".into()).unwrap();
         let (input, _receiver) = tokio::sync::mpsc::channel(1);
         let instance = uuid::Uuid::new_v4();
         let adapted = super::super::requests::claude(
@@ -1432,7 +1489,7 @@ mod tests {
         use agent_protocol::{execution::ItemStatus, requests::Answer, session::RequestDelivery};
         let router = SessionRouter::new();
         let connection = router.open_session();
-        let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+        let target = SessionRef::new("native".into()).unwrap();
         // An outstanding native read also retains the completed turn below.
         let _read = open(&router, "native");
         let instance = uuid::Uuid::new_v4();
@@ -1555,8 +1612,8 @@ mod tests {
         );
         let response = ThreadResponse {
             thread: Thread {
+                provider: Some(agent_protocol::session::ProviderKind::Codex),
                 id: Some(SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
                     id: "native".into(),
                 }),
                 turns: Some(turns),
@@ -1597,7 +1654,7 @@ mod tests {
             field: TextField::AssistantText,
             delta: " forwarded to native history".into(),
         };
-        let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+        let target = SessionRef::new("native".into()).unwrap();
         router.session_change(&target, delta.clone()).unwrap();
         let frame = tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -1626,7 +1683,7 @@ mod tests {
             json!({"id":"tool","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"z".repeat(8192),"exitCode":null}}}}}),
         );
         let response = serde_json::from_value(
-            json!({"thread":{"id":{"provider":"codex","id":"native"},"turns":[{"id":"turn","items":items,"status":"unknown"}]}}),
+            json!({"thread":{"provider":"codex","id":{"id":"native"},"turns":[{"id":"turn","items":items,"status":"unknown"}]}}),
         )
         .unwrap();
         let response = router
@@ -1659,7 +1716,7 @@ mod tests {
         let connection = router.open_session();
         for _ in 0..2 {
             let response = serde_json::from_value(
-                json!({"thread":{"id":{"provider":"codex","id":"native"},"name":"x".repeat(MAX_QUEUED_BYTES + 1)}}),
+                json!({"thread":{"provider":"codex","id":{"id":"native"},"name":"x".repeat(MAX_QUEUED_BYTES + 1)}}),
             )
             .unwrap();
             let response = router
@@ -1680,7 +1737,7 @@ mod tests {
     #[tokio::test]
     async fn completion_during_native_read_is_overlaid_before_live_updates() {
         let router = SessionRouter::new();
-        let target = SessionRef::new(ProviderKind::Codex, "native".into()).unwrap();
+        let target = SessionRef::new("native".into()).unwrap();
         let connection = router.open_session();
         let read = open(&router, "native");
         turn(&router, false);
@@ -1731,7 +1788,7 @@ mod tests {
             .finish_session_read(
                 read,
                 connection.id(),
-                serde_json::from_value(json!({"thread":{"id":{"provider":"codex","id":"native"},"turns":[{"id":"run","status":"running","items":[]}]}}))
+                serde_json::from_value(json!({"thread":{"provider":"codex","id":{"id":"native"},"turns":[{"id":"run","status":"running","items":[]}]}}))
                 .unwrap(),
             )
             .unwrap();
@@ -1753,7 +1810,6 @@ mod tests {
     fn completion_does_not_discard_unconfirmed_input_or_its_accepted_receipt() {
         let router = SessionRouter::new();
         let target = SessionRef {
-            provider: ProviderKind::Codex,
             id: "native".into(),
         };
         router
@@ -1788,7 +1844,7 @@ mod tests {
             .unwrap();
         let thread = router.overlay_execution(
             &target,
-            serde_json::from_value(json!({"id":{"provider":"codex","id":"native"},"turns":[]}))
+            serde_json::from_value(json!({"provider":"codex","id":{"id":"native"},"turns":[]}))
                 .unwrap(),
         );
         assert_eq!(
@@ -1802,12 +1858,39 @@ mod tests {
     #[test]
     fn provider_exit_clears_activity_but_preserves_uncertain_delivery() {
         use agent_protocol::{models::SessionStatus, session::SubmissionDelivery};
-        let router = SessionRouter::new();
-        let target = SessionRef::new(
-            agent_protocol::session::ProviderKind::Codex,
-            "native".to_string(),
-        )
-        .unwrap();
+        let store = Arc::new(super::super::conversations::Conversations::memory());
+        let target = store
+            .bind(
+                &super::super::conversations::NativeIdentity {
+                    provider: ProviderKind::Codex,
+                    id: "native".into(),
+                },
+                "scope",
+            )
+            .unwrap();
+        let other = store
+            .bind(
+                &super::super::conversations::NativeIdentity {
+                    provider: ProviderKind::Claude,
+                    id: "native".into(),
+                },
+                "scope",
+            )
+            .unwrap();
+        let router = SessionRouter::with_conversations(store);
+        router
+            .session_change(
+                &other,
+                SessionChange::Turn {
+                    turn: Turn {
+                        id: "other-turn".into(),
+                        status: agent_protocol::execution::TurnStatus::Running,
+                        ..Default::default()
+                    },
+                    completed: false,
+                },
+            )
+            .unwrap();
         router
             .publish_submission(&target, "input".into(), SubmissionDelivery::Sending)
             .unwrap();
@@ -1826,6 +1909,10 @@ mod tests {
         router
             .fail_provider(ProviderKind::Codex, "provider stopped")
             .unwrap();
+        assert_eq!(
+            lock_state(&router.actor(&other)).timeline.status,
+            SessionStatus::Running
+        );
         let actor = router.actor(&target);
         let state = lock_state(&actor);
         let live = &state.timeline;
@@ -1853,7 +1940,7 @@ mod tests {
         let router = SessionRouter::new();
         let mut connection = router.open_session();
         let response: ThreadResponse = serde_json::from_value(
-            json!({"thread":{"id":{"provider":"codex","id":"native"},"turns":[]}}),
+            json!({"thread":{"provider":"codex","id":{"id":"native"},"turns":[]}}),
         )
         .unwrap();
         let mut subscription = router
@@ -1866,11 +1953,7 @@ mod tests {
         for index in 0..512 {
             router
                 .session_change(
-                    &SessionRef::new(
-                        agent_protocol::session::ProviderKind::Codex,
-                        "native".to_string(),
-                    )
-                    .unwrap(),
+                    &SessionRef::new("native".to_string()).unwrap(),
                     SessionChange::Status {
                         status: if index % 2 == 0 {
                             agent_protocol::models::SessionStatus::Running
@@ -1914,14 +1997,10 @@ mod tests {
         let router = SessionRouter::new();
         let slow = router.open_session();
         let mut healthy = router.open_session();
-        let target = SessionRef::new(
-            agent_protocol::session::ProviderKind::Codex,
-            "native".to_string(),
-        )
-        .unwrap();
+        let target = SessionRef::new("native".to_string()).unwrap();
         let _execution = open(&router, "native");
         let response: ThreadResponse = serde_json::from_value(
-            json!({"thread":{"id":{"provider":"codex","id":"native"},"turns":[]}}),
+            json!({"thread":{"provider":"codex","id":{"id":"native"},"turns":[]}}),
         )
         .unwrap();
         let mut streams = Vec::new();
@@ -1955,7 +2034,7 @@ mod tests {
         let router = SessionRouter::new();
         let connection = router.open_session();
         let response: ThreadResponse = serde_json::from_value(
-            json!({"thread":{"id":{"provider":"codex","id":"native"},"turns":[]}}),
+            json!({"thread":{"provider":"codex","id":{"id":"native"},"turns":[]}}),
         )
         .unwrap();
         let first = router
@@ -1971,7 +2050,7 @@ mod tests {
         let budget = lock_state(&router.state).sessions[&connection.id()]
             .bytes
             .clone();
-        let actor = router.actor(&SessionRef::new(ProviderKind::Codex, "native".into()).unwrap());
+        let actor = router.actor(&SessionRef::new("native".into()).unwrap());
         let (a, b) = {
             let actor = lock_state(&actor);
             (
@@ -2003,23 +2082,14 @@ mod tests {
         let router = SessionRouter::new();
         let connection = router.open_session();
         let read = router
-            .retain_execution(
-                SessionRef::new(
-                    agent_protocol::session::ProviderKind::Codex,
-                    "native".to_string(),
-                )
-                .unwrap(),
-            )
+            .retain_execution(SessionRef::new("native".to_string()).unwrap())
             .unwrap();
         drop(connection);
         drop(read);
         // Fill and evict idle entries: leaked leases would eventually prevent admission.
         for id in 0..200 {
             let read = router
-                .retain_execution(
-                    SessionRef::new(agent_protocol::session::ProviderKind::Codex, id.to_string())
-                        .unwrap(),
-                )
+                .retain_execution(SessionRef::new(id.to_string()).unwrap())
                 .unwrap();
             drop(read);
         }
@@ -2039,7 +2109,7 @@ fn identical_native_request_ids_keep_their_source_instance() {
         ProviderKind::Codex,
     ] {
         let instance = uuid::Uuid::new_v4();
-        let target = SessionRef::new(provider, "shared-native-session".into()).unwrap();
+        let target = SessionRef::new("shared-native-session".into()).unwrap();
         router
             .session_change(
                 &target,

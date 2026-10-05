@@ -233,7 +233,7 @@ private struct ThreadListRow: View {
     let open: () -> Void
 
     private var accessibilityID: String {
-        "\(thread.id.provider == .codex ? "codex" : "claude"):\(thread.id.id)"
+        thread.id.id
     }
 
     var body: some View {

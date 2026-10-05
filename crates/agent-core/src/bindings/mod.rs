@@ -473,7 +473,7 @@ mod tests {
             };
             let cached = crate::state::Snapshot {
                 list_query: Arc::new(crate::models::ListQuery { project_limit: 15, chat_limit: 25, search_term: "retained search".into(), project_thread_limits: [("project".into(), 35)].into() }),
-                navigation: Arc::new(crate::state::Navigation { thread_id: Some(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }), draft_key: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), ..Default::default() }),
+                navigation: Arc::new(crate::state::Navigation { thread_id: Some(agent_protocol::session::SessionRef { id: "thread".into() }), draft_key: agent_protocol::session::SessionRef { id: "thread".into()}.into(), ..Default::default() }),
                 ..Default::default()
             };
             let mut saved: serde_json::Value = serde_json::from_slice(&cached.serialize_local_state().unwrap()).unwrap();
@@ -489,7 +489,7 @@ mod tests {
             let mut old = reader;
             let _first_writer = writer;
             assert!(store.snapshot().connected());
-            store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), text: "preserved".into() })
+            store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef { id: "thread".into()}.into(), text: "preserved".into() })
                 .unwrap().wait().await.unwrap();
             // Leave every automatic read pending on the old transport.
             let mut methods = std::collections::BTreeSet::new();
@@ -517,9 +517,9 @@ mod tests {
                 let open = &requests["host/session/open"];
                 assert_eq!(open["params"]["session"]["id"], "thread");
                 // Finish the conversation before the lists; no reload invalidates another.
-                writer.reply(open, json!({"result":{"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"after reconnect","phase":"unknown"}}}}}],"status":"unknown"}]}}}})).await.unwrap();
+                writer.reply(open, json!({"result":{"session":{"id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"provider":"codex","id":{"id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"after reconnect","phase":"unknown"}}}}}],"status":"unknown"}]}}}})).await.unwrap();
                 writer.reply(&requests["host/model/list"], json!({ "result":{"data":[{"id":"fresh-model","model":{"provider": "codex", "id": "fresh-model"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}})).await.unwrap();
-                writer.reply(list, json!({ "result":{"data":[{"id":{"provider":"codex","id":"thread"},"name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
+                writer.reply(list, json!({ "result":{"data":[{"provider":"codex","id":{"id":"thread"},"name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
                 assert!(!matches!(reader.read_request().await, Ok(Some(_))));
                 next.close();
             };
@@ -532,7 +532,7 @@ mod tests {
                 loop {
                     let ready = {
                         let snapshot = updates.borrow_and_update();
-                        snapshot.account.accounts.is_some() && snapshot.threads.is_some() && !snapshot.models.is_empty() && snapshot.conversations.contains_key(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })
+                        snapshot.account.accounts.is_some() && snapshot.threads.is_some() && !snapshot.models.is_empty() && snapshot.conversations.contains_key(&agent_protocol::session::SessionRef { id: "thread".into() })
                     };
                     if ready { break; }
                     updates.changed().await.unwrap();
@@ -542,9 +542,9 @@ mod tests {
                 assert!(snapshot.error.is_none());
                 assert_eq!(snapshot.navigation.thread_id.as_ref().map(|session| session.id.as_str()), Some("thread"));
                 assert!(snapshot.threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_ref().map(|session| session.id.as_str()) == Some("thread")));
-                assert_eq!(item_text(&(snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])), Some("after reconnect"));
+                assert_eq!(item_text(&(snapshot.conversations[&agent_protocol::session::SessionRef { id: "thread".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])), Some("after reconnect"));
                 assert_eq!(snapshot.models[0].model, agent_protocol::models::ModelRef {provider:agent_protocol::session::ProviderKind::Codex,id:"fresh-model".into()});
-                assert_eq!(snapshot.drafts[&crate::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })].text, "preserved");
+                assert_eq!(snapshot.drafts[&crate::state::DraftKey::from(agent_protocol::session::SessionRef { id: "thread".into() })].text, "preserved");
                 store.shutdown().await.unwrap();
             };
             tokio::join!(server, client);
@@ -578,7 +578,7 @@ mod tests {
                     };
                     let snapshot = Snapshot {
                         navigation: Arc::new(crate::state::Navigation {
-                            thread_id: selected.then(|| agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }), draft_key: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(),
+                            thread_id: selected.then(|| agent_protocol::session::SessionRef { id: "thread".into() }), draft_key: agent_protocol::session::SessionRef { id: "thread".into()}.into(),
                             ..Default::default()
                         }), ..Default::default()
                     };
@@ -591,8 +591,8 @@ mod tests {
                             "host/session/scope" => json!("fixture-storage"),
                             "host/diagnostics/connection" => json!({}),
                             "host/account/list" => json!({"accounts":[],"selected":{}}),
-                            "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
-                            "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}}],"status":"unknown"}]}}}),
+                            "host/session/list" => json!({"data":[{"provider":"codex","id":{"id":"thread"},"name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                            "host/session/open" => json!({"session":{"id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"provider":"codex","id":{"id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}}],"status":"unknown"}]}}}),
                             "host/model/list" => json!({"data":[],"nextCursor":null}),
                             method => panic!("unexpected request: {method}"),
                         };
@@ -643,11 +643,11 @@ mod tests {
                     let client = async {
                         let mut updates = store.store.subscribe();
                         loop {
-                            let ready = { let snapshot = updates.borrow_and_update(); snapshot.account.accounts.is_some() && snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })) };
+                            let ready = { let snapshot = updates.borrow_and_update(); snapshot.account.accounts.is_some() && snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key(&agent_protocol::session::SessionRef { id: "thread".into() })) };
                             if ready { break; }
                             updates.changed().await.unwrap();
                         }
-                        store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), text: "keep draft".into() }).unwrap().wait().await.unwrap();
+                        store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef { id: "thread".into()}.into(), text: "keep draft".into() }).unwrap().wait().await.unwrap();
                         let started = std::time::Instant::now();
                         let resumed = tokio::time::timeout(Duration::from_millis(500), store.resume(connection())).await
                             .expect("foreground recovery must not wait for provider reads or shutdown deadlines");
@@ -659,13 +659,13 @@ mod tests {
                             let ready = {
                                 let snapshot = updates.borrow_and_update();
                                 snapshot.threads.as_ref().is_some_and(|list| list.data.iter().any(|thread| thread.name.as_deref() == Some("after")))
-                                    && (!selected || item_text(&(snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])) == Some("after"))
+                                    && (!selected || item_text(&(snapshot.conversations[&agent_protocol::session::SessionRef { id: "thread".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])) == Some("after"))
                             };
                             if ready { break; }
                             updates.changed().await.unwrap();
                         } }
                         assert!(store.snapshot().connected());
-                        assert_eq!(store.snapshot().drafts[&crate::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })].text, "keep draft");
+                        assert_eq!(store.snapshot().drafts[&crate::state::DraftKey::from(agent_protocol::session::SessionRef { id: "thread".into() })].text, "keep draft");
                         assert_eq!(store.endpoint.lock().await.as_ref().unwrap().endpoint.node_id(), old_identity, "recovery retains the endpoint identity; discovered addresses can change");
                         store.shutdown().await.unwrap();
                     };
@@ -891,7 +891,7 @@ mod tests {
                 let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
                 let connection = || Connection { ticket: host.ticket().to_string(), identity: identity.to_bytes().to_vec(), invitation: None, use_relays: false };
                 let cached = Snapshot {
-                    navigation: Arc::new(crate::state::Navigation { thread_id: selected.then(|| agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }), draft_key: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), ..Default::default() }),
+                    navigation: Arc::new(crate::state::Navigation { thread_id: selected.then(|| agent_protocol::session::SessionRef { id: "thread".into() }), draft_key: agent_protocol::session::SessionRef { id: "thread".into()}.into(), ..Default::default() }),
                     ..Default::default()
                 };
                 let store = AgentStore::offline(crate::persistence::encode(&cached).unwrap(), None).await.unwrap();
@@ -909,8 +909,8 @@ mod tests {
                         }
                         for request in requests {
                             let result = match request["method"].as_str().unwrap() {
-                                "host/session/list" => json!({"data":[{"id":{"provider":"codex","id":"thread"},"name":format!("round {round}")}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
-                                "host/session/open" => json!({"session":{"provider":"codex","id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"id":{"provider":"codex","id":"thread"},"turns":[]}}}),
+                                "host/session/list" => json!({"data":[{"provider":"codex","id":{"id":"thread"},"name":format!("round {round}")}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                                "host/session/open" => json!({"session":{"id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"provider":"codex","id":{"id":"thread"},"turns":[]}}}),
                                 "host/account/list" if round == 0 => json!({"accounts":[],"selected":{}}),
                                 "host/model/list" if round == 0 => json!({"data":[],"nextCursor":null}),
                                 method => panic!("unexpected refresh request {method}"),
@@ -928,11 +928,11 @@ mod tests {
                 let client = async {
                     let mut updates = store.store.subscribe();
                     loop {
-                        let ready = { let snapshot = updates.borrow_and_update(); snapshot.account.accounts.is_some() && snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })) };
+                        let ready = { let snapshot = updates.borrow_and_update(); snapshot.account.accounts.is_some() && snapshot.threads.is_some() && (!selected || snapshot.conversations.contains_key(&agent_protocol::session::SessionRef { id: "thread".into() })) };
                         if ready { break; }
                         updates.changed().await.unwrap();
                     }
-                    store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef {provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into()}.into(), text: "preserved".into() }).unwrap().wait().await.unwrap();
+                    store.dispatch(Intent::SetDraftText { thread_id: agent_protocol::session::SessionRef { id: "thread".into()}.into(), text: "preserved".into() }).unwrap().wait().await.unwrap();
                     let refresh = || async {
                         use crate::state::operations as op;
                         let list = store.store.dispatch(Intent::ListSessions(op::ListSessions::new(
@@ -940,7 +940,7 @@ mod tests {
                         )));
                         let history = async {
                             if selected {
-                                store.store.dispatch(Intent::ReadThread(op::ReadThread::new(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }))).await?;
+                                store.store.dispatch(Intent::ReadThread(op::ReadThread::new(agent_protocol::session::SessionRef { id: "thread".into() }))).await?;
                             }
                             Ok(Outcome::Applied)
                         };
@@ -974,7 +974,7 @@ mod tests {
                     assert!(after.error.is_none());
                     assert_eq!(after.epoch, before.epoch);
                     assert_eq!(after.navigation, before.navigation);
-                    assert_eq!(after.drafts[&crate::state::DraftKey::from(agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() })].text, "preserved");
+                    assert_eq!(after.drafts[&crate::state::DraftKey::from(agent_protocol::session::SessionRef { id: "thread".into() })].text, "preserved");
                     assert_eq!(after.threads.as_ref().unwrap().data[0].name.as_deref(), Some(if selected { "round 3" } else { "round 2" }));
                     store.shutdown().await.unwrap();
                 };

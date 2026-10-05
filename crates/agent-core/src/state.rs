@@ -991,10 +991,11 @@ pub(crate) fn supported_settings<'a>(
     {
         return (selected_model, selected_effort, selected_tier);
     }
-    let provider = selected_model
-        .filter(|model| !model.id.is_empty())
-        .map(|model| model.provider)
-        .or(default_provider);
+    let provider = default_provider.or_else(|| {
+        selected_model
+            .filter(|model| !model.id.is_empty())
+            .map(|model| model.provider)
+    });
     let mut available = models
         .iter()
         .filter(|model| provider.is_none_or(|provider| model.model.provider == provider));
@@ -1093,11 +1094,16 @@ fn submission(
     force_queue: bool,
 ) -> (Snapshot, Vec<Effect>) {
     if let DraftKey::Queued { session, id } = &draft_key {
+        let Some(provider) = previous.session_provider(session) else {
+            let mut next = previous.clone();
+            next.error = Some("conversation provider is missing".into());
+            return (next, Vec::new());
+        };
         return prepare(
             previous,
             previous.clone(),
             op::SaveQueuedInput {
-                submission: draft.submission(session.clone(), id.clone()),
+                submission: draft.submission(session.clone(), provider, id.clone()),
                 draft_key,
             },
         );
@@ -1152,7 +1158,7 @@ fn submission(
         }),
         None => Effect::execute(op::StartSubmission {
             provider: crate::presentation::model_settings::draft_provider(
-                &draft_key,
+                None,
                 draft.model.as_ref(),
             ),
             draft_key,

@@ -377,6 +377,9 @@ pub fn project_conversation(
     }
     let previous = previous.as_ref().filter(|old| source.id == old.source.id);
     let cached: HashMap<_, _> = previous
+        .filter(|old| {
+            source.provider == old.source.provider && source.capabilities == old.source.capabilities
+        })
         .into_iter()
         .flat_map(|old| &old.turns)
         .map(|turn| (turn.source.id.as_str(), turn))
@@ -413,6 +416,7 @@ pub fn project_conversation(
             }
             render_turn(
                 source.id.as_ref(),
+                source.provider,
                 source.capabilities.unwrap_or_default().fork,
                 turn.clone(),
                 pending.cloned().collect(),
@@ -465,13 +469,13 @@ pub fn project_conversation(
 
 fn render_turn(
     session: Option<&crate::session::SessionRef>,
+    provider: Option<crate::session::ProviderKind>,
     supports_fork: bool,
     source: Arc<models::Turn>,
     pending: PendingItems,
     requests: Vec<Arc<WireRequest>>,
     previous: Option<&Arc<RenderedTurn>>,
 ) -> Arc<RenderedTurn> {
-    let provider = session.map(|session| session.provider);
     let cached: HashMap<_, _> = previous
         .into_iter()
         .flat_map(|turn| turn.items())
@@ -850,7 +854,7 @@ mod tests {
         use agent_protocol::{
             operations::Submission,
             queue::{QueueAction, QueueEntry},
-            session::{ProviderKind, SessionRef, SubmissionDelivery},
+            session::{SessionRef, SubmissionDelivery},
         };
         let entries: Vec<_> = [
             SubmissionDelivery::Queued,
@@ -864,7 +868,6 @@ mod tests {
         .map(|(index, delivery)| QueueEntry {
             submission: Submission {
                 thread_id: SessionRef {
-                    provider: ProviderKind::Codex,
                     id: "conversation".into(),
                 },
                 client_user_message_id: index.to_string().into(),
@@ -954,12 +957,11 @@ mod tests {
     }
 
     fn fixture() -> Snapshot {
-        let thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"turns":[{"id":"done","status":"completed","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"earlier","phase":"unknown"}}}}}]},{"id":"live","status":"running","items":[{"id":"user","status":"unknown","clientInputId":"accepted","body":{"inline":{"body":{"userMessage":{"text":"question","content":[]}}}}},{"id":"command","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":"/fixture","exitCode":null}}}}},{"id":"stream","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"hello","phase":"unknown"}}}}}]}]})).unwrap();
+        let thread = serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"turns":[{"id":"done","status":"completed","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"earlier","phase":"unknown"}}}}}]},{"id":"live","status":"running","items":[{"id":"user","status":"unknown","clientInputId":"accepted","body":{"inline":{"body":{"userMessage":{"text":"question","content":[]}}}}},{"id":"command","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":"/fixture","exitCode":null}}}}},{"id":"stream","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"hello","phase":"unknown"}}}}}]}]})).unwrap();
         Snapshot {
             conversations: Arc::new(
                 [(
                     agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
                         id: "thread".into(),
                     },
                     Arc::new(thread),
@@ -976,7 +978,6 @@ mod tests {
         project_conversation(
             &snapshot,
             snapshot.conversations[&agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
                 id: "thread".into(),
             }]
                 .clone(),
@@ -1079,7 +1080,8 @@ mod tests {
                 .unwrap(),
             );
             let projected = render_turn(
-                Some(&crate::session::SessionRef::new(crate::session::ProviderKind::Codex, "session".into()).unwrap()),
+                Some(&crate::session::SessionRef::new("session".into()).unwrap()),
+                Some(crate::session::ProviderKind::Codex),
                 false,
                 Arc::new(models::Turn {
                     id: "turn".into(),
@@ -1102,12 +1104,68 @@ mod tests {
     }
 
     #[test]
+    fn conversation_metadata_changes_refresh_labels_and_actions_on_unchanged_turns() {
+        let source: models::Thread = serde_json::from_value(json!({
+            "id":{"id":"conversation"}, "provider":"codex", "capabilities":{"activeSteering":false,"fork":false,"rename":false,"modelChange":false},
+            "turns":[{"id":"done","status":"completed","items":[{"id":"answer","body":{"inline":{"body":{"assistantText":{"text":"saved","phase":"final"}}}}}]}]
+        })).unwrap();
+        let before = project_conversation(&Snapshot::default(), Arc::new(source.clone()), &None);
+        for provider in [
+            crate::session::ProviderKind::Codex,
+            crate::session::ProviderKind::Claude,
+        ] {
+            for supports_fork in [false, true] {
+                let mut source = source.clone();
+                source.provider = Some(provider);
+                source.capabilities.as_mut().unwrap().fork = supports_fork;
+                let after = project_conversation(
+                    &Snapshot::default(),
+                    Arc::new(source),
+                    &Some(before.clone()),
+                );
+                assert!(Arc::ptr_eq(&before.turns[0].source, &after.turns[0].source));
+                let title = if provider == crate::session::ProviderKind::Codex {
+                    "Codex"
+                } else {
+                    "Claude"
+                };
+                assert_eq!(
+                    after.turns[0].items().next().unwrap().data.title.as_deref(),
+                    Some(title)
+                );
+                let ConversationRowContent::Response { fork_turn_id, .. } =
+                    &after.turns[0].rows.last().unwrap().content
+                else {
+                    panic!("response is missing");
+                };
+                assert_eq!(fork_turn_id.is_some(), supports_fork);
+            }
+        }
+        assert_eq!(
+            before.turns[0]
+                .items()
+                .next()
+                .unwrap()
+                .data
+                .title
+                .as_deref(),
+            Some("Codex")
+        );
+        assert!(matches!(
+            before.turns[0].rows.last().unwrap().content,
+            ConversationRowContent::Response {
+                fork_turn_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn flat_rows_preserve_history_order_and_only_offer_fork_on_last_completed_response() {
         let mut snapshot = fixture();
         let thread = Arc::make_mut(
             Arc::make_mut(&mut snapshot.conversations)
                 .get_mut(&agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
                     id: "thread".into(),
                 })
                 .unwrap(),
@@ -1139,7 +1197,6 @@ mod tests {
         let thread = Arc::make_mut(
             Arc::make_mut(&mut snapshot.conversations)
                 .get_mut(&agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
                     id: "thread".into(),
                 })
                 .unwrap(),
@@ -1176,7 +1233,7 @@ mod tests {
     #[test]
     fn flat_row_ids_distinguish_repeated_items_and_turns() {
         let source = Arc::new(
-            serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"turns":[{"id":"first","status":"completed","items":[{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"old","phase":"unknown"}}}}},{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"final"}}}}}]},{"id":"second","status":"completed","items":[{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"another turn","phase":"unknown"}}}}}]}]}))
+            serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"turns":[{"id":"first","status":"completed","items":[{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"old","phase":"unknown"}}}}},{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"final"}}}}}]},{"id":"second","status":"completed","items":[{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"another turn","phase":"unknown"}}}}}]}]}))
             .unwrap(),
         );
         let rendered = project_conversation(&Snapshot::default(), source, &None);
@@ -1224,7 +1281,7 @@ mod tests {
     #[test]
     fn summaries_show_input_and_answer_with_activity_loaded_on_expansion() {
         let source = Arc::new(serde_json::from_value(json!({
-            "id":{"provider":"codex","id":"thread"},"turns":[{
+            "provider":"codex","id":{"id":"thread"},"turns":[{
                 "id":"turn","status":"completed","itemsSummary":true,"items":[
                     {"id":"user","body":{"inline":{"body":{"userMessage":{"text":"question","content":[]}}}}},
                     {"id":"answer","body":{"inline":{"body":{"assistantText":{"text":"answer","phase":"final"}}}}}
@@ -1260,9 +1317,9 @@ mod tests {
             let mut snapshot = Snapshot {
                 conversations: Arc::new(
                     [(
-                        agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() },
+                        agent_protocol::session::SessionRef { id: "thread".into() },
                         Arc::new(
-                            serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"capabilities":{"activeSteering":true,"fork":false,"rename":false,"modelChange":false},"turns":[{"id":"before","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"before","phase":"unknown"}}}}}]}]}))
+                            serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"capabilities":{"activeSteering":true,"fork":false,"rename":false,"modelChange":false},"turns":[{"id":"before","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"before","phase":"unknown"}}}}}]}]}))
                             .unwrap(),
                         ),
                     )]
@@ -1274,7 +1331,6 @@ mod tests {
             for id in ["z-first", "a-second", "m-third"] {
                 Arc::make_mut(&mut snapshot.drafts).insert(
                     agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
                         id: "thread".into(),
                     }
                     .into(),
@@ -1288,7 +1344,6 @@ mod tests {
                     Event::Intent(Intent::Submit {
                         alternate: false,
                         thread_id: Some(agent_protocol::session::SessionRef {
-                            provider: agent_protocol::session::ProviderKind::Codex,
                             id: "thread".into(),
                         }),
                         client_user_message_id: id.into(),
@@ -1315,7 +1370,6 @@ mod tests {
             let thread = Arc::make_mut(
                 Arc::make_mut(&mut snapshot.conversations)
                     .get_mut(&agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
                         id: "thread".into(),
                     })
                     .unwrap(),
@@ -1342,12 +1396,11 @@ mod tests {
             conversations: Arc::new(
                 [(
                     agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
                         id: "thread".into(),
                     },
                     Arc::new(models::Thread {
+                        provider: Some(agent_protocol::session::ProviderKind::Codex),
                         id: Some(agent_protocol::session::SessionRef {
-                            provider: agent_protocol::session::ProviderKind::Codex,
                             id: "thread".into(),
                         }),
                         ..Default::default()
@@ -1363,7 +1416,6 @@ mod tests {
                 Event::Intent(Intent::Submit {
                     alternate: false,
                     thread_id: Some(agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
                         id: "thread".into(),
                     }),
                     client_user_message_id: id.into(),
@@ -1384,7 +1436,6 @@ mod tests {
         Arc::make_mut(
             Arc::make_mut(&mut snapshot.conversations)
                 .get_mut(&agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
                     id: "thread".into(),
                 })
                 .unwrap(),
@@ -1413,7 +1464,6 @@ mod tests {
                 Arc::new(PendingSubmission {
                     sequence: sequence as u64,
                     draft_key: agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
                         id: "thread".into(),
                     }
                     .into(),
@@ -1428,7 +1478,7 @@ mod tests {
                 }),
             );
         }
-        Arc::make_mut(Arc::make_mut(&mut snapshot.conversations).get_mut(&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() }).unwrap())
+        Arc::make_mut(Arc::make_mut(&mut snapshot.conversations).get_mut(&agent_protocol::session::SessionRef { id: "thread".into() }).unwrap())
             .turns.as_mut().unwrap().push(Arc::new(serde_json::from_value(json!({"id":"echo-turn","items":[{"id":"echo","status":"unknown","clientInputId":"b","body":{"inline":{"body":{"userMessage":{"text":"native b","content":[]}}}}}],"status":"unknown"})).unwrap()));
         let rendered = project_snapshot(snapshot.clone(), None);
         let items: Vec<_> = rendered.turns.last().unwrap().items().collect();
@@ -1468,7 +1518,6 @@ mod tests {
             Arc::new(PendingSubmission {
                 sequence: 0,
                 draft_key: agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
                     id: "thread".into(),
                 }
                 .into(),
@@ -1491,7 +1540,6 @@ mod tests {
         let thread = Arc::make_mut(
             Arc::make_mut(&mut snapshot.conversations)
                 .get_mut(&agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
                     id: "thread".into(),
                 })
                 .unwrap(),
@@ -1520,14 +1568,12 @@ mod tests {
         }
         .apply(
             &snapshot.conversations[&agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
                 id: "thread".into(),
             }],
         )
         .unwrap();
         Arc::make_mut(&mut updated.conversations).insert(
             agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
                 id: "thread".into(),
             },
             Arc::new(thread),
@@ -1553,7 +1599,6 @@ mod tests {
         let thread = Arc::make_mut(
             Arc::make_mut(&mut deferred.conversations)
                 .get_mut(&agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
                     id: "thread".into(),
                 })
                 .unwrap(),
@@ -1587,7 +1632,6 @@ mod tests {
             let request: WireRequest = serde_json::from_value(value).unwrap();
             let request = Arc::new(request);
             let session = agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
                 id: if request.id.as_str() == "3" {
                     "other"
                 } else {
@@ -1611,7 +1655,6 @@ mod tests {
             Arc::new(PendingSubmission {
                 sequence: 0,
                 draft_key: agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
                     id: "thread".into(),
                 }
                 .into(),

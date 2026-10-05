@@ -11,6 +11,7 @@ impl Draft {
     pub(super) fn submission(
         &self,
         thread_id: crate::session::SessionRef,
+        provider: crate::session::ProviderKind,
         client_user_message_id: agent_protocol::ids::ClientInputId,
     ) -> Submission {
         let mut input = Vec::new();
@@ -22,7 +23,7 @@ impl Draft {
         input.extend(
             self.invocations
                 .iter()
-                .filter(|item| item.provider == thread_id.provider && item.is_in(&self.text))
+                .filter(|item| item.provider == provider && item.is_in(&self.text))
                 .map(Invocation::input),
         );
         input.extend(self.attachments.iter().map(|attachment| {
@@ -48,7 +49,7 @@ impl Draft {
     }
 }
 
-fn draft_from_submission(input: &Submission) -> Draft {
+fn draft_from_submission(input: &Submission, provider: crate::session::ProviderKind) -> Draft {
     let mut draft = Draft {
         model: input.model.clone(),
         effort: input.effort.clone(),
@@ -60,7 +61,7 @@ fn draft_from_submission(input: &Submission) -> Draft {
         match part {
             Input::Text { text } => texts.push(text.as_str()),
             Input::Skill { name, path } => draft.invocations.push(Invocation {
-                provider: input.thread_id.provider,
+                provider,
                 kind: InvocationKind::Skill,
                 name: name.clone(),
                 path: path.clone(),
@@ -69,7 +70,7 @@ fn draft_from_submission(input: &Submission) -> Draft {
                 if path.starts_with("plugin://") || path.starts_with("app://") =>
             {
                 draft.invocations.push(Invocation {
-                    provider: input.thread_id.provider,
+                    provider,
                     kind: InvocationKind::Plugin,
                     name: name.clone(),
                     path: path.clone(),
@@ -219,7 +220,11 @@ pub(super) fn begin(snapshot: &mut Snapshot, id: agent_protocol::ids::ClientInpu
         snapshot.error = Some("queued input is no longer available".into());
         return;
     };
-    let draft = Arc::new(draft_from_submission(&entry.submission));
+    let Some(provider) = snapshot.session_provider(session) else {
+        snapshot.error = Some("conversation provider is missing".into());
+        return;
+    };
+    let draft = Arc::new(draft_from_submission(&entry.submission, provider));
     let previous = snapshot.composer_key().clone();
     finish(snapshot, &previous, false);
     Arc::make_mut(&mut snapshot.drafts).insert(key.clone(), draft.clone());
@@ -297,7 +302,6 @@ mod tests {
 
     fn state(text: &str) -> (Snapshot, SessionRef) {
         let session = SessionRef {
-            provider: ProviderKind::Codex,
             id: "isolated".into(),
         };
         let original = Draft {
@@ -316,20 +320,20 @@ mod tests {
             ],
             invocations: vec![
                 Invocation {
-                    provider: session.provider,
+                    provider: ProviderKind::Codex,
                     kind: InvocationKind::Skill,
                     name: "review".into(),
                     path: "/isolated/review/SKILL.md".into(),
                 },
                 Invocation {
-                    provider: session.provider,
+                    provider: ProviderKind::Codex,
                     kind: InvocationKind::Plugin,
                     name: "repo".into(),
                     path: "app://repo".into(),
                 },
             ],
             model: Some(crate::models::ModelRef {
-                provider: session.provider,
+                provider: ProviderKind::Codex,
                 id: "queue-model".into(),
             }),
             effort: Some("high".into()),
@@ -347,8 +351,13 @@ mod tests {
             session.clone(),
             Arc::new(crate::models::Thread {
                 id: Some(session.clone()),
+                provider: Some(ProviderKind::Codex),
                 queued_inputs: vec![QueueEntry {
-                    submission: original.submission(session.clone(), "waiting".into()),
+                    submission: original.submission(
+                        session.clone(),
+                        ProviderKind::Codex,
+                        "waiting".into(),
+                    ),
                     delivery: SubmissionDelivery::Queued,
                 }],
                 ..Default::default()
@@ -423,7 +432,7 @@ mod tests {
         assert_eq!(draft.effort.as_deref(), Some("high"));
         assert_eq!(draft.service_tier.as_deref(), Some("fast"));
         assert_eq!(
-            draft.submission(session.clone(), "waiting".into()),
+            draft.submission(session.clone(), ProviderKind::Codex, "waiting".into()),
             queued[0].submission
         );
         set_draft_text(&mut snapshot, key.clone(), "edited".into());
@@ -457,7 +466,7 @@ mod tests {
             is_image: true,
         }];
         draft.effort = Some("low".into());
-        let input = draft.submission(session.clone(), "waiting".into());
+        let input = draft.submission(session.clone(), ProviderKind::Codex, "waiting".into());
         assert_eq!(input.input.len(), 3);
         assert_eq!(
             input.input[1],
@@ -605,7 +614,11 @@ mod tests {
         begin(&mut snapshot, "waiting".into());
         let key = snapshot.composer_draft_key();
         let mut save = SaveQueuedInput {
-            submission: snapshot.drafts[&key].submission(session, "waiting".into()),
+            submission: snapshot.drafts[&key].submission(
+                session,
+                ProviderKind::Codex,
+                "waiting".into(),
+            ),
             draft_key: key.clone(),
         };
         finish(&mut snapshot, &key, false);
@@ -661,7 +674,11 @@ mod tests {
         begin(&mut snapshot, "waiting".into());
         let key = snapshot.composer_draft_key();
         let save = SaveQueuedInput {
-            submission: snapshot.drafts[&key].submission(session.clone(), "waiting".into()),
+            submission: snapshot.drafts[&key].submission(
+                session.clone(),
+                ProviderKind::Codex,
+                "waiting".into(),
+            ),
             draft_key: key.clone(),
         };
         set_draft_text(&mut snapshot, key.clone(), "typed during save".into());
@@ -681,7 +698,11 @@ mod tests {
         begin(&mut snapshot, "waiting".into());
         let key = snapshot.composer_draft_key();
         let save = SaveQueuedInput {
-            submission: snapshot.drafts[&key].submission(session, "waiting".into()),
+            submission: snapshot.drafts[&key].submission(
+                session,
+                ProviderKind::Codex,
+                "waiting".into(),
+            ),
             draft_key: key.clone(),
         };
         let captured = save.capture(&snapshot).unwrap();
@@ -696,8 +717,10 @@ mod tests {
     #[test]
     fn recovery_preserves_changed_attachments_and_context_even_without_a_text_edit() {
         let (snapshot, session) = state("");
-        let original =
-            draft_from_submission(&snapshot.conversations[&session].queued_inputs[0].submission);
+        let original = draft_from_submission(
+            &snapshot.conversations[&session].queued_inputs[0].submission,
+            ProviderKind::Codex,
+        );
         let ordinary = Draft {
             effort: Some("ordinary-effort".into()),
             ..Default::default()

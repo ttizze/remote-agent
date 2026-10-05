@@ -1140,7 +1140,7 @@ mod rendering_tests {
     fn completed_response_offers_fork_but_streaming_response_does_not(cx: &mut TestAppContext) {
         let _runtime = init(cx);
         for status in ["completed", "running"] {
-            let source = serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"fixture"},"capabilities":{"activeSteering":true,"fork":true,"rename":true,"modelChange":true},"turns":[{"id":"turn","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"Answer","phase":"final"}}}}}]}]}))
+            let source = serde_json::from_value(serde_json::json!({"provider":"codex","id":{"id":"fixture"},"capabilities":{"activeSteering":true,"fork":true,"rename":true,"modelChange":true},"turns":[{"id":"turn","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"Answer","phase":"final"}}}}}]}]}))
             .unwrap();
             let (_, window) = cx.add_window_view(|window, cx| {
                 ConversationView::new(Snapshot::default(), source, window, cx)
@@ -1164,7 +1164,7 @@ mod rendering_tests {
     fn conversation_navigation_returns_to_latest_and_resumes_following(cx: &mut TestAppContext) {
         let _runtime = init(cx);
         let source = serde_json::from_value(serde_json::json!({
-            "id": {"provider":"codex","id":"fixture"}, "turns": (0..20).map(|i| serde_json::json!({
+            "provider":"codex","id":{"id":"fixture"}, "turns": (0..20).map(|i| serde_json::json!({
                 "id": format!("turn-{i}"), "status": "completed", "items": [
                     {"id": format!("user-{i}"), "body": {"inline":{"body":{"userMessage":{"text":format!("Question {i}"),"content":[]}}}}},
                     {"id": format!("answer-{i}"), "body":{"inline":{"body":{"assistantText":{"text":"A long answer\n".repeat(10),"phase":"final"}}}}}
@@ -1182,12 +1182,10 @@ mod rendering_tests {
                 let snapshot = std::sync::Arc::make_mut(&mut desktop.snapshot);
                 Arc::make_mut(&mut snapshot.navigation).thread_id =
                     Some(agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
                         id: "fixture".into(),
                     });
                 std::sync::Arc::make_mut(&mut snapshot.conversations).insert(
                     agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
                         id: "fixture".into(),
                     },
                     fixture.conversation.source.clone(),
@@ -1302,7 +1300,7 @@ mod rendering_tests {
     #[gpui::test]
     fn file_changes_render_and_expand_in_the_desktop_view(cx: &mut TestAppContext) {
         let _runtime = init(cx);
-        let source = serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"fixture"},"turns":[{"id":"turn","status":"completed","items":[{"id":"files","status":"completed","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[{"path":"/fixture/a.txt","kind":{"update":{"movePath":null}},"diff":"@@ -1 +1 @@\n-old\n+new","proposal":null},{"path":"/fixture/b.txt","kind":"add","diff":"@@ -0,0 +1 @@\n+second","proposal":null}],"output":""}}}}}]}]}))
+        let source = serde_json::from_value(serde_json::json!({"provider":"codex","id":{"id":"fixture"},"turns":[{"id":"turn","status":"completed","items":[{"id":"files","status":"completed","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[{"path":"/fixture/a.txt","kind":{"update":{"movePath":null}},"diff":"@@ -1 +1 @@\n-old\n+new","proposal":null},{"path":"/fixture/b.txt","kind":"add","diff":"@@ -0,0 +1 @@\n+second","proposal":null}],"output":""}}}}}]}]}))
         .unwrap();
         let (view, window) = cx.add_window_view(|window, cx| {
             ConversationView::new(Snapshot::default(), source, window, cx)
@@ -1360,7 +1358,6 @@ mod rendering_tests {
                         Arc::new(agent_core::state::PendingSubmission {
                             sequence: 0,
                             draft_key: agent_protocol::session::SessionRef {
-                                provider: agent_protocol::session::ProviderKind::Codex,
                                 id: "fixture".into(),
                             }
                             .into(),
@@ -1381,7 +1378,7 @@ mod rendering_tests {
                     );
                 }
                 let source = serde_json::from_value(serde_json::json!({
-                    "id":{"provider":"codex","id":"fixture"}, "turns":[{"id":"turn", "status":"completed", "items":items}]
+                    "provider":"codex","id":{"id":"fixture"}, "turns":[{"id":"turn", "status":"completed", "items":items}]
                 }))
                 .unwrap();
                 let (view, window) = cx.add_window_view(|window, cx| {

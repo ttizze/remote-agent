@@ -287,29 +287,22 @@ pub(crate) fn codex_item(mut value: Value) -> Result<Item, serde_json::Error> {
             prompt: field(&value, "prompt")?,
             model: field(&value, "model")?,
             effort: field(&value, "reasoningEffort")?,
-            sender: value["senderThreadId"].as_str().map(|id| SessionRef {
-                provider: ProviderKind::Codex,
-                id: id.into(),
-            }),
+            sender: value["senderThreadId"]
+                .as_str()
+                .map(|id| SessionRef { id: id.into() }),
             receivers: value["receiverThreadIds"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
-                .map(|id| SessionRef {
-                    provider: ProviderKind::Codex,
-                    id: id.into(),
-                })
+                .map(|id| SessionRef { id: id.into() })
                 .collect(),
             states: value["agentsStates"]
                 .as_object()
                 .into_iter()
                 .flat_map(|fields| fields.iter())
                 .map(|(id, state)| SubagentState {
-                    session: SessionRef {
-                        provider: ProviderKind::Codex,
-                        id: id.clone(),
-                    },
+                    session: SessionRef { id: id.clone() },
                     status: turn_status(state["status"].as_str()),
                     message: state["message"].as_str().map(str::to_owned),
                 })
@@ -472,7 +465,7 @@ pub(crate) fn codex_turn(mut value: Value) -> Result<Turn, serde_json::Error> {
 pub(crate) fn codex_thread(mut value: Value) -> Result<Thread, serde_json::Error> {
     Ok(Thread {
         id: Some(
-            SessionRef::new(ProviderKind::Codex, field(&value, "id")?)
+            SessionRef::new(field(&value, "id")?)
                 .map_err(<serde_json::Error as serde::de::Error>::custom)?,
         ),
         name: field(&value, "name")?,
@@ -566,7 +559,7 @@ mod tests {
         );
         let subagent = codex_item(json!({"id":"s","type":"collabAgentToolCall","tool":"spawnAgent","senderThreadId":"same","receiverThreadIds":["same"],"agentsStates":{"same":{"status":"pendingInit"}}})).unwrap();
         assert!(
-            matches!(subagent.body(),ItemBody::Subagent {states,..} if states[0].session.provider == ProviderKind::Codex && states[0].status == TurnStatus::Running)
+            matches!(subagent.body(),ItemBody::Subagent {states,..} if states[0].status == TurnStatus::Running)
         );
         let future = json!({"id":"u","type":"futureItem","unknown":[1,2,3]});
         assert!(

@@ -25,11 +25,8 @@ pub fn native_id(directory: &Path, session: &agent_protocol::session::SessionRef
     connection.busy_timeout(Duration::from_secs(5)).unwrap();
     connection
         .query_row(
-            "SELECT native_id FROM conversations WHERE id=?1 AND provider=?2",
-            rusqlite::params![
-                session.id,
-                serde_json::to_string(&session.provider).unwrap()
-            ],
+            "SELECT native_id FROM conversations WHERE id=?1",
+            [&session.id],
             |row| row.get(0),
         )
         .unwrap()

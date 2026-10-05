@@ -4,44 +4,45 @@ Codex and Claude Code are the supported providers.
 
 ## Ownership and protocol
 
-- Provider native history is the only persistent conversation source. The Host
-  stores only owned execution turns, unresolved requests and in-flight input IDs.
-  `SessionActor` owns a `Timeline` with execution state, separate from thread
-  metadata and native history. It never adopts a native history response. Completed turns are
-  released, even while clients remain subscribed.
-  Normalized requests and their delivery state live only in the Timeline; the
-  actor's request origins retain provider answer sources and native identities.
-- `SessionRef { provider, id }` preserves the complete native ID. The
-  `claude:` prefix identifies Claude sessions in client thread keys.
-- `host/session/open` reads native history on every call, including reconnect.
-  At response enqueue, the router overlays owned execution and registers the
-  subscription under that conversation’s lock. The shared registry lock only
-  locates conversations, connections and request identities; encoding and
-  delivery never hold it. An execution that completes during a read is
-  retained only until those readers finish; cancellation releases the reader.
-- `host/session/update` sends typed changes with a subscription UUID. The ordered
-  transport carries the response before subsequent updates. There are no history
-  hydration revisions, cached snapshots, replay logs or gap-repair protocol.
-  Obsolete subscription UUIDs are ignored; queue overflow closes that connection.
-- Turn lifecycle notifications upsert their items without removing independently
-  streamed items, including when the native notification labels its view `full`.
-  Explicit item removals delete items; a fresh history response replaces the view.
-  An inapplicable update reopens the current history window and subscription;
-  only a failed recovery read becomes a client error.
-- Unresolved requests belong to the execution. Provider/session/turn/native request
-  identity is shared by every client, with no per-device alias map. The first valid
-  answer is claimed after checking connection, execution and content. Delivery can
-  be awaiting, sending or unknown; unknown delivery is not automatically retried.
-- Input IDs prevent duplicate admission while execution or delivery is unconfirmed.
-  There is no completed receipt, fingerprint, 15-minute retention or repeated
-  response delivery. After completion/restart, the Host does not guarantee input
-  deduplication. Clients preserve uncertain drafts and never automatically resend.
-- `SubscribeSubmission` is folded into `SendSubmission`: open is applied to the
-  Store before sending. Native-history selection takes immutable values instead
-  of mutating a cloned Snapshot. Navigation epochs and draft protection remain.
-- If native history is unavailable, the client supplements the response with
-  cached completed turns. The Host's current turns, status and unresolved requests
-  remain authoritative; subsequent text changes still target those current turns.
+- The Host's SQLite conversation database is the authoritative history, title,
+  queue and submission-receipt store. Native history is imported automatically
+  on first startup and retained after source files disappear. Import workers
+  own native pagination, hydration and bounded retries. Clients read stored
+  pages and receive import progress or explicit incomplete-history reasons.
+- `SessionRef { id }` contains an opaque Host conversation ID. Provider and
+  native identity belong to the persisted binding. Clients cannot change the
+  execution provider by changing a reference. Provider metadata reaches core
+  separately for presentation and model selection.
+- `SessionActor` retains live execution, unresolved request origins and delivery
+  evidence. It overlays the database read while registering a subscription
+  under that conversation's lock. Completed turns are released from memory;
+  committed history remains in the database.
+- Each conversation opens on its own iroh bidirectional stream. The response
+  precedes subsequent typed `SessionChange` frames on that stream. The client
+  assigns its subscription identity locally and ignores obsolete subscriptions.
+  Queue overflow closes the affected connection.
+- Native events are normalized and committed before publication. Turn lifecycle
+  updates preserve independently streamed items; explicit removals delete items.
+  Client recovery reopens the current stored window and subscription.
+- Native request sources own answer mappings and resources. The router checks
+  persisted provider ownership, current execution and normalized answer content
+  before claiming a response. Sending or unknown delivery is never retried
+  automatically. Runtime origins are retired when their source closes.
+- Input IDs and immutable admission payloads persist across completion and Host
+  restart. Repeated identical admission returns its durable receipt. Changed
+  content under an admitted ID is rejected. A queued message has a separate
+  editable execution payload; the original receipt identity remains unchanged.
+- The Host claims queued work durably before native IO and retains IO ownership
+  after the client disconnects. Restart changes uncertain in-flight delivery to
+  unknown rather than sending the input again. Successful stop holds remaining
+  queued inputs; queue edits and title changes require no provider process.
+- `SendSubmission` opens and applies the conversation to Store before sending.
+  Core captures provider metadata separately from its opaque reference and
+  normalizes model settings when either metadata or the catalog arrives.
+- Database reads, stored list filtering and completed submission receipts do not
+  depend on the current native history path. Native execution checks the binding
+  against the configured source. Changing a provider path cannot erase already
+  imported histories or unrelated client drafts.
 
 ## Provider boundaries
 
@@ -70,8 +71,9 @@ uses that exact native ID and verified working directory.
 
 Claude execution uses the installed CLI's stream-json interface and existing
 subscription authentication. Consecutive turns reuse a process. Viewing or
-listing history does not start one. Unsupported running input, rename and fork
-capabilities are surfaced by core; existing Codex side chats and forks remain.
+listing history does not start one. Claude active steering uses priority-now input on the running process. The
+Host owns rename and queued input for both adapters; unsupported native fork
+capabilities are surfaced by core. Codex execution uses app-server RPC.
 
 Account selection changes credentials, not the user's configuration. Codex thread
 RPCs keep the original App Server and `CODEX_HOME`; only authentication helpers

@@ -1997,11 +1997,10 @@ mod completion_tests {
 
     #[test]
     fn row_projection_keeps_repeated_turns_and_scopes_requests_without_changing_input() {
-        let mut source: Arc<Thread> = Arc::new(serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"selected"},"turns":[{"id":"repeated","items":[{"id":"first","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"first answer","phase":"unknown"}}}}}],"status":"unknown"},{"id":"repeated","items":[{"id":"second","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"second answer","phase":"unknown"}}}}}],"status":"unknown"}]})).unwrap());
+        let mut source: Arc<Thread> = Arc::new(serde_json::from_value(serde_json::json!({"provider":"codex","id":{"id":"selected"},"turns":[{"id":"repeated","items":[{"id":"first","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"first answer","phase":"unknown"}}}}}],"status":"unknown"},{"id":"repeated","items":[{"id":"second","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"second answer","phase":"unknown"}}}}}],"status":"unknown"}]})).unwrap());
         let mut snapshot = Snapshot::default();
         Arc::make_mut(&mut snapshot.navigation).thread_id =
             Some(agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
                 id: "selected".into(),
             });
         let request = Arc::new(agent_protocol::requests::Request {
@@ -2020,10 +2019,7 @@ mod completion_tests {
         let mut other = (*source).clone();
         let request = Arc::make_mut(other.requests.get_mut("global").unwrap());
         request.id = "other".into();
-        other.id = Some(agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
-            id: "other".into(),
-        });
+        other.id = Some(agent_protocol::session::SessionRef { id: "other".into() });
         Arc::make_mut(&mut snapshot.conversations)
             .insert(other.id.clone().unwrap(), Arc::new(other));
         let before = snapshot.clone();

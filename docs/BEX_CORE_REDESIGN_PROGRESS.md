@@ -1,5 +1,7 @@
 # コア再設計の実装記録
 
+この文書は2026年9月の設計・実装記録。現在の移行方針と進捗は[T3 native rewrite plan](T3_NATIVE_REWRITE_PLAN.md)、現在の会話所有と参照形式は[Session runtime](SESSION_RUNTIME.md)に従う。
+
 2026-09-16 / macOS arm64 / Nixの固定環境。計画の第1〜第3段階を実装した。稼働Host・実機の置換はしていない。
 
 基準HEADは `a76284c`。開始時の `4def0f2` 以降に別セッションがコミットした初回履歴読取・quality変更は保持している。以下はPR作成前の実装・検証記録であり、commit単位の必須quality結果はPRに記録する。

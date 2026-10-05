@@ -457,7 +457,7 @@ impl RpcMethod for CreateSession {
         output.subscription_id = id;
     }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        if output.session.provider != self.provider {
+        if output.response.thread.provider != Some(self.provider) {
             return Err("created session provider does not match");
         }
         validate_thread(&output.response, Some(&output.session))

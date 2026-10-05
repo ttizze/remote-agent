@@ -10,7 +10,6 @@ import dev.remoteagent.core.Attachment
 import dev.remoteagent.core.ConversationRowContent
 import dev.remoteagent.core.DraftKey
 import dev.remoteagent.core.Intent
-import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.SessionRef
 import dev.remoteagent.core.Snapshot
 import java.io.File
@@ -33,9 +32,9 @@ import org.junit.runner.RunWith
 class StorePersistenceTest {
     @Test
     fun projectionRetainsBothAnswersAndPublishedValuesAcrossDraftEdits() = runBlocking {
-        val session = SessionRef(ProviderKind.CODEX, "thread")
+        val session = SessionRef("thread")
         val key = DraftKey.Session(session)
-        val identity = JSONObject("""{"provider":"codex","id":"thread"}""")
+        val identity = JSONObject("""{"id":"thread"}""")
         val persisted =
             JSONObject(Snapshot.empty().serialize().decodeToString())
                 .put(
@@ -53,7 +52,7 @@ class StorePersistenceTest {
                                 .put(identity)
                                 .put(
                                     JSONObject(
-                                        """{"id":{"provider":"codex","id":"thread"},"turns":[
+                                        """{"provider":"codex","id":{"id":"thread"},"turns":[
                 {"id":"repeated","items":[${messageItem("first", "first answer")}]},
                 {"id":"repeated","items":[${messageItem("second", "second answer")}]}
             ]}"""
@@ -110,9 +109,17 @@ class StorePersistenceTest {
             val key = store.snapshot().navigation().draftKey
             store.dispatch(Intent.SetDraftText(key, "日本語の下書き")).wait()
             store.dispatch(Intent.AddAttachment(key, Attachment("/fixture/photo.png", "photo.png", true))).wait()
-            repository.save("host-a", store.snapshot().serializeLocalState())
+            repository.save(
+                "host-a",
+                store.snapshot().serializeLocalState(),
+                store.snapshot().serializeClientPreferences(),
+            )
             store.dispatch(Intent.SetDraftText(key, "別の Host の下書き")).wait()
-            repository.save("host-b", store.snapshot().serializeLocalState())
+            repository.save(
+                "host-b",
+                store.snapshot().serializeLocalState(),
+                store.snapshot().serializeClientPreferences(),
+            )
             val restoredA = AgentStore.offline(repository.load("host-a"), null)
             val restoredB = AgentStore.offline(repository.load("host-b"), null)
             try {

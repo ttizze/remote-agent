@@ -16,7 +16,13 @@ use std::{
 #[cfg(test)]
 mod tests;
 
-const DATABASE_FORMAT: u32 = 1;
+const DATABASE_FORMAT: u32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(super) struct NativeIdentity {
+    pub(super) provider: ProviderKind,
+    pub(super) id: String,
+}
 
 pub(super) struct Conversations {
     connection: Mutex<Connection>,
@@ -229,7 +235,7 @@ impl Conversations {
         Ok(())
     }
 
-    pub(super) fn bind(&self, native: &SessionRef, scope: &str) -> Result<SessionRef> {
+    pub(super) fn bind(&self, native: &NativeIdentity, scope: &str) -> Result<SessionRef> {
         let mut connection = self.lock();
         let tx = connection.transaction()?;
         let target = bind(&tx, native, scope)?;
@@ -237,19 +243,31 @@ impl Conversations {
         Ok(target)
     }
 
-    pub(super) fn native(&self, target: &SessionRef, scope: &str) -> Result<SessionRef> {
+    pub(super) fn provider(&self, target: &SessionRef) -> Result<ProviderKind> {
+        let value: String = self
+            .lock()
+            .query_row(
+                "SELECT provider FROM conversations WHERE id=?1",
+                [&target.id],
+                |row| row.get(0),
+            )
+            .context("conversation is not available")?;
+        serde_json::from_str(&value).context("conversation provider is invalid")
+    }
+
+    pub(super) fn native(&self, target: &SessionRef, scope: &str) -> Result<NativeIdentity> {
         let native = self
             .lock()
             .query_row(
-                "SELECT native_id FROM conversations WHERE id=?1 AND provider=?2 AND scope=?3",
-                params![target.id, serde_json::to_string(&target.provider)?, scope],
-                |row| row.get(0),
+                "SELECT provider, native_id FROM conversations WHERE id=?1 AND scope=?2",
+                params![target.id, scope],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?
             .context("conversation is not owned by this provider instance")?;
-        Ok(SessionRef {
-            provider: target.provider,
-            id: native,
+        Ok(NativeIdentity {
+            provider: serde_json::from_str(&native.0)?,
+            id: native.1,
         })
     }
 
@@ -265,6 +283,7 @@ impl Conversations {
 
     pub(super) fn discover_page(
         &self,
+        provider: ProviderKind,
         page: &[super::agent::SessionSummary],
         scope: &str,
     ) -> Result<()> {
@@ -274,8 +293,16 @@ impl Conversations {
             let Some(native) = &summary.thread.id else {
                 continue;
             };
-            let target = bind(&tx, native, scope)?;
+            let target = bind(
+                &tx,
+                &NativeIdentity {
+                    provider,
+                    id: native.id.clone(),
+                },
+                scope,
+            )?;
             let mut metadata = summary.thread.clone();
+            metadata.provider = Some(provider);
             metadata.id = Some(target.clone());
             metadata.turns = None;
             if let Some((name, updated_at)) = manual_title(&tx, &target.id)? {
@@ -319,15 +346,7 @@ impl Conversations {
         query
             .query_map(
                 params![serde_json::to_string(&provider)?, scope, after],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        SessionRef {
-                            provider,
-                            id: row.get(1)?,
-                        },
-                    ))
-                },
+                |row| Ok((row.get(0)?, SessionRef { id: row.get(1)? })),
             )?
             .map(|row| row.map_err(Into::into))
             .collect()
@@ -408,6 +427,7 @@ impl Conversations {
                 |row| row.get(0),
             )?;
             let previous: Thread = serde_json::from_str(&previous)?;
+            metadata.provider = previous.provider;
             metadata.submissions.extend(previous.submissions);
             metadata.requests.extend(previous.requests);
             if let Some(updated_at) = previous.updated_at {
@@ -602,16 +622,12 @@ impl Conversations {
 
     pub(super) fn title_list(
         &self,
-        areas: &[(ProviderKind, String)],
         projects: &crate::projects::state::Snapshot,
         params: &agent_protocol::models::ListQuery,
     ) -> Result<(
         agent_protocol::models::ThreadList,
         std::collections::HashMap<SessionRef, String>,
     )> {
-        let mut areas = areas.to_vec();
-        areas.sort();
-        areas.dedup();
         let connection = self.lock();
         // Select only title fields. Receipts, requests, queues and timeline
         // bodies remain in the DB. The connection lock keeps this iterator on
@@ -621,15 +637,14 @@ impl Conversations {
                 'name', json_extract(c.metadata, '$.name'),
                 'cwd', json_extract(c.metadata, '$.cwd'),
                 'status', json_extract(c.metadata, '$.status'),
+                'provider', json_extract(c.metadata, '$.provider'),
                 'preview', json_extract(c.metadata, '$.preview'),
                 'updatedAt', json_extract(c.metadata, '$.updatedAt')), c.branch
-             FROM conversations c JOIN json_each(?1) area
-                ON c.provider=json_quote(json_extract(area.value, '$[0]'))
-                AND c.scope=json_extract(area.value, '$[1]')
+             FROM conversations c
              ORDER BY COALESCE(CAST(json_extract(c.metadata, '$.updatedAt') AS REAL), 0) DESC,
-                CAST(area.key AS INTEGER), c.id",
+                c.id",
         )?;
-        let mut rows = query.query([serde_json::to_string(&areas)?])?;
+        let mut rows = query.query([])?;
         let search = params.search_term.trim().to_lowercase();
         let mut titles = crate::projects::titles::TitleList::new(&projects.projects, params);
         let mut branches = std::collections::HashMap::new();
@@ -880,11 +895,17 @@ impl Conversations {
                     &submission.thread_id == target,
                     "queued input belongs to another conversation"
                 );
+                let provider: String = tx.query_row(
+                    "SELECT provider FROM conversations WHERE id=?1",
+                    [&target.id],
+                    |row| row.get(0),
+                )?;
+                let provider: ProviderKind = serde_json::from_str(&provider)?;
                 ensure!(
                     submission
                         .model
                         .as_ref()
-                        .is_none_or(|model| model.provider == target.provider),
+                        .is_none_or(|model| model.provider == provider),
                     "queued model belongs to another provider"
                 );
                 ensure!(
@@ -979,8 +1000,8 @@ impl Conversations {
     }
 }
 
-fn bind(tx: &Transaction<'_>, native: &SessionRef, scope: &str) -> Result<SessionRef> {
-    native.validate().map_err(anyhow::Error::msg)?;
+fn bind(tx: &Transaction<'_>, native: &NativeIdentity, scope: &str) -> Result<SessionRef> {
+    agent_protocol::session::validate_session_id(&native.id).map_err(anyhow::Error::msg)?;
     let provider = serde_json::to_string(&native.provider)?;
     let existing: Option<String> = tx
         .query_row(
@@ -994,10 +1015,8 @@ fn bind(tx: &Transaction<'_>, native: &SessionRef, scope: &str) -> Result<Sessio
         None => {
             let id = uuid::Uuid::new_v4().to_string();
             let metadata = Thread {
-                id: Some(SessionRef {
-                    provider: native.provider,
-                    id: id.clone(),
-                }),
+                provider: Some(native.provider),
+                id: Some(SessionRef { id: id.clone() }),
                 ..Default::default()
             };
             tx.execute("INSERT INTO conversations(id, provider, scope, native_id, metadata, model) VALUES(?1, ?2, ?3, ?4, ?5, 'null')",
@@ -1006,10 +1025,7 @@ fn bind(tx: &Transaction<'_>, native: &SessionRef, scope: &str) -> Result<Sessio
             id
         }
     };
-    Ok(SessionRef {
-        provider: native.provider,
-        id,
-    })
+    Ok(SessionRef { id })
 }
 
 #[cfg(test)]

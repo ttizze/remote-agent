@@ -47,7 +47,7 @@ val buildAgentAndroid by
     tasks.registering(Exec::class) {
         workingDir(rootProject.projectDir)
         commandLine(
-            "cargo",
+            providers.environmentVariable("CARGO").orElse("cargo").get(),
             "ndk",
             "--target",
             "arm64-v8a",
@@ -56,6 +56,7 @@ val buildAgentAndroid by
             "--output-dir",
             layout.buildDirectory.dir("generated/jniLibs").get().asFile.absolutePath,
             "build",
+            "--locked",
             "--package",
             "agent-ffi",
             "--release",

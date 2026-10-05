@@ -41,7 +41,6 @@
             targets = [
               "aarch64-apple-ios"
               "aarch64-apple-ios-sim"
-            ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               "aarch64-linux-android"
               "x86_64-linux-android"
             ];
@@ -110,13 +109,13 @@
               sccache
               cargo-mutants
               cargo-nextest
+              cargo-ndk
+              jdk21
+              androidSdk
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               lsof
               gradle
-              jdk21
-              cargo-ndk
               kotlin-language-server
-              androidSdk
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
               pkgs.swiftlint
               pkgs.swiftformat
@@ -135,7 +134,9 @@
                 unset LD
               fi
             '';
-          } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          } // {
+            CARGO = "${rustToolchain}/bin/cargo";
+            RUSTC = "${rustToolchain}/bin/rustc";
             JAVA_HOME = pkgs.jdk21.home;
             ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
             ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";

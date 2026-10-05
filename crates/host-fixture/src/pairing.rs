@@ -231,10 +231,7 @@ fn route(
                 ticket,
                 identity,
                 &agent_protocol::operations::Submission {
-                    thread_id: agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
-                        id,
-                    },
+                    thread_id: agent_protocol::session::SessionRef { id },
                     client_user_message_id: format!("other-client-{}", uuid::Uuid::new_v4()).into(),
                     input: vec![agent_protocol::operations::Input::Text {
                         text: "[external-reply] Latest reply from another client".into(),
@@ -362,10 +359,7 @@ fn conversation(root: &Path, native: &str) -> Result<agent_protocol::session::Se
         rusqlite::params!["\"codex\"", native],
         |row| row.get(0),
     )?;
-    Ok(agent_protocol::session::SessionRef {
-        provider: agent_protocol::session::ProviderKind::Codex,
-        id,
-    })
+    Ok(agent_protocol::session::SessionRef { id })
 }
 
 fn merge_worktree(root: &Path, path: &str) -> Result<()> {

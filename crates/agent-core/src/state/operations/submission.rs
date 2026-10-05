@@ -266,9 +266,12 @@ impl Operation for SendSubmission {
             draft_key: self.thread_id.clone().into(),
         })
     }
-    type Input = bool;
+    type Input = (bool, Option<crate::session::ProviderKind>);
     fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
-        Ok(!snapshot.subscriptions.contains_key(&self.thread_id))
+        Ok((
+            !snapshot.subscriptions.contains_key(&self.thread_id),
+            snapshot.session_provider(&self.thread_id),
+        ))
     }
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn submission_id(&self) -> Option<&str> {
@@ -285,7 +288,7 @@ impl Operation for SendSubmission {
     }
     async fn run(
         &self,
-        needs_subscription: Self::Input,
+        (needs_subscription, provider): Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
         if needs_subscription {
@@ -295,9 +298,13 @@ impl Operation for SendSubmission {
                 .await
                 .map(|opened| SubmissionProgress::Opened(Box::new(opened)));
         }
-        let submission = self
-            .draft
-            .submission(self.thread_id.clone(), self.client_user_message_id.clone());
+        let provider = provider
+            .ok_or_else(|| PeerError::InvalidMessage("conversation provider is missing".into()))?;
+        let submission = self.draft.submission(
+            self.thread_id.clone(),
+            provider,
+            self.client_user_message_id.clone(),
+        );
         let reply = if self.force_queue {
             context
                 .client
@@ -355,17 +362,21 @@ impl Operation for SaveQueuedInput {
             draft_key: self.draft_key.clone(),
         })
     }
-    type Input = Arc<Draft>;
+    type Input = (Arc<Draft>, crate::session::ProviderKind);
     fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
-        snapshot
+        let original = snapshot
             .queue_edits
             .get(&self.draft_key)
             .cloned()
             .ok_or_else(|| {
                 PeerError::InvalidMessage("queued input is no longer being edited".into())
-            })
+            })?;
+        let provider = snapshot
+            .session_provider(&self.submission.thread_id)
+            .ok_or_else(|| PeerError::InvalidMessage("conversation provider is missing".into()))?;
+        Ok((original, provider))
     }
-    type Output = Arc<Draft>;
+    type Output = Self::Input;
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         if !snapshot.queue_edits.contains_key(&self.draft_key) {
@@ -389,7 +400,7 @@ impl Operation for SaveQueuedInput {
             .await?;
         Ok(original)
     }
-    fn apply(self, snapshot: &mut Snapshot, original: Self::Output) -> Vec<Effect> {
+    fn apply(self, snapshot: &mut Snapshot, (original, provider): Self::Output) -> Vec<Effect> {
         if !snapshot.queue_edit_matches(&self.draft_key, Some(&original)) {
             return vec![Effect::continuation(ReadThread::new(
                 self.submission.thread_id,
@@ -398,6 +409,7 @@ impl Operation for SaveQueuedInput {
         let changed = snapshot.drafts.get(&self.draft_key).is_some_and(|draft| {
             draft.submission(
                 self.submission.thread_id.clone(),
+                provider,
                 self.submission.client_user_message_id.clone(),
             ) != self.submission
         });
@@ -498,10 +510,7 @@ mod tests {
 
     #[test]
     fn queued_receipt_preserves_later_host_progress_and_keeps_the_input_editable_until_claimed() {
-        let session = crate::session::SessionRef {
-            provider: ProviderKind::Codex,
-            id: "owned".into(),
-        };
+        let session = crate::session::SessionRef { id: "owned".into() };
         let draft = Arc::new(Draft {
             text: "waiting message".into(),
             ..Default::default()
@@ -518,12 +527,17 @@ mod tests {
         ] {
             let mut thread = Thread {
                 id: Some(session.clone()),
+                provider: Some(ProviderKind::Codex),
                 ..Default::default()
             };
             thread
                 .queued_inputs
                 .push(agent_protocol::queue::QueueEntry {
-                    submission: draft.submission(session.clone(), "message".into()),
+                    submission: draft.submission(
+                        session.clone(),
+                        ProviderKind::Codex,
+                        "message".into(),
+                    ),
                     delivery: SubmissionDelivery::Queued,
                 });
             if let Some(current) = &current {

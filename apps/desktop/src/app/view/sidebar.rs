@@ -380,7 +380,6 @@ mod tests {
             desktop.onboarding = false;
             desktop.panel_open = false;
             let session = agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
                 id: "fixture".into(),
             };
             let snapshot = Arc::make_mut(&mut desktop.snapshot);
@@ -457,8 +456,8 @@ mod tests {
         let snapshot = Snapshot {
             threads: Some(Arc::new(
                 serde_json::from_value(serde_json::json!({
-                    "data":[{"id":{"provider":"codex","id":"first"},"name":"First task","worktreeStatus":"unmerged"},
-                            {"id":{"provider":"codex","id":"second"},"name":"Second task","worktreeStatus":"merged"}],
+                    "data":[{"provider":"codex","id":{"id":"first"},"name":"First task","worktreeStatus":"unmerged"},
+                            {"provider":"codex","id":{"id":"second"},"name":"Second task","worktreeStatus":"merged"}],
                     "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
                 }))
                 .unwrap(),

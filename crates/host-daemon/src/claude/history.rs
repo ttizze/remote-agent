@@ -101,10 +101,8 @@ pub(super) fn summary(path: &Path) -> Result<crate::host_rpc::agent::SessionSumm
         .and_then(|id| id.to_str())
         .context("invalid native transcript filename")?;
     let mut thread = Thread {
-        id: Some(SessionRef {
-            provider: ProviderKind::Claude,
-            id: id.into(),
-        }),
+        provider: Some(ProviderKind::Claude),
+        id: Some(SessionRef { id: id.into() }),
         updated_at: metadata
             .modified()
             .ok()
@@ -201,8 +199,8 @@ pub(super) fn read_related(
         return Err(anyhow!("native subagent path escapes its session"));
     }
     let mut thread = Thread {
+        provider: Some(ProviderKind::Claude),
         id: Some(SessionRef {
-            provider: ProviderKind::Claude,
             id: session_id.to_string(),
         }),
         ..Default::default()
@@ -642,7 +640,7 @@ mod tests {
         ];
         let history = convert(
             Thread {
-                id: Some(SessionRef::new(ProviderKind::Claude, ID.into()).unwrap()),
+                id: Some(SessionRef::new(ID.into()).unwrap()),
                 ..Default::default()
             },
             nodes,
@@ -866,10 +864,8 @@ mod tests {
         ];
         let response = convert(
             Thread {
-                id: Some(SessionRef {
-                    provider: ProviderKind::Claude,
-                    id: ID.into(),
-                }),
+                provider: Some(ProviderKind::Claude),
+                id: Some(SessionRef { id: ID.into() }),
                 ..Default::default()
             },
             rows.into(),

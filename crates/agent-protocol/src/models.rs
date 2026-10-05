@@ -83,6 +83,7 @@ fn project_membership<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
+    pub provider: Option<crate::session::ProviderKind>,
     pub history_read_state: Option<crate::session::HistoryReadState>,
     pub capabilities: Option<crate::session::Capabilities>,
     #[serde(default)]

@@ -2095,8 +2095,8 @@ async fn creating_default_claude_chat_does_not_launch_the_cli_or_read_models() {
         }
     );
     assert_eq!(
-        response.response.thread.id.unwrap().provider,
-        ProviderKind::Claude
+        response.response.thread.provider,
+        Some(ProviderKind::Claude)
     );
     local.close().await;
     fixture.close().await.unwrap();

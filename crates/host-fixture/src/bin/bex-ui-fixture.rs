@@ -89,11 +89,8 @@ async fn main() {
             .peer
             .request::<agent_protocol::browser::BrowserFrame>(
                 &agent_protocol::protocol::Call::Browser(agent_protocol::browser::BrowserRequest {
-                    thread_id: agent_protocol::session::SessionRef::new(
-                        agent_protocol::session::ProviderKind::Codex,
-                        "ui-browser-setup".into(),
-                    )
-                    .unwrap(),
+                    thread_id: agent_protocol::session::SessionRef::new("ui-browser-setup".into())
+                        .unwrap(),
                     tab_id: String::new(),
                     image_id: String::new(),
                     action: agent_protocol::browser::BrowserAction::Read,

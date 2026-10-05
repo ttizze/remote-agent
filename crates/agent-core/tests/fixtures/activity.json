@@ -6,7 +6,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "a"
         },
         "change": {
@@ -22,7 +21,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "a"
         },
         "change": {
@@ -46,7 +44,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "a"
         },
         "change": {
@@ -70,7 +67,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "a"
         },
         "change": {
@@ -94,7 +90,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "a"
         },
         "change": {
@@ -118,7 +113,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "a"
         },
         "change": {
@@ -134,7 +128,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "a"
         },
         "change": {
@@ -154,7 +147,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "a"
         },
         "change": {
@@ -170,7 +162,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "a"
         },
         "change": {

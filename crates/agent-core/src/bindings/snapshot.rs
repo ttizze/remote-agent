@@ -244,20 +244,12 @@ mod tests {
     fn abi_handles_preserve_conversation_projection_identity() {
         let mut snapshot = Snapshot::default();
         Arc::make_mut(&mut snapshot.navigation).thread_id =
-            Some(agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
-                id: "chat".into(),
-            });
+            Some(agent_protocol::session::SessionRef { id: "chat".into() });
         Arc::make_mut(&mut snapshot.conversations).insert(
-            agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
-                id: "chat".into(),
-            },
+            agent_protocol::session::SessionRef { id: "chat".into() },
             Arc::new(crate::models::Thread {
-                id: Some(agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
-                    id: "chat".into(),
-                }),
+                provider: Some(agent_protocol::session::ProviderKind::Codex),
+                id: Some(agent_protocol::session::SessionRef { id: "chat".into() }),
                 ..Default::default()
             }),
         );
@@ -270,16 +262,10 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(
             snapshot
-                .conversation(agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
-                    id: "chat".into()
-                })
+                .conversation(agent_protocol::session::SessionRef { id: "chat".into() })
                 .unwrap()
                 .id(),
-            Some(agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
-                id: "chat".into()
-            })
+            Some(agent_protocol::session::SessionRef { id: "chat".into() })
         );
     }
 }

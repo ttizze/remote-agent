@@ -53,9 +53,7 @@ async fn imported_codex_session(peer: &Client, title: &str) -> agent_protocol::s
                 .into_iter()
                 .find(|thread| {
                     thread.name.as_deref() == Some(title)
-                        && thread.id.as_ref().is_some_and(|id| {
-                            id.provider == agent_protocol::session::ProviderKind::Codex
-                        })
+                        && thread.provider == Some(agent_protocol::session::ProviderKind::Codex)
                 })
                 .and_then(|thread| thread.id)
             {
@@ -1380,7 +1378,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         let target = imported_codex_session(&local.peer, "History pagination").await;
         // First-run import hydrates the source once. Subsequent reads own no provider IO.
         wait_for_import(&local.peer, &target).await;
-        let mut previous: models::Thread = serde_json::from_value(json!({"id":{"provider":"codex","id":"history"},"historyCursor":null,
+        let mut previous: models::Thread = serde_json::from_value(json!({"provider":"codex","id":{"id":"history"},"historyCursor":null,
             "turns":[{"id":"turn-0","status":"completed","items":[{"id":"item-0-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 0/0","phase":"unknown"}}}}}]}, {"id":"turn-11","status":"completed","items":[{"id":"item-11-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 11/0","phase":"unknown"}}}}}],
                 "itemsSummary":true}]})).unwrap();
         previous.id = Some(target.clone());
@@ -1701,7 +1699,7 @@ async fn initial_catalog_returns_committed_pages_while_another_page_is_blocked()
             first
                 .data
                 .iter()
-                .filter(|row| row.id.as_ref().unwrap().provider == ProviderKind::Codex)
+                .filter(|row| row.provider == Some(ProviderKind::Codex))
                 .count(),
             100
         );
@@ -1774,7 +1772,7 @@ async fn initial_catalog_returns_committed_pages_while_another_page_is_blocked()
                 if page
                     .data
                     .iter()
-                    .any(|row| row.id.as_ref().unwrap().provider == ProviderKind::Claude)
+                    .any(|row| row.provider == Some(ProviderKind::Claude))
                 {
                     assert!(
                         page.importing,
@@ -1908,7 +1906,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(body["thread"]["status"], "unknown");
         let item = mobile.peer.call(&serde_json::from_value::<rpc::ReadItem>(json!({"threadId":target,"turnId":"turn-p5-1","itemId":"answer-p5-1"})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap()).unwrap();
         assert_eq!(body_json(&item["item"])["assistantText"]["text"], "History for Project 05 conversation 01");
-        assert!(agent_protocol::protocol::json_boundary::call("host/thread/watch", json!({"watchId":1,"threadId":{"provider":"codex","id":"p5-1"},"path":rollout})).is_err(), "external rollout following is retired");
+        assert!(agent_protocol::protocol::json_boundary::call("host/thread/watch", json!({"watchId":1,"threadId":{"id":"p5-1"},"path":rollout})).is_err(), "external rollout following is retired");
         mobile.close().await;
         fixture.close().await.unwrap();
     }).await.expect("title list loop exceeded deadline");

@@ -1,5 +1,5 @@
 use super::*;
-use agent_protocol::session::{ProviderKind, SessionRef};
+use agent_protocol::session::SessionRef;
 
 #[test]
 fn input_requires_the_displayed_tab_but_reads_and_selection_can_refresh_it() {
@@ -69,8 +69,8 @@ async fn shared_browser_live() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
     let browser = Browser::start(profile.clone()).await.unwrap();
-    let thread_a = SessionRef::new(ProviderKind::Codex, "thread-a".into()).unwrap();
-    let thread_b = SessionRef::new(ProviderKind::Codex, "thread-b".into()).unwrap();
+    let thread_a = SessionRef::new("thread-a".into()).unwrap();
+    let thread_b = SessionRef::new("thread-b".into()).unwrap();
     let scope_a = thread_a.to_string();
     let scope_b = thread_b.to_string();
     let mut initial = browser

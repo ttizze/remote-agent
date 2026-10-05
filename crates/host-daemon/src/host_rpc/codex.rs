@@ -446,13 +446,12 @@ pub(super) fn event_change(
             .map_err(|e| e.to_string())?
     {
         AgentChange::Session {
-            session: SessionRef::new(ProviderKind::Codex, id).map_err(str::to_owned)?,
+            session: SessionRef::new(id).map_err(str::to_owned)?,
             change,
         }
     } else if message.method() == Some("thread/name/updated") {
         AgentChange::Renamed {
             session: SessionRef::new(
-                ProviderKind::Codex,
                 params["threadId"]
                     .as_str()
                     .ok_or("renamed session ID is missing")?
@@ -542,7 +541,7 @@ fn request_change(
         .as_str()
         .ok_or("request session ID is missing")?
         .to_owned();
-    let session = SessionRef::new(ProviderKind::Codex, id).map_err(str::to_owned)?;
+    let session = SessionRef::new(id).map_err(str::to_owned)?;
     let adapted = super::requests::codex(
         uuid::Uuid::new_v4().to_string().into(),
         &native.method,
@@ -714,15 +713,13 @@ impl Agent for Codex {
 
     async fn read_item(
         &self,
-        params: &op::ReadItem,
+        native_id: &str,
+        turn_id: &agent_protocol::ids::TurnId,
+        item_id: &agent_protocol::ids::ItemId,
     ) -> Result<agent_protocol::operations::ItemResponse, Failure> {
-        if [
-            params.thread_id.id.as_str(),
-            params.turn_id.as_str(),
-            params.item_id.as_str(),
-        ]
-        .iter()
-        .any(|id| id.is_empty())
+        if [native_id, turn_id.as_str(), item_id.as_str()]
+            .iter()
+            .any(|id| id.is_empty())
         {
             return Err(Failure::new(
                 "invalid_params",
@@ -733,11 +730,10 @@ impl Agent for Codex {
         let mut cursors = std::collections::HashSet::new();
         loop {
             let page = self
-                .item_page(&params.thread_id.id, &params.turn_id, cursor.as_deref())
+                .item_page(native_id, turn_id, cursor.as_deref())
                 .await?;
             if let Some(entry) = page.data.into_iter().find(|entry| {
-                entry.turn_id.as_deref() == Some(params.turn_id.as_str())
-                    && entry.item.id == params.item_id
+                entry.turn_id.as_deref() == Some(turn_id.as_str()) && &entry.item.id == item_id
             }) {
                 return Ok(agent_protocol::operations::ItemResponse {
                     item: Arc::unwrap_or_clone(entry.item),
@@ -793,13 +789,14 @@ impl Agent for Codex {
     async fn submit(
         &self,
         input: &op::Submission,
+        native_id: &str,
         route: super::submission::SubmissionTarget,
         reload: bool,
         browser: Option<Value>,
     ) -> Result<op::SubmissionReceipt, Failure> {
         use super::submission::SubmissionTarget;
         let mut params = serde_json::json!({
-            "threadId": input.thread_id.id,
+            "threadId": native_id,
             "clientUserMessageId": input.client_user_message_id,
             "input": super::native::codex_input(&input.input),
         });
@@ -821,7 +818,7 @@ impl Agent for Codex {
                     self.thread_response(
                         "thread/resume",
                         &with_browser_config(
-                            serde_json::json!({"threadId":input.thread_id.id,"cwd":cwd}),
+                            serde_json::json!({"threadId":native_id,"cwd":cwd}),
                             browser,
                         ),
                     )

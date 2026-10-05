@@ -1,5 +1,7 @@
 # Bex：コア再設計の実装計画
 
+この文書は2026年9月の設計・実装記録。現在の移行方針と進捗は[T3 native rewrite plan](T3_NATIVE_REWRITE_PLAN.md)、現在の会話所有と参照形式は[Session runtime](SESSION_RUNTIME.md)に従う。
+
 作成日：2026-09-16
 
 対象：`ttizze/remote-agent`

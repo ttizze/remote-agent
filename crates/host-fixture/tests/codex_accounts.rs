@@ -60,10 +60,7 @@ async fn completed_turn(
 ) -> String {
     let open = agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {
         include_activity: false,
-        session: agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
-            id: thread.into(),
-        },
+        session: agent_protocol::session::SessionRef { id: thread.into() },
         limit: 5,
     });
     let reply = service.dispatch(session.id(), &open).await.unwrap();
@@ -72,7 +69,7 @@ async fn completed_turn(
         service,
         session,
         "host/session/submit",
-        json!({"threadId":{"provider":"codex","id":thread},"clientUserMessageId":text,"input":[{"text":{"text":text}}]}),
+        json!({"threadId":{"id":thread},"clientUserMessageId":text,"input":[{"text":{"text":text}}]}),
     )
     .await;
     assert!(result.get("error").is_none(), "{result}");
@@ -135,7 +132,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let started = call(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":home})).await;
         let thread = started["result"]["thread"]["id"]["id"].as_str().unwrap();
         completed_turn(&service, &mut session, thread, "before switch").await;
-        let before = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
+        let before = call(&service, &mut session, "host/session/open", json!({"session":{"id":thread},"limit":5})).await;
         assert!(before.get("error").is_none(), "{before}");
         assert_eq!(before["result"]["thread"]["turns"].as_array().unwrap().len(), 1);
         let canceled = call(&service, &mut session, "host/account/login/start", json!({"provider":"codex"})).await;
@@ -160,10 +157,10 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert_eq!(server.initialize_response().codex_home, dunce::canonicalize(&home).unwrap(), "account selection must retain the conversation configuration home");
         let refreshed = rpc(&server, "fixture/account/refresh", json!({"previousAccountId":"desktop"})).await;
         assert_eq!(refreshed, json!({"accountId":"desktop","hasToken":true}));
-        let after = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
+        let after = call(&service, &mut session, "host/session/open", json!({"session":{"id":thread},"limit":5})).await;
         assert_eq!(before["result"]["thread"], after["result"]["thread"]);
         completed_turn(&service, &mut session, thread, "after switch").await;
-        let after = call(&service, &mut session, "host/session/open", json!({"session":{"provider":"codex","id":thread},"limit":5})).await;
+        let after = call(&service, &mut session, "host/session/open", json!({"session":{"id":thread},"limit":5})).await;
         assert_eq!(after["result"]["thread"]["turns"].as_array().unwrap().len(), 2);
         let invalid = call(&service, &mut session, "host/account/select", json!({"accountId":"missing"})).await;
         assert!(invalid.get("error").is_some());
@@ -204,7 +201,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert!(accounts["result"]["selected"]["codex"].is_null());
         assert!(accounts["result"]["error"].is_string());
         assert!(call(&service, &mut session, "host/session/list", json!({})).await.get("error").is_none());
-        assert_eq!(call(&service, &mut session, "host/session/submit", json!({"threadId":{"provider":"codex","id":thread},"clientUserMessageId":"unavailable-account","input":[{"text":{"text":"must not use a different account"}}]})).await["error"]["code"], "account_unavailable");
+        assert_eq!(call(&service, &mut session, "host/session/submit", json!({"threadId":{"id":thread},"clientUserMessageId":"unavailable-account","input":[{"text":{"text":"must not use a different account"}}]})).await["error"]["code"], "account_unavailable");
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
         let started = call(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":home})).await;
         assert!(started.get("error").is_none(), "{started}");
@@ -285,7 +282,7 @@ async fn helper_initialization_does_not_block_completed_turns() {
             &service,
             &mut session,
             "host/session/open",
-            json!({"session":{"provider":"codex","id":thread},"limit":5}),
+            json!({"session":{"id":thread},"limit":5}),
         )
         .await;
         assert_eq!(read["result"]["thread"]["turns"][0]["status"], "completed");

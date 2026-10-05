@@ -7,8 +7,8 @@
       "historyReadState": {
         "type": "complete"
       },
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "fixture-thread-1"
       },
       "model": null,
@@ -315,7 +315,6 @@
         "modelChange": true
       },
       "session": {
-        "provider": "codex",
         "id": "fixture-thread-1"
       }
     }
@@ -324,8 +323,8 @@
     "data": [
       {
         "cwd": "/fixture/workspace",
+        "provider": "codex",
         "id": {
-          "provider": "codex",
           "id": "fixture-thread-1"
         },
         "name": "Simulator conversation",
@@ -334,7 +333,6 @@
         "updatedAt": 1,
         "worktreeStatus": null,
         "session": {
-          "provider": "codex",
           "id": "fixture-thread-1"
         },
         "capabilities": {

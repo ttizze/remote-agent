@@ -123,10 +123,10 @@ mod tests {
             &mut snapshot,
             serde_json::from_value(json!({
                 "data": [
-                    {"id":{"provider":"codex","id":"named"},"name":"Name","preview":"Preview"},
-                    {"id":{"provider":"codex","id":"preview"},"name":"","preview":"First prompt"},
-                    {"id":{"provider":"claude","id":"empty"},"name":"","preview":""},
-                    {"id":{"provider":"claude","id":"missing"}}
+                    {"provider":"codex","id":{"id":"named"},"name":"Name","preview":"Preview"},
+                    {"provider":"codex","id":{"id":"preview"},"name":"","preview":"First prompt"},
+                    {"provider":"claude","id":{"id":"empty"},"name":"","preview":""},
+                    {"provider":"claude","id":{"id":"missing"}}
                 ],
                 "projects":[], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false
             }))
@@ -172,10 +172,10 @@ mod tests {
             &mut snapshot,
             serde_json::from_value(json!({
                 "data": [
-                    {"id":{"provider":"codex","id":"assigned"}, "projectId":"known"},
-                    {"id":{"provider":"codex","id":"missing"}, "projectId":"absent"},
-                    {"id":{"provider":"codex","id":"chat"}, "projectId":null},
-                    {"id":{"provider":"codex","id":"unknown"}}
+                    {"provider":"codex","id":{"id":"assigned"}, "projectId":"known"},
+                    {"provider":"codex","id":{"id":"missing"}, "projectId":"absent"},
+                    {"provider":"codex","id":{"id":"chat"}, "projectId":null},
+                    {"provider":"codex","id":{"id":"unknown"}}
                 ],
                 "projects":[{"id":"known", "name":"Project", "roots":[]}],
                 "moreProjectIds":["known"], "hasMoreChats":true, "hasMoreProjects":true
@@ -211,14 +211,14 @@ mod tests {
         ListSessions::new(Default::default()).apply(
             &mut snapshot,
             page(
-                serde_json::json!([{"id":{"provider":"codex","id":"native"},"name":"Cached"}]),
+                serde_json::json!([{"provider":"codex","id":{"id":"native"},"name":"Cached"}]),
                 serde_json::json!({}),
             ),
         );
         ListSessions::new(Default::default()).apply(
             &mut snapshot,
             page(
-                serde_json::json!([{"id":{"provider":"claude","id":"uuid"},"name":"Available"}]),
+                serde_json::json!([{"provider":"claude","id":{"id":"uuid"},"name":"Available"}]),
                 serde_json::json!({"codex":{"message":"offline"}}),
             ),
         );
@@ -244,21 +244,15 @@ mod tests {
         std::sync::Arc::make_mut(&mut snapshot.activity)
             .active
             .insert(
-                agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
-                    id: "task".into(),
-                },
+                agent_protocol::session::SessionRef { id: "task".into() },
                 active,
             );
         if unread {
             std::sync::Arc::make_mut(&mut snapshot.activity)
                 .unread
-                .insert(agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
-                    id: "task".into(),
-                });
+                .insert(agent_protocol::session::SessionRef { id: "task".into() });
         }
-        let mut thread = json!({"id":{"provider":"codex","id":"task"},"name":"Worktree task",
+        let mut thread = json!({"provider":"codex","id":{"id":"task"},"name":"Worktree task",
             "status":if active {"running"} else {"idle"}});
         if let Some(status) = status {
             thread["worktreeStatus"] = json!(status);

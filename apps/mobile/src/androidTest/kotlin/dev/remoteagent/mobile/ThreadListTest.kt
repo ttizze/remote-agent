@@ -11,7 +11,6 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import dev.remoteagent.core.Intent
-import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.SessionRef
 import dev.remoteagent.core.Snapshot
 import org.json.JSONObject
@@ -33,11 +32,11 @@ class ThreadListTest {
                     JSONObject(
                         """{
                 "data":[
-                    {"id":{"provider":"codex","id":"running"},"name":"Running worktree","worktreeStatus":"merged","status":"running"},
-                    {"id":{"provider":"codex","id":"unread"},"name":"Unread worktree","worktreeStatus":"merged"},
-                    {"id":{"provider":"claude","id":"pending"},"name":"Pending worktree","worktreeStatus":"unmerged","status":"running"},
-                    {"id":{"provider":"claude","id":"pending-unread"},"name":"Pending unread worktree","worktreeStatus":"unmerged"},
-                    {"id":{"provider":"claude","id":"running"},"name":"Claude conversation"}
+                    {"provider":"codex","id":{"id":"running"},"name":"Running worktree","worktreeStatus":"merged","status":"running"},
+                    {"provider":"codex","id":{"id":"unread"},"name":"Unread worktree","worktreeStatus":"merged"},
+                    {"provider":"claude","id":{"id":"pending"},"name":"Pending worktree","worktreeStatus":"unmerged","status":"running"},
+                    {"provider":"claude","id":{"id":"pending-unread"},"name":"Pending unread worktree","worktreeStatus":"unmerged"},
+                    {"provider":"claude","id":{"id":"other-running"},"name":"Claude conversation"}
                 ],
                 "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
             }"""
@@ -46,7 +45,7 @@ class ThreadListTest {
                 .put(
                     "activity",
                     JSONObject(
-                        """{"active":[[{"provider":"codex","id":"running"},true],[{"provider":"claude","id":"pending"},true]],"unread":[{"provider":"codex","id":"unread"},{"provider":"claude","id":"pending-unread"}]}"""
+                        """{"active":[[{"id":"running"},true],[{"id":"pending"},true]],"unread":[{"id":"unread"},{"id":"pending-unread"}]}"""
                     ),
                 )
         // Render a live snapshot: opening an offline Store intentionally clears running status.
@@ -83,10 +82,7 @@ class ThreadListTest {
             )
             compose.onNodeWithText("Running worktree").performClick()
             compose.onNodeWithText("Claude conversation").assertIsDisplayed().performClick()
-            assertEquals(
-                listOf(SessionRef(ProviderKind.CODEX, "running"), SessionRef(ProviderKind.CLAUDE, "running")),
-                opened,
-            )
+            assertEquals(listOf(SessionRef("running"), SessionRef("other-running")), opened)
         }
     }
 }

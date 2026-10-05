@@ -163,7 +163,6 @@ enum ProviderKind {
 }
 #[uniffi::remote(Record)]
 struct SessionRef {
-    pub provider: ProviderKind,
     pub id: String,
 }
 #[uniffi::remote(Record)]

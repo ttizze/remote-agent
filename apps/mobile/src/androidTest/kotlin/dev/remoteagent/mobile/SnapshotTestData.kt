@@ -1,6 +1,5 @@
 package dev.remoteagent.mobile
 
-import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.SessionRef
 import dev.remoteagent.core.Snapshot
 import org.json.JSONArray
@@ -26,15 +25,10 @@ internal fun messageItem(id: String, text: String, user: Boolean = false): JSONO
 
 internal fun Snapshot.threadJson(session: SessionRef): JSONObject {
     val entries = JSONObject(serialize().decodeToString()).getJSONArray("conversations")
-    val provider =
-        when (session.provider) {
-            ProviderKind.CODEX -> "codex"
-            ProviderKind.CLAUDE -> "claude"
-        }
     return (0 until entries.length()).firstNotNullOf { index ->
         val entry = entries.getJSONArray(index)
         val identity = entry.getJSONObject(0)
-        if (identity.getString("provider") == provider && identity.getString("id") == session.id) {
+        if (identity.getString("id") == session.id) {
             entry.getJSONObject(1)
         } else null
     }

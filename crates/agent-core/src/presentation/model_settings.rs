@@ -7,15 +7,30 @@ use crate::{
 use agent_protocol::operations::UsageWindow;
 
 pub(crate) fn draft_provider(
-    key: &crate::state::DraftKey,
+    provider: Option<ProviderKind>,
     model: Option<&ModelRef>,
 ) -> ProviderKind {
-    match key {
-        crate::state::DraftKey::Session { session }
-        | crate::state::DraftKey::Queued { session, .. } => session.provider,
-        crate::state::DraftKey::Local { .. } => model
-            .map(|model| model.provider)
-            .unwrap_or(ProviderKind::Codex),
+    provider
+        .or_else(|| model.map(|model| model.provider))
+        .unwrap_or(ProviderKind::Codex)
+}
+
+impl Snapshot {
+    pub(crate) fn session_provider(
+        &self,
+        session: &crate::session::SessionRef,
+    ) -> Option<ProviderKind> {
+        self.conversations
+            .get(session)
+            .and_then(|thread| thread.provider)
+            .or_else(|| {
+                self.threads
+                    .as_ref()?
+                    .data
+                    .iter()
+                    .find(|thread| thread.id.as_ref() == Some(session))?
+                    .provider
+            })
     }
 }
 
@@ -157,7 +172,11 @@ impl Snapshot {
 
     pub fn model_provider_for_draft(&self, thread_id: crate::state::DraftKey) -> ProviderKind {
         draft_provider(
-            &thread_id,
+            match &thread_id {
+                crate::state::DraftKey::Session { session }
+                | crate::state::DraftKey::Queued { session, .. } => self.session_provider(session),
+                crate::state::DraftKey::Local { .. } => None,
+            },
             self.drafts
                 .get(&thread_id)
                 .and_then(|draft| draft.model.as_ref()),
@@ -303,7 +322,7 @@ mod tests {
             };
             for (provider, effort) in [(ProviderKind::Codex, "high"), (ProviderKind::Claude, "low")] {
                 let selected = ModelRef { provider, id: id.clone() };
-                for key in [crate::state::DraftKey::from("local"), crate::session::SessionRef { provider, id: "session".into() }.into()] {
+                for key in [crate::state::DraftKey::from("local"), crate::session::SessionRef { id: "session".into() }.into()] {
                     Arc::make_mut(&mut snapshot.drafts).insert(key.clone(), Arc::new(Draft {model:Some(selected.clone()),..Default::default()}));
                     proptest::prop_assert_eq!(snapshot.model_provider_for_draft(key.clone()), provider);
                     proptest::prop_assert_eq!(snapshot.model_for_provider(key.clone(), provider), Some(selected.clone()));

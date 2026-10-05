@@ -346,10 +346,8 @@ impl Catalog {
                     .and_then(|path| metadata(&home, path)),
             };
             let mut thread = Thread {
-                id: Some(SessionRef {
-                    provider: ProviderKind::Codex,
-                    id: id.to_string(),
-                }),
+                provider: Some(ProviderKind::Codex),
+                id: Some(SessionRef { id: id.to_string() }),
                 ..Default::default()
             };
             let mut branch = None;

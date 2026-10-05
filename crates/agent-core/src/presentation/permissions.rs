@@ -168,9 +168,16 @@ mod tests {
         assert_eq!(control.label, "読み込み中…");
         assert_eq!(control.version, None);
         let session = crate::session::SessionRef {
-            provider: ProviderKind::Claude,
             id: "native".into(),
         };
+        Arc::make_mut(&mut snapshot.conversations).insert(
+            session.clone(),
+            Arc::new(crate::models::Thread {
+                id: Some(session.clone()),
+                provider: Some(ProviderKind::Claude),
+                ..Default::default()
+            }),
+        );
         let key = crate::state::DraftKey::from(session);
         assert_eq!(
             snapshot.permission_control(&key).provider,

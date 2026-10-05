@@ -409,7 +409,6 @@
     "command": {
       "type": "forkThread",
       "threadId": {
-        "provider": "codex",
         "id": "thread"
       },
       "lastTurnId": "last"
@@ -419,7 +418,6 @@
         "method": "host/session/fork",
         "params": {
           "threadId": {
-            "provider": "codex",
             "id": "thread"
           },
           "lastTurnId": "last"
@@ -427,8 +425,8 @@
         "response": {
           "result": {
             "thread": {
+              "provider": "codex",
               "id": {
-                "provider": "codex",
                 "id": "fork"
               },
               "turns": [],
@@ -442,8 +440,8 @@
     ],
     "result": {
       "thread": {
+        "provider": "codex",
         "id": {
-          "provider": "codex",
           "id": "fork"
         },
         "turns": [],

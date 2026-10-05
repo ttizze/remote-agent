@@ -1357,7 +1357,6 @@ mod tests {
             view.read(cx).0.clone().update(cx, |view, cx| {
                 let draft = view.draft().clone();
                 let session = agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
                     id: "existing".into(),
                 };
                 let snapshot = Arc::make_mut(&mut view.snapshot);

@@ -11,7 +11,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.remoteagent.core.DraftKey
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
-import dev.remoteagent.core.ProviderKind
 import dev.remoteagent.core.ReadThread
 import dev.remoteagent.core.SessionRef
 import java.io.File
@@ -62,7 +61,7 @@ class ConversationRecoveryTest {
                     while (model.busy || !model.snapshot.connected() || model.snapshot.models().isEmpty()) delay(10)
                     perform(Intent.NewChat(cwd)).getOrThrow()
                     perform(Intent.SetDraftText(model.draftKey, "Recovery fixture input")).getOrThrow()
-                    perform(Intent.Submit(null, UUID.randomUUID().toString())).getOrThrow()
+                    perform(Intent.Submit(null, UUID.randomUUID().toString(), false)).getOrThrow()
                     val id = requireNotNull(model.snapshot.navigation().threadId)
                     while (true) {
                         val thread = model.snapshot.threadJson(id)
@@ -79,12 +78,7 @@ class ConversationRecoveryTest {
                     assertEquals("", model.snapshot.draft(DraftKey.Session(id)).text)
                     perform(Intent.SetDraftText(DraftKey.Session(id), "preserved draft")).getOrThrow()
                     assertTrue(
-                        perform(
-                                Intent.ReadThread(
-                                    ReadThread(SessionRef(ProviderKind.CODEX, "missing-thread"), open = true)
-                                )
-                            )
-                            .isFailure
+                        perform(Intent.ReadThread(ReadThread(SessionRef("missing-thread"), open = true))).isFailure
                     )
                     assertNotNull(model.snapshot.error())
                     perform(Intent.ReadThread(ReadThread(id, open = true))).getOrThrow()
@@ -102,7 +96,7 @@ class ConversationRecoveryTest {
                     assertEquals(id, model.snapshot.navigation().threadId)
                     assertEquals("preserved draft", model.snapshot.draft(DraftKey.Session(id)).text)
                     assertNull(model.notice)
-                    perform(Intent.Submit(id, UUID.randomUUID().toString())).getOrThrow()
+                    perform(Intent.Submit(id, UUID.randomUUID().toString(), false)).getOrThrow()
                     while (true) {
                         val thread = model.snapshot.threadJson(id)
                         val turns = thread.getJSONArray("turns")

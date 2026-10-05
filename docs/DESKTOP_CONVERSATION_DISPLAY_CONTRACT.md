@@ -101,6 +101,13 @@ hydration must not change this default.
   replaced. Native source paths still separate import bindings. Database creation
   records the current format and identity atomically; unsupported or damaged
   databases fail explicitly without replacing saved data.
+- A conversation reference contains only its opaque Host ID. Provider selection
+  belongs to persisted binding and metadata, never to the client reference or
+  native history ID. Reads, title changes, queue edits and completed submission
+  receipts remain available when a native history path changes. Listing reads
+  all saved conversations from the database, including unavailable sources.
+  Native execution still checks the binding against its configured source.
+  This replaces source-filtered lists under the October 5, 2026 rewrite requirement.
 - If Codex app-server cannot start, import its native rollout storage read-only.
   Honor the current index's immutable rollout after revert, compressed files,
   inherited byte/ordinal boundaries and the subagent cutoff. Bound decompressed

@@ -2743,20 +2743,25 @@
       "incremental automatic Codex and Claude catalog discovery",
       "bounded database title projection and incremental source body import",
       "read-only Codex history import without app-server, including compressed rollouts and indexed revert selection",
-      "database-owned client storage identity independent of provider configuration"
+      "database-owned client storage identity independent of provider configuration",
+      "opaque conversation references with database-owned provider metadata and provider-independent cached operations"
     ],
     "verification": {
-      "local_unit_tests": "489 passed, 3 existing skips; Markdown regressions passed",
+      "local_unit_tests": "494 passed, 3 existing skips; Markdown regressions passed",
       "rust_clippy": "passed",
       "swift_lint_and_format": "passed",
       "kotlin_detekt_and_format": "passed",
-      "ios_app_and_ui_test_bundle_build": "passed without executing acceptance",
+      "ios_app_and_ui_test_bundle_build": "passed for opaque conversation references without executing acceptance",
       "focused_import_and_title_mutations": "29 caught, 8 unviable; 0 missed or timed out",
       "focused_codex_file_mutations": "26 caught, 2 unviable; 0 missed or timed out",
       "native_acceptance": "pending",
       "all_client_visual_comparison": "pending",
       "host_rpc_and_conversation_units": "97 passed, including database identity across provider configuration, restart and replacement",
-      "focused_database_identity_mutations": "7 caught; 0 missed, unviable or timed out"
+      "focused_database_identity_mutations": "7 caught; 0 missed, unviable or timed out",
+      "opaque_conversation_mutations": "20 caught, 1 syntactically unviable; 0 missed or timed out; package-option and missing-companion baseline failures excluded",
+      "core_and_cli_integration": "CLI iroh connection/submission/approval passed; core Store 64 passed; state 27 passed",
+      "android_debug_app_and_test_compile": "passed with arm64-v8a and x86_64 Rust JNI libraries; no emulator execution",
+      "macos_android_environment": "pinned Nix SDK, JDK, cargo-ndk and Rust Android targets; Cargo/Rustc explicitly selected for Gradle"
     },
     "remaining": [
       "provider instances",

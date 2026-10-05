@@ -81,10 +81,7 @@ mod tests {
 
     #[test]
     fn composer_offers_the_alternate_only_with_a_valid_active_steer_target() {
-        let session = crate::session::SessionRef {
-            provider: crate::session::ProviderKind::Claude,
-            id: "owned".into(),
-        };
+        let session = crate::session::SessionRef { id: "owned".into() };
         for (status, active, supported, expected) in [
             (
                 crate::models::SessionStatus::Idle,

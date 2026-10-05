@@ -153,10 +153,20 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     thread_id: thread_id.clone().into(),
                     draft: Draft {
                         text,
-                        model: model.map(|id| agent_protocol::models::ModelRef {
-                            provider: thread_id.provider,
-                            id,
-                        }),
+                        model: model
+                            .map(|id| {
+                                let provider = store
+                                    .snapshot()
+                                    .conversations
+                                    .get(&thread_id)
+                                    .and_then(|thread| thread.provider)
+                                    .context("conversation provider is missing")?;
+                                Ok::<_, anyhow::Error>(agent_protocol::models::ModelRef {
+                                    provider,
+                                    id,
+                                })
+                            })
+                            .transpose()?,
                         effort,
                         ..Default::default()
                     },

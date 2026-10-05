@@ -112,7 +112,7 @@ private const val SEARCH_DEBOUNCE_MILLIS = 200L
 private const val UNMERGED_COLOR_ARGB = 0xFFFB923C
 
 private val SessionRef.listKey: String
-    get() = "session:$provider:$id"
+    get() = "session:$id"
 
 private fun LazyListScope.projectThreads(
     list: ThreadList?,

@@ -123,7 +123,7 @@ impl Fixture {
                             } else {
                                 vec![deferred_command("")]
                             };
-                            json!({"session":request["params"]["session"],"subscriptionId":subscription,"response":{"thread":{"id":{"provider":"codex","id":"A"},"turns":[{"id":"turn","status":"running","items":items}]}}})
+                            json!({"session":request["params"]["session"],"subscriptionId":subscription,"response":{"thread":{"provider":"codex","id":{"id":"A"},"turns":[{"id":"turn","status":"running","items":items}]}}})
                         }
                         "host/session/item/read" if automatic_reads => {
                             let id: usize = request["params"]["itemId"]
@@ -183,10 +183,7 @@ impl Fixture {
     async fn open(&self) {
         self.store
             .dispatch(Intent::ReadThread(op::ReadThread::new(
-                agent_protocol::session::SessionRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
-                    id: "A".into(),
-                },
+                agent_protocol::session::SessionRef { id: "A".into() },
             )))
             .await
             .unwrap();
@@ -219,10 +216,10 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
         if let agent_protocol::items::ItemBody::AssistantText {text, ..} = changed.body_mut() {*text = "live update".into();}
         fixture.update(SessionChange::Item {turn_id:"turn".into(), item: changed.into()}).await;
         fixture.update(SessionChange::Request { request: serde_json::from_value(json!({"id": "approval", "target": {"turn": {"turnId": "turn", "itemId": "item-0"}}, "delivery": "awaiting", "body": {"approval": {"kind": "command", "description": "", "details": "", "choices": [{"id": "choice-0", "label": "承認", "description": ""}, {"id": "choice-1", "label": "このセッションで承認", "description": ""}, {"id": "choice-2", "label": "拒否", "description": ""}, {"id": "choice-3", "label": "キャンセル", "description": ""}]}}})).unwrap() }).await;
-        wait_for(&fixture.store, |s| s.request("approval").is_some() && matches!(s.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "live update")).await;
+        wait_for(&fixture.store, |s| s.request("approval").is_some() && matches!(s.conversations[&agent_protocol::session::SessionRef { id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0].body(), agent_protocol::items::ItemBody::AssistantText {text, ..} if text == "live update")).await;
         for intent in [
             Intent::Respond(op::Respond {request_id: "approval".into(),answer:Answer::Approval {choice_id: "choice-2".into()}}),
-            Intent::Interrupt(op::Interrupt {thread_id: agent_protocol::session::SessionRef {provider:agent_protocol::session::ProviderKind::Codex,id:"A".into()},turn_id:"turn".into()}),
+            Intent::Interrupt(op::Interrupt {thread_id: agent_protocol::session::SessionRef {id:"A".into()},turn_id:"turn".into()}),
         ] {
             let completion = fixture.store.dispatch(intent);
             let request = fixture.requests.recv().await.unwrap();
@@ -242,10 +239,10 @@ async fn bulk_item_reads_hold_slots_through_body_application_without_starving_co
                 fixture.files.transfer(OWNER, stream).await.unwrap();
             }
         };
-        let complete = wait_for(&fixture.store, |s| s.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap().iter().all(|item| !item.is_deferred()));
+        let complete = wait_for(&fixture.store, |s| s.conversations[&agent_protocol::session::SessionRef { id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap().iter().all(|item| !item.is_deferred()));
         tokio::select! { _ = serving => unreachable!(), _ = complete => {} }
         let snapshot = fixture.store.snapshot();
-        let items = snapshot.conversations[&agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap();
+        let items = snapshot.conversations[&agent_protocol::session::SessionRef { id: "A".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap();
         assert_eq!(items.len(), 12);
         for (id, actual) in items.iter().enumerate() {
             let expected: agent_protocol::models::Item = serde_json::from_value(item(id, true)).unwrap();
@@ -262,10 +259,7 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
         let mut fixture = Fixture::start(1, false).await;
         fixture.open().await;
         let completion = fixture.store.dispatch(Intent::ReadItem(op::ReadItem {
-            thread_id: agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
-                id: "A".into(),
-            },
+            thread_id: agent_protocol::session::SessionRef { id: "A".into() },
             turn_id: "turn".into(),
             item_id: "item-0".into(),
         }));
@@ -297,10 +291,7 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
                     .await;
                 wait_for(&fixture.store, |s| {
                     command_output(
-                        &s.conversations[&agent_protocol::session::SessionRef {
-                            provider: agent_protocol::session::ProviderKind::Codex,
-                            id: "A".into(),
-                        }]
+                        &s.conversations[&agent_protocol::session::SessionRef { id: "A".into() }]
                             .turns
                             .as_ref()
                             .unwrap()[0]
@@ -327,10 +318,7 @@ async fn stale_control_responses_consume_grants_before_retrying_more_than_eight_
         }
         completion.await.unwrap();
         let snapshot = fixture.store.snapshot();
-        let turn = &snapshot.conversations[&agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
-            id: "A".into(),
-        }]
+        let turn = &snapshot.conversations[&agent_protocol::session::SessionRef { id: "A".into() }]
             .turns
             .as_ref()
             .unwrap()[0];

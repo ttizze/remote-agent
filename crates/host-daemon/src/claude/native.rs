@@ -492,7 +492,7 @@ mod tests {
             output_available in any::<bool>(),
         ) {
             let summary = summary.trim();
-            let session = SessionRef::new(ProviderKind::Claude, "session".into()).unwrap();
+            let session = SessionRef::new("session".into()).unwrap();
             let call = content_item(&session, "block".into(),
                 &json!({"type":"tool_use","id":"work","name":match tool_kind {0=>"Bash", 1=>"Agent", _=>"mcp__workflow__run"},"input":{"command":"work","prompt":"work"}}),
                 None, ItemStatus::Running).unwrap();
@@ -639,7 +639,7 @@ mod tests {
         use agent_protocol::{execution::TurnStatus, models::Turn};
         use std::sync::Arc;
 
-        let session = SessionRef::new(ProviderKind::Claude, "session".into()).unwrap();
+        let session = SessionRef::new("session".into()).unwrap();
         let command = content_item(
             &session,
             "block".into(),
@@ -700,7 +700,7 @@ mod tests {
     }
     #[test]
     fn native_tools_preserve_observations_without_inventing_exit_codes_or_diffs() {
-        let session = SessionRef::new(ProviderKind::Claude, "session".into()).unwrap();
+        let session = SessionRef::new("session".into()).unwrap();
         let command = content_item(
             &session,
             "stream".into(),

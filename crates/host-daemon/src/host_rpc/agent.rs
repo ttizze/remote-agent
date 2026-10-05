@@ -124,7 +124,12 @@ pub(crate) trait Agent: Identity {
         cursor: &str,
         include_activity: bool,
     ) -> Result<agent_protocol::session::HistoryPage, Failure>;
-    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure>;
+    async fn read_item(
+        &self,
+        native_id: &str,
+        turn_id: &agent_protocol::ids::TurnId,
+        item_id: &agent_protocol::ids::ItemId,
+    ) -> Result<op::ItemResponse, Failure>;
     async fn read_turn_items(&self, id: &str, turn_id: &TurnId) -> Result<Vec<Arc<Item>>, Failure>;
     async fn create(
         &self,
@@ -136,6 +141,7 @@ pub(crate) trait Agent: Identity {
     async fn submit(
         &self,
         input: &op::Submission,
+        native_id: &str,
         route: super::submission::SubmissionTarget,
         reload: bool,
         browser: Option<Value>,

@@ -17,34 +17,37 @@ pub enum ProviderKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "SessionIdentity")]
 pub struct SessionRef {
-    pub provider: ProviderKind,
     pub id: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SessionIdentity {
-    provider: ProviderKind,
     id: String,
 }
 impl TryFrom<SessionIdentity> for SessionRef {
     type Error = &'static str;
     fn try_from(value: SessionIdentity) -> Result<Self, Self::Error> {
-        Self::new(value.provider, value.id)
+        Self::new(value.id)
     }
 }
 
 impl SessionRef {
-    pub fn new(provider: ProviderKind, id: String) -> Result<Self, &'static str> {
-        let session = Self { provider, id };
+    pub fn new(id: String) -> Result<Self, &'static str> {
+        let session = Self { id };
         session.validate()?;
         Ok(session)
     }
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.id.is_empty() || self.id.len() > 4096 || self.id.trim() != self.id {
-            return Err("conversation ID is required");
-        }
-        Ok(())
+        validate_session_id(&self.id)
     }
+}
+
+pub fn validate_session_id(id: &str) -> Result<(), &'static str> {
+    if id.is_empty() || id.len() > 4096 || id.trim() != id {
+        return Err("conversation ID is required");
+    }
+    Ok(())
 }
 impl std::fmt::Display for SessionRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -905,6 +908,44 @@ mod history_tests {
             .apply(&source)
             .unwrap(),
             source
+        );
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::SessionRef;
+    use serde_json::json;
+    #[test]
+    fn malformed_session_refs_are_rejected_at_the_wire_boundary() {
+        for id in [
+            "".into(),
+            " leading".into(),
+            "trailing ".into(),
+            "x".repeat(4097),
+        ] {
+            let session = json!({"id":id});
+            assert!(serde_json::from_value::<SessionRef>(session).is_err());
+        }
+        assert!(serde_json::from_value::<SessionRef>(json!("claude:native")).is_err());
+        assert!(SessionRef::new("x".repeat(4096)).is_ok());
+        assert!(SessionRef::new("claude:".into()).is_ok());
+        assert!(
+            serde_json::from_value::<SessionRef>(json!({"provider":"codex","id":"valid"})).is_err()
+        );
+        assert_eq!(
+            serde_json::from_value::<SessionRef>(json!({"id":"valid"}))
+                .unwrap()
+                .id,
+            "valid"
+        );
+        let id = "claude:01234567-89ab-cdef-0123-456789abcdef";
+        let reference = SessionRef::new(id.into()).unwrap();
+        assert_eq!(reference.id, id);
+        assert_eq!(reference.to_string(), json!({"id": id}).to_string());
+        assert_eq!(
+            reference.to_string().parse::<SessionRef>().unwrap(),
+            reference
         );
     }
 }

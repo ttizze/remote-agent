@@ -261,8 +261,8 @@ impl Claude {
         let session_id = Uuid::new_v4();
         let response = ThreadResponse {
             thread: Thread {
+                provider: Some(ProviderKind::Claude),
                 id: Some(SessionRef {
-                    provider: ProviderKind::Claude,
                     id: session_id.to_string(),
                 }),
                 cwd: Some(cwd.to_string_lossy().into_owned()),
@@ -351,10 +351,7 @@ impl Claude {
                             id: path
                                 .file_stem()
                                 .and_then(|id| id.to_str())
-                                .map(|id| SessionRef {
-                                    provider: ProviderKind::Claude,
-                                    id: id.into(),
-                                }),
+                                .map(|id| SessionRef { id: id.into() }),
                             name: Some("Claude履歴を読み取れません".into()),
                             status: SessionStatus::Unknown,
                             ..Default::default()
@@ -378,7 +375,6 @@ impl Claude {
             let record = record.lock().await;
             if record.running.is_some() {
                 let id = SessionRef {
-                    provider: ProviderKind::Claude,
                     id: record.session_id.to_string(),
                 };
                 if let Some(summary) = threads
@@ -389,8 +385,8 @@ impl Claude {
                 } else {
                     threads.push(SessionSummary {
                         thread: Thread {
+                            provider: Some(ProviderKind::Claude),
                             id: Some(SessionRef {
-                                provider: ProviderKind::Claude,
                                 id: record.session_id.to_string(),
                             }),
                             cwd: Some(record.cwd.clone()),
@@ -461,10 +457,8 @@ impl Claude {
                     None => return Err(error),
                 };
                 let mut thread = Thread {
-                    id: Some(SessionRef {
-                        provider: ProviderKind::Claude,
-                        id: id.into(),
-                    }),
+                    provider: Some(ProviderKind::Claude),
+                    id: Some(SessionRef { id: id.into() }),
                     cwd: Some(record.cwd.clone()),
                     ..Default::default()
                 };
@@ -488,8 +482,13 @@ impl Claude {
         }
     }
 
-    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, OperationError> {
-        let native = Uuid::parse_str(&params.thread_id.id).map_err(|_| "invalid Claude ID")?;
+    async fn read_item(
+        &self,
+        native_id: &str,
+        turn_id: &agent_protocol::ids::TurnId,
+        item_id: &agent_protocol::ids::ItemId,
+    ) -> Result<op::ItemResponse, OperationError> {
+        let native = Uuid::parse_str(native_id).map_err(|_| "invalid Claude ID")?;
         let home = self.native_home.clone();
         let native_history = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native)?;
@@ -504,11 +503,11 @@ impl Claude {
             .turns
             .iter()
             .flatten()
-            .find(|turn| turn.id == params.turn_id)
+            .find(|turn| &turn.id == turn_id)
             .and_then(|turn| turn.items.as_ref())
             .into_iter()
             .flatten()
-            .find(|item| item.id == params.item_id)
+            .find(|item| &item.id == item_id)
             .ok_or("Claude native history item is unavailable")?;
         let mut item = (**item).clone();
         if let Some(path) = native_history.output_paths.get(&item.id) {
@@ -619,10 +618,11 @@ impl Claude {
 
     async fn start_turn(
         &self,
+        native_id: &str,
         params: &op::Submission,
         browser: Option<Value>,
     ) -> Result<agent_protocol::ids::TurnId, OperationError> {
-        let record = self.record(&params.thread_id.id).await?;
+        let record = self.record(native_id).await?;
         if self.stop.is_cancelled() {
             return Err("Host is shutting down".into());
         }
@@ -720,8 +720,7 @@ impl Claude {
         });
         drop(state);
         let target = SessionRef {
-            provider: ProviderKind::Claude,
-            id: params.thread_id.id.clone(),
+            id: native_id.to_owned(),
         };
         let worker = Worker {
             record,
@@ -752,6 +751,7 @@ impl Claude {
 
     async fn steer(
         &self,
+        native_id: &str,
         params: &op::Submission,
         turn_id: &str,
     ) -> Result<agent_protocol::ids::TurnId, Failure> {
@@ -759,7 +759,7 @@ impl Claude {
             .await
             .map_err(|error| Failure::new("invalid_input", error))?;
         let record = self
-            .record(&params.thread_id.id)
+            .record(native_id)
             .await
             .map_err(|error| Failure::new("invalid_session", error))?;
         let (input, session) = {
@@ -1717,8 +1717,15 @@ impl Agent for Claude {
             "Claude history does not issue timeline cursors",
         ))
     }
-    async fn read_item(&self, params: &op::ReadItem) -> Result<op::ItemResponse, Failure> {
-        Claude::read_item(self, params).await.map_err(Into::into)
+    async fn read_item(
+        &self,
+        native_id: &str,
+        turn_id: &agent_protocol::ids::TurnId,
+        item_id: &agent_protocol::ids::ItemId,
+    ) -> Result<op::ItemResponse, Failure> {
+        Claude::read_item(self, native_id, turn_id, item_id)
+            .await
+            .map_err(Into::into)
     }
     async fn read_turn_items(
         &self,
@@ -1764,20 +1771,23 @@ impl Agent for Claude {
     async fn submit(
         &self,
         input: &op::Submission,
+        native_id: &str,
         route: crate::host_rpc::submission::SubmissionTarget,
         _reload: bool,
         browser: Option<Value>,
     ) -> Result<op::SubmissionReceipt, Failure> {
         use crate::host_rpc::submission::SubmissionTarget;
         let turn_id = match route {
-            SubmissionTarget::Steer(turn) => Some(self.steer(input, &turn).await?),
+            SubmissionTarget::Steer(turn) => Some(self.steer(native_id, input, &turn).await?),
             SubmissionTarget::Queue => {
                 return Err(Failure::new(
                     "invalid_execution_route",
                     "the Host owns queued input",
                 ));
             }
-            SubmissionTarget::Start { .. } => Some(self.start_turn(input, browser).await?),
+            SubmissionTarget::Start { .. } => {
+                Some(self.start_turn(native_id, input, browser).await?)
+            }
         };
         Ok(op::SubmissionReceipt { turn_id })
     }
@@ -1998,11 +2008,15 @@ mod execution_tests {
             service_tier: None,
         };
         assert_eq!(
-            claude.steer(&params, "old-turn").await.unwrap_err().code,
+            claude
+                .steer(&params.thread_id.id, &params, "old-turn")
+                .await
+                .unwrap_err()
+                .code,
             "steer_unavailable"
         );
         assert!(receiver.try_recv().is_err());
-        let write = claude.steer(&params, "active");
+        let write = claude.steer(&params.thread_id.id, &params, "active");
         tokio::pin!(write);
         let command = tokio::select! {
             result = &mut write => panic!("steer completed before its owner: {result:?}"),
@@ -2022,7 +2036,7 @@ mod execution_tests {
         command.delivered.unwrap().send(Ok(())).unwrap();
         assert_eq!(write.await.unwrap().as_str(), "active");
 
-        let write = claude.steer(&params, "active");
+        let write = claude.steer(&params.thread_id.id, &params, "active");
         tokio::pin!(write);
         let command = tokio::select! {
             result = &mut write => panic!("steer completed before its owner: {result:?}"),
@@ -2034,7 +2048,10 @@ mod execution_tests {
             agent_protocol::error::Delivery::Unknown
         );
         drop(receiver);
-        let failure = claude.steer(&params, "active").await.unwrap_err();
+        let failure = claude
+            .steer(&params.thread_id.id, &params, "active")
+            .await
+            .unwrap_err();
         assert_eq!(failure.delivery, agent_protocol::error::Delivery::NotSent);
     }
 
@@ -2131,7 +2148,7 @@ mod execution_tests {
             }
         });
         let uuid = Uuid::new_v4();
-        let session = SessionRef::new(ProviderKind::Claude, uuid.to_string()).unwrap();
+        let session = SessionRef::new(uuid.to_string()).unwrap();
         router
             .session_change(
                 &session,

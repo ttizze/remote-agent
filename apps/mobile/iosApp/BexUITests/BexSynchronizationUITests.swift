@@ -57,7 +57,6 @@ extension BexLaunchUITests {
 
     private func createBackgroundTaskRowIdentifier() throws -> String {
         struct Session: Decodable {
-            let provider: String
             let id: String
         }
 
@@ -67,7 +66,7 @@ extension BexLaunchUITests {
 
         let response = try simulatorFixture("background-task", expectedStatus: 200, timeout: 15)
         let session = try JSONDecoder().decode(CreatedTask.self, from: response).threadId
-        return "tasks.row.\(session.provider):\(session.id)"
+        return "tasks.row.\(session.id)"
     }
 
     func testSimulatorOpensTasksBeforeHistoryReadFinishes() throws {
@@ -284,7 +283,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "value == %@", "完了・未確認")).firstMatch.exists)
         try startSimulatorConversation(app, promptText: "[success] Notify when this task finishes")
         app.navigationBars.buttons.element(boundBy: 0).tap()
-        let row = prefixedElement(app, prefix: "tasks.row.codex:")
+        let row = prefixedElement(app, prefix: "tasks.row.")
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         XCTAssertEqual(row.value as? String, "実行中")
         captureScreen(app, named: "Task running in list")

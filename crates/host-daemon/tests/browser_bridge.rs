@@ -102,10 +102,7 @@ async fn installed_codex_exposes_the_same_browser_as_the_phone() {
         .outcome
         .unwrap();
     let thread = started["thread"]["id"].as_str().unwrap();
-    let session = agent_protocol::session::SessionRef {
-        provider: agent_protocol::session::ProviderKind::Codex,
-        id: thread.into(),
-    };
+    let session = agent_protocol::session::SessionRef { id: thread.into() };
     browser
         .bind_scope("startup-scope".into(), session.to_string())
         .await;

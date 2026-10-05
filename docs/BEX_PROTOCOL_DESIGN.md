@@ -27,14 +27,14 @@ native history は履歴の正本とする。Host に会話 DB、永続イベン
 ## 2. ID は構造を保つ
 
 ```rust
-struct SessionRef { provider: ProviderKind, id: String }
+struct SessionRef { id: String }
 enum DraftKey { Session(SessionRef), Local(String) }
 ```
 
 SessionRef は Rust、Postcard、UniFFI、Swift、Kotlin のすべてで構造を保つ。
 prefix、既定の Codex、JSON を詰めた String、同じ会話の別形式の ID は使わない。
 CLI の入力・出力、ログ、UI フレームワークの保存可能な表示キーに文字列が必要な場合だけ境界で書式化する。
-表示キーから provider を再解釈せず、操作・保存には元の SessionRef を使う。
+providerはHostの保存済みbindingとmetadataから解決する。操作・保存にはopaque会話IDのSessionRefを使う。
 構造化キーを持つ JSON の保存形式は `[key, value]` の列にする。旧形式の移行経路は作らない。
 
 TurnId、ItemId、RequestId、ClientInputId は取り違えを防ぐ newtype とする。
@@ -46,7 +46,7 @@ SessionRef のスコープは接続先 Host の保存領域である。
 複数 Host のデータを一つの map に混ぜる場合は、その所有者が既存の接続先スコープと組にする。
 接続先の切替で隔離される map にまで HostId を追加しない。
 
-native ID に含まれる `claude:` 等はそのまま値として扱う。
+native IDはHost内部のbindingに保持し、クライアントの会話IDや表示キーへ流用しない。
 不正な参照は外部入力を受ける境界で拒否する。内部の型変換ごとに stringify/parse を挟まない。
 
 ## 3. 操作は利用者の意図に合わせる
@@ -54,7 +54,7 @@ native ID に含まれる `claude:` 等はそのまま値として扱う。
 会話の操作は Create、List、Open、ReadItem、Submit、Interrupt、Fork、Rename とする。
 名前は `host/session/...` に統一する。モデル・アカウント・ファイル・端末・ブラウザの独立した操作は残す。
 
-- Create は provider を必須にする。既存の会話への操作では SessionRef が provider を決める。
+- Create は provider を必須にする。既存の会話への操作ではHostがSessionRefのIDで保存済みproviderを解決する。
 - Submit は SessionRef、ClientInputId、入力、ターンの設定を受け取る。
 - start、resume、steer、queue の選択は Host が実際の実行状態から判断する。
 - provider とモデルの所属が一致しない指定や、実行中に対応しない操作は明示的に拒否する。

@@ -2,8 +2,8 @@
   {
     "name": "summary retains live items and unknown metadata",
     "previous": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -35,7 +35,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "thread"
         },
         "change": {
@@ -75,8 +74,8 @@
       }
     ],
     "expected": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -131,8 +130,8 @@
   {
     "name": "full lifecycle upserts items while retaining live output",
     "previous": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -163,7 +162,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "thread"
         },
         "change": {
@@ -224,8 +222,8 @@
       }
     ],
     "expected": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -279,8 +277,8 @@
   {
     "name": "late start preserves completed timing",
     "previous": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -313,7 +311,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "thread"
         },
         "change": {
@@ -331,8 +328,8 @@
       }
     ],
     "expected": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -365,8 +362,8 @@
   {
     "name": "completion clears retrying error",
     "previous": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -408,7 +405,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "thread"
         },
         "change": {
@@ -424,8 +420,8 @@
       }
     ],
     "expected": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -457,8 +453,8 @@
   {
     "name": "summary resolves deferred identities",
     "previous": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -496,7 +492,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "thread"
         },
         "change": {
@@ -535,8 +530,8 @@
       }
     ],
     "expected": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -575,8 +570,8 @@
   {
     "name": "delta after completion applies to loaded item",
     "previous": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -607,7 +602,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "thread"
         },
         "change": {
@@ -624,7 +618,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "thread"
         },
         "change": {
@@ -638,8 +631,8 @@
       }
     ],
     "expected": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -671,8 +664,8 @@
   {
     "name": "repeated turn identity selects final occurrence",
     "previous": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
@@ -731,7 +724,6 @@
       {
         "method": "fixture/session/change",
         "session": {
-          "provider": "codex",
           "id": "thread"
         },
         "change": {
@@ -747,8 +739,8 @@
       }
     ],
     "expected": {
+      "provider": "codex",
       "id": {
-        "provider": "codex",
         "id": "thread"
       },
       "turns": [
