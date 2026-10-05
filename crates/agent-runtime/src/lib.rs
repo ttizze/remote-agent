@@ -10,6 +10,7 @@ mod session;
 mod shell;
 mod store;
 mod sync;
+mod title;
 
 pub use actor::*;
 pub use clock::*;
@@ -22,6 +23,7 @@ pub use session::*;
 pub use shell::*;
 pub use store::*;
 pub use sync::*;
+pub use title::*;
 
 /// Envelope keys seed fact, attempt and effect IDs, so they must be unique across threads.
 pub fn envelope_key(thread: &agent_domain::ThreadId, input_seq: u64) -> String {
