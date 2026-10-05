@@ -102,6 +102,14 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         )
         .await,
     );
+    // The published ticket tells supervisors the Host is ready, so listen
+    // first: an earlier interrupt would end the process without shutdown.
+    #[cfg(unix)]
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("cannot receive shutdown signal")?;
+    #[cfg(windows)]
+    let mut interrupt =
+        tokio::signal::windows::ctrl_c().context("cannot receive shutdown signal")?;
     let lease = tokio::task::spawn_blocking(move || {
         lease.publish(&local_ticket)?;
         Ok::<_, anyhow::Error>(lease)
@@ -117,10 +125,9 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         tokio::pin!(run);
         tokio::select! {
             result = &mut run => result,
-            signal = tokio::signal::ctrl_c() => {
+            _ = interrupt.recv() => {
                 shutdown.cancel();
-                let result = run.await;
-                signal.context("cannot receive shutdown signal").and(result)
+                run.await
             }
         }
     };
