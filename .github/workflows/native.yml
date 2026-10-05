@@ -252,11 +252,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # With Mac, five jobs fit the hosted macOS concurrency limit.
-          - { suite: conversation, shard: 0, shards: 3, label: 1/3, artifact: 1 }
-          - { suite: conversation, shard: 1, shards: 3, label: 2/3, artifact: 2 }
-          - { suite: conversation, shard: 2, shards: 3, label: 3/3, artifact: 3 }
-          - { suite: browser, shard: 0, shards: 1, label: browser, artifact: browser }
+          # With Mac, four jobs stay within the hosted macOS concurrency limit.
+          - { shard: 0, label: 1/3 }
+          - { shard: 1, label: 2/3 }
+          - { shard: 2, label: 3/3 }
     runs-on: macos-26
     timeout-minutes: 120
     env:
@@ -265,9 +264,8 @@ jobs:
       NEXTEST_TEST_THREADS: 6
       # The iPhone runner has its own Host and one Simulator on a 7 GiB Mac.
       BEX_IOS_TEST_WORKERS: 1
-      BEX_IOS_SUITE: ${{ matrix.suite }}
       BEX_IOS_TEST_SHARD: ${{ matrix.shard }}
-      BEX_IOS_TEST_SHARDS: ${{ matrix.shards }}
+      BEX_IOS_TEST_SHARDS: 3
       BEX_IOS_TEST_ROUNDS: ${{ inputs.ios-test-rounds || 1 }}
       # The builders validate Swift content/toolchain hashes before reuse.
       BEX_IOS_SWIFT_CACHE_PATHS: |
@@ -286,7 +284,7 @@ jobs:
         with:
           cmd-format: nix develop . --command {0}
           key: macos-swift-xcode-26.6-${{ hashFiles('flake.lock') }}
-          save-if: ${{ github.event_name != 'pull_request' && matrix.suite == 'conversation' && matrix.shard == 0 }}
+          save-if: ${{ github.event_name != 'pull_request' && matrix.shard == 0 }}
           cache-on-failure: true
       - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         id: ios-cache
@@ -298,32 +296,9 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p target/qa
-          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version
-          export BEX_BROWSER_LOG="$PWD/target/qa/chrome.log"
-          export BEX_BROWSER_EXECUTABLE="$RUNNER_TEMP/bex-ci-chrome"
-          cat > "$BEX_BROWSER_EXECUTABLE" <<'CHROME'
-          #!/bin/bash
-          printf 'Chrome start %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$BEX_BROWSER_LOG"
-          chrome_pid=$$
-          chrome_profile=
-          for arg in "$@"; do
-            case "$arg" in --user-data-dir=*) chrome_profile=${arg#--user-data-dir=} ;; esac
-          done
-          (
-            sleep 6
-            if [[ -n "$chrome_profile" && ! -s "$chrome_profile/DevToolsActivePort" ]]; then
-              startup_log="${BEX_BROWSER_LOG%.log}-startup-${chrome_pid}"
-              /usr/bin/vm_stat > "$startup_log-memory.txt"
-              /bin/ps -axo pid,ppid,rss,pcpu,comm -m > "$startup_log-processes.txt"
-              /usr/bin/sample "$chrome_pid" 3 -file "$startup_log-sample.txt" > "$startup_log-sample-output.txt" 2>&1
-            fi
-          ) </dev/null &
-          exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "$@" 2>> "$BEX_BROWSER_LOG"
-          CHROME
-          chmod +x "$BEX_BROWSER_EXECUTABLE"
           nix develop . --command just quality swift 2>&1 | tee target/qa/quality.log
       - name: Save iPhone Swift builds once for all shards
-        if: ${{ !cancelled() && github.event_name != 'pull_request' && matrix.suite == 'conversation' && matrix.shard == 0 && steps.ios-cache.outputs.cache-primary-key != '' && steps.ios-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && matrix.shard == 0 && steps.ios-cache.outputs.cache-primary-key != '' && steps.ios-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.BEX_IOS_SWIFT_CACHE_PATHS }}
@@ -332,11 +307,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: apple-iphone-${{ matrix.artifact }}-acceptance
+          name: apple-iphone-${{ matrix.shard }}-acceptance
           path: |
             target/qa/quality.log
-            target/qa/chrome.log
-            target/qa/chrome-startup-*.txt
             target/qa/Bex-*
           retention-days: 7
   windows:

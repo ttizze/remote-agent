@@ -177,8 +177,8 @@ transfer server just to delete that check would reverse A14.
   Manual workflow dispatch remains available for focused audits and the soak.
   Require successful CI checks for the current commit and a clean working tree
   before claiming full verification. Manual check commands remain for
-  debugging. Apple CI uses five Apple Silicon `macos-26` runners with Xcode 26.6.
-  Main and manual runs may use all five Apple slots. Optional PR Apple jobs share
+  debugging. Apple CI uses four Apple Silicon `macos-26` runners with Xcode 26.6.
+  Main and manual runs may use all four Apple slots. Optional PR Apple jobs share
   one repository-wide concurrency queue, retaining up to 100 pending checks
   without cancellation so several PRs cannot occupy every Apple slot together.
   Dependabot checks one ecosystem per day from Monday through Saturday at
@@ -186,7 +186,9 @@ transfer server just to delete that check would reverse A14.
   opening every ecosystem's updates together during working hours.
   It selects the image's preinstalled Xcode directly.
   The Mac runner uses `nix develop . --command just quality rust` for Rust
-  contracts and Mac Browser E2E. Four iPhone runners use
+  contracts, Mac Browser E2E and the Host-owned Chrome live case
+  (`browser::tests::shared_browser_live`: navigation, clicks, concurrent phone
+  and agent input, popups and persistence). Three iPhone runners use
   `nix develop . --command just quality swift` for Swift checks and acceptance.
   Linux and Windows run the same library, binary and integration assertions
   with Nix-pinned cargo-nextest, allowing independent test binaries to run
@@ -214,8 +216,7 @@ transfer server just to delete that check would reverse A14.
   agents and PTYs. Production Host cleanup retains its 60-second interval.
   The conversation-creation case selects immediate fixture completion because
   it checks completed output; scenarios that inspect running turns retain their
-  artificial streaming delay. Browser input waits for the preceding Host click
-  to finish before opening its keyboard. Acceptance deadlines stay unchanged.
+  artificial streaming delay. Acceptance deadlines stay unchanged.
   Linux, Windows and Android use four
   Cargo build jobs; Apple runners retain two.
   They partition the same maintained test list with `BEX_IOS_TEST_SHARDS=3`
@@ -225,11 +226,8 @@ transfer server just to delete that check would reverse A14.
   so equal test counts do not leave one runner with all the slow cases.
   Swift formatting, linting and headless Markdown checks run on shard zero;
   all three shards run their selected Simulator acceptance tests.
-  The Host-owned Chrome case (`just browser-ui`) runs on a fourth iPhone runner
-  with `BEX_IOS_SUITE=browser`, because its Host keeps Chrome running for the
-  whole worker; conversation shards select `BEX_IOS_SUITE=conversation`, and
-  local `just quality` runs both. With the Mac job, the five Apple jobs fit
-  the hosted macOS concurrency limit, so none waits for another to finish. Dispatching Native clients with
+  With the Mac job, the four Apple jobs stay within the hosted macOS
+  concurrency limit, so none waits for another to finish. Dispatching Native clients with
   `ios-test-rounds` above one repeats every iPhone runner's tests on fresh
   Simulator/Host pairs (`BEX_IOS_TEST_ROUNDS`) and prints per-test failure
   counts, to measure flaky cases without retrying them in normal runs.
@@ -245,7 +243,7 @@ transfer server just to delete that check would reverse A14.
   The manual `iPhone driver comparison` workflow measures the maintained native
   navigation/pairing XCTest case and its Maestro flow on separate fresh
   Simulator/Host pairs. `just ios-maestro` selects only that comparison flow;
-  normal acceptance retains all 33 XCTest cases. The workflow's `driver` input
+  normal acceptance retains all 32 XCTest cases. The workflow's `driver` input
   selects both drivers or one driver for focused
   retries without repeating an unchanged baseline.
   Each pair receives its own loopback driver port, passed to the CLI and flow
@@ -268,11 +266,7 @@ transfer server just to delete that check would reverse A14.
   failed cases. Compare UI durations after subtracting each pair's setup;
   the second run reuses build products and does not provide a cold-build comparison.
   Each runner has separate processes,
-  memory and logs. iPhone acceptance uses the Host's normal preinstalled Google
-  Chrome with unchanged launch arguments, retaining its startup time and stderr
-  in `qa/chrome.log`. The Browser shard initializes the real Host-owned browser
-  through its normal RPC before booting the Simulator, avoiding overlapping
-  Chrome's first launch with the Simulator's background app initialization.
+  memory and logs.
   Mac and iPhone Rust dependency caches are separate;
   only shard zero saves each Apple cache. PR runs restore existing caches without
   saving branch-specific copies; main and manual runs populate caches so duplicate
@@ -286,12 +280,7 @@ transfer server just to delete that check would reverse A14.
   photos and video, only the image-saving test grants Photos add permission, and
   only the file-upload test writes its document fixture. Preparation logs name
   boot, media import, installation and permission operations and their failures.
-  UI fixture Hosts use the production diagnostic log; iPhone bundles retain it
-  alongside Chrome stderr. Browser diagnostics record startup phases and slow
-  or interrupted CDP methods without page URLs, input or image payloads.
-  If Chrome has not published its endpoint after six seconds, CI retains a
-  bounded startup stack sample, sampler output, memory counters, and process
-  memory usage under `qa/chrome-startup-*`. Process arguments are not recorded.
+  UI fixture Hosts use the production diagnostic log; iPhone bundles retain it.
   Xcode collects verbose diagnostics on test failure in the retained result bundle.
   During CI acceptance, the owning worker records process memory when its app
   first launches. If XCTest stops writing progress for 30 seconds, it takes one

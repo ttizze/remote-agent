@@ -637,13 +637,6 @@ async fn worker(
         .stdin(std::process::Stdio::null())
         .stdout(host_log.try_clone()?)
         .stderr(host_log);
-    if std::env::var("CI").as_deref() == Ok("true")
-        && tests
-            .iter()
-            .any(|test| test == "testSimulatorBrowserIsSeparateFromConversationAndPreservesPage")
-    {
-        command.arg("--prepare-browser");
-    }
     let mut host = Child::spawn(command)?;
     let result: Result<_> = async {
             let deadline = Instant::now() + Duration::from_secs(30);

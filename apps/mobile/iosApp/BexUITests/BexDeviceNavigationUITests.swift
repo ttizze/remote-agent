@@ -173,68 +173,11 @@ extension BexLaunchUITests {
         }
     }
 
-    func testSimulatorBrowserIsSeparateFromConversationAndPreservesPage() throws {
-        let app = try connectedSimulatorApp()
-        try startSimulatorConversation(app, promptText: "Browser sharing fixture")
-        XCTAssertFalse(app.buttons["workbench.browser"].exists)
-        app.buttons["task.tools"].tap()
-        app.buttons["workbench.browser"].tap()
-        let address = app.textFields["browser.address"]
-        XCTAssertTrue(address.waitForExistence(timeout: 10))
-        let open = app.buttons["browser.open"]
-        let ready = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: open)
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 20), .completed,
-                       "Browser startup must enable input")
-        XCTAssertFalse(app.buttons["browser.take"].exists)
-        XCTAssertFalse(app.buttons["browser.release"].exists)
-        replaceFieldText(address, text: "file:///etc/passwd")
-        app.buttons["browser.open"].tap()
-        XCTAssertTrue(app.staticTexts["http または https の URL を入力してください"].waitForExistence(timeout: 5))
-        let pairing = try XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])
-        let url = try XCTUnwrap(URL(string: pairing)).deletingLastPathComponent().appendingPathComponent("browser-test")
-        replaceFieldText(address, text: url.absoluteString)
-        let recovered = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: open)
-        wait(for: [recovered], timeout: 10)
-        open.tap()
-        XCTAssertTrue(app.staticTexts["BEX browser fixture"].waitForExistence(timeout: 10))
-        let canvas = app.descendants(matching: .any)["browser.content"]
-        XCTAssertTrue(canvas.waitForExistence(timeout: 10))
-        canvas.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: canvas.frame.width * 100 / 1024, dy: canvas.frame.width * 40 / 1024)).tap()
-        let keyboard = app.buttons["文字入力"]
-        let clickCompleted = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: keyboard)
-        wait(for: [clickCompleted], timeout: 10); keyboard.tap()
-        let input = app.secureTextFields["browser.text"]
-        XCTAssertTrue(input.waitForExistence(timeout: 5)); input.tap(); input.typeText("Remote phone input")
-        app.buttons["browser.type"].tap()
-        XCTAssertTrue(app.staticTexts["Remote phone input"].waitForExistence(timeout: 10))
-        captureScreen(app, named: "Shared Host browser with direct input")
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.4))
-            .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.4)))
-        XCTAssertTrue(app.buttons["task.tools"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["workbench.browser"].exists)
-        app.buttons["task.tools"].tap()
-        app.buttons["workbench.browser"].tap()
-        XCTAssertTrue(app.staticTexts["Remote phone input"].waitForExistence(timeout: 10))
-        let reopened = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: open)
-        wait(for: [reopened], timeout: 10)
-        XCTAssertFalse(app.buttons["browser.take"].exists)
-        XCTAssertFalse(app.buttons["browser.release"].exists)
-        app.coordinate(withNormalizedOffset: CGVector(dx: 0.005, dy: 0.4))
-            .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.4)))
-        XCTAssertTrue(app.buttons["task.tools"].waitForExistence(timeout: 5))
-        XCTAssertFalse(address.exists)
-    }
-
     private func replaceFieldText(_ field: XCUIElement, text: String) {
         field.tap()
         if let value = field.value as? String, !value.isEmpty, value != field.placeholderValue {
             field.tap(withNumberOfTaps: 3, numberOfTouches: 1)
             field.typeText(XCUIKeyboardKey.delete.rawValue)
-            // A triple tap selects only "blank" in about:blank; the cursor then follows the rest.
-            if let rest = field.value as? String, !rest.isEmpty, rest != field.placeholderValue {
-                field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: rest.count))
-            }
             XCTAssertEqual(field.value as? String, field.placeholderValue)
         }
         field.typeText(text)

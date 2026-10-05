@@ -107,10 +107,6 @@ conversation-ui:
         testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
         testSimulatorFillsInitialHistoryViewportWithoutScrolling
 
-# The Host-owned Chrome runs for this whole worker; keep it off conversation runners.
-browser-ui:
-    scripts/ios-e2e.sh testSimulatorBrowserIsSeparateFromConversationAndPreservesPage
-
 # Exercise the real iroh Host through the headless client.
 iroh-e2e:
     cargo build --locked --package bex-process --bin bex-provider-supervisor

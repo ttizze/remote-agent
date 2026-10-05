@@ -82,28 +82,6 @@ async fn main() {
     )
     .await
     .unwrap();
-    if std::env::args().nth(6).as_deref() == Some("--prepare-browser") {
-        // Initialize the real Host-owned browser before a memory-heavy Simulator boots.
-        let client = host.local().await.unwrap();
-        client
-            .peer
-            .request::<agent_protocol::browser::BrowserFrame>(
-                &agent_protocol::protocol::Call::Browser(agent_protocol::browser::BrowserRequest {
-                    thread_id: agent_protocol::session::SessionRef::new(
-                        agent_protocol::session::ProviderKind::Codex,
-                        "ui-browser-setup".into(),
-                    )
-                    .unwrap(),
-                    tab_id: String::new(),
-                    image_id: String::new(),
-                    action: agent_protocol::browser::BrowserAction::Read,
-                }),
-            )
-            .await
-            .expect("UI fixture browser preparation failed");
-        client.close().await;
-        println!("UI fixture browser ready");
-    }
     let pairing = PairingServer::start(
         &directory,
         host.ticket.clone(),
