@@ -35,6 +35,23 @@ pub struct ClaudeProtocol {
     usage_limited: BTreeSet<String>,
 }
 impl ClaudeProtocol {
+    /// Restore only native correlation after a process restart. The actor owns
+    /// the durable task and child projections that supply these values.
+    pub fn restore_task_route(
+        &mut self,
+        task: &str,
+        tool: &str,
+        parent_tool: Option<&str>,
+        agent: bool,
+    ) {
+        self.tasks.insert(task.into(), (tool.into(), agent));
+        if let Some(parent) = parent_tool {
+            self.parents.insert(tool.into(), parent.into());
+        }
+        if !agent {
+            self.background_tasks.insert(task.into());
+        }
+    }
     pub fn command(
         &mut self,
         command: &ProviderCommand,

@@ -1121,3 +1121,5 @@ Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機�
 `mcp/OrchestratorMcpToolkit.integration.test.ts` の `delegated_task_status/codex` replay を移植した。元の `Delegated API boundary inspected.` と result transfer を保持し、running / queued follow-up がある間の pending 判定、interrupt 後の queued run の完了、`Queued delegated follow-up completed.` と latest transfer の null を確認する。MCP の RPC 接続は段階 3 でこの domain の読み取り結果を利用する。
 
 R3 O6/O8/O9/O13 の再発検証を追加した。control RPC の失敗は run/attempt を Running に保つ（proptest を含む）。子の停止確認前は task/card を Running に保って rollback を拒否し、削除された native 子は親に Cancelled を確定させる。pending rollback 中の provider/interaction/runtime の変更も拒否する。provider の injection 待ちで停止した場合の成功／-32601 fallback の双方で未送信の prompt を抑止する。
+
+`ClaudeAdapterV2.test.ts` の runtime query policy と makeClaudeQueryOptions の thinking/resume/permission override の期待値は `claude_control.rs` の CLI 引数・設定テストで検証する。read-only の 3 tools、global read の allowlist、approval callback、plan の skip-permissions 抑止、300,000 の compaction window を維持する。`claude_subagent_resume_after_restart` replay は query.open ごとに翻訳器を新規作成し、domain の native correlation を復元して子が増えないことを検証する。

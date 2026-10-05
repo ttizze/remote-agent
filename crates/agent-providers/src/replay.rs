@@ -325,6 +325,32 @@ impl Replay {
             let method = string(frame, "method");
             let kind = string(frame, "type");
             if kind == "query.open" {
+                replay.claude = ClaudeProtocol::default();
+                for state in replay.states.values() {
+                    for task in &state.tasks {
+                        if let Some(native_task) = &task.native_task {
+                            let parent = task.parent_task.as_ref().and_then(|id| {
+                                replay
+                                    .states
+                                    .values()
+                                    .flat_map(|state| &state.tasks)
+                                    .find(|candidate| &candidate.id == id)
+                                    .map(|parent| parent.native_key.as_str())
+                            });
+                            replay.claude.restore_task_route(
+                                native_task,
+                                &task.native_key,
+                                parent,
+                                true,
+                            );
+                        }
+                    }
+                    for (key, work) in &state.background_work {
+                        replay
+                            .claude
+                            .restore_task_route(key, &work.tool, None, false);
+                    }
+                }
                 let root = replay.root.clone();
                 replay.apply(
                     &root,

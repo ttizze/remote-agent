@@ -39,10 +39,17 @@ pub struct StdioProcess {
     pub stderr: ChildStderr,
 }
 impl StdioProcess {
-    pub fn spawn(executable: &Path, args: &[String], cwd: &Path) -> io::Result<Self> {
+    pub fn spawn(
+        executable: &Path,
+        args: &[String],
+        cwd: &Path,
+        environment: &std::collections::BTreeMap<String, String>,
+    ) -> io::Result<Self> {
         let mut child = Command::new(executable)
             .args(args)
             .current_dir(cwd)
+            .env_clear()
+            .envs(environment)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
