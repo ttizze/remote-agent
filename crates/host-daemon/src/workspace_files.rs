@@ -457,7 +457,7 @@ mod tests {
         let source = directory.path().join("comparison.html");
         fs::write(
             &source,
-            include_str!("../../agent-core/tests/fixtures/visualize/icon-options.html"),
+            include_str!("visualize/icon-options.html"),
         )
         .unwrap();
         let request = || {

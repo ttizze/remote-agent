@@ -74,7 +74,7 @@ mod tests {
             assert!(visualization_path(source, cwd).is_err());
         }
         let doc = visualization_document(include_str!(
-            "../../agent-core/tests/fixtures/visualize/icon-options.html"
+            "visualize/icon-options.html"
         ));
         assert!(doc.contains("sandbox=\"allow-scripts\""));
         assert!(!doc.contains("allow-same-origin"));

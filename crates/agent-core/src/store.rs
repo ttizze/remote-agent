@@ -1,28 +1,20 @@
-//! The single state owner. Independent RPC work publishes completed results.
+//! One owner applies device changes and completed network operations.
 use crate::{
-    client::{ClientExt, SessionImage},
-    diagnostics::{ConnectionPerformance, ConnectionPhase as Phase},
     peer::PeerError,
-    state::{Event, Intent, Snapshot, operations as op, reduce},
+    protocol::{self, Call},
+    state::*,
+    transport,
 };
-use agent_protocol::operations::{Pair, RpcMethod};
+use agent_protocol::{models as m, operations as op, orchestration as rpc};
 use agent_transport::client::{Client, Updates};
-use futures_util::{StreamExt, stream::FuturesUnordered};
+use orchestration::*;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::Arc,
+    time::Duration,
 };
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio_util::sync::{CancellationToken, DropGuard};
-
-const MAX_COMMANDS: usize = 256;
-const MAX_RPC_JOBS: usize = 32;
-const CONTROL_RESERVE: usize = 16;
-const MAX_TERMINAL_JOBS: usize = 16;
-const MAX_TERMINAL_QUEUE: usize = 128;
-const MAX_ITEM_READS: usize = 132;
-const MAX_ITEM_TRANSFERS: usize = 4;
-const MAX_WAITERS: usize = 128;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -30,1516 +22,1548 @@ pub enum Outcome {
     #[default]
     Applied,
     StartedThread {
-        id: crate::session::SessionRef,
-    },
-    Submitted {
-        turn_id: Option<agent_protocol::ids::TurnId>,
-    },
-    RemoteHostPaired {
         id: String,
     },
-    Visualization {
-        html: String,
-    },
-    SessionImages {
-        images: Vec<SessionImage>,
-    },
 }
-enum Command {
-    PrepareDictation {
-        id: String,
-        cancel: CancellationToken,
-    },
-    ConnectionPerformance {
-        epoch: u64,
-        performance: ConnectionPerformance,
-    },
-    Browser {
-        request: crate::browser::BrowserRequest,
-        complete: oneshot::Sender<Result<crate::browser::BrowserFrame, PeerError>>,
-    },
-    Dispatch(Dispatch),
-    ResumePeer {
-        endpoint: crate::transport::Endpoint,
-        remote: crate::transport::NodeId,
-        complete: oneshot::Sender<Option<Arc<Client>>>,
-    },
-    Disconnect(oneshot::Sender<Result<(), PeerError>>),
-    Attach {
-        connection: Box<Connection>,
-        attempt: CancellationToken,
-        storage_scope: String,
-        complete: oneshot::Sender<Result<(), PeerError>>,
-    },
-}
-struct Connection {
-    peer: Arc<Client>,
-    events: Updates,
-    session: Option<crate::transport::Session>,
-}
-impl Connection {
-    async fn open(
-        endpoint: &crate::transport::Endpoint,
-        ticket: &crate::transport::Ticket,
-        invitation: Option<uuid::Uuid>,
-        list_query: crate::models::ListQuery,
-    ) -> Result<(Self, String, ConnectionPerformance), crate::transport::TransportError> {
-        let started = std::time::Instant::now();
-        let session = scopeguard::guard(endpoint.connect(ticket).await?, |session| session.close());
-        let transport_ms = started.elapsed().as_millis() as u64;
-        let started = std::time::Instant::now();
-        let (peer, events) = session
-            .open_peer(std::time::Duration::from_secs(30), 64)
-            .await?;
-        if let Some(invitation) = invitation {
-            peer.call(&Pair { invitation }).await?;
-        }
-        let (scope, ()) = tokio::try_join!(
-            read_storage_scope(&peer),
-            peer.start_initial_list(list_query.for_connection()),
-        )?;
-        let (route, rtt_ms) = peer.connection_path();
-        let performance = ConnectionPerformance {
-            transport_ms,
-            verification_ms: started.elapsed().as_millis() as u64,
-            route,
-            rtt_ms,
-            resolution_ms: session.resolution_ms(),
-            connection_id: peer.diagnostic_id,
-            ..Default::default()
-        };
-        Ok((
-            Self {
-                peer: Arc::new(peer),
-                events,
-                session: Some(scopeguard::ScopeGuard::into_inner(session)),
-            },
-            format!("{}:{scope}", ticket.node_id()),
-            performance,
-        ))
-    }
-}
-impl Drop for Connection {
-    fn drop(&mut self) {
-        // Includes candidates dropped from the command queue during shutdown.
-        if let Some(session) = &self.session {
-            session.close();
-        }
-    }
-}
-type CompletionSender = oneshot::Sender<Result<Outcome, PeerError>>;
-struct Dispatch {
-    effects: Vec<Scheduled>,
-    complete: CompletionSender,
-}
-struct Applied {
-    application: Box<dyn Application>,
-    outcome: Outcome,
-}
-#[derive(Clone, Default)]
-struct Receipt(Arc<Mutex<Vec<CompletionSender>>>);
-impl Receipt {
-    fn new(sender: CompletionSender) -> Self {
-        Self(Arc::new(Mutex::new(vec![sender])))
-    }
-    fn join(&self, other: Self) {
-        if !Arc::ptr_eq(&self.0, &other.0) {
-            let mut waiters = self.0.lock().unwrap();
-            let remaining = MAX_WAITERS.saturating_sub(waiters.len());
-            for (index, sender) in other.0.lock().unwrap().drain(..).enumerate() {
-                if index < remaining {
-                    waiters.push(sender);
-                } else {
-                    let _ = sender.send(Err(PeerError::InvalidMessage(
-                        "too many waiters for operation".into(),
-                    )));
-                }
-            }
-        }
-    }
-    fn send(self, result: Result<Outcome, PeerError>) {
-        for sender in self.0.lock().unwrap().drain(..) {
-            let _ = sender.send(result.clone());
-        }
-    }
-}
-struct Completed {
-    subscriptions: Vec<(uuid::Uuid, agent_transport::client::Updates)>,
-    scheduling: op::Scheduling,
-    delivery_attempted: bool,
-    scope: Scope,
-    result: Result<Applied, PeerError>,
-    rejection: Option<Box<dyn Application>>,
-    failed_submission: Option<agent_protocol::ids::ClientInputId>,
-    complete: Option<Receipt>,
-}
-struct Scheduled {
-    effect: Effect,
-    scope: Scope,
-    complete: Option<Receipt>,
-}
-struct Scope {
-    navigation: u64,
-    operation: Option<(op::OperationKey, u64)>,
-}
-impl Scope {
-    fn current(
-        &self,
-        navigation: u64,
-        operations: &BTreeMap<op::OperationKey, op::OperationState>,
-    ) -> bool {
-        self.navigation == navigation
-            && self.operation.as_ref().is_none_or(|(key, generation)| {
-                operations
-                    .get(key)
-                    .is_some_and(|state| state.generation == *generation)
-            })
-    }
-    fn finish(
-        &self,
-        operations: &mut Arc<BTreeMap<op::OperationKey, op::OperationState>>,
-        error: Option<&PeerError>,
-    ) {
-        if let Some((key, generation)) = &self.operation
-            && operations
-                .get(key)
-                .is_some_and(|state| state.generation == *generation)
-        {
-            match error {
-                None => {
-                    Arc::make_mut(operations).remove(key);
-                }
-                Some(error) => {
-                    Arc::make_mut(operations).get_mut(key).unwrap().phase =
-                        op::OperationPhase::Failed {
-                            message: error.to_string(),
-                        };
-                }
-            }
-        }
-    }
-}
-impl Scheduled {
-    fn new(mut effect: Effect, snapshot: &mut Snapshot, continuation: Option<&Scope>) -> Self {
-        let operation = effect.operation.key().map(|key| {
-            let generation = if (matches!(key, op::OperationKey::Item { .. })
-                || continuation
-                    .and_then(|scope| scope.operation.as_ref())
-                    .is_some_and(|(previous, generation)| {
-                        previous == &key
-                            && snapshot
-                                .operations
-                                .get(&key)
-                                .is_some_and(|state| state.generation == *generation)
-                    }))
-                && let Some(state) = snapshot.operations.get(&key)
-                && state.phase == op::OperationPhase::Running
-            {
-                state.generation
-            } else {
-                snapshot.operation_sequence += 1;
-                snapshot.operation_sequence
-            };
-            let state = op::OperationState {
-                generation,
-                phase: op::OperationPhase::Running,
-            };
-            if snapshot.operations.get(&key) != Some(&state) {
-                Arc::make_mut(&mut snapshot.operations).insert(key.clone(), state);
-            }
-            (key, generation)
-        });
-        effect.operation.capture(snapshot);
-        Self {
-            effect,
-            scope: Scope {
-                navigation: snapshot.epoch,
-                operation,
-            },
-            complete: None,
-        }
-    }
-}
+pub type Receipt = oneshot::Receiver<Result<Outcome, PeerError>>;
+#[derive(Clone)]
 pub struct Store {
-    updates: watch::Receiver<Arc<Snapshot>>,
-    publications: Mutex<Option<watch::Sender<Arc<Snapshot>>>>,
-    commands: mpsc::Sender<Command>,
-    connection_attempt: Mutex<CancellationToken>,
-    stop: CancellationToken,
-    _close_on_drop: DropGuard,
-    finished: watch::Receiver<bool>,
+    inner: Arc<Inner>,
 }
-impl Store {
-    pub fn new(peer: (Client, Updates), snapshot: Snapshot) -> Self {
-        Self::start(Some(peer), snapshot)
+struct Inner {
+    sender: mpsc::Sender<OwnerEvent>,
+    snapshots: watch::Receiver<Arc<Snapshot>>,
+    stop: CancellationToken,
+}
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.stop.cancel();
     }
-    pub fn offline(snapshot: Snapshot) -> Self {
-        let (snapshot, _) = reduce(&snapshot, Event::Disconnected("Host not connected".into()));
-        Self::start(None, snapshot)
+}
+enum OwnerEvent {
+    Dispatch(Intent, oneshot::Sender<Result<Outcome, PeerError>>),
+    Attach {
+        peer: Arc<Client>,
+        host_name: String,
+        events: Updates,
+        complete: oneshot::Sender<()>,
+    },
+    Shell(u64, ShellStreamItem),
+    Thread(u64, ThreadId, ThreadStreamItem),
+    Notification(u64, protocol::Notification),
+    Disconnected(u64, String),
+    Finished(u64, Box<JobResult>),
+    Close(oneshot::Sender<()>),
+    Browser(
+        crate::browser::BrowserRequest,
+        oneshot::Sender<Result<crate::browser::BrowserFrame, PeerError>>,
+    ),
+    Dictation(String, CancellationToken),
+    Performance(crate::diagnostics::ConnectionPerformance),
+}
+type PreparedIntent = (Option<Call>, Option<(String, Draft)>, Option<ThreadId>);
+struct JobResult {
+    call: Call,
+    result: Result<Reply, PeerError>,
+    complete: Option<oneshot::Sender<Result<Outcome, PeerError>>>,
+    sent: Option<(String, Draft)>,
+    launched: Option<ThreadId>,
+}
+enum Reply {
+    Receipt(rpc::DispatchReceipt),
+    History(ThreadId, ThreadHistoryPage),
+    Item(ThreadId, Option<Box<TurnItem>>),
+    Search(Vec<SearchMatch>),
+    Models(op::ModelPage),
+    Projects(Vec<m::Project>),
+    ProjectAdded(String),
+    Files(m::FileList),
+    File(m::FileContent),
+    Review(m::WorkspaceReview),
+    WorktreeSettings(m::WorktreeSettings),
+    Worktrees(Vec<m::Worktree>),
+    Accounts(op::Accounts),
+    Login(op::AccountLogin),
+    HostStatus(m::HostStatus),
+    Remotes(Vec<m::RemoteHost>),
+    Invitation(m::Invitation),
+    Done,
+}
+struct Network {
+    peer: Arc<Client>,
+    epoch: u64,
+    tasks: Vec<AbortOnDropHandle<()>>,
+    thread: Option<AbortOnDropHandle<()>>,
+    mutations: BTreeMap<ThreadId, VecDeque<PendingJob>>,
+    running_mutations: BTreeSet<ThreadId>,
+}
+struct PendingJob {
+    call: Call,
+    complete: Option<oneshot::Sender<Result<Outcome, PeerError>>>,
+    sent: Option<(String, Draft)>,
+    launched: Option<ThreadId>,
+}
+fn mutation_thread(call: &Call) -> Option<ThreadId> {
+    match call {
+        Call::DispatchCommand(command) => Some(command.thread_id.clone()),
+        Call::LaunchThread(launch) => Some(launch.create.thread_id.clone()),
+        _ => None,
     }
-    fn start(peer: Option<(Client, Updates)>, snapshot: Snapshot) -> Self {
-        let (writer, updates) = watch::channel(Arc::new(snapshot));
-        let connection = peer.map(|(peer, events)| {
-            (
-                Connection {
-                    peer: Arc::new(peer),
-                    events,
-                    session: None,
-                },
-                apply(&writer, Event::Connected),
-            )
-        });
-        let (commands, mut incoming) = mpsc::channel(MAX_COMMANDS);
-        let stop = CancellationToken::new();
-        let (finished_tx, finished) = watch::channel(false);
-        let publications = writer.clone();
-        let shutdown = stop.clone();
-        tokio::spawn(async move {
-            let mut connection = connection;
-            loop {
-                if let Some((connection, effects)) = connection.take() {
-                    run(
-                        connection,
-                        publications.clone(),
-                        &mut incoming,
-                        shutdown.clone(),
-                        effects,
-                    )
-                    .await;
-                }
-                // Local intents and reconnects share one state owner.
-                connection = run_offline(&publications, &mut incoming, &shutdown).await;
-                if connection.is_none() {
-                    break;
-                }
-            }
-            apply(&publications, Event::Disconnected("store closed".into()));
-            finished_tx.send_replace(true);
-        });
-        Self {
-            updates,
-            publications: Mutex::new(Some(writer)),
-            commands,
-            connection_attempt: Mutex::new(stop.child_token()),
-            _close_on_drop: stop.clone().drop_guard(),
-            stop,
-            finished,
-        }
-    }
-    #[cfg(all(test, feature = "bindings"))]
-    pub(crate) fn mock_connection() -> (Self, impl Future<Output = ConnectionPerformance>) {
-        let mut store = Self::start(
-            None,
-            Snapshot {
-                connected: true,
-                ..Default::default()
-            },
-        );
-        let (commands, mut reports) = mpsc::channel(MAX_COMMANDS);
-        let worker = std::mem::replace(&mut store.commands, commands);
-        (store, async move {
-            // Keep the actual Store worker alive for shutdown, while the mock
-            // connection leaves its diagnostic command queue unread.
-            let _worker = worker;
-            match reports.recv().await.expect("missing diagnostic report") {
-                Command::ConnectionPerformance { performance, .. } => performance,
-                _ => panic!("unexpected connection command"),
-            }
-        })
-    }
+}
+struct Owner {
+    state: Snapshot,
+    snapshots: watch::Sender<Arc<Snapshot>>,
+    sender: mpsc::Sender<OwnerEvent>,
+    network: Option<Network>,
+    epoch: u64,
+    source: CreationSource,
+}
 
+fn invalid(error: impl std::fmt::Display) -> PeerError {
+    PeerError::InvalidMessage(error.to_string())
+}
+fn now() -> Timestamp {
+    Timestamp::from_millis(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64,
+    )
+    .expect("current timestamp")
+}
+fn id(prefix: &str) -> String {
+    format!("{prefix}:{}", uuid::Uuid::new_v4())
+}
+fn command(thread_id: ThreadId, body: CommandBody) -> Command {
+    Command {
+        command_id: CommandId::new(id("command")).unwrap(),
+        thread_id,
+        body,
+    }
+}
+
+impl Store {
     pub async fn connect(
-        endpoint: &crate::transport::Endpoint,
-        ticket: &crate::transport::Ticket,
+        endpoint: &transport::Endpoint,
+        ticket: &transport::Ticket,
         snapshot: Snapshot,
         invitation: Option<uuid::Uuid>,
-    ) -> Result<Self, crate::transport::TransportError> {
+    ) -> Result<Self, PeerError> {
         let store = Self::offline(snapshot);
         store.reconnect(endpoint, ticket, invitation).await?;
         Ok(store)
     }
-    /// Reuse a responsive Host connection, then refresh without blocking interaction.
-    /// Only reads are retried; pending submissions retain their delivery evidence.
-    pub async fn resume(
-        &self,
-        endpoint: &crate::transport::Endpoint,
-        ticket: &crate::transport::Ticket,
-    ) -> Result<ConnectionPerformance, crate::transport::TransportError> {
-        let attempt = {
-            let mut current = self.connection_attempt.lock().unwrap();
-            current.cancel();
-            *current = self.stop.child_token();
-            current.clone()
-        };
-        let guard = attempt.clone().drop_guard();
-        let setup = async {
-            let (complete, receiver) = oneshot::channel();
-            self.commands
-                .try_send(Command::ResumePeer {
-                    endpoint: endpoint.clone(),
-                    remote: ticket.node_id(),
-                    complete,
-                })
-                .map_err(command_error)?;
-            let reusable = receiver.await.unwrap_or(None);
-            let replacement = async {
-                let (connection, scope, performance) = Connection::open(
-                    endpoint,
-                    ticket,
-                    None,
-                    (*self.snapshot().list_query).clone(),
-                )
-                .await?;
-                Ok::<_, crate::transport::TransportError>((Some((connection, scope)), performance))
-            };
-            let (prepared, performance) = if let Some(peer) = reusable {
-                // Recovery and the liveness read start together. A dead old path
-                // cannot add its probe deadline to a working replacement's latency.
-                let scope = self.snapshot().storage_scope.clone();
-                let probe = async {
-                    let started = std::time::Instant::now();
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(1),
-                        read_storage_scope(&peer),
-                    )
-                    .await
-                    {
-                        Ok(Ok(current)) => Ok((scope == format!("{}:{current}", ticket.node_id()))
-                            .then(|| {
-                                let (route, rtt_ms) = peer.connection_path();
-                                ConnectionPerformance {
-                                    reused: true,
-                                    connection_id: peer.diagnostic_id,
-                                    verification_ms: started.elapsed().as_millis() as u64,
-                                    route,
-                                    rtt_ms,
-                                    ..Default::default()
-                                }
-                            })),
-                        Ok(Err(
-                            error @ (PeerError::Remote { .. } | PeerError::InvalidResponse { .. }),
-                        )) => Err(error),
-                        _ => Ok(None),
-                    }
-                };
-                tokio::pin!(probe, replacement);
-                tokio::select! {
-                    biased;
-                    responsive = &mut probe => {
-                        if let Some(performance) = responsive? { (None, performance) } else { replacement.await? }
-                    }
-                    candidate = &mut replacement => match candidate {
-                        Ok(candidate) => candidate,
-                        // A new connection can fail while the current one remains
-                        // healthy. Never discard that working session on this error.
-                        Err(error) => {
-                            if let Some(performance) = probe.await? { (None, performance) } else { return Err(error); }
-                        }
-                    }
-                }
+    pub fn offline(snapshot: Snapshot) -> Self {
+        Self::offline_for(
+            snapshot,
+            if cfg!(any(target_os = "ios", target_os = "android")) {
+                CreationSource::Mobile
             } else {
-                replacement.await?
-            };
-            let Some((connection, storage_scope)) = prepared else {
-                let snapshot = self.snapshot();
-                if let Some(id) = &snapshot.navigation.thread_id {
-                    drop(self.dispatch(Intent::ReadThread(op::ReadThread::new(id.clone()))));
+                CreationSource::Desktop
+            },
+        )
+    }
+    pub fn offline_for(snapshot: Snapshot, source: CreationSource) -> Self {
+        let (sender, mut receiver) = mpsc::channel(64);
+        let (snapshots, updates) = watch::channel(Arc::new(snapshot.clone()));
+        let stop = CancellationToken::new();
+        let mut owner = Owner {
+            state: snapshot,
+            snapshots,
+            sender: sender.clone(),
+            network: None,
+            epoch: 0,
+            source,
+        };
+        let stopped = stop.clone();
+        tokio::spawn(async move {
+            loop {
+                let event = tokio::select! {biased;_=stopped.cancelled()=>break,event=receiver.recv()=>match event{Some(e)=>e,None=>break}};
+                if owner.handle(event).await {
+                    break;
                 }
-                drop(self.dispatch(Intent::ListSessions(op::ListSessions::new(
-                    (*snapshot.list_query).clone(),
-                ))));
-                drop(self.dispatch(Intent::LoadModels(op::LoadModels {})));
-                return Ok(performance);
-            };
-            let disconnected = {
-                // Only a fully authorized replacement may retire the old session.
-                // Cancellation and the disconnect enqueue share the attempt lock.
-                let _current = self.connection_attempt.lock().unwrap();
-                if attempt.is_cancelled() {
-                    return Err(
-                        PeerError::ConnectionClosed("connection attempt cancelled".into()).into(),
-                    );
-                }
-                self.request_disconnect()?
-            };
-            disconnected
-                .await
-                .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
-            self.attach_connection(connection, storage_scope, attempt.clone())
-                .await?;
-            Ok(performance)
-        };
-        tokio::select! {
-            biased;
-            _ = attempt.cancelled() => Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
-            result = setup => {
-                let performance = result?;
-                guard.disarm();
-                Ok(performance)
+                owner.publish();
             }
-        }
-    }
-    /// Replace transport while retaining local edits. A newer reconnect or
-    /// disconnect cancels setup before it can attach an obsolete connection.
-    pub async fn reconnect(
-        &self,
-        endpoint: &crate::transport::Endpoint,
-        ticket: &crate::transport::Ticket,
-        invitation: Option<uuid::Uuid>,
-    ) -> Result<ConnectionPerformance, crate::transport::TransportError> {
-        let (attempt, disconnected) = {
-            let mut current = self.connection_attempt.lock().unwrap();
-            current.cancel();
-            *current = self.stop.child_token();
-            // Explicit replacement releases the old connection before pairing.
-            (current.clone(), self.request_disconnect()?)
-        };
-        let guard = attempt.clone().drop_guard();
-        let setup = async {
-            disconnected
-                .await
-                .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
-            let (connection, scope, performance) = Connection::open(
-                endpoint,
-                ticket,
-                invitation,
-                (*self.snapshot().list_query).clone(),
-            )
-            .await?;
-            self.attach_connection(connection, scope, attempt.clone())
-                .await?;
-            Ok::<_, crate::transport::TransportError>(performance)
-        };
-        tokio::select! {
-            biased;
-            _ = attempt.cancelled() => Err(PeerError::ConnectionClosed("connection attempt cancelled".into()).into()),
-            result = setup => {
-                let performance = result?;
-                guard.disarm();
-                Ok(performance)
+            if let Some(network) = owner.network.take() {
+                network.peer.close().await;
             }
+        });
+        Self {
+            inner: Arc::new(Inner {
+                sender,
+                snapshots: updates,
+                stop,
+            }),
         }
-    }
-    async fn attach_connection(
-        &self,
-        connection: Connection,
-        storage_scope: String,
-        attempt: CancellationToken,
-    ) -> Result<(), crate::transport::TransportError> {
-        let trace = connection.peer.trace.clone();
-        let group = connection.peer.diagnostic_id;
-        trace.record(Phase::AttachStart, group, 0, 0);
-        let (complete, result) = oneshot::channel();
-        self.commands
-            .try_send(Command::Attach {
-                connection: Box::new(connection),
-                attempt,
-                storage_scope,
-                complete,
-            })
-            .map_err(command_error)?;
-        result
-            .await
-            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))??;
-        trace.record(Phase::AttachReady, group, 0, 1);
-        Ok(())
-    }
-    /// Release the current transport while retaining offline editing and observers.
-    pub async fn disconnect(&self) -> Result<(), PeerError> {
-        let result = {
-            let current = self.connection_attempt.lock().unwrap();
-            current.cancel();
-            self.request_disconnect()?
-        };
-        result
-            .await
-            .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?
-    }
-    fn request_disconnect(&self) -> Result<oneshot::Receiver<Result<(), PeerError>>, PeerError> {
-        let (complete, result) = oneshot::channel();
-        self.commands
-            .try_send(Command::Disconnect(complete))
-            .map_err(command_error)?;
-        Ok(result)
     }
     pub fn snapshot(&self) -> Arc<Snapshot> {
-        self.updates.borrow().clone()
+        self.inner.snapshots.borrow().clone()
     }
     pub fn subscribe(&self) -> watch::Receiver<Arc<Snapshot>> {
-        self.updates.clone()
+        self.inner.snapshots.clone()
     }
-    pub fn prepare_dictation(&self) -> crate::client::DictationPreparation {
-        let id = uuid::Uuid::new_v4().to_string();
-        let cancel = self.stop.child_token();
-        let preparation = crate::client::DictationPreparation {
-            id: id.clone(),
-            _cancel: cancel.clone().drop_guard(),
-        };
-        let _ = self
-            .commands
-            .try_send(Command::PrepareDictation { id, cancel });
-        preparation
-    }
-    /// Best-effort diagnostics use the owned connection without delaying recovery.
-    pub fn record_connection_performance(&self, performance: ConnectionPerformance) {
-        let _ = self.commands.try_send(Command::ConnectionPerformance {
-            epoch: self.snapshot().epoch,
-            performance,
-        });
-    }
-    /// Publish the pure transition before returning to a native input control.
-    /// The watch lock orders publication and effect enqueueing across callers.
-    /// Watch releases that lock before waking potentially reentrant FFI consumers.
-    /// Only effects wait for the executor; dropping a receipt does not cancel them.
-    pub fn dispatch(
-        &self,
-        intent: Intent,
-    ) -> impl Future<Output = Result<Outcome, PeerError>> + Send + use<> {
-        let mut receipt = Err(PeerError::ConnectionClosed("store is closed".into()));
-        let publications = self.publications.lock().unwrap().clone();
-        if let Some(publications) = publications {
-            receipt = Ok(None);
-            publications.send_if_modified(|current| {
-                if self.stop.is_cancelled() || self.commands.is_closed() {
-                    receipt = Err(PeerError::ConnectionClosed("store is closed".into()));
-                    return false;
-                }
-                let mut candidate = current.clone();
-                let (effects, changed) = apply_locked(&mut candidate, Event::Intent(intent));
-                if !effects.is_empty() {
-                    let permit = match self.commands.try_reserve() {
-                        Ok(permit) => permit,
-                        Err(error) => {
-                            receipt = Err(command_error(error));
-                            return false;
-                        }
-                    };
-                    let (complete, result) = oneshot::channel();
-                    permit.send(Command::Dispatch(Dispatch { effects, complete }));
-                    receipt = Ok(Some(result));
-                }
-                *current = candidate;
-                changed
-            });
-        }
-        async move {
-            match receipt? {
-                None => Ok(Outcome::Applied),
-                Some(result) => result
-                    .await
-                    .map_err(|_| PeerError::ConnectionClosed("store is closed".into()))?,
+    pub fn dispatch(&self, intent: Intent) -> Receipt {
+        let (sender, receiver) = oneshot::channel();
+        if let Err(error) = self
+            .inner
+            .sender
+            .try_send(OwnerEvent::Dispatch(intent, sender))
+        {
+            let reason = invalid(&error);
+            if let OwnerEvent::Dispatch(_, complete) = error.into_inner() {
+                let _ = complete.send(Err(reason));
             }
         }
+        receiver
     }
-    /// Ephemeral frames never enter persisted conversation snapshots.
+    pub async fn reconnect(
+        &self,
+        endpoint: &transport::Endpoint,
+        ticket: &transport::Ticket,
+        invitation: Option<uuid::Uuid>,
+    ) -> Result<crate::diagnostics::ConnectionPerformance, PeerError> {
+        let started = std::time::Instant::now();
+        let session = endpoint.connect(ticket).await.map_err(invalid)?;
+        let (peer, events) = session
+            .open_peer(Duration::from_secs(30), 32)
+            .await
+            .map_err(invalid)?;
+        let peer = Arc::new(peer);
+        if let Some(invitation) = invitation {
+            peer.call(&op::Pair { invitation }).await?;
+        }
+        let host_name = peer.request::<String>(&Call::HostName(m::Empty {})).await?;
+        let (complete, receiver) = oneshot::channel();
+        self.inner
+            .sender
+            .send(OwnerEvent::Attach {
+                peer: peer.clone(),
+                host_name,
+                events,
+                complete,
+            })
+            .await
+            .map_err(invalid)?;
+        receiver.await.map_err(invalid)?;
+        // Name is data fetched from the authenticated connection; not an authority token.
+        let performance = crate::diagnostics::ConnectionPerformance {
+            total_ms: started.elapsed().as_millis() as u64,
+            connection_id: peer.diagnostic_id,
+            ..Default::default()
+        };
+        Ok(performance)
+    }
+    pub async fn resume(
+        &self,
+        endpoint: &transport::Endpoint,
+        ticket: &transport::Ticket,
+    ) -> Result<crate::diagnostics::ConnectionPerformance, PeerError> {
+        self.reconnect(endpoint, ticket, None).await
+    }
+    pub async fn close(&self) -> Result<(), PeerError> {
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .sender
+            .send(OwnerEvent::Close(sender))
+            .await
+            .map_err(invalid)?;
+        receiver.await.map_err(invalid)
+    }
     pub async fn browser(
         &self,
         request: crate::browser::BrowserRequest,
     ) -> Result<crate::browser::BrowserFrame, PeerError> {
-        request.validate().map_err(PeerError::InvalidMessage)?;
-        let (complete, result) = oneshot::channel();
-        self.commands
-            .try_send(Command::Browser { request, complete })
-            .map_err(command_error)?;
-        result
+        let (sender, receiver) = oneshot::channel();
+        self.inner
+            .sender
+            .send(OwnerEvent::Browser(request, sender))
             .await
-            .map_err(|_| PeerError::ConnectionClosed("browser connection ended".into()))?
+            .map_err(invalid)?;
+        receiver.await.map_err(invalid)?
     }
-
-    pub async fn close(&self) -> Result<(), PeerError> {
-        self.stop.cancel();
-        self.publications.lock().unwrap().take();
-        let mut finished = self.finished.clone();
-        finished
-            .wait_for(|done| *done)
-            .await
-            .map(|_| ())
-            .map_err(|_| PeerError::ConnectionClosed("store task stopped".into()))
-    }
-}
-
-async fn read_storage_scope(peer: &Client) -> Result<String, PeerError> {
-    let scope = peer
-        .request::<String>(&crate::protocol::Call::SessionScope(
-            crate::models::Empty {},
-        ))
-        .await?;
-    if scope.is_empty() || scope.len() > 256 {
-        return Err(PeerError::InvalidMessage(
-            "invalid provider storage scope".into(),
-        ));
-    }
-    Ok(scope)
-}
-
-fn apply(updates: &watch::Sender<Arc<Snapshot>>, event: Event) -> Vec<Scheduled> {
-    let mut effects = Vec::new();
-    updates.send_if_modified(|current| {
-        let (produced, changed) = apply_locked(current, event);
-        effects = produced;
-        changed
-    });
-    effects
-}
-fn apply_locked(current: &mut Arc<Snapshot>, event: Event) -> (Vec<Scheduled>, bool) {
-    let (mut next, effects) = reduce(current, event);
-    if next.epoch != current.epoch {
-        Arc::make_mut(&mut next.operations).retain(|key, _| {
-            !matches!(
-                key,
-                op::OperationKey::Directory
-                    | op::OperationKey::File
-                    | op::OperationKey::WorkspaceReview
-                    | op::OperationKey::WorktreeSettings
-                    | op::OperationKey::Worktrees
-                    | op::OperationKey::Permissions { .. }
-            )
-        });
-    }
-    let scheduled = effects
-        .into_iter()
-        .map(|effect| Scheduled::new(effect, &mut next, None))
-        .collect();
-    let changed = publish_locked(current, next);
-    (scheduled, changed)
-}
-fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
-    // No `..`: adding a Snapshot field must update the publication contract.
-    let Snapshot {
-        operations,
-        operation_sequence,
-        model_defaults,
-        scoped_model_defaults,
-        permission_settings,
-        composer_catalog,
-        host_name,
-        storage_scope,
-        archived_scopes,
-        account,
-        terminals,
-        conversations,
-        threads,
-        models,
-        model_errors,
-        drafts,
-        pending_submissions,
-        file_drafts,
-        workspace,
-        navigation,
-        activity,
-        management,
-        list_query,
-        epoch,
-        connected,
-        subscriptions,
-        error,
-    } = &next;
-    let same_threads = match (&current.threads, threads) {
-        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-        (None, None) => true,
-        _ => false,
-    };
-    if Arc::ptr_eq(&current.operations, operations)
-        && current.operation_sequence == *operation_sequence
-        && current.model_defaults == *model_defaults
-        && Arc::ptr_eq(&current.scoped_model_defaults, scoped_model_defaults)
-        && current.host_name == *host_name
-        && current.permission_settings == *permission_settings
-        && current.composer_catalog == *composer_catalog
-        && current.storage_scope == *storage_scope
-        && Arc::ptr_eq(&current.archived_scopes, archived_scopes)
-        && Arc::ptr_eq(&current.terminals, terminals)
-        && Arc::ptr_eq(&current.subscriptions, subscriptions)
-        && Arc::ptr_eq(&current.account, account)
-        && Arc::ptr_eq(&current.conversations, conversations)
-        && same_threads
-        && Arc::ptr_eq(&current.models, models)
-        && Arc::ptr_eq(&current.model_errors, model_errors)
-        && Arc::ptr_eq(&current.drafts, drafts)
-        && Arc::ptr_eq(&current.pending_submissions, pending_submissions)
-        && Arc::ptr_eq(&current.file_drafts, file_drafts)
-        && Arc::ptr_eq(&current.workspace, workspace)
-        && Arc::ptr_eq(&current.navigation, navigation)
-        && Arc::ptr_eq(&current.activity, activity)
-        && Arc::ptr_eq(&current.management, management)
-        && Arc::ptr_eq(&current.list_query, list_query)
-        && &current.epoch == epoch
-        && &current.connected == connected
-        && &current.error == error
-    {
-        return false;
-    }
-    *current = Arc::new(next);
-    true
-}
-fn finish(updates: &watch::Sender<Arc<Snapshot>>, completed: Completed) -> Vec<Scheduled> {
-    let mut effects = Vec::new();
-    let mut scheduled = Vec::new();
-    let mut result = Ok(Outcome::Applied);
-    updates.send_if_modified(|snapshot| {
-        // Dispatch and completion share this lock. List results and failures
-        // belong to their query; view work belongs to the navigation epoch.
-        let current = completed.scheduling.query().map_or_else(
-            || {
-                completed
-                    .scope
-                    .current(snapshot.epoch, &snapshot.operations)
-            },
-            |query| query == snapshot.list_query.as_ref(),
-        );
-        let mut next = snapshot.as_ref().clone();
-        result = match completed.result {
-            Ok(applied) => match applied.application.apply(&mut next, current) {
-                Ok(next_effects) => {
-                    effects = next_effects;
-                    Ok(applied.outcome)
-                }
-                Err(error) => {
-                    if current {
-                        next.error = Some(error.to_string());
-                    }
-                    Err(error)
-                }
-            },
-            Err(error) => {
-                let error = match completed.rejection {
-                    Some(application) => match application.apply(&mut next, current) {
-                        Ok(next_effects) => {
-                            effects.extend(next_effects);
-                            error
-                        }
-                        Err(error) => error,
-                    },
-                    None => error,
-                };
-                if (completed.delivery_attempted
-                    || matches!(
-                        completed.scheduling,
-                        op::Scheduling::Terminal { starts: true, .. }
-                    ))
-                    && let Some(handle) = completed.scheduling.terminal()
-                {
-                    next = reduce(
-                        &next,
-                        Event::TerminalFailed {
-                            handle: handle.to_owned(),
-                            reason: error.to_string(),
-                        },
-                    )
-                    .0;
-                }
-                if let Some(id) = completed.failed_submission {
-                    let unknown = completed.delivery_attempted
-                        && (matches!(
-                            &error,
-                            PeerError::ConnectionClosed(_)
-                                | PeerError::RequestTimeout { .. }
-                                | PeerError::InvalidResponse { .. }
-                        ) || matches!(
-                            &error,
-                            PeerError::Remote {
-                                delivery: crate::peer::Delivery::Unknown,
-                                ..
-                            }
-                        ));
-                    next = reduce(
-                        &next,
-                        if unknown {
-                            Event::SubmissionUnknown(id)
-                        } else {
-                            Event::SubmissionFailed(id)
-                        },
-                    )
-                    .0;
-                }
-                if current {
-                    next.error = Some(error.to_string());
-                }
-                Err(error)
-            }
-        };
-        effects.extend(op::prefetch_composer_catalog(&mut next));
-        let continues = completed.scope.operation.as_ref().is_some_and(|(key, _)| {
-            effects
-                .iter()
-                .any(|effect| effect.operation.key().as_ref() == Some(key))
-        });
-        if !continues {
-            completed
-                .scope
-                .finish(&mut next.operations, result.as_ref().err());
+    pub fn prepare_dictation(&self) -> crate::client::DictationPreparation {
+        let cancel = CancellationToken::new();
+        let recording = id("dictation");
+        let _ = self
+            .inner
+            .sender
+            .try_send(OwnerEvent::Dictation(recording.clone(), cancel.clone()));
+        crate::client::DictationPreparation {
+            id: recording,
+            _cancel: cancel.drop_guard(),
         }
-        let superseded = completed
-            .scope
-            .operation
-            .as_ref()
-            .is_some_and(|(key, generation)| {
-                next.operations
-                    .get(key)
-                    .is_some_and(|state| state.generation != *generation)
-            });
-        scheduled = effects
-            .drain(..)
-            .filter(|effect| {
-                !superseded
-                    || effect.operation.key().as_ref()
-                        != completed.scope.operation.as_ref().map(|(key, _)| key)
-            })
-            .map(|effect| Scheduled::new(effect, &mut next, Some(&completed.scope)))
-            .collect();
-        publish_locked(snapshot, next)
-    });
-    let continuation = scheduled.iter().position(|scheduled| {
-        scheduled.effect.receipt == ReceiptPolicy::Continue
-            || scheduled.effect.operation.submission_id().is_some()
-    });
-    let mut complete = completed.complete;
-    if continuation.is_none()
-        && let Some(complete) = complete.take()
-    {
-        complete.send(result);
     }
-    if let Some(index) = continuation {
-        scheduled[index].complete = complete;
+    pub fn record_connection_performance(
+        &self,
+        performance: crate::diagnostics::ConnectionPerformance,
+    ) {
+        let _ = self
+            .inner
+            .sender
+            .try_send(OwnerEvent::Performance(performance));
     }
-    scheduled
 }
-/// Bounded, connection-local item work. A continuation keeps its original
-/// receipt and slot identity, without blocking unrelated work.
-#[derive(Default)]
-struct ItemReads {
-    receipts: BTreeMap<op::ReadItem, Receipt>,
-    running: BTreeSet<op::ReadItem>,
-    pending: VecDeque<Scheduled>,
-}
-impl ItemReads {
-    fn enqueue(&mut self, mut scheduled: Scheduled) -> Result<(), Box<(Scheduled, PeerError)>> {
-        let key = scheduled.effect.scheduling.item().unwrap().clone();
-        if let Some(receipt) = self.receipts.get(&key) {
-            if let Some(complete) = scheduled.complete.take() {
-                receipt.join(complete);
-            }
-            if scheduled.effect.receipt != ReceiptPolicy::Continue {
+
+impl Owner {
+    fn publish(&mut self) {
+        self.state.revision += 1;
+        self.snapshots.send_replace(Arc::new(self.state.clone()));
+    }
+    fn selected(&self) -> Result<ThreadId, PeerError> {
+        self.state
+            .selected_thread
+            .clone()
+            .ok_or_else(|| invalid("Open a thread"))
+    }
+    fn active(&self) -> Option<RunId> {
+        self.state
+            .projection()
+            .and_then(|p| p.runs.iter().find(|r| r.status.is_blocking()))
+            .map(|r| r.id.clone())
+    }
+    fn job(
+        &mut self,
+        call: Call,
+        complete: Option<oneshot::Sender<Result<Outcome, PeerError>>>,
+        sent: Option<(String, Draft)>,
+        launched: Option<ThreadId>,
+    ) -> Result<(), PeerError> {
+        if self.network.is_none() {
+            return Err(invalid("Connect to the Host"));
+        }
+        if !self.state.connected {
+            return Err(invalid("Connect to the Host"));
+        }
+        if let Call::DispatchCommand(command) = &call
+            && !self
+                .state
+                .pending_commands
+                .iter()
+                .any(|old| old.command_id == command.command_id)
+        {
+            self.state.pending_commands.push(command.clone());
+        }
+        if let Call::LaunchThread(launch) = &call
+            && !self
+                .state
+                .pending_launches
+                .iter()
+                .any(|old| old.create.command_id == launch.create.command_id)
+        {
+            self.state.pending_launches.push(*launch.clone());
+        }
+        if let Some(thread) = mutation_thread(&call) {
+            let network = self.network.as_mut().unwrap();
+            if !network.running_mutations.insert(thread.clone()) {
+                network
+                    .mutations
+                    .entry(thread)
+                    .or_default()
+                    .push_back(PendingJob {
+                        call,
+                        complete,
+                        sent,
+                        launched,
+                    });
                 return Ok(());
             }
-            scheduled.complete = Some(receipt.clone());
-        } else {
-            if self.receipts.len() >= MAX_ITEM_READS {
-                let error = PeerError::InvalidMessage(format!(
-                    "too many pending item reads: {}",
-                    key.item_id
-                ));
-                return Err(Box::new((scheduled, error)));
-            }
-            let receipt = scheduled.complete.get_or_insert_default().clone();
-            self.receipts.insert(key, receipt);
         }
-        if scheduled.effect.receipt == ReceiptPolicy::Continue {
-            // Continue the same item before issuing new grants. Its slot covers
-            // the control response, body transfer, and final application.
-            self.pending.push_front(scheduled);
+        let network = self.network.as_ref().unwrap();
+        let epoch = network.epoch;
+        let peer = network.peer.clone();
+        let sender = self.sender.clone();
+        let task = tokio::spawn(async move {
+            let result = execute(&peer, &call).await;
+            let _ = sender
+                .send(OwnerEvent::Finished(
+                    epoch,
+                    Box::new(JobResult {
+                        call,
+                        result,
+                        complete,
+                        sent,
+                        launched,
+                    }),
+                ))
+                .await;
+        });
+        let network = self.network.as_mut().unwrap();
+        network.tasks.retain(|t| !t.is_finished());
+        network.tasks.push(AbortOnDropHandle::new(task));
+        Ok(())
+    }
+    fn subscribe_thread(&mut self) {
+        let Some(network) = self.network.as_mut() else {
+            return;
+        };
+        network.thread.take();
+        if let Some(id) = self.state.selected_thread.clone() {
+            if let Some(cache) = self.state.threads.get_mut(&id) {
+                cache.accessed_at = self.state.revision;
+                cache.synchronized = false;
+            }
+            network.thread = Some(AbortOnDropHandle::new(tokio::spawn(thread_stream(
+                network.peer.clone(),
+                network.epoch,
+                id,
+                self.snapshots.subscribe(),
+                self.sender.clone(),
+            ))));
+        }
+    }
+    fn refresh(&mut self) {
+        for call in [
+            Call::ListModels(op::ListModels {
+                limit: 100,
+                cursor: None,
+            }),
+            Call::ListProjects(m::Empty {}),
+            Call::ListAccounts(m::Empty {}),
+        ] {
+            if let Err(error) = self.job(call, None, None, None) {
+                self.state.error = Some(error.to_string());
+            }
+        }
+    }
+    async fn handle(&mut self, event: OwnerEvent) -> bool {
+        match event {
+            OwnerEvent::Attach {
+                peer,
+                host_name,
+                events,
+                complete,
+            } => {
+                if let Some(network) = self.network.take() {
+                    network.peer.close().await;
+                }
+                self.epoch += 1;
+                self.state.connected = true;
+                self.state.host_name = Some(host_name);
+                self.state.error = None;
+                self.state.shell_synchronized = false;
+                let epoch = self.epoch;
+                let tasks = vec![
+                    AbortOnDropHandle::new(tokio::spawn(shell_stream(
+                        peer.clone(),
+                        epoch,
+                        self.snapshots.subscribe(),
+                        self.sender.clone(),
+                    ))),
+                    AbortOnDropHandle::new(tokio::spawn(notifications(
+                        events,
+                        epoch,
+                        self.sender.clone(),
+                    ))),
+                ];
+                self.network = Some(Network {
+                    peer,
+                    epoch,
+                    tasks,
+                    thread: None,
+                    mutations: BTreeMap::new(),
+                    running_mutations: BTreeSet::new(),
+                });
+                self.subscribe_thread();
+                self.refresh();
+                for command in self.state.pending_commands.clone() {
+                    let _ = self.job(Call::DispatchCommand(command), None, None, None);
+                }
+                for launch in self.state.pending_launches.clone() {
+                    let thread = launch.create.thread_id.clone();
+                    let draft = Draft {
+                        text: launch.input.text.clone(),
+                        ..self.state.default_draft.clone()
+                    };
+                    let key = format!(
+                        "new:{}",
+                        match &launch.create.body {
+                            CommandBody::ThreadCreate { project_id, .. } => project_id.as_str(),
+                            _ => "bex:chats",
+                        }
+                    );
+                    let _ = self.job(
+                        Call::LaunchThread(Box::new(launch)),
+                        None,
+                        Some((key, draft)),
+                        Some(thread),
+                    );
+                }
+                let _ = complete.send(());
+            }
+            OwnerEvent::Dispatch(intent, complete) => {
+                if let Err((error, complete)) = self.intent(intent, complete) {
+                    self.state.error = Some(error.to_string());
+                    let _ = complete.send(Err(error));
+                }
+            }
+            OwnerEvent::Shell(epoch, item) if epoch == self.epoch => {
+                crate::sync::shell(&mut self.state, item, &now())
+            }
+            OwnerEvent::Thread(epoch, id, item) if epoch == self.epoch => {
+                crate::sync::thread(&mut self.state, &id, item)
+            }
+            OwnerEvent::Notification(epoch, notification) if epoch == self.epoch => {
+                self.notification(notification)
+            }
+            OwnerEvent::Disconnected(epoch, error) if epoch == self.epoch => {
+                self.state.connected = false;
+                self.state.error = Some(error);
+                self.state.shell_synchronized = false;
+                for terminal in self.state.terminals.values_mut() {
+                    if matches!(
+                        terminal.phase,
+                        TerminalPhase::Starting | TerminalPhase::Running
+                    ) {
+                        terminal.phase = TerminalPhase::Suspended;
+                    }
+                }
+            }
+            OwnerEvent::Finished(epoch, result) if epoch == self.epoch => self.finished(*result),
+            OwnerEvent::Close(complete) => {
+                if let Some(network) = self.network.take() {
+                    network.peer.close().await;
+                }
+                self.state.connected = false;
+                self.publish();
+                let _ = complete.send(());
+                return true;
+            }
+            OwnerEvent::Browser(request, complete) => {
+                if let Some(network) = self.network.as_mut() {
+                    let peer = network.peer.clone();
+                    network
+                        .tasks
+                        .push(AbortOnDropHandle::new(tokio::spawn(async move {
+                            let result = match request.validate() {
+                                Ok(()) => peer.request(&Call::Browser(request)).await,
+                                Err(e) => Err(invalid(e)),
+                            };
+                            let _ = complete.send(result);
+                        })));
+                } else {
+                    let _ = complete.send(Err(invalid("Connect to the Host")));
+                }
+            }
+            OwnerEvent::Dictation(id, cancel) => {
+                if let Some(network) = &self.network {
+                    tokio::spawn(crate::client::prepare_dictation(
+                        network.peer.clone(),
+                        id,
+                        cancel,
+                    ));
+                }
+            }
+            OwnerEvent::Performance(performance) => {
+                if let Some(network) = &self.network {
+                    let peer = network.peer.clone();
+                    tokio::spawn(async move {
+                        peer.collect_connection_diagnostics(performance).await;
+                    });
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+    fn intent(
+        &mut self,
+        intent: Intent,
+        complete: oneshot::Sender<Result<Outcome, PeerError>>,
+    ) -> Result<(), (PeerError, oneshot::Sender<Result<Outcome, PeerError>>)> {
+        if self.state.pending_commands.len() + self.state.pending_launches.len() >= 128 {
+            return Err((
+                invalid("Too many pending commands; wait for the Host"),
+                complete,
+            ));
+        }
+        let prepared = self.prepare(intent);
+        let (call, sent, launched) = match prepared {
+            Ok(value) => value,
+            Err(error) => return Err((error, complete)),
+        };
+        if let Some(call) = call {
+            // Keep the receipt available if the request cannot be scheduled.
+            if self.network.is_none() || !self.state.connected {
+                return Err((invalid("Connect to the Host"), complete));
+            }
+            self.job(call, Some(complete), sent, launched)
+                .expect("connection checked");
         } else {
-            self.pending.push_back(scheduled);
+            let _ = complete.send(Ok(Outcome::Applied));
         }
         Ok(())
     }
-    fn next(&mut self) -> Option<Scheduled> {
-        let next = self.pending.front()?;
-        if self.running.len() >= MAX_ITEM_TRANSFERS
-            && !self
-                .running
-                .contains(next.effect.scheduling.item().unwrap())
-        {
-            return None;
-        }
-        let scheduled = self.pending.pop_front().unwrap();
-        self.running
-            .insert(scheduled.effect.scheduling.item().unwrap().clone());
-        Some(scheduled)
-    }
-    fn finish(
-        &mut self,
-        updates: &watch::Sender<Arc<Snapshot>>,
-        completed: Completed,
-    ) -> Vec<Scheduled> {
-        let key = completed.scheduling.item().cloned();
-        let effects = finish(updates, completed);
-        if let Some(key) = key
-            && !effects.iter().any(|s| {
-                s.effect.receipt == ReceiptPolicy::Continue
-                    && s.effect.scheduling.item() == Some(&key)
-            })
-        {
-            self.running.remove(&key);
-            self.receipts.remove(&key);
-        }
-        effects
-    }
-}
-async fn run(
-    mut connection: Connection,
-    updates: watch::Sender<Arc<Snapshot>>,
-    commands: &mut mpsc::Receiver<Command>,
-    stop: CancellationToken,
-    mut effects: Vec<Scheduled>,
-) {
-    let peer = &connection.peer;
-    let session = &connection.session;
-    let events = &mut connection.events;
-    let mut jobs = FuturesUnordered::new();
-    let mut browser_jobs = FuturesUnordered::new();
-    let mut diagnostic_jobs = FuturesUnordered::new();
-    let mut preparation_jobs = FuturesUnordered::new();
-    let mut subscriptions = tokio_stream::StreamMap::new();
-    let mut terminal_commands = VecDeque::new();
-    let mut item_reads = ItemReads::default();
-    let mut terminal_running = BTreeSet::new();
-    let mut latest_reads: BTreeMap<op::OperationKey, Option<Scheduled>> = BTreeMap::new();
-    let mut disconnected = None;
-    let reason = loop {
-        let unused: Vec<_> = subscriptions
-            .keys()
-            .filter(|id| {
-                !updates
-                    .borrow()
-                    .subscriptions
-                    .values()
-                    .any(|current| current == *id)
-            })
-            .copied()
-            .collect();
-        for id in unused {
-            subscriptions.remove(&id);
-        }
-        for mut scheduled in std::mem::take(&mut effects) {
-            if let Some(key) = scheduled.effect.scheduling.latest_key()
-                && let Some(pending) = latest_reads.get_mut(&key)
-            {
-                if let Some(previous) = pending.take()
-                    && let Some(complete) = previous.complete
-                {
-                    scheduled.complete.get_or_insert_default().join(complete);
-                }
-                *pending = Some(scheduled);
-                continue;
-            }
-            let limit = match &scheduled.effect.scheduling {
-                op::Scheduling::Terminal { .. } => {
-                    if terminal_commands.len() >= MAX_TERMINAL_QUEUE {
-                        effects.extend(finish(&updates, rejected(scheduled, busy_error())));
-                    } else {
-                        terminal_commands.push_back(scheduled);
-                    }
-                    continue;
-                }
-                op::Scheduling::Item(_) => {
-                    if let Err(rejection) = item_reads.enqueue(scheduled) {
-                        let (scheduled, error) = *rejection;
-                        effects.extend(finish(&updates, rejected(scheduled, error)));
-                    }
-                    continue;
-                }
-                op::Scheduling::Control => MAX_RPC_JOBS + CONTROL_RESERVE,
-                op::Scheduling::Concurrent
-                | op::Scheduling::LatestList(_)
-                | op::Scheduling::LatestReview => MAX_RPC_JOBS,
-            };
-            if jobs.len() >= limit {
-                effects.extend(finish(&updates, rejected(scheduled, busy_error())));
-                continue;
-            }
-            if let Some(key) = scheduled.effect.scheduling.latest_key() {
-                latest_reads.insert(key, None);
-            }
-            jobs.push(perform(Some(peer), session.as_ref(), scheduled));
-        }
-        while jobs.len() < MAX_RPC_JOBS {
-            let Some(scheduled) = item_reads.next() else {
-                break;
-            };
-            jobs.push(perform(Some(peer), session.as_ref(), scheduled));
-        }
-        while terminal_running.len() < MAX_TERMINAL_JOBS && jobs.len() < MAX_RPC_JOBS {
-            let Some(index) = terminal_commands.iter().position(|scheduled| {
-                !terminal_running.contains(scheduled.effect.scheduling.terminal().unwrap())
-            }) else {
-                break;
-            };
-            let scheduled = terminal_commands.remove(index).unwrap();
-            terminal_running.insert(scheduled.effect.scheduling.terminal().unwrap().to_owned());
-            jobs.push(perform(Some(peer), session.as_ref(), scheduled));
-        }
-        tokio::select! {
-            _ = stop.cancelled() => break "store closed".into(),
-            command = commands.recv() => {
-                let Some(command) = command else { break "store closed".into() };
-                let command = match command {
-                    Command::PrepareDictation { id, cancel } => {
-                        if preparation_jobs.len() < MAX_RPC_JOBS {
-                            preparation_jobs.push(crate::client::prepare_dictation(peer, id, cancel));
-                        }
-                        continue;
-                    }
-                    Command::ConnectionPerformance { epoch, performance } => {
-                        if epoch == updates.borrow().epoch && performance.connection_id == peer.diagnostic_id {
-                            diagnostic_jobs.clear();
-                            let peer = peer.clone();
-                            diagnostic_jobs.push(async move {
-                                peer.collect_connection_diagnostics(performance).await;
-                            });
-                        }
-                        continue;
-                    }
-                    Command::Dispatch(command) => command,
-                    Command::Browser { request, complete } => {
-                        if browser_jobs.len() >= 16 {
-                            let _ = complete.send(Err(PeerError::InvalidMessage("ブラウザ操作が混み合っています。少し待って再試行してください。".into())));
-                        } else {
-                            let peer = peer.clone();
-                            browser_jobs.push(async move { let _ = complete.send(peer.call(&request).await); });
-                        }
-                        continue;
-                    }
-                    Command::ResumePeer { endpoint, remote, complete } => {
-                        let _ = complete.send(session.as_ref().filter(|session| session.uses_endpoint(&endpoint) && session.node_id() == remote).map(|_| peer.clone()));
-                        continue;
-                    }
-                    Command::Disconnect(complete) => {
-                        disconnected = Some(complete);
-                        break "Host disconnected".into();
-                    }
-                    Command::Attach { connection, complete, .. } => {
-                        drop(connection);
-                        let _ = complete.send(Err(PeerError::ConnectionClosed("store is already connected".into())));
-                        continue;
-                    }
-                };
-                let mut complete = Some(Receipt::new(command.complete));
-                for mut scheduled in command.effects {
-                    scheduled.complete = if scheduled.effect.receipt == ReceiptPolicy::Background { None } else { complete.take() };
-                    effects.push(scheduled);
-                }
-                if let Some(complete) = complete {
-                    complete.send(Ok(Outcome::Applied));
-                }
-            }
-            _ = browser_jobs.next(), if !browser_jobs.is_empty() => {},
-            _ = diagnostic_jobs.next(), if !diagnostic_jobs.is_empty() => {},
-            result = jobs.next(), if !jobs.is_empty() => {
-                let mut result = result.unwrap();
-                for (id, stream) in result.subscriptions.drain(..) { subscriptions.insert(id, futures_util::stream::try_unfold(stream, |mut stream| async {
-                        Ok(stream.read::<crate::session::SessionChange>().await?.map(|line| (line, stream)))
-                    }).chain(futures_util::stream::once(async {
-                    Err(std::io::Error::other("subscription ended"))
-                })).boxed()); }
-                if let Some(handle) = result.scheduling.terminal() { terminal_running.remove(handle); }
-                if let Some(key) = result.scheduling.latest_key()
-                    && let Some(Some(scheduled)) = latest_reads.remove(&key) {
-                    effects.push(scheduled);
-                }
-                effects.extend(item_reads.finish(&updates, result));
-            }
-            Some(()) = preparation_jobs.next(), if !preparation_jobs.is_empty() => {},
-            Some((id, update)) = subscriptions.next(), if !subscriptions.is_empty() => {
-                match update {
-                    Ok(change) => effects.extend(apply(&updates, Event::SessionUpdate(Box::new(crate::session::SessionUpdate { subscription_id: id, change })))),
-                    Err(error) => break error.to_string(),
-                }
-            }
-            event = events.read::<crate::protocol::Notification>() => match event {
-                Ok(Some(notification)) => effects.extend(apply(&updates, Event::Notification(notification))),
-                Ok(None) => break "Host event stream ended".into(),
-                Err(error) => break error.to_string(),
-            }
-        }
-    };
-    // The Host owns connection-scoped PTYs and grants, including starts in flight.
-    // Replacement must not wait for delivery acknowledgments from the old peer.
-    let replacing = disconnected.is_some() && session.is_some();
-    if replacing {
-        session.as_ref().unwrap().close();
-    }
-    drop(jobs);
-    drop(browser_jobs);
-    drop(diagnostic_jobs);
-    drop(preparation_jobs);
-    peer.close().await;
-    drop(connection);
-    apply(&updates, Event::Disconnected(reason));
-    if let Some(complete) = disconnected {
-        let _ = complete.send(Ok(()));
-    }
-}
-
-async fn run_offline(
-    updates: &watch::Sender<Arc<Snapshot>>,
-    commands: &mut mpsc::Receiver<Command>,
-    stop: &CancellationToken,
-) -> Option<(Connection, Vec<Scheduled>)> {
-    while !stop.is_cancelled() {
-        let command = tokio::select! {
-            _ = stop.cancelled() => break,
-            command = commands.recv() => match command { Some(command) => command, None => break },
-        };
-        let command = match command {
-            Command::PrepareDictation { .. } => continue,
-            Command::ConnectionPerformance { .. } => continue,
-            Command::Dispatch(command) => command,
-            Command::Browser { complete, .. } => {
-                let _ = complete.send(Err(PeerError::ConnectionClosed(
-                    "Hostに接続してください。".into(),
-                )));
-                continue;
-            }
-            Command::ResumePeer { complete, .. } => {
-                let _ = complete.send(None);
-                continue;
-            }
-            Command::Disconnect(complete) => {
-                let _ = complete.send(Ok(()));
-                continue;
-            }
-            Command::Attach {
-                connection,
-                attempt,
-                complete,
-                storage_scope,
-            } => {
-                if attempt.is_cancelled() {
-                    drop(connection);
-                    let _ = complete.send(Err(PeerError::ConnectionClosed(
-                        "connection attempt cancelled".into(),
-                    )));
-                    continue;
-                }
-                apply(updates, Event::StorageScope(storage_scope));
-                let effects = apply(updates, Event::Connected);
-                let _ = complete.send(Ok(()));
-                return Some((*connection, effects));
-            }
-        };
-        let mut complete = Some(Receipt::new(command.complete));
-        for mut scheduled in command.effects {
-            scheduled.complete = if scheduled.effect.receipt == ReceiptPolicy::Background {
+    fn prepare(&mut self, intent: Intent) -> Result<PreparedIntent, PeerError> {
+        let mut body = None;
+        let mut target = self.state.selected_thread.clone();
+        let mut sent = None;
+        let mut launched = None;
+        let timestamp = now();
+        let call = match intent {
+            Intent::OpenThread { thread_id } => {
+                let id = ThreadId::new(thread_id).map_err(invalid)?;
+                self.state.selected_thread = Some(id.clone());
+                self.state.editing_run = None;
+                self.subscribe_thread();
+                target = Some(id);
+                body = Some(CommandBody::ThreadVisit {
+                    visited_at: timestamp,
+                });
                 None
-            } else {
-                complete.take()
-            };
-            let result = perform(None, None, scheduled).await;
-            drop(finish(updates, result));
-        }
-        if let Some(complete) = complete {
-            complete.send(Ok(Outcome::Applied));
-        }
-    }
-    None
-}
-
-fn busy_error() -> PeerError {
-    PeerError::InvalidMessage("操作が混み合っています。少し待って再試行してください。".into())
-}
-fn command_error<T>(error: mpsc::error::TrySendError<T>) -> PeerError {
-    match error {
-        mpsc::error::TrySendError::Full(_) => busy_error(),
-        mpsc::error::TrySendError::Closed(_) => {
-            PeerError::ConnectionClosed("store is closed".into())
-        }
-    }
-}
-fn rejected(scheduled: Scheduled, error: PeerError) -> Completed {
-    Completed {
-        scheduling: scheduled.effect.scheduling,
-        failed_submission: scheduled
-            .effect
-            .operation
-            .submission_id()
-            .map(agent_protocol::ids::ClientInputId::from),
-        subscriptions: Vec::new(),
-        delivery_attempted: false,
-        scope: scheduled.scope,
-        complete: scheduled.complete,
-        result: Err(error),
-        rejection: scheduled.effect.operation.rejected_output(),
-    }
-}
-
-async fn perform(
-    client: Option<&Client>,
-    session: Option<&crate::transport::Session>,
-    scheduled: Scheduled,
-) -> Completed {
-    let Scheduled {
-        effect,
-        scope,
-        complete,
-    } = scheduled;
-    let scheduling = effect.scheduling;
-    let failed_submission = effect
-        .operation
-        .submission_id()
-        .map(agent_protocol::ids::ClientInputId::from);
-    let mut subscriptions = Vec::new();
-    let result = async {
-        let client =
-            client.ok_or_else(|| PeerError::ConnectionClosed("Host not connected".into()))?;
-        let mut context = Execution {
-            client,
-            session,
-            subscriptions: &mut subscriptions,
+            }
+            Intent::NewThread { project_id } => {
+                self.state.selected_thread = None;
+                self.state.selected_project = project_id;
+                self.state.editing_run = None;
+                self.subscribe_thread();
+                None
+            }
+            Intent::FilterProject { project_id } => {
+                self.state.selected_project = project_id;
+                None
+            }
+            Intent::Search { query } => {
+                self.state.search = query.clone();
+                Some(Call::SearchThreads(rpc::SearchThreads {
+                    query,
+                    limit: 100,
+                }))
+            }
+            Intent::EditDraft { draft } => {
+                self.state.drafts.insert(self.state.draft_key(), draft);
+                None
+            }
+            Intent::Send { behavior } => {
+                if target.is_none() && self.state.pending_launches.iter().any(|launch|matches!(&launch.create.body,CommandBody::ThreadCreate{project_id,..} if project_id.as_str()==self.state.selected_project.as_deref().unwrap_or("bex:chats"))) {return Err(invalid("Thread is being created"))}
+                if self.state.editing_run.is_some() {
+                    return self.prepare(Intent::Queue {
+                        action: QueueAction::SaveEdit,
+                    });
+                }
+                let draft = self.state.current_draft();
+                let mode = if behavior == SendBehavior::Default && target.is_some() {
+                    DispatchMode::QueueAfterActive
+                } else {
+                    crate::presentation::dispatch_mode(self.active().as_ref(), behavior)
+                };
+                let input = crate::commands::message(
+                    &draft,
+                    MessageId::new(id("message")).unwrap(),
+                    mode,
+                    self.source,
+                )
+                .map_err(invalid)?;
+                sent = Some((self.state.draft_key(), draft.clone()));
+                if target.is_some() {
+                    body = Some(CommandBody::MessageDispatch(input));
+                    None
+                } else {
+                    let thread_id = ThreadId::new(id("thread")).unwrap();
+                    let title = draft
+                        .text
+                        .lines()
+                        .next()
+                        .unwrap_or("New thread")
+                        .chars()
+                        .take(100)
+                        .collect();
+                    let create = command(
+                        thread_id.clone(),
+                        CommandBody::ThreadCreate {
+                            created_by: CreatedBy::User,
+                            creation_source: self.source,
+                            project_id: ProjectId::new(
+                                self.state
+                                    .selected_project
+                                    .clone()
+                                    .unwrap_or_else(|| "bex:chats".into()),
+                            )
+                            .map_err(invalid)?,
+                            title,
+                            model_selection: draft.selection().map_err(invalid)?,
+                            runtime_mode: crate::commands::runtime_mode(&draft.runtime_mode)
+                                .map_err(invalid)?,
+                            interaction_mode: crate::commands::interaction_mode(
+                                &draft.interaction_mode,
+                            )
+                            .map_err(invalid)?,
+                            branch: None,
+                            worktree_path: None,
+                        },
+                    );
+                    launched = Some(thread_id);
+                    Some(Call::LaunchThread(Box::new(rpc::LaunchThread {
+                        create,
+                        input,
+                    })))
+                }
+            }
+            Intent::Stop => {
+                body = Some(CommandBody::RunInterrupt {
+                    run_id: self.active().ok_or_else(|| invalid("No active run"))?,
+                    reason: Some("user".into()),
+                    hold_queue: true,
+                });
+                None
+            }
+            Intent::Thread { thread_id, action } => {
+                target = Some(ThreadId::new(thread_id).map_err(invalid)?);
+                body = Some(crate::commands::thread_action(&action, &timestamp).map_err(invalid)?);
+                None
+            }
+            Intent::Queue { action } => {
+                match action {
+                    QueueAction::Resume => body = Some(CommandBody::QueueResume),
+                    QueueAction::Cancel { run_id } => {
+                        body = Some(CommandBody::QueuedRunCancel {
+                            run_id: RunId::new(run_id).map_err(invalid)?,
+                        })
+                    }
+                    QueueAction::Steer { run_id } => {
+                        body = Some(CommandBody::QueuedMessagePromoteToSteer {
+                            queued_run_id: RunId::new(run_id).map_err(invalid)?,
+                            target_run_id: self.active().ok_or_else(|| invalid("No active run"))?,
+                        })
+                    }
+                    QueueAction::Edit { run_id } => {
+                        let id = RunId::new(run_id).map_err(invalid)?;
+                        let projection = self
+                            .state
+                            .projection()
+                            .ok_or_else(|| invalid("Thread is loading"))?;
+                        let run = projection
+                            .runs
+                            .iter()
+                            .find(|r| r.id == id && r.status == RunStatus::Queued)
+                            .ok_or_else(|| invalid("Queued run is unavailable"))?;
+                        let text = projection
+                            .messages
+                            .iter()
+                            .find(|m| m.id == run.user_message_id)
+                            .map(|m| m.text.clone())
+                            .unwrap_or_default();
+                        let mut draft = self.state.current_draft();
+                        draft.text = text;
+                        self.state.drafts.insert(self.state.draft_key(), draft);
+                        self.state.editing_run = Some(id);
+                    }
+                    QueueAction::SaveEdit => {
+                        let draft = self.state.current_draft();
+                        body = Some(CommandBody::QueuedRunEdit {
+                            run_id: self
+                                .state
+                                .editing_run
+                                .clone()
+                                .ok_or_else(|| invalid("No queued message is being edited"))?,
+                            text: draft.text.clone(),
+                            context: None,
+                            attachments: None,
+                        });
+                        sent = Some((self.state.draft_key(), draft));
+                    }
+                    QueueAction::CancelEdit => {
+                        self.state.editing_run = None;
+                        let mut draft = self.state.current_draft();
+                        draft.text.clear();
+                        self.state.drafts.insert(self.state.draft_key(), draft);
+                    }
+                    QueueAction::Reorder { run_ids } => {
+                        let ordered = run_ids
+                            .iter()
+                            .map(|id| RunId::new(id.clone()).map_err(invalid))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        for (index, run) in ordered.iter().enumerate().rev() {
+                            self.job(
+                                Call::DispatchCommand(command(
+                                    self.selected()?,
+                                    CommandBody::QueuedRunReorder {
+                                        run_id: run.clone(),
+                                        before_run_id: ordered.get(index + 1).cloned(),
+                                    },
+                                )),
+                                None,
+                                None,
+                                None,
+                            )?;
+                        }
+                    }
+                }
+                None
+            }
+            Intent::SetModel {
+                instance_id,
+                model,
+                effort,
+                service_tier,
+            } => {
+                let mut draft = self.state.current_draft();
+                let switched = draft.instance_id != instance_id;
+                draft.instance_id = instance_id;
+                draft.model = model;
+                draft.effort = effort;
+                draft.service_tier = service_tier;
+                let selection = draft.selection().map_err(invalid)?;
+                self.state.default_draft = draft.clone();
+                self.state.default_draft.text.clear();
+                self.state.drafts.insert(self.state.draft_key(), draft);
+                if target.is_some() {
+                    body = Some(if switched {
+                        CommandBody::ProviderSwitch {
+                            model_selection: selection,
+                        }
+                    } else {
+                        CommandBody::ThreadModelSelectionSet {
+                            model_selection: selection,
+                        }
+                    });
+                }
+                None
+            }
+            Intent::SetRuntimeMode { mode } => {
+                let runtime_mode = crate::commands::runtime_mode(&mode).map_err(invalid)?;
+                let mut draft = self.state.current_draft();
+                draft.runtime_mode = runtime_mode.as_str().into();
+                self.state.drafts.insert(self.state.draft_key(), draft);
+                if target.is_some() {
+                    body = Some(CommandBody::ThreadRuntimeModeSet { runtime_mode });
+                }
+                None
+            }
+            Intent::SetInteractionMode { mode } => {
+                let interaction_mode = crate::commands::interaction_mode(&mode).map_err(invalid)?;
+                let mut draft = self.state.current_draft();
+                draft.interaction_mode = interaction_mode.as_str().into();
+                self.state.drafts.insert(self.state.draft_key(), draft);
+                if target.is_some() {
+                    body = Some(CommandBody::ThreadInteractionModeSet { interaction_mode });
+                }
+                None
+            }
+            Intent::RespondApproval {
+                request_id,
+                decision,
+            } => {
+                body = Some(CommandBody::RuntimeRequestRespond {
+                    request_id: RuntimeRequestId::new(request_id).map_err(invalid)?,
+                    decision: Some(crate::commands::approval_decision(&decision).map_err(invalid)?),
+                    answers: None,
+                });
+                None
+            }
+            Intent::RespondQuestions {
+                request_id,
+                answers,
+            } => {
+                let row = self
+                    .state
+                    .projection()
+                    .map(crate::presentation::timeline)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|row| row.request_id.as_deref() == Some(&request_id))
+                    .ok_or_else(|| invalid("Question is unavailable"))?;
+                if let Some(error) =
+                    crate::presentation::question_error(row.questions, answers.clone())
+                {
+                    return Err(invalid(error));
+                }
+                body = Some(CommandBody::RuntimeRequestRespond {
+                    request_id: RuntimeRequestId::new(request_id).map_err(invalid)?,
+                    decision: None,
+                    answers: Some(crate::commands::question_answers(&answers)),
+                });
+                None
+            }
+            Intent::DismissInput { request_id } => {
+                body = Some(CommandBody::ThreadUserInputDismiss {
+                    request_id: RuntimeRequestId::new(request_id).map_err(invalid)?,
+                });
+                None
+            }
+            Intent::LoadHistory => {
+                let id = self.selected()?;
+                let cursor = self
+                    .state
+                    .threads
+                    .get(&id)
+                    .and_then(|c| c.history_cursor.clone())
+                    .ok_or_else(|| invalid("No earlier history"))?;
+                Some(Call::ReadThreadHistory(rpc::ReadThreadHistory {
+                    thread_id: id,
+                    cursor: Some(cursor),
+                    limit: 200,
+                }))
+            }
+            Intent::LoadItem { item_id } => Some(Call::GetTurnItem(rpc::GetTurnItem {
+                thread_id: self.selected()?,
+                item_id: TurnItemId::new(item_id).map_err(invalid)?,
+            })),
+            Intent::Refresh => {
+                self.refresh();
+                self.subscribe_thread();
+                None
+            }
+            Intent::ListFiles { path } => Some(Call::ListFiles(op::ListFiles { path })),
+            Intent::ReadFile { path } => Some(Call::ReadFile(op::ListFiles { path })),
+            Intent::EditFile { path, text } => {
+                self.state.workspace.file_drafts.insert(path, text);
+                None
+            }
+            Intent::SaveFile { path } => {
+                let file = self
+                    .state
+                    .workspace
+                    .file
+                    .as_ref()
+                    .filter(|f| f.path == path)
+                    .ok_or_else(|| invalid("Open the file before saving"))?;
+                let text = self
+                    .state
+                    .workspace
+                    .file_drafts
+                    .get(&path)
+                    .cloned()
+                    .ok_or_else(|| invalid("File has no edits"))?;
+                Some(Call::WriteFile(op::WriteFile {
+                    path,
+                    revision: file.revision.clone(),
+                    text,
+                }))
+            }
+            Intent::ReviewWorkspace { cwd } => {
+                Some(Call::ReviewWorkspace(op::ReviewWorkspace { cwd }))
+            }
+            Intent::LoadWorktreeSettings => Some(Call::ReadWorktreeSettings(m::Empty {})),
+            Intent::SaveWorktreeSettings { settings } => {
+                Some(Call::UpdateWorktreeSettings(settings))
+            }
+            Intent::ListWorktrees => Some(Call::ListWorktrees(m::Empty {})),
+            Intent::RemoveWorktree { path } => {
+                Some(Call::RemoveWorktree(op::RemoveWorktree { path }))
+            }
+            Intent::StartTerminal {
+                handle,
+                cwd,
+                cols,
+                rows,
+            } => {
+                let size = op::TerminalSize { cols, rows };
+                let previous = self.state.terminals.get(&handle);
+                let output = previous.map(|t| t.output.clone()).unwrap_or_default();
+                let sequence = previous.map_or(0, |t| t.sequence);
+                self.state.terminals.insert(
+                    handle.clone(),
+                    Terminal {
+                        cwd: cwd.clone(),
+                        size,
+                        phase: TerminalPhase::Starting,
+                        output,
+                        sequence,
+                    },
+                );
+                Some(Call::StartTerminal(op::StartTerminal { handle, cwd, size }))
+            }
+            Intent::ResizeTerminal { handle, cols, rows } => {
+                Some(Call::ResizeTerminal(op::ResizeTerminal {
+                    handle,
+                    size: op::TerminalSize { cols, rows },
+                }))
+            }
+            Intent::WriteTerminal { handle, data } => {
+                Some(Call::WriteTerminal(op::TerminalWrite {
+                    process_handle: handle,
+                    data,
+                }))
+            }
+            Intent::DetachTerminal { handle } => {
+                Some(Call::DetachTerminal(op::DetachTerminal { handle }))
+            }
+            Intent::KillTerminal { handle } => Some(Call::KillTerminal(op::TerminalKill {
+                process_handle: handle,
+            })),
+            Intent::LoadAccounts => Some(Call::ListAccounts(m::Empty {})),
+            Intent::SelectAccount { provider, id } => {
+                Some(Call::SelectAccount(op::SelectAccount { provider, id }))
+            }
+            Intent::StartLogin { provider } => {
+                Some(Call::StartAccountLogin(op::StartAccountLogin { provider }))
+            }
+            Intent::CompleteLogin { provider, id, code } => {
+                Some(Call::SubmitAccountLogin(op::SubmitAccountLogin {
+                    provider,
+                    id,
+                    code,
+                }))
+            }
+            Intent::CancelLogin { provider, id } => {
+                Some(Call::CancelAccountLogin(op::CancelAccountLogin {
+                    provider,
+                    id,
+                }))
+            }
+            Intent::DeleteAccount { provider, id } => {
+                Some(Call::LogoutAccount(op::LogoutAccount { provider, id }))
+            }
+            Intent::LoadHostStatus => Some(Call::HostStatus(m::Empty {})),
+            Intent::LoadRemoteHosts => Some(Call::ListRemotes(m::Empty {})),
+            Intent::CreateInvitation => Some(Call::Invite(m::Empty {})),
+            Intent::RevokeDevice { id } => Some(Call::Revoke(op::RevokeDevice { id })),
+            Intent::RegisterProject { path } => {
+                Some(Call::AddProject(op::AddProject { cwd: path }))
+            }
         };
-        effect.operation.run(&mut context).await
+        Ok((
+            call.or_else(|| {
+                body.map(|body| {
+                    Call::DispatchCommand(command(target.expect("thread command target"), body))
+                })
+            }),
+            sent,
+            launched,
+        ))
     }
-    .await;
-    Completed {
-        subscriptions,
-        scheduling,
-        delivery_attempted: client.is_some(),
-        scope,
-        result,
-        rejection: None,
-        failed_submission,
-        complete,
+    fn finished(&mut self, result: JobResult) {
+        let JobResult {
+            call,
+            result,
+            complete,
+            sent,
+            launched,
+        } = result;
+        let mutation = mutation_thread(&call);
+        let should_navigate = sent
+            .as_ref()
+            .is_some_and(|(key, _)| self.state.draft_key() == *key);
+        let outcome = match result {
+            Err(error) => {
+                self.state.error = Some(error.to_string());
+                if matches!(
+                    error,
+                    PeerError::Remote { .. }
+                        | PeerError::InvalidMessage(_)
+                        | PeerError::InvalidResponse { .. }
+                ) {
+                    match &call {
+                        Call::DispatchCommand(command) => {
+                            self.state
+                                .pending_commands
+                                .retain(|old| old.command_id != command.command_id);
+                        }
+                        Call::LaunchThread(launch) => {
+                            self.state
+                                .pending_launches
+                                .retain(|old| old.create.command_id != launch.create.command_id);
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error)
+            }
+            Ok(reply) => {
+                self.state.error = None;
+                match reply {
+                    Reply::Receipt(receipt) => {
+                        if let Call::DispatchCommand(command) = &call {
+                            self.state
+                                .pending_commands
+                                .retain(|old| old.command_id != command.command_id);
+                        }
+                        if let Call::LaunchThread(launch) = &call {
+                            self.state
+                                .pending_launches
+                                .retain(|old| old.create.command_id != launch.create.command_id);
+                        }
+                        if sent.is_none()
+                            && let Call::DispatchCommand(Command {
+                                thread_id,
+                                body: CommandBody::MessageDispatch(input),
+                                ..
+                            }) = &call
+                            && let Some(draft) = self.state.drafts.get_mut(thread_id.as_str())
+                            && draft.text == input.text
+                        {
+                            draft.text.clear();
+                        }
+                        if let Some((key, draft)) = sent {
+                            if self
+                                .state
+                                .drafts
+                                .get(&key)
+                                .is_none_or(|current| current.text == draft.text)
+                            {
+                                self.state.drafts.entry(key).or_insert(draft).text.clear();
+                            }
+                            if let Call::DispatchCommand(Command {
+                                body: CommandBody::QueuedRunEdit { run_id, .. },
+                                ..
+                            }) = &call
+                                && self.state.editing_run.as_ref() == Some(run_id)
+                            {
+                                self.state.editing_run = None;
+                            }
+                        }
+                        if should_navigate && let Some(id) = &launched {
+                            let key = self.state.draft_key();
+                            if let Some(draft) = self.state.drafts.get(&key).cloned() {
+                                self.state.drafts.insert(id.to_string(), draft);
+                                if let Some(source) = self.state.drafts.get_mut(&key) {
+                                    source.text.clear();
+                                }
+                            }
+                            self.state.selected_thread = Some(id.clone());
+                            self.subscribe_thread();
+                        }
+                        let _ = receipt;
+                    }
+                    Reply::History(id, page) => {
+                        if let Some(cache) = self.state.threads.get_mut(&id) {
+                            *cache = crate::sync::history(cache, page);
+                        }
+                    }
+                    Reply::Item(id, item) => {
+                        if let Some(item) = item
+                            && let Some(cache) = self.state.threads.get_mut(&id)
+                        {
+                            let p = Arc::make_mut(&mut cache.projection);
+                            if let Some(old) = p.turn_items.iter_mut().find(|old| old.id == item.id)
+                            {
+                                *old = *item;
+                            } else {
+                                p.turn_items.push(*item);
+                            }
+                        }
+                    }
+                    Reply::Models(page) => {
+                        self.state.models = page.data;
+                        self.state.model_errors = page
+                            .provider_errors
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|(k, v)| {
+                                (
+                                    k,
+                                    v.as_str()
+                                        .map(str::to_owned)
+                                        .unwrap_or_else(|| v.to_string()),
+                                )
+                            })
+                            .collect();
+                        if self.state.default_draft.model.is_empty()
+                            && let Some(model) = self
+                                .state
+                                .models
+                                .iter()
+                                .find(|m| m.is_default == Some(true))
+                                .or(self.state.models.first())
+                        {
+                            self.state.default_draft = Draft {
+                                instance_id: match model.model.provider {
+                                    crate::session::ProviderKind::Codex => "codex",
+                                    crate::session::ProviderKind::Claude => "claude",
+                                }
+                                .into(),
+                                model: model.id.clone(),
+                                runtime_mode: "full-access".into(),
+                                interaction_mode: "default".into(),
+                                ..Draft::default()
+                            };
+                        }
+                    }
+                    Reply::Search(matches) => {
+                        if let Call::SearchThreads(params) = &call
+                            && params.query == self.state.search
+                        {
+                            self.state.search_matches = matches;
+                        }
+                    }
+                    Reply::ProjectAdded(id) => {
+                        self.state.selected_project = Some(id);
+                        self.refresh();
+                    }
+                    Reply::Projects(projects) => self.state.projects = projects,
+                    Reply::Files(files) => self.state.workspace.directory = Some(files),
+                    Reply::File(file) => {
+                        self.state.workspace.file = Some(file);
+                    }
+                    Reply::Review(review) => self.state.workspace.review = Some(review),
+                    Reply::WorktreeSettings(settings) => {
+                        self.state.workspace.worktree_settings = Some(settings)
+                    }
+                    Reply::Worktrees(worktrees) => self.state.workspace.worktrees = worktrees,
+                    Reply::Accounts(accounts) => self.state.accounts = Some(accounts),
+                    Reply::Login(login) => self.state.account_login = Some(login),
+                    Reply::HostStatus(status) => self.state.host_status = Some(status),
+                    Reply::Remotes(remotes) => self.state.remote_hosts = remotes,
+                    Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
+                    Reply::Done => {}
+                }
+                match &call {
+                    Call::StartTerminal(params) => {
+                        if let Some(t) = self.state.terminals.get_mut(&params.handle)
+                            && t.phase == TerminalPhase::Starting
+                        {
+                            t.phase = TerminalPhase::Running;
+                        }
+                    }
+                    Call::ResizeTerminal(params) => {
+                        if let Some(t) = self.state.terminals.get_mut(&params.handle) {
+                            t.size = params.size;
+                        }
+                    }
+                    Call::DetachTerminal(params) => {
+                        if let Some(t) = self.state.terminals.get_mut(&params.handle) {
+                            t.phase = TerminalPhase::Detached;
+                        }
+                    }
+                    Call::SelectAccount(_)
+                    | Call::SubmitAccountLogin(_)
+                    | Call::CancelAccountLogin(_)
+                    | Call::LogoutAccount(_) => self.refresh(),
+                    _ => {}
+                }
+                Ok(launched
+                    .map(|id| Outcome::StartedThread { id: id.to_string() })
+                    .unwrap_or_default())
+            }
+        };
+        if let Some(complete) = complete {
+            let _ = complete.send(outcome);
+        }
+        if let Some(thread) = mutation
+            && let Some(network) = self.network.as_mut()
+        {
+            network.running_mutations.remove(&thread);
+            let next = network
+                .mutations
+                .get_mut(&thread)
+                .and_then(VecDeque::pop_front);
+            if network
+                .mutations
+                .get(&thread)
+                .is_some_and(VecDeque::is_empty)
+            {
+                network.mutations.remove(&thread);
+            }
+            if let Some(job) = next {
+                let _ = self.job(job.call, job.complete, job.sent, job.launched);
+            }
+        }
+    }
+    fn notification(&mut self, notification: protocol::Notification) {
+        match notification {
+            protocol::Notification::Output { handle, data } => {
+                self.terminal_output(&handle, data, None)
+            }
+            protocol::Notification::TerminalRestored {
+                handle,
+                data,
+                cols,
+                rows,
+            } => {
+                self.terminal_output(&handle, data, Some(op::TerminalSize { cols, rows }));
+                if let Some(t) = self.state.terminals.get_mut(&handle) {
+                    t.phase = TerminalPhase::Running;
+                }
+            }
+            protocol::Notification::Exited { handle, code } => {
+                if let Some(t) = self.state.terminals.get_mut(&handle) {
+                    t.phase = TerminalPhase::Exited(code);
+                }
+            }
+            protocol::Notification::TerminalFailed { handle, reason } => {
+                if let Some(t) = self.state.terminals.get_mut(&handle) {
+                    t.phase = TerminalPhase::Failed(reason);
+                }
+            }
+            _ => {}
+        }
+    }
+    fn terminal_output(
+        &mut self,
+        handle: &str,
+        data: Vec<u8>,
+        reset_size: Option<op::TerminalSize>,
+    ) {
+        if let Some(t) = self.state.terminals.get_mut(handle) {
+            t.sequence += 1;
+            if reset_size.is_some() {
+                t.output.clear();
+            }
+            t.output.push(TerminalOutput {
+                sequence: t.sequence,
+                data,
+                reset_size,
+            });
+            let mut bytes = t.output.iter().map(|o| o.data.len()).sum::<usize>();
+            while bytes > 8 * 1024 * 1024 && t.output.len() > 1 {
+                bytes -= t.output.remove(0).data.len();
+            }
+        }
     }
 }
 
-// The typed completion is executable Store state, never part of a replayable Event.
-trait Application: Send + std::fmt::Debug {
-    fn apply(
-        self: Box<Self>,
-        snapshot: &mut Snapshot,
-        current: bool,
-    ) -> Result<Vec<Effect>, PeerError>;
+async fn execute(peer: &Client, call: &Call) -> Result<Reply, PeerError> {
+    Ok(match call {
+        Call::DispatchCommand(_) | Call::LaunchThread(_) => {
+            Reply::Receipt(peer.request(call).await?)
+        }
+        Call::ReadThreadHistory(p) => {
+            Reply::History(p.thread_id.clone(), peer.request(call).await?)
+        }
+        Call::GetTurnItem(p) => Reply::Item(
+            p.thread_id.clone(),
+            peer.request::<Option<TurnItem>>(call).await?.map(Box::new),
+        ),
+        Call::SearchThreads(_) => Reply::Search(peer.request(call).await?),
+        Call::AddProject(_) => Reply::ProjectAdded(peer.request(call).await?),
+        Call::ListModels(_) => Reply::Models(crate::client::models(peer).await?),
+        Call::ListProjects(_) => Reply::Projects(peer.request(call).await?),
+        Call::ListFiles(_) => Reply::Files(peer.request(call).await?),
+        Call::ReadFile(_) | Call::WriteFile(_) => Reply::File(peer.request(call).await?),
+        Call::ReviewWorkspace(_) => Reply::Review(peer.request(call).await?),
+        Call::ReadWorktreeSettings(_) | Call::UpdateWorktreeSettings(_) => {
+            Reply::WorktreeSettings(peer.request(call).await?)
+        }
+        Call::ListWorktrees(_) => Reply::Worktrees(peer.request(call).await?),
+        Call::ListAccounts(_) => Reply::Accounts(peer.request(call).await?),
+        Call::StartAccountLogin(_) => Reply::Login(peer.request(call).await?),
+        Call::HostStatus(_) => Reply::HostStatus(peer.request(call).await?),
+        Call::ListRemotes(_) => Reply::Remotes(peer.request(call).await?),
+        Call::Invite(_) => Reply::Invitation(peer.request(call).await?),
+        Call::SelectAccount(_) => {
+            let _: op::AccountSelection = peer.request(call).await?;
+            Reply::Done
+        }
+        Call::RemoveWorktree(_) => {
+            let _: () = peer.request(call).await?;
+            Reply::Done
+        }
+        _ => {
+            let _: m::Empty = peer.request(call).await?;
+            Reply::Done
+        }
+    })
 }
-#[derive(Debug)]
-struct Completion<O: op::Operation> {
-    operation: O,
-    input: Option<Result<O::Input, PeerError>>,
-    output: Option<O::Output>,
-}
-impl<O: op::Operation> Application for Completion<O> {
-    fn apply(
-        self: Box<Self>,
-        snapshot: &mut Snapshot,
-        current: bool,
-    ) -> Result<Vec<Effect>, PeerError> {
-        let Self {
-            operation, output, ..
-        } = *self;
-        let output = output.expect("only completed operations are published");
-        operation.complete(snapshot, output, current)
-    }
-}
-// Intent is replayable data. Only the effect queue erases an operation's type;
-// the same allocation carries its output until its result is applied.
-#[derive(Debug)]
-pub struct Effect {
-    operation: Box<dyn Pending>,
-    scheduling: op::Scheduling,
-    receipt: ReceiptPolicy,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReceiptPolicy {
-    First,
-    Continue,
-    Background,
-}
-impl Effect {
-    /// Continue the dispatch receipt after this step is applied.
-    pub(crate) fn continuation<O: op::Operation>(operation: O) -> Self {
-        let mut effect = Self::execute(operation);
-        effect.receipt = ReceiptPolicy::Continue;
-        effect
-    }
-    pub fn execute<O: op::Operation>(operation: O) -> Self {
-        Self {
-            scheduling: operation.scheduling(),
-            operation: Box::new(Completion {
-                operation,
-                input: None,
-                output: None,
-            }),
-            receipt: if O::BACKGROUND {
-                ReceiptPolicy::Background
-            } else {
-                ReceiptPolicy::First
-            },
+async fn notifications(mut events: Updates, epoch: u64, sender: mpsc::Sender<OwnerEvent>) {
+    loop {
+        match events.read::<protocol::Notification>().await {
+            Ok(Some(notification)) => {
+                if sender
+                    .send(OwnerEvent::Notification(epoch, notification))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Ok(None) => {
+                let _ = sender
+                    .send(OwnerEvent::Disconnected(
+                        epoch,
+                        "Host connection closed".into(),
+                    ))
+                    .await;
+                return;
+            }
+            Err(error) => {
+                let _ = sender
+                    .send(OwnerEvent::Disconnected(epoch, error.to_string()))
+                    .await;
+                return;
+            }
         }
     }
 }
-trait Pending: Application {
-    fn key(&self) -> Option<op::OperationKey>;
-    fn capture(&mut self, snapshot: &Snapshot);
-    fn submission_id(&self) -> Option<&str>;
-    fn rejected_output(self: Box<Self>) -> Option<Box<dyn Application>>;
-    fn run<'a>(
-        self: Box<Self>,
-        context: &'a mut Execution<'_>,
-    ) -> futures_util::future::BoxFuture<'a, Result<Applied, PeerError>>;
-}
-impl<O: op::Operation> Pending for Completion<O> {
-    fn key(&self) -> Option<op::OperationKey> {
-        self.operation.key()
-    }
-    fn capture(&mut self, snapshot: &Snapshot) {
-        self.input = Some(self.operation.capture(snapshot));
-    }
-    fn submission_id(&self) -> Option<&str> {
-        self.operation.submission_id()
-    }
-    fn rejected_output(mut self: Box<Self>) -> Option<Box<dyn Application>> {
-        let input = self.input.take()?.ok()?;
-        self.output = self.operation.rejected_output(input);
-        self.output.as_ref()?;
-        Some(self)
-    }
-    fn run<'a>(
-        mut self: Box<Self>,
-        context: &'a mut Execution<'_>,
-    ) -> futures_util::future::BoxFuture<'a, Result<Applied, PeerError>> {
-        Box::pin(async move {
-            let input = self
-                .input
-                .take()
-                .expect("effects capture inputs before execution")?;
-            let mut output = self.operation.run(input, context).await?;
-            let outcome = O::outcome(&mut output);
-            self.output = Some(output);
-            Ok(Applied {
-                outcome,
-                application: self,
-            })
-        })
-    }
-}
-pub struct Execution<'a> {
-    pub(crate) client: &'a Client,
-    pub(crate) session: Option<&'a crate::transport::Session>,
-    subscriptions: &'a mut Vec<(uuid::Uuid, agent_transport::client::Updates)>,
-}
-impl Execution<'_> {
-    pub(crate) async fn call<O: RpcMethod + Sync>(
-        &mut self,
-        operation: &O,
-    ) -> Result<O::Output, PeerError> {
-        if let Some((output, stream, id)) = self.client.open_subscription(operation).await? {
-            self.subscriptions.push((id, stream));
-            Ok(output)
-        } else {
-            Ok(self.client.call(operation).await?)
+async fn shell_stream(
+    peer: Arc<Client>,
+    epoch: u64,
+    snapshots: watch::Receiver<Arc<Snapshot>>,
+    sender: mpsc::Sender<OwnerEvent>,
+) {
+    loop {
+        let after = snapshots
+            .borrow()
+            .shell
+            .as_ref()
+            .map(|s| s.snapshot_sequence);
+        let stream = peer
+            .request_stream::<ShellStreamItem>(&Call::SubscribeShell(rpc::SubscribeShell {
+                after_sequence: after,
+            }))
+            .await;
+        if let Ok((first, mut stream)) = stream {
+            if sender.send(OwnerEvent::Shell(epoch, first)).await.is_err() {
+                return;
+            }
+            while let Ok(Some(item)) = stream.read::<ShellStreamItem>().await {
+                if sender.send(OwnerEvent::Shell(epoch, item)).await.is_err() {
+                    return;
+                }
+            }
         }
+        if peer.is_closed() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+async fn thread_stream(
+    peer: Arc<Client>,
+    epoch: u64,
+    id: ThreadId,
+    snapshots: watch::Receiver<Arc<Snapshot>>,
+    sender: mpsc::Sender<OwnerEvent>,
+) {
+    loop {
+        let after = snapshots.borrow().threads.get(&id).map(|c| c.sequence);
+        let stream = peer
+            .request_stream::<ThreadStreamItem>(&Call::SubscribeThread(rpc::SubscribeThread {
+                thread_id: id.clone(),
+                after_sequence: after,
+            }))
+            .await;
+        if let Ok((first, mut stream)) = stream {
+            if sender
+                .send(OwnerEvent::Thread(epoch, id.clone(), first))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            while let Ok(Some(item)) = stream.read::<ThreadStreamItem>().await {
+                if sender
+                    .send(OwnerEvent::Thread(epoch, id.clone(), item))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+        if peer.is_closed() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_full_command_queue_keeps_the_draft_and_all_submission_state() {
-        let store = Store::offline(Snapshot::default());
-        let draft_key = store.snapshot().navigation.draft_key.clone();
-        store
-            .dispatch(Intent::SetDraftText {
-                thread_id: draft_key,
-                text: "must not be lost".into(),
-            })
-            .await
-            .unwrap();
-        for index in 0..MAX_COMMANDS {
-            drop(store.dispatch(Intent::ReadFile(op::ReadFile {
-                path: format!("/queued/{index}"),
-                discard_draft: false,
-            })));
+    fn owner(state: Snapshot) -> Owner {
+        let (sender, _) = mpsc::channel(64);
+        let (snapshots, _) = watch::channel(Arc::new(state.clone()));
+        Owner {
+            state,
+            snapshots,
+            sender,
+            network: None,
+            epoch: 0,
+            source: CreationSource::Desktop,
         }
-        let before = store.snapshot();
-        let result = store
-            .dispatch(Intent::Submit {
-                thread_id: None,
-                client_user_message_id: "input".into(),
-            })
-            .await;
-        assert!(matches!(result, Err(PeerError::InvalidMessage(_))));
-        assert!(Arc::ptr_eq(&before, &store.snapshot()));
-        assert!(matches!(
-            store.disconnect().await,
-            Err(PeerError::InvalidMessage(_))
-        ));
-        store.close().await.unwrap();
     }
     #[test]
-    fn every_snapshot_field_notifies_subscribers_independently() {
-        type Change = fn(&mut Snapshot);
-        let changes: &[(&str, Change)] = &[
-            ("operations", |snapshot| {
-                snapshot.operations = Arc::default()
-            }),
-            ("operation_sequence", |snapshot| {
-                snapshot.operation_sequence += 1
-            }),
-            ("scoped_model_defaults", |snapshot| {
-                snapshot.scoped_model_defaults = Arc::default()
-            }),
-            ("permission_settings", |snapshot| {
-                snapshot.permission_settings = Some(Arc::new(
-                    crate::state::operations::PermissionSettingsState {
-                        provider: agent_protocol::session::ProviderKind::Codex,
-                        result: None,
-                    },
-                ));
-            }),
-            ("account", |snapshot| snapshot.account = Arc::default()),
-            ("terminals", |snapshot| snapshot.terminals = Arc::default()),
-            ("conversations", |snapshot| {
-                snapshot.conversations = Arc::default()
-            }),
-            ("models", |snapshot| snapshot.models = Arc::default()),
-            ("drafts", |snapshot| snapshot.drafts = Arc::default()),
-            ("pending_submissions", |snapshot| {
-                snapshot.pending_submissions = Arc::default()
-            }),
-            ("file_drafts", |snapshot| {
-                snapshot.file_drafts = Arc::default()
-            }),
-            ("workspace", |snapshot| snapshot.workspace = Arc::default()),
-            ("navigation", |snapshot| {
-                snapshot.navigation = Arc::default()
-            }),
-            ("activity", |snapshot| snapshot.activity = Arc::default()),
-            ("management", |snapshot| {
-                snapshot.management = Arc::default()
-            }),
-            ("list_query", |snapshot| {
-                snapshot.list_query = Arc::default()
-            }),
-            ("threads", |snapshot| {
-                snapshot.threads = Some(Arc::new(crate::models::ThreadList {
-                    data: Vec::new(),
-                    projects: Vec::new(),
-                    more_project_ids: Vec::new(),
-                    has_more_chats: false,
-                    has_more_projects: false,
-
-                    provider_errors: None,
-                }))
-            }),
-            ("epoch", |snapshot| snapshot.epoch += 1),
-            ("connected", |snapshot| snapshot.connected = true),
-            ("error", |snapshot| {
-                snapshot.error = Some("fixture failure".into())
-            }),
-        ];
-        for (name, change) in changes {
-            let previous = Arc::new(Snapshot::default());
-            let (writer, reader) = watch::channel(previous.clone());
-            writer.send_if_modified(|current| publish_locked(current, previous.as_ref().clone()));
-            assert!(
-                !reader.has_changed().unwrap(),
-                "unchanged snapshot published"
-            );
-            let mut next = previous.as_ref().clone();
-            change(&mut next);
-            writer.send_if_modified(|current| publish_locked(current, next));
-            assert!(reader.has_changed().unwrap(), "{name} update was dropped");
-        }
+    fn delayed_submission_receipt_preserves_new_text_and_model_changes() {
+        let thread = ThreadId::new("thread").unwrap();
+        let mut state = Snapshot {
+            selected_thread: Some(thread.clone()),
+            ..Snapshot::default()
+        };
+        let submitted = Draft {
+            text: "Original".into(),
+            model: "model".into(),
+            instance_id: "codex".into(),
+            ..Draft::default()
+        };
+        let mut current = submitted.clone();
+        current.text = "Next message".into();
+        current.model = "other".into();
+        state.drafts.insert("thread".into(), current.clone());
+        let mut owner = owner(state);
+        owner.finished(JobResult {
+            call: Call::DispatchCommand(command(thread.clone(), CommandBody::ThreadMarkUnread)),
+            result: Ok(Reply::Receipt(rpc::DispatchReceipt {
+                thread_id: thread,
+                sequence: 1,
+                replayed: false,
+            })),
+            complete: None,
+            sent: Some(("thread".into(), submitted)),
+            launched: None,
+        });
+        assert_eq!(owner.state.current_draft(), current);
+    }
+    #[test]
+    fn late_launch_receipt_does_not_navigate_away_from_another_thread() {
+        let selected = ThreadId::new("selected").unwrap();
+        let launched = ThreadId::new("launched").unwrap();
+        let mut owner = owner(Snapshot {
+            selected_thread: Some(selected.clone()),
+            ..Snapshot::default()
+        });
+        owner.finished(JobResult {
+            call: Call::DispatchCommand(command(launched.clone(), CommandBody::ThreadMarkUnread)),
+            result: Ok(Reply::Receipt(rpc::DispatchReceipt {
+                thread_id: launched.clone(),
+                sequence: 1,
+                replayed: false,
+            })),
+            complete: None,
+            sent: Some(("new:bex:chats".into(), Draft::default())),
+            launched: Some(launched),
+        });
+        assert_eq!(owner.state.selected_thread, Some(selected));
+    }
+    #[test]
+    fn text_typed_during_launch_becomes_the_new_threads_followup() {
+        let launched = ThreadId::new("launched").unwrap();
+        let mut state = Snapshot::default();
+        state.drafts.insert(
+            "new:bex:chats".into(),
+            Draft {
+                text: "Next message".into(),
+                ..Draft::default()
+            },
+        );
+        let mut owner = owner(state);
+        owner.finished(JobResult {
+            call: Call::DispatchCommand(command(launched.clone(), CommandBody::ThreadMarkUnread)),
+            result: Ok(Reply::Receipt(rpc::DispatchReceipt {
+                thread_id: launched.clone(),
+                sequence: 1,
+                replayed: false,
+            })),
+            complete: None,
+            sent: Some((
+                "new:bex:chats".into(),
+                Draft {
+                    text: "Original".into(),
+                    ..Draft::default()
+                },
+            )),
+            launched: Some(launched.clone()),
+        });
+        assert_eq!(owner.state.selected_thread, Some(launched));
+        assert_eq!(owner.state.current_draft().text, "Next message");
+        assert!(owner.state.drafts["new:bex:chats"].text.is_empty());
+    }
+    #[tokio::test]
+    async fn shutdown_closes_snapshot_waiters_and_preserves_local_edits() {
+        let store = Store::offline(Snapshot::default());
+        store
+            .dispatch(Intent::EditDraft {
+                draft: Draft {
+                    text: "Unsent".into(),
+                    ..Draft::default()
+                },
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.snapshot().current_draft().text, "Unsent");
+        let mut snapshots = store.subscribe();
+        store.close().await.unwrap();
+        while snapshots.changed().await.is_ok() {}
+        assert!(!snapshots.borrow().connected);
     }
 }

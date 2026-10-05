@@ -1,5 +1,5 @@
 use super::*;
-use agent_protocol::session::{ProviderKind, SessionRef};
+use orchestration::ThreadId;
 
 #[test]
 fn input_requires_the_displayed_tab_but_reads_and_selection_can_refresh_it() {
@@ -28,7 +28,7 @@ fn input_requires_the_displayed_tab_but_reads_and_selection_can_refresh_it() {
     }
 }
 
-fn request(thread: &SessionRef, frame: &BrowserFrame, action: BrowserAction) -> BrowserRequest {
+fn request(thread: &ThreadId, frame: &BrowserFrame, action: BrowserAction) -> BrowserRequest {
     BrowserRequest {
         thread_id: thread.clone(),
         tab_id: frame.tab_id.clone(),
@@ -69,8 +69,8 @@ async fn shared_browser_live() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
     let browser = Browser::start(profile.clone()).await.unwrap();
-    let thread_a = SessionRef::new(ProviderKind::Codex, "thread-a".into()).unwrap();
-    let thread_b = SessionRef::new(ProviderKind::Codex, "thread-b".into()).unwrap();
+    let thread_a = ThreadId::new("thread-a").unwrap();
+    let thread_b = ThreadId::new("thread-b").unwrap();
     let scope_a = thread_a.to_string();
     let scope_b = thread_b.to_string();
     let mut initial = browser

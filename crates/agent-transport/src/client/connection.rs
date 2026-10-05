@@ -7,10 +7,7 @@ use crate::{
     protocol::{Call, Response},
 };
 use serde::de::DeserializeOwned;
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
     time::Instant,
@@ -33,7 +30,6 @@ pub struct Client {
     pub diagnostic_id: u64,
     permits: Arc<Semaphore>,
     timeout: Duration,
-    initial_list: Mutex<Option<(crate::models::ListQuery, PendingReply)>>,
     _path_monitor: Option<tokio_util::task::AbortOnDropHandle<()>>,
 }
 struct PendingReply {
@@ -44,6 +40,9 @@ struct PendingReply {
     _permit: OwnedSemaphorePermit,
 }
 impl Client {
+    pub fn is_closed(&self) -> bool {
+        self.connection.close_reason().is_some()
+    }
     fn path_sample(&self) -> (crate::diagnostics::ConnectionRoute, Option<u64>) {
         use crate::diagnostics::ConnectionRoute;
         self.connection
@@ -113,7 +112,6 @@ impl Client {
             diagnostic_id,
             permits: Arc::new(Semaphore::new(max_requests)),
             timeout,
-            initial_list: Mutex::new(None),
             _path_monitor: path_monitor,
         };
         client.record_path();
@@ -154,20 +152,6 @@ impl Client {
             );
         }
         result.map(|result| (result, updates))
-    }
-    /// Send the first title read while storage-scope verification is in flight.
-    /// Its ordinary caller consumes the reply once, with the original deadline.
-    pub async fn start_initial_list(
-        &self,
-        query: crate::models::ListQuery,
-    ) -> Result<(), PeerError> {
-        let reply = self
-            .start_call(&Call::ListSessions(
-                agent_protocol::operations::ListSessions::new(query.clone()),
-            ))
-            .await?;
-        *self.initial_list.lock().unwrap() = Some((query, reply));
-        Ok(())
     }
     async fn start_call(&self, call: &Call) -> Result<PendingReply, PeerError> {
         let started = std::time::Instant::now();
@@ -254,22 +238,7 @@ impl Client {
         &self,
         call: &Call,
     ) -> Result<(tokio_util::bytes::BytesMut, Updates), PeerError> {
-        let initial = if let Call::ListSessions(params) = call {
-            // A changed query discards the old read instead of publishing it or
-            // retaining a semaphore slot for the lifetime of the connection.
-            self.initial_list
-                .lock()
-                .unwrap()
-                .take()
-                .filter(|(query, _)| *query == params.query)
-                .map(|(_, reply)| reply)
-        } else {
-            None
-        };
-        let mut reply = match initial {
-            Some(reply) => reply,
-            None => self.start_call(call).await?,
-        };
+        let mut reply = self.start_call(call).await?;
         let stream = reply.stream;
         let measured = self.trace.active() && !matches!(call, Call::ConnectionPerformance(_));
         if measured {
@@ -512,7 +481,7 @@ mod tests {
             let (remote, events) = tokio::join!(session.open_peer(Duration::from_secs(2), 1), incoming.accept_peer());
             let (remote, _updates) = remote.unwrap();
             let _events = events.unwrap();
-            let call = Call::SessionScope(crate::models::Empty {});
+            let call = Call::HostName(crate::models::Empty {});
             let mut pending = remote.start_call(&call).await.unwrap();
             let crate::transport::IncomingRequest::Call(mut request) = incoming.accept_request().await.unwrap() else { panic!("call expected") };
             let stream = u64::from(request.send.id());
@@ -533,59 +502,6 @@ mod tests {
             assert_eq!(remote.permits.available_permits(), 1);
             session.close(); incoming.close(); client.close().await; host.close().await;
         }).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn pipelined_read_keeps_its_deadline_and_releases_its_request_slot() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
-                .await
-                .unwrap();
-            let client = Endpoint::bind(Identity::generate(), Relays::Disabled)
-                .await
-                .unwrap();
-            let trust = Trust {
-                allowed: [client.node_id()].into(),
-                ..Default::default()
-            };
-            let ticket = host.ticket();
-            let (session, incoming) = tokio::join!(client.connect(&ticket), host.accept());
-            let session = session.unwrap();
-            let incoming = incoming.unwrap().unwrap().authorize(&trust).unwrap();
-            let (remote, events) = tokio::join!(
-                session.open_peer(Duration::from_millis(100), 1),
-                incoming.accept_peer()
-            );
-            let (remote, _updates) = remote.unwrap();
-            let _events = events.unwrap();
-            let query = crate::models::ListQuery::default();
-            remote.start_initial_list(query.clone()).await.unwrap();
-            let IncomingRequest::Call(pending) = incoming.accept_request().await.unwrap() else {
-                panic!("title read expected")
-            };
-            assert!(matches!(pending.call, Call::ListSessions(_)));
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            assert!(matches!(
-                tokio::time::timeout(
-                    Duration::from_millis(50),
-                    remote.call(&agent_protocol::operations::ListSessions::new(query))
-                )
-                .await
-                .unwrap(),
-                Err(PeerError::RequestTimeout { .. })
-            ));
-            assert_eq!(remote.permits.available_permits(), 1);
-            tokio::time::timeout(Duration::from_millis(100), pending.send.stopped())
-                .await
-                .unwrap()
-                .unwrap();
-            session.close();
-            incoming.close();
-            client.close().await;
-            host.close().await;
-        })
-        .await
-        .unwrap();
     }
 
     #[tokio::test]

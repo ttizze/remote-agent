@@ -127,3 +127,7 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 - 2026-10-05: 初回 transcript 走査は読み取り専用・最近30日・各 provider 最新100ファイル・各会話200発言とする。最初のユーザー発言を残し、native session UUID と実際の cwd を保存する。取り込み済み会話は上書きしない。取り込み時の既定モデルは固定 T3 ソースの gpt-6-astra と claude-fable-5-1 を使う。
 - 2026-10-05: provider-thread が native session を持つ段階で app thread の activeProviderThreadId を更新する。キュー作成だけの placeholder は更新しない。T3 のサーバー側更新規則を共通 projector に含め、Host とクライアントを一致させる。
 - 2026-10-05: 会話の launch では既存 Host の worktree 自動作成設定を維持する。M2 の新しい workspace strategy はまだ実装しない。Host 検証は --lib の単体テストに限定し、実 Host を起動する integration test は実行しない。terminal 単体テストに必要な supervisor は同じ worktree にビルドする。
+- 2026-10-05: agent-core の旧 reducer・operation・会話描画・旧形式の保存状態を削除し、V2 の snapshot／replay と共通 projector に置き換える。PC ごとに Store を持ち、選択中 thread と16件の idle cache を保持する。history を追加しても partial timeline の watermark を維持する。
+- 2026-10-05: クライアントの mutation RPC は thread ごとに受付順で直列化する。未確認の command／launch は同じ ID のまま保存して再接続時に再送する。既存 thread の通常送信は queue-after-active を使い、実行が無ければ Host が即時開始する。これにより購読更新より先に次の送信が来ても T3 の既定 queue 動作を保つ。
+- 2026-10-05: 棚分け・作業ログ・承認と質問・コンポーザー・provider capability による操作可否は agent-core で判断する。ネイティブ側は共通レコードと固定 T3 の theme palette を描画する。受信キューは64件で backpressure をかける。新しく書いた下書きや別 thread への移動は、遅い送信応答で上書きしない。
+- 2026-10-05: shell に最新 run の requestedAt／completedAt と active run の startedAt を含める。Active の並び順は T3 の return 時刻、Working は最後のユーザー発言時刻を使う。承認待ちなどで Working を離れた観測時刻だけクライアントに保持し、削除時に除去する。snooze の早期解除は rename 等の更新時刻でなく run の終了時刻を見る。

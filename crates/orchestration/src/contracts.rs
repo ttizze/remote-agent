@@ -82,6 +82,11 @@ impl Timestamp {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    pub fn millis(&self) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(&self.0)
+            .expect("validated timestamp")
+            .timestamp_millis()
+    }
 }
 impl<'de> Deserialize<'de> for Timestamp {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -119,6 +124,9 @@ macro_rules! enums {
     ($($name:ident { $($variant:ident => $value:literal),+ $(,)? })+) => {$ (
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
         pub enum $name { $(#[serde(rename = $value)] $variant),+ }
+        impl $name {
+            pub fn as_str(self) -> &'static str { match self { $(Self::$variant => $value),+ } }
+        }
     )+};
 }
 enums! {
@@ -1267,6 +1275,9 @@ pub struct ThreadShell {
     pub pending_runtime_request: Option<PendingRuntimeRequest>,
     pub latest_visible_message: Option<VisibleMessage>,
     pub latest_user_message_at: Option<Timestamp>,
+    pub latest_run_requested_at: Option<Timestamp>,
+    pub latest_run_completed_at: Option<Timestamp>,
+    pub active_run_started_at: Option<Timestamp>,
     pub has_actionable_proposed_plan: bool,
     pub pending_background_tasks: Vec<BackgroundTask>,
     pub provider_instance_history: Vec<ProviderInstanceId>,
