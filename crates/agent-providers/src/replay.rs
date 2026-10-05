@@ -324,6 +324,27 @@ impl Replay {
             }
             let method = string(frame, "method");
             let kind = string(frame, "type");
+            if kind == "query.open" {
+                let root = replay.root.clone();
+                replay.apply(
+                    &root,
+                    Input::RuntimeOpened {
+                        instance: replay
+                            .state()
+                            .thread
+                            .as_ref()
+                            .unwrap()
+                            .selection
+                            .instance
+                            .clone(),
+                        attempt: replay
+                            .state()
+                            .active_run()
+                            .and_then(|run| run.attempt.clone()),
+                    },
+                );
+            }
+
             if method == "turn/start" || method == "turn/steer" || kind == "prompt.offer" {
                 let text = if driver == Driver::Claude {
                     string(&frame["message"]["message"], "content")
@@ -1310,3 +1331,264 @@ fn native_subagent_threads_refuse_messages_with_the_reference_error_and_no_proje
 }
 
 mod graph;
+
+#[test]
+fn resumed_provider_thread_replay_keeps_the_original_conversation_and_native_identity() {
+    let replay = Replay::run("provider_thread_resume", Driver::Codex);
+    replay.integrity();
+    assert_eq!(replay.statuses(), vec![RunStatus::Completed; 2]);
+    assert_eq!(
+        replay
+            .state()
+            .runs
+            .iter()
+            .map(|r| r.ordinal)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert_eq!(
+        replay
+            .state()
+            .messages
+            .iter()
+            .map(|m| m.role)
+            .collect::<Vec<_>>(),
+        [Role::User, Role::Assistant, Role::User, Role::Assistant]
+    );
+    assert_eq!(replay.state().native_sessions.len(), 1);
+    assert_eq!(
+        replay.state().attempts[0].native_thread,
+        replay.state().attempts[1].native_thread
+    );
+    assert_eq!(
+        replay.replies(&replay.state().runs[0].id),
+        ["provider thread resume fixture first turn complete"]
+    );
+    assert!(
+        replay
+            .replies(&replay.state().runs[1].id)
+            .join("\n")
+            .contains("provider thread resume fixture second turn complete")
+    );
+}
+
+#[test]
+fn plan_question_replay_preserves_the_native_question_id_answer_and_completed_reply() {
+    let replay = Replay::run("plan_questions", Driver::Codex);
+    replay.integrity();
+    assert_eq!(replay.statuses(), [RunStatus::Completed]);
+    assert_eq!(replay.state().requests.len(), 1);
+    let request = &replay.state().requests[0];
+    assert_eq!(request.status, RequestStatus::Resolved);
+    let RequestBody::Questions { questions } = &request.body else {
+        panic!()
+    };
+    assert_eq!(questions[0].id, "schema_preference");
+    assert!(
+        replay
+            .replies(&replay.state().runs[0].id)
+            .join("\n")
+            .contains("plan questions fixture complete")
+    );
+    assert!(
+        replay
+            .state()
+            .items
+            .iter()
+            .any(|i| matches!(i.kind, ItemKind::UserInputRequest { .. }))
+    );
+}
+
+#[test]
+fn subagent_continuation_replay_reopens_one_child_without_extra_application_runs() {
+    let replay = Replay::run("subagent_continue", Driver::Codex);
+    replay.integrity();
+    assert_eq!(replay.statuses(), [RunStatus::Completed; 2]);
+    assert_eq!(replay.state().tasks.len(), 1);
+    let task = &replay.state().tasks[0];
+    assert_eq!(task.status, ItemStatus::Completed);
+    assert_eq!(task.result.as_deref(), Some("continued subagent response"));
+    assert_eq!(task.run.as_ref(), Some(&replay.state().runs[1].id));
+    let child = &replay.states[&task.child_thread];
+    assert!(child.runs.is_empty());
+    let text = child
+        .items
+        .iter()
+        .filter(|i| {
+            matches!(
+                i.kind,
+                ItemKind::UserMessage { .. } | ItemKind::AssistantMessage { .. }
+            )
+        })
+        .map(|i| i.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("initial subagent response"));
+    assert!(text.contains("continued subagent response"));
+    assert!(
+        child
+            .items
+            .iter()
+            .any(|i| matches!(i.kind, ItemKind::UserMessage { .. })
+                && i.text.contains("continued subagent response"))
+    );
+}
+
+#[test]
+fn tool_replays_keep_the_original_outputs_without_creating_approval_requests() {
+    for (scenario, driver) in [
+        ("tool_call_read_only", Driver::Claude),
+        ("tool_call_workspace_never", Driver::Codex),
+        ("tool_call_workspace_never", Driver::Claude),
+    ] {
+        let replay = Replay::run(scenario, driver);
+        replay.integrity();
+        assert_eq!(replay.statuses(), [RunStatus::Completed]);
+        assert!(replay.state().requests.is_empty());
+        let replies = replay.replies(&replay.state().runs[0].id).join("\n");
+        if scenario == "tool_call_read_only" {
+            assert!(replies.contains("read only tool fixture complete"));
+            let reads = replay
+                .state()
+                .items
+                .iter()
+                .filter_map(|i| {
+                    if let ItemKind::DynamicTool { name, output, .. } = &i.kind {
+                        Some((name, output))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(reads.len(), 2);
+            assert!(reads.iter().all(|(name, _)| name.as_str() == "Read"));
+            assert!(reads.iter().any(|(_, output)| {
+                serde_json::to_string(output)
+                    .unwrap()
+                    .contains("claude-read-only-fixture")
+            }));
+            assert!(
+                reads
+                    .iter()
+                    .any(|(_, output)| serde_json::to_string(output).unwrap().contains("ESNext"))
+            );
+        } else {
+            assert!(replies.contains("codex app-server approval fixture"));
+        }
+    }
+}
+
+#[test]
+fn interrupt_restart_replay_preserves_interrupted_tools_and_completed_recovery() {
+    let replay = Replay::run("turn_interrupt_restart", Driver::Claude);
+    replay.integrity();
+    assert_eq!(
+        replay.statuses(),
+        [RunStatus::Interrupted, RunStatus::Completed]
+    );
+    assert_eq!(
+        replay
+            .state()
+            .attempts
+            .iter()
+            .map(|a| a.status)
+            .collect::<Vec<_>>(),
+        [AttemptStatus::Interrupted, AttemptStatus::Completed]
+    );
+    assert_eq!(
+        replay.replies(&replay.state().runs[1].id),
+        ["interrupt recovery fixture complete"]
+    );
+    assert!(replay.state().items.iter().any(
+        |i| matches!(&i.kind,ItemKind::CommandExecution{command,..} if command.contains("node -e"))
+            && i.status == ItemStatus::Interrupted
+    ));
+    assert_eq!(replay.state().native_sessions.len(), 1);
+}
+
+#[test]
+fn late_background_completion_replay_clears_the_roster_and_keeps_the_root_reply() {
+    let replay = Replay::run("claude_background_task_after_root", Driver::Claude);
+    replay.integrity();
+    assert_eq!(replay.statuses(), [RunStatus::Completed]);
+    assert_eq!(replay.replies(&replay.state().runs[0].id), ["L2_STARTED"]);
+    assert!(replay.state().tasks.is_empty());
+    assert!(replay.state().background_work.is_empty());
+    let started = replay
+        .facts
+        .iter()
+        .position(|f| matches!(&f.body,FactBody::BackgroundTaskStarted{key,..} if key=="bc9gkn8ei"))
+        .unwrap();
+    let finished = replay
+        .facts
+        .iter()
+        .position(|f| matches!(&f.body,FactBody::BackgroundTaskFinished{key} if key=="bc9gkn8ei"))
+        .unwrap();
+    assert!(finished > started);
+}
+
+#[test]
+fn compact_after_resumed_wake_keeps_the_unechoed_reply_on_the_compact_run() {
+    let replay = Replay::run("claude_compact_after_resume_wake", Driver::Claude);
+    replay.integrity();
+    assert_eq!(replay.statuses(), [RunStatus::Completed; 2]);
+    assert_eq!(
+        replay.replies(&replay.state().runs[0].id),
+        ["compact probe first turn"]
+    );
+    assert_eq!(replay.replies(&replay.state().runs[1].id), ["A_REPORTED"]);
+    assert!(replay.state().items.iter().any(|i| matches!(
+        i.kind,
+        ItemKind::Compaction {
+            before: Some(27445),
+            after: Some(1192)
+        }
+    ) && i.run.as_ref()
+        == Some(&replay.state().runs[1].id)));
+}
+
+#[test]
+fn subagent_resume_after_restart_keeps_one_child_and_its_tools_and_messages() {
+    let replay = Replay::run("claude_subagent_resume_after_restart", Driver::Claude);
+    replay.integrity();
+    assert_eq!(replay.state().tasks.len(), 1);
+    let task = &replay.state().tasks[0];
+    assert_eq!(task.status, ItemStatus::Completed);
+    let child = &replay.states[&task.child_thread];
+    assert!(child.runs.is_empty());
+    let conversation = child
+        .items
+        .iter()
+        .filter(|i| {
+            matches!(
+                i.kind,
+                ItemKind::UserMessage { .. } | ItemKind::AssistantMessage { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(conversation.len(), 4);
+    assert!(conversation[0].text.contains("Your job is just the file"));
+    assert!(conversation[1].text.contains("is 1 line long"));
+    assert!(conversation[2].text.contains("Look again at"));
+    assert!(
+        conversation[3]
+            .text
+            .contains("Bug/edge case found and fixed")
+    );
+    assert_eq!(
+        child
+            .items
+            .iter()
+            .filter(|i| matches!(i.kind, ItemKind::CommandExecution { .. }))
+            .count(),
+        3
+    );
+    assert!(
+        !replay
+            .state()
+            .items
+            .iter()
+            .any(|i| matches!(i.kind, ItemKind::AssistantMessage { .. })
+                && i.text.contains("Bug/edge case found"))
+    );
+}

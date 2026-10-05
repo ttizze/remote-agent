@@ -3807,6 +3807,23 @@ impl ThreadMachine {
                 });
                 reply
             }
+            Input::RuntimeOpened { instance, attempt } => {
+                let current = decision.state.active_run();
+                if decision
+                    .state
+                    .thread
+                    .as_ref()
+                    .is_none_or(|thread| thread.selection.instance != *instance)
+                    || current.and_then(|run| run.attempt.as_ref()) != attempt.as_ref()
+                {
+                    Reply::Ignored
+                } else {
+                    decision.fact(FactBody::PromptEchoModeLearned {
+                        mode: PromptEchoMode::Unknown,
+                    });
+                    Reply::Accepted
+                }
+            }
             Input::CheckpointScope {
                 run,
                 attempt,

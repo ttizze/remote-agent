@@ -127,3 +127,4 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-06: Codex 0.156 の rollback は paginated history と `beforeTurnId` を使う。effect は保存済みの inclusive head を指定し、翻訳層が newest-first のページからその直後の境界を解決する。T3 の件数指定 helper を内部には持ち込まないため、ページ取得件数は同版 helper の最大ページサイズ 100 を使う。目的の head に既に戻っていれば revert を送らず、head 不明・cursor 循環では部分的な revert を行わない。
 - 2026-10-06: native fork の context transfer は作成時の履歴を固定し、最初の dispatch で `NativeFork` の配送結果を記録する。native session を失った場合は同じ履歴を portable delivery に使う。fork marker は細かい項目開始・完了の事実として保存し、表示層は synthetic 行として扱う。
 - 2026-10-06: Codex の reasoning は native item の開始だけでは行を作らない。非空の summary/content を独立した part index で翻訳し、空の native reasoning と異なる stream の結合を避ける。これは固定版の reasoning coalescer と同じ表示・順序になる。
+- 2026-10-06: Claude の prompt echo 能力は native session ID ではなくプロセスごとの観測である。Host は新しいプロセスを開いたときに、instance と対象 attempt を明示した `RuntimeOpened` を actor に渡す。再開時は Unknown に戻し、同じ session の以前の echo 能力で `/compact` 前の wake を別 run に割り当てない。古い attempt の起動結果は無視する。

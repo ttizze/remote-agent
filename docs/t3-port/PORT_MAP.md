@@ -1115,3 +1115,5 @@ Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機�
 `provider/CodexThreadRevert.test.ts` のページ越し境界と循環 cursor の失敗を、保存済みの絶対 head を入力する protocol テストに移植した。削除境界 `boundary` とエラー文言の期待値を維持し、同じ effect の再送で追加の削除が起きないことも確認する。件数を数える内部 helper は新設計には不要。
 
 `ThreadFork.integration.test.ts` と `ThreadMergeBack.integration.test.ts` の native / prior-turn / continue / sibling / fork-local rollback、および Codex の rollback / after-restart / stopped-turn の transcript を `agent-providers/src/replay/graph.rs` に追加した。複数 actor への saga command、固定した fork 履歴、native fork の配送結果、rollback の可視項目、兄弟ごとの delta と source の recall を原本の文言・境界で検証する。fork の内部イベント表の順序は、固定 command の確定→native 成功→子 command の順序へ読み替える。
+
+`provider_thread_resume`、`plan_questions`、`subagent_continue`、`tool_call_read_only`、`tool_call_workspace_never`（両 provider）、`turn_interrupt_restart`、`claude_background_task_after_root`、`claude_compact_after_resume_wake`、`claude_subagent_resume_after_restart` の projection 期待値を replay に追加した。質問 ID `schema_preference`、元の返信、再開した子の会話と 3 command、2 run の compaction 帰属を保持する。休眠・再起動の実プロセス／SQLite 境界は段階 3 で接続する。

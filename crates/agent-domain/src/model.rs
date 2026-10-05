@@ -1089,6 +1089,10 @@ pub enum EffectResult {
 values! { ProviderOperation { Start, Steer, Interrupt, Respond, Compact, SetModel } }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Input {
+    RuntimeOpened {
+        instance: String,
+        attempt: Option<RunAttemptId>,
+    },
     CheckpointScope {
         run: Option<RunId>,
         attempt: Option<RunAttemptId>,

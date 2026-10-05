@@ -351,10 +351,10 @@ impl GraphReplay {
                 if method == "thread/revert" {
                     self.finish_rollback(&thread);
                 }
-                if method == "thread/start" || method == "thread/resume" {
-                    if let Some(native) = frame["result"]["thread"]["id"].as_str() {
-                        self.roots.insert(native.into(), thread);
-                    }
+                if (method == "thread/start" || method == "thread/resume")
+                    && let Some(native) = frame["result"]["thread"]["id"].as_str()
+                {
+                    self.roots.insert(native.into(), thread);
                 }
             }
         } else if let Some(thread) = frame["params"]["threadId"]
