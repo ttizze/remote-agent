@@ -5,6 +5,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      ios-test-rounds:
+        description: Fresh Simulator and Host rounds per iPhone runner, to measure flaky tests
+        type: number
+        default: 1
 permissions:
   contents: read
 concurrency:
@@ -236,21 +241,22 @@ jobs:
             target/qa/Bex-*
           retention-days: 7
   iphone:
-    name: iPhone ${{ matrix.number }}/4
+    name: iPhone ${{ matrix.label }}
     needs: changes
     if: needs.changes.outputs.iphone == 'true'
     concurrency:
-      group: native-apple-${{ github.event_name == 'pull_request' && 'pr' || format('{0}-{1}-{2}', github.run_id, github.job, matrix.shard) }}
+      group: native-apple-${{ github.event_name == 'pull_request' && 'pr' || format('{0}-{1}-{2}', github.run_id, github.job, matrix.label) }}
       cancel-in-progress: false
       queue: max
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { shard: 0, number: 1 }
-          - { shard: 1, number: 2 }
-          - { shard: 2, number: 3 }
-          - { shard: 3, number: 4 }
+          - { suite: conversation, shard: 0, shards: 4, label: 1/4, artifact: 1 }
+          - { suite: conversation, shard: 1, shards: 4, label: 2/4, artifact: 2 }
+          - { suite: conversation, shard: 2, shards: 4, label: 3/4, artifact: 3 }
+          - { suite: conversation, shard: 3, shards: 4, label: 4/4, artifact: 4 }
+          - { suite: browser, shard: 0, shards: 1, label: browser, artifact: browser }
     runs-on: macos-26
     timeout-minutes: 120
     env:
@@ -259,8 +265,10 @@ jobs:
       NEXTEST_TEST_THREADS: 6
       # The iPhone runner has its own Host and one Simulator on a 7 GiB Mac.
       BEX_IOS_TEST_WORKERS: 1
+      BEX_IOS_SUITE: ${{ matrix.suite }}
       BEX_IOS_TEST_SHARD: ${{ matrix.shard }}
-      BEX_IOS_TEST_SHARDS: 4
+      BEX_IOS_TEST_SHARDS: ${{ matrix.shards }}
+      BEX_IOS_TEST_ROUNDS: ${{ inputs.ios-test-rounds || 1 }}
       # The builders validate Swift content/toolchain hashes before reuse.
       BEX_IOS_SWIFT_CACHE_PATHS: |
         target/qa/ios-derived-data
@@ -278,7 +286,7 @@ jobs:
         with:
           cmd-format: nix develop . --command {0}
           key: macos-swift-xcode-26.6-${{ hashFiles('flake.lock') }}
-          save-if: ${{ github.event_name != 'pull_request' && matrix.shard == 0 }}
+          save-if: ${{ github.event_name != 'pull_request' && matrix.suite == 'conversation' && matrix.shard == 0 }}
           cache-on-failure: true
       - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         id: ios-cache
@@ -315,7 +323,7 @@ jobs:
           chmod +x "$BEX_BROWSER_EXECUTABLE"
           nix develop . --command just quality swift 2>&1 | tee target/qa/quality.log
       - name: Save iPhone Swift builds once for all shards
-        if: ${{ !cancelled() && github.event_name != 'pull_request' && matrix.shard == 0 && steps.ios-cache.outputs.cache-primary-key != '' && steps.ios-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && matrix.suite == 'conversation' && matrix.shard == 0 && steps.ios-cache.outputs.cache-primary-key != '' && steps.ios-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.BEX_IOS_SWIFT_CACHE_PATHS }}
@@ -324,7 +332,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: apple-iphone-${{ matrix.number }}-acceptance
+          name: apple-iphone-${{ matrix.artifact }}-acceptance
           path: |
             target/qa/quality.log
             target/qa/chrome.log

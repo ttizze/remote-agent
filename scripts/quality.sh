@@ -23,16 +23,21 @@ if [[ $language == kotlin ]]; then
     ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt --continue --console=plain || failed=1
     just android-e2e || failed=1
 fi
-# Every shard runs acceptance; shared Swift checks run on the first shard only.
-if [[ ( $language == apple || $language == swift ) && ${BEX_IOS_TEST_SHARD:-0} == 0 ]]; then
+suite=${BEX_IOS_SUITE:-all}
+case $suite in all|conversation|browser) ;; *) echo 'BEX_IOS_SUITE expects all, conversation, or browser' >&2; exit 2 ;; esac
+# Every shard runs acceptance; shared Swift checks run on the first conversation shard only.
+if [[ ( $language == apple || $language == swift ) && $suite != browser && ${BEX_IOS_TEST_SHARD:-0} == 0 ]]; then
     swiftformat --lint apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests || failed=1
     swiftlint lint --strict || failed=1
     if [[ $language == swift ]]; then
         just ios-markdown || failed=1
     fi
 fi
-if [[ $language == apple || $language == swift ]]; then
+if [[ ( $language == apple || $language == swift ) && $suite != browser ]]; then
     just conversation-ui || failed=1
+fi
+if [[ ( $language == apple || $language == swift ) && $suite != conversation ]]; then
+    just browser-ui || failed=1
 fi
 cargo xtask clean-builds || failed=1
 exit "$failed"

@@ -225,6 +225,13 @@ transfer server just to delete that check would reverse A14.
   so equal test counts do not leave one runner with all the slow cases.
   Swift formatting, linting and headless Markdown checks run on shard zero;
   all four shards run their selected Simulator acceptance tests.
+  The Host-owned Chrome case (`just browser-ui`) runs on a fifth iPhone runner
+  with `BEX_IOS_SUITE=browser`, because its Host keeps Chrome running for the
+  whole worker; conversation shards select `BEX_IOS_SUITE=conversation`, and
+  local `just quality` runs both. Dispatching Native clients with
+  `ios-test-rounds` above one repeats every iPhone runner's tests on fresh
+  Simulator/Host pairs (`BEX_IOS_TEST_ROUNDS`) and prints per-test failure
+  counts, to measure flaky cases without retrying them in normal runs.
   The Simulator app, package dependencies and UI test runner build only arm64,
   matching the supported Apple Silicon test host rather than also compiling
   unused x86_64 test products.

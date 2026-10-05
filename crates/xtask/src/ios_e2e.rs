@@ -105,6 +105,24 @@ fn check_summary(summary: &Value, expected: usize) -> Result<()> {
     Ok(())
 }
 
+/// Count failures by test across every worker summary, so repeated rounds expose flaky cases.
+fn failure_counts(summaries: &[Value]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for summary in summaries {
+        // One run may report several failures for the same test.
+        let failed = summary["testFailures"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|failure| failure["testName"].as_str())
+            .collect::<BTreeSet<_>>();
+        for name in failed {
+            *counts.entry(name.to_owned()).or_default() += 1;
+        }
+    }
+    counts
+}
+
 fn partition_tests(tests: &[String], index: usize, count: usize) -> Result<Vec<String>> {
     if index >= count || count > tests.len() {
         return Err("Test partitions must be in range and nonempty".into());
@@ -163,7 +181,7 @@ use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -611,6 +629,13 @@ pub async fn run(tests: Vec<String>, without_codex: bool, driver: TestDriver) ->
         return Err("BEX_IOS_TEST_WORKERS must be between 1 and 10".into());
     }
     let workers = workers.min(tests.len());
+    // Repeated rounds measure flaky tests; each round gets fresh Simulators and Hosts.
+    let rounds = std::env::var("BEX_IOS_TEST_ROUNDS")
+        .unwrap_or_else(|_| "1".to_owned())
+        .parse::<usize>()?;
+    if !(1..=10).contains(&rounds) {
+        return Err("BEX_IOS_TEST_ROUNDS must be between 1 and 10".into());
+    }
     if driver == TestDriver::Maestro {
         for test in &tests {
             if !Path::new("apps/mobile/maestro/ios")
@@ -811,28 +836,63 @@ pub async fn run(tests: Vec<String>, without_codex: bool, driver: TestDriver) ->
         tests.len(),
         records.display()
     );
-    let mut pending = JoinSet::new();
-    for (index, tests) in groups.into_iter().enumerate() {
-        pending.spawn(worker(
-            tests,
-            target.clone(),
-            runs[0].clone(),
-            simulator_source.clone(),
-            records.join(format!("worker-{}", index + 1)),
-            without_codex,
-            driver,
-            cancel.clone(),
-        ));
-    }
-    // Await every owner so that an error never drops a live Host's cleanup.
     let mut results = Vec::new();
     let mut failure = None;
-    while let Some(result) = pending.join_next().await {
-        match result {
-            Ok(Ok(result)) => results.push(result),
-            Ok(Err(error)) if failure.is_none() => failure = Some(error),
-            Err(error) if failure.is_none() => failure = Some(error.into()),
-            _ => {}
+    for round in 1..=rounds {
+        let mut pending = JoinSet::new();
+        for (index, tests) in groups.iter().cloned().enumerate() {
+            let label = if rounds == 1 {
+                format!("worker-{}", index + 1)
+            } else {
+                format!("worker-{}-round-{round}", index + 1)
+            };
+            pending.spawn(worker(
+                tests,
+                target.clone(),
+                runs[0].clone(),
+                simulator_source.clone(),
+                records.join(label),
+                without_codex,
+                driver,
+                cancel.clone(),
+            ));
+        }
+        // Await every owner so that an error never drops a live Host's cleanup.
+        while let Some(result) = pending.join_next().await {
+            match result {
+                Ok(Ok(result)) => results.push(result),
+                Ok(Err(error)) => {
+                    if rounds > 1 {
+                        eprintln!("Round {round}/{rounds}: {error}");
+                    }
+                    failure.get_or_insert(error);
+                }
+                Err(error) => {
+                    failure.get_or_insert(error.into());
+                }
+            }
+        }
+        if *cancel.borrow() {
+            return Err(supervision::interrupted());
+        }
+    }
+    if rounds > 1 {
+        let mut summaries = Vec::new();
+        for entry in fs::read_dir(&records)? {
+            let path = entry?.path();
+            if path.to_string_lossy().ends_with(".summary.json") {
+                summaries.push(serde_json::from_slice(&fs::read(path)?)?);
+            }
+        }
+        let counts = failure_counts(&summaries);
+        println!(
+            "{rounds} rounds of {} tests: {} worker results, {} failing tests",
+            tests.len(),
+            summaries.len(),
+            counts.len()
+        );
+        for (test, failed) in &counts {
+            println!("  {test}: failed {failed}/{rounds}");
         }
     }
     if let Some(error) = failure {
@@ -1007,6 +1067,21 @@ mod tests {
             mixed.push(test.to_owned());
             assert!(needs_media_fixtures(&mixed));
         }
+    }
+
+    #[test]
+    fn failure_counts_add_each_failing_run_once_per_test() {
+        let failure = |name: &str| json!({"testName": name, "failureText": "timed out"});
+        let summaries = [
+            json!({"testFailures": [failure("first"), failure("first"), failure("second")]}),
+            json!({"testFailures": [failure("first")]}),
+            json!({"testFailures": []}),
+            json!({"passedTests": 3}),
+        ];
+        assert_eq!(
+            failure_counts(&summaries).into_iter().collect::<Vec<_>>(),
+            [("first".to_owned(), 2), ("second".to_owned(), 1)]
+        );
     }
 
     #[test]
