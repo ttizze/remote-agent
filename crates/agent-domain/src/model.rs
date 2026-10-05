@@ -1100,6 +1100,12 @@ pub enum EffectBody {
     DeleteAttachments {
         paths: Vec<String>,
     },
+    /// Detach this thread's provider sessions, which stops their background work.
+    DetachSessions {
+        reason: String,
+        revoke_credentials: bool,
+    },
+    CleanupTerminals,
     GenerateTitle {
         text: String,
     },

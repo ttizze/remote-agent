@@ -142,6 +142,16 @@ pub enum FactBody {
     ThreadRenamed {
         title: String,
     },
+    ThreadUnsettled,
+    RunRestarting {
+        id: RunId,
+        selection: ModelSelection,
+    },
+    ItemMoved {
+        id: TurnItemId,
+        run: RunId,
+        ordinal: Option<u64>,
+    },
     ThreadArchived {
         archived: bool,
     },
@@ -718,6 +728,23 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 .as_mut()
                 .ok_or(FoldError::Missing("thread"))?
                 .title = title.clone()
+        }
+        ThreadUnsettled => {
+            let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
+            t.settled = None;
+            t.settled_at = None;
+        }
+        RunRestarting { id, selection } => {
+            let run = find_mut(&mut state.runs, "run", |r| &r.id == id)?;
+            run.status = RunStatus::Starting;
+            run.selection = selection.clone();
+        }
+        ItemMoved { id, run, ordinal } => {
+            let item = find_mut(&mut state.items, "item", |i| &i.id == id)?;
+            item.run = Some(run.clone());
+            if let Some(ordinal) = ordinal {
+                item.ordinal = *ordinal;
+            }
         }
         ThreadArchived { archived } => {
             state

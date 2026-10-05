@@ -183,8 +183,10 @@ fn steering_preserves_run_and_attempt_and_records_the_input_intent() {
         EffectBody::Provider(ProviderCommand::Steer { .. })
     ));
 }
+// T3 SelectionRestart.integration.test.ts and RunExecutionService.test.ts: a superseded
+// attempt gets no interrupt rows and no subagent cascade.
 #[test]
-fn restart_supersedes_attempt_and_interrupts_native_children() {
+fn restart_supersedes_attempt_and_leaves_native_children_to_their_provider() {
     let mut s = state();
     let (run, a) = running(&mut s, "first");
     provider(
@@ -200,13 +202,44 @@ fn restart_supersedes_attempt_and_interrupts_native_children() {
             model: None,
         },
     );
-    command(
+    let restart = command(
         &mut s,
         "restart",
         send_message("restart", DispatchMode::RestartActive { run }),
     );
-    assert_eq!(s.attempts[0].status, AttemptStatus::Superseded);
-    assert_eq!(s.tasks[0].status, ItemStatus::Interrupted);
+    assert_eq!(
+        s.attempts.iter().map(|a| a.status).collect::<Vec<_>>(),
+        [AttemptStatus::Superseded, AttemptStatus::Pending]
+    );
+    assert_eq!(s.runs[0].status, RunStatus::Starting);
+    assert_eq!(s.tasks[0].status, ItemStatus::Running);
+    assert!(!restart.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::SendToThread { command, .. } if matches!(command.as_ref(), Command::Stop)
+    )));
+    assert!(!s.items.iter().any(|item| matches!(
+        item.kind,
+        ItemKind::RunInterruptRequest | ItemKind::RunInterruptResult { .. }
+    )));
+    let next = s.runs[0].attempt.clone().unwrap();
+    let routed = provider(
+        &mut s,
+        "child-output",
+        &next,
+        ProviderEvent::Child {
+            key: "child".into(),
+            event: Box::new(ProviderEvent::TextDelta {
+                key: "child-text".into(),
+                kind: ProviderItem::Text,
+                text: "still working".into(),
+            }),
+        },
+    );
+    assert!(routed.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::SendToThread { command, .. }
+            if matches!(command.as_ref(), Command::NativeInput { attempt, .. } if attempt == &a)
+    )));
     let before = s.clone();
     let late = provider(
         &mut s,
@@ -220,6 +253,75 @@ fn restart_supersedes_attempt_and_interrupts_native_children() {
     );
     assert_eq!(late.reply, Reply::Ignored);
     assert_eq!(s, before);
+}
+fn claude_selection() -> ModelSelection {
+    ModelSelection {
+        instance: "claude".into(),
+        driver: Driver::Claude,
+        model: "claude-sonnet-4-6".into(),
+        options: BTreeMap::new(),
+    }
+}
+// T3 CommandPolicy.test.ts: providers without interrupt-and-restart reject a required restart.
+#[test]
+fn restart_and_steering_respect_capabilities_and_maintenance_turns() {
+    let mut s = state();
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider {
+            selection: claude_selection(),
+        },
+    );
+    let (run, _) = running(&mut s, "first");
+    let mut restart = send_message("restart", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut restart {
+        message.intent = Some(DeliveryIntent::Restart);
+    }
+    assert_eq!(
+        command(&mut s, "restart", restart).reply,
+        Reply::Rejected {
+            reason: "restart-unsupported".into()
+        }
+    );
+    let mut compact = send_message(
+        "compact-steer",
+        DispatchMode::SteerActive { run: run.clone() },
+    );
+    if let Command::Send(message) = &mut compact {
+        message.text = " /Compact ".into();
+    }
+    assert_eq!(
+        command(&mut s, "compact-steer", compact).reply,
+        Reply::Rejected {
+            reason: "maintenance-must-run-separately".into()
+        }
+    );
+    let mut s = state();
+    let mut logout = send_message("logout", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut logout {
+        message.text = "/logout".into();
+    }
+    command(&mut s, "logout", logout);
+    let run = s.runs[0].id.clone();
+    let a = s.runs[0].attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "started",
+        &a,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    assert_eq!(
+        command(
+            &mut s,
+            "steer",
+            send_message("steer", DispatchMode::SteerActive { run })
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "maintenance-in-progress".into()
+        }
+    );
 }
 #[test]
 fn stop_during_start_emits_interrupt_even_without_native_turn() {
@@ -3549,4 +3651,559 @@ fn merge_back_requires_a_fork_of_the_target_and_a_finished_source() {
             reason: "merge-back-source-not-finished".into()
         }
     );
+}
+fn native_root(events: Vec<ProviderEvent>) -> ProviderEvent {
+    ProviderEvent::NativeOutput {
+        echoed_prompts: vec![],
+        acknowledged_prompt: None,
+        root: true,
+        result: Some(NativeResult {
+            origin: None,
+            turn_count: 1,
+        }),
+        events,
+    }
+}
+// T3 ClaudeAdapterV2.ts: a result after Stop finalizes the turn as interrupted.
+#[test]
+fn a_stopped_claude_turn_finishes_on_its_wrapped_result() {
+    let mut s = state();
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider {
+            selection: claude_selection(),
+        },
+    );
+    let (_, a) = running(&mut s, "first");
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    command(&mut s, "stop", Command::Stop);
+    provider(
+        &mut s,
+        "result",
+        &a,
+        native_root(vec![
+            ProviderEvent::TurnUsage(normalize_claude_turn_usage(
+                "success",
+                Some(&serde_json::json!({"input_tokens":4,"output_tokens":2})),
+                RunStatus::Completed,
+            )),
+            ProviderEvent::TurnFinished {
+                status: RunStatus::Completed,
+                native_head: None,
+            },
+        ]),
+    );
+    assert_eq!(s.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(s.attempts[0].status, AttemptStatus::Interrupted);
+    assert_eq!(
+        s.attempts[0].turn_usage.as_ref().unwrap().status,
+        UsageStatus::Partial
+    );
+    assert!(s.runs[1].queue_held);
+    assert!(s.items.iter().any(
+        |item| matches!(item.kind, ItemKind::RunInterruptResult { .. })
+            && item.status == ItemStatus::Interrupted
+    ));
+}
+fn fail_with(s: &mut State, attempt: &RunAttemptId, key: &str, class: &str) {
+    provider(
+        s,
+        &format!("{key}-error"),
+        attempt,
+        ProviderEvent::ItemFinished {
+            key: format!("{key}-error"),
+            kind: ProviderItem::Error {
+                message: class.into(),
+                retrying: false,
+                code: None,
+                class: Some(class.into()),
+                retryable: None,
+            },
+            text: None,
+            status: ItemStatus::Failed,
+        },
+    );
+    provider(
+        s,
+        &format!("{key}-failed"),
+        attempt,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Failed,
+            native_head: None,
+        },
+    );
+}
+// T3 runtimeLayer.test.ts "handles a queued message after a %s failure".
+#[test]
+fn provider_failures_hold_the_queue_and_usage_limits_block_it() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    fail_with(&mut s, &a, "first", "provider_error");
+    assert_eq!(s.runs[1].status, RunStatus::Queued);
+    assert!(s.runs[1].queue_held);
+    command(&mut s, "resume", Command::ResumeQueue);
+    assert_eq!(s.runs[1].status, RunStatus::Starting);
+
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    fail_with(&mut s, &a, "first", "usage_limit");
+    assert_eq!(s.runs[1].status, RunStatus::Queued);
+    assert!(!s.runs[1].queue_held);
+    assert_eq!(
+        command(&mut s, "resume", Command::ResumeQueue).reply,
+        Reply::Rejected {
+            reason: "usage-limited".into()
+        }
+    );
+    command(
+        &mut s,
+        "new",
+        send_message("new", DispatchMode::StartImmediately),
+    );
+    assert_eq!(s.runs[2].status, RunStatus::Starting);
+    assert_eq!(s.runs[1].status, RunStatus::Queued);
+}
+fn delegate(s: &mut State, key: &str) -> NodeId {
+    let task = NodeId::new(key).unwrap();
+    command(
+        s,
+        key,
+        Command::Delegate {
+            task: task.clone(),
+            child: ThreadId::new(format!("child-{key}")).unwrap(),
+            prompt: "task prompt".into(),
+            selection: selection(),
+            wake: CompletionWake::Always,
+        },
+    );
+    task
+}
+fn complete_task(s: &mut State, key: &str, task: &NodeId) -> Step {
+    let source_message = s
+        .tasks
+        .iter()
+        .find(|candidate| &candidate.id == task)
+        .and_then(|task| task.original_message.clone());
+    command(
+        s,
+        key,
+        Command::TaskResult {
+            source_message,
+            context: None,
+            task: task.clone(),
+            status: ItemStatus::Completed,
+            result: "done".into(),
+        },
+    )
+}
+// T3 Orchestrator.ts archive: queued work and completion delivery are cancelled, sessions detach.
+#[test]
+fn archive_cancels_queued_work_and_detaches_without_unarchive_resuming() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let task = delegate(&mut s, "task");
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    let archive = command(&mut s, "archive", Command::Archive { archived: true });
+    assert_eq!(s.runs[1].status, RunStatus::Cancelled);
+    assert_eq!(s.runs[0].status, RunStatus::Running);
+    assert_eq!(s.tasks[0].delivery, DeliveryState::Disposed);
+    assert!(archive.effects.iter().any(|effect| effect.body
+        == EffectBody::DetachSessions {
+            reason: "Thread archived.".into(),
+            revoke_credentials: true
+        }));
+    assert!(
+        archive
+            .effects
+            .iter()
+            .any(|effect| effect.body == EffectBody::CleanupTerminals)
+    );
+    assert_eq!(
+        command(&mut s, "again", Command::Archive { archived: true }).reply,
+        Reply::Rejected {
+            reason: "thread-already-archived".into()
+        }
+    );
+    finish(&mut s, &a);
+    complete_task(&mut s, "task-done", &task);
+    let unarchive = command(&mut s, "unarchive", Command::Archive { archived: false });
+    assert!(unarchive.effects.is_empty());
+    assert_eq!(s.runs.len(), 2);
+}
+// T3 runtimeLayer.test.ts settle cases.
+#[test]
+fn settle_rejects_blocked_work_and_cancels_automatic_deliveries() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let settle = |s: &mut State, key: &str| {
+        command(
+            s,
+            key,
+            Command::Settle {
+                settled: true,
+                at: None,
+            },
+        )
+    };
+    assert_eq!(
+        settle(&mut s, "active").reply,
+        Reply::Rejected {
+            reason: "thread-has-active-work".into()
+        }
+    );
+    provider(
+        &mut s,
+        "question",
+        &a,
+        ProviderEvent::RequestOpened {
+            owner_path: vec![],
+            key: "async".into(),
+            body: RequestBody::Questions {
+                questions: vec![Question {
+                    required: true,
+                    id: "q".into(),
+                    header: "Question".into(),
+                    question: "Which?".into(),
+                    multiple: false,
+                    options: vec![],
+                }],
+            },
+            capability: ResponseCapability::Message,
+        },
+    );
+    let task = delegate(&mut s, "task");
+    complete_task(&mut s, "task-done", &task);
+    command(
+        &mut s,
+        "wake",
+        Command::AcceptTaskWake {
+            task_ids: vec![task],
+        },
+    );
+    let wake = s.runs.last().unwrap().id.clone();
+    recover(&mut s);
+    let held = s.runs.iter().find(|run| run.id == wake).unwrap();
+    assert!(held.status == RunStatus::Queued && held.queue_held);
+    assert_eq!(s.requests[0].status, RequestStatus::Pending);
+    let mut user = s.clone();
+    command(
+        &mut user,
+        "user-queued",
+        send_message("user", DispatchMode::QueueAfterActive),
+    );
+    assert_eq!(
+        settle(&mut user, "blocked").reply,
+        Reply::Rejected {
+            reason: "thread-has-active-work".into()
+        }
+    );
+    let settled = settle(&mut s, "settle");
+    assert_eq!(settled.reply, Reply::Accepted);
+    assert_eq!(
+        s.runs.iter().find(|run| run.id == wake).unwrap().status,
+        RunStatus::Cancelled
+    );
+    let request = &s.requests[0];
+    assert_eq!(request.status, RequestStatus::Resolved);
+    assert_eq!(request.decision, Some(ApprovalDecision::Cancel));
+    assert!(s.items.iter().any(
+        |item| matches!(item.kind, ItemKind::UserInputRequest { .. })
+            && item.status == ItemStatus::Cancelled
+    ));
+    assert!(settled.effects.iter().any(|effect| effect.body
+        == EffectBody::DetachSessions {
+            reason: "Thread settled.".into(),
+            revoke_credentials: false
+        }));
+    assert_eq!(s.thread.as_ref().unwrap().settled, Some(true));
+}
+// T3 Orchestrator.ts dispatchMessage: a message re-engages a settled or snoozed thread.
+#[test]
+fn sending_a_message_clears_settled_and_snoozed_state() {
+    let mut s = state();
+    command(
+        &mut s,
+        "settle",
+        Command::Settle {
+            settled: true,
+            at: None,
+        },
+    );
+    command(
+        &mut s,
+        "unsettle-snooze",
+        Command::Settle {
+            settled: false,
+            at: None,
+        },
+    );
+    command(
+        &mut s,
+        "snooze",
+        Command::Snooze {
+            until: Some(Timestamp::parse("2026-10-06T00:00:00Z").unwrap()),
+        },
+    );
+    command(
+        &mut s,
+        "message",
+        send_message("message", DispatchMode::StartImmediately),
+    );
+    let thread = s.thread.as_ref().unwrap();
+    assert_eq!(thread.settled, None);
+    assert_eq!(thread.settled_at, None);
+    assert_eq!(thread.snoozed_until, None);
+}
+// T3 SteeringCompletion.integration.test.ts:563 and :638.
+#[test]
+fn dispatch_saves_the_requested_selection_and_late_steers_use_it() {
+    let mut s = state();
+    let mut other = selection();
+    other.model = "gpt-6-sol".into();
+    let (run, a) = running(&mut s, "first");
+    let mut steer = send_message("steer", DispatchMode::SteerActive { run: run.clone() });
+    if let Command::Send(message) = &mut steer {
+        message.selection = Some(other.clone());
+    }
+    command(&mut s, "steer", steer);
+    assert_eq!(s.runs[0].selection, selection());
+    assert_eq!(s.thread.as_ref().unwrap().selection, other);
+    finish(&mut s, &a);
+    result(
+        &mut s,
+        "missed",
+        EffectResult::ProviderFailed {
+            attempt: a,
+            operation: ProviderOperation::Steer,
+            message: "turn already completed".into(),
+            message_id: Some(MessageId::new("steer").unwrap()),
+            turn_completed: true,
+            session_lost: false,
+        },
+    );
+    assert_eq!(s.runs[1].selection, other);
+    assert_eq!(s.runs[1].status, RunStatus::Starting);
+    let item = s
+        .items
+        .iter()
+        .find(|item| matches!(&item.kind, ItemKind::UserMessage { message } if message.as_str() == "steer"))
+        .unwrap();
+    assert_eq!(item.run.as_ref(), Some(&s.runs[1].id));
+    assert_eq!(
+        s.messages
+            .iter()
+            .filter(|m| m.id.as_str() == "steer")
+            .count(),
+        1
+    );
+    rollback_free_check(&s);
+
+    let mut s = state();
+    let mut start = send_message("start", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut start {
+        message.selection = Some(other.clone());
+    }
+    command(&mut s, "start", start);
+    assert_eq!(s.thread.as_ref().unwrap().selection, other);
+    let mut queued = send_message("queued", DispatchMode::QueueAfterActive);
+    if let Command::Send(message) = &mut queued {
+        message.selection = Some(selection());
+    }
+    command(&mut s, "queued", queued);
+    assert_eq!(s.thread.as_ref().unwrap().selection, other);
+    let a = s.runs[0].attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "started",
+        &a,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &a);
+    assert_eq!(s.thread.as_ref().unwrap().selection, selection());
+}
+fn rollback_free_check(s: &State) {
+    assert!(s.visible_items().iter().all(|item| {
+        item.run
+            .as_ref()
+            .is_none_or(|run| s.runs.iter().any(|r| &r.id == run))
+    }));
+}
+// T3 Orchestrator.ts:4609: a proposed plan is consumed when its implementation is accepted.
+#[test]
+fn a_proposed_plan_is_consumed_once_at_acceptance() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "plan");
+    provider(
+        &mut s,
+        "plan",
+        &a,
+        ProviderEvent::Plan {
+            kind: PlanKind::Proposed,
+            key: "proposal".into(),
+            markdown: "Do it".into(),
+            steps: vec![],
+        },
+    );
+    provider(
+        &mut s,
+        "todo",
+        &a,
+        ProviderEvent::Plan {
+            kind: PlanKind::Todo,
+            key: "todo".into(),
+            markdown: String::new(),
+            steps: vec![],
+        },
+    );
+    let proposal = s.plans[0].id.clone();
+    let todo = s.plans[1].id.clone();
+    let implement = |key: &str, plan: &PlanId| {
+        let mut send = send_message(key, DispatchMode::QueueAfterActive);
+        if let Command::Send(message) = &mut send {
+            message.source_plan = Some(plan.clone());
+        }
+        send
+    };
+    assert_eq!(
+        command(&mut s, "todo-plan", implement("todo-plan", &todo)).reply,
+        Reply::Rejected {
+            reason: "plan-not-found".into()
+        }
+    );
+    command(&mut s, "first", implement("first", &proposal));
+    assert!(s.plans[0].implemented_by.is_some());
+    assert_eq!(
+        command(&mut s, "second", implement("second", &proposal)).reply,
+        Reply::Rejected {
+            reason: "plan-not-active".into()
+        }
+    );
+}
+// T3 ThreadDeletion.test.ts: deletion cancels requests and queues session, terminal and attachment cleanup.
+#[test]
+fn deletion_cancels_pending_requests_and_releases_thread_resources() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    provider(
+        &mut s,
+        "approval",
+        &a,
+        ProviderEvent::RequestOpened {
+            owner_path: vec![],
+            key: "1".into(),
+            body: RequestBody::Approval {
+                kind: "command".into(),
+                title: "ls".into(),
+                detail: None,
+                options: vec![],
+                input: Json(serde_json::json!({})),
+            },
+            capability: ResponseCapability::Live,
+        },
+    );
+    let task = delegate(&mut s, "task");
+    let deleted = command(&mut s, "delete", Command::Delete);
+    assert_eq!(s.requests[0].status, RequestStatus::Cancelled);
+    assert_eq!(s.requests[0].capability, ResponseCapability::NotResumable);
+    assert_eq!(
+        s.tasks.iter().find(|t| t.id == task).unwrap().delivery,
+        DeliveryState::Disposed
+    );
+    let kinds = deleted
+        .effects
+        .iter()
+        .filter_map(|effect| match &effect.body {
+            EffectBody::DetachSessions {
+                reason,
+                revoke_credentials: true,
+            } => Some(reason.as_str()),
+            EffectBody::CleanupTerminals => Some("terminals"),
+            EffectBody::DeleteAttachments { .. } => Some("attachments"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["Thread deleted.", "terminals", "attachments"]);
+}
+// T3 ProviderEventIngestor.test.ts: only native questions are dismissed when their turn ends.
+#[test]
+fn message_capable_questions_stay_answerable_after_their_turn_ends() {
+    for status in [
+        RunStatus::Completed,
+        RunStatus::Interrupted,
+        RunStatus::Failed,
+    ] {
+        let mut s = state();
+        let (_, a) = running(&mut s, "first");
+        for (key, capability) in [
+            ("message", ResponseCapability::Message),
+            ("live", ResponseCapability::Live),
+        ] {
+            provider(
+                &mut s,
+                key,
+                &a,
+                ProviderEvent::RequestOpened {
+                    owner_path: vec![],
+                    key: key.into(),
+                    body: RequestBody::Questions {
+                        questions: vec![Question {
+                            required: true,
+                            id: "q".into(),
+                            header: "Question".into(),
+                            question: "Which?".into(),
+                            multiple: false,
+                            options: vec![],
+                        }],
+                    },
+                    capability,
+                },
+            );
+        }
+        provider(
+            &mut s,
+            "end",
+            &a,
+            ProviderEvent::TurnFinished {
+                status,
+                native_head: None,
+            },
+        );
+        assert_eq!(
+            s.requests.iter().map(|r| r.status).collect::<Vec<_>>(),
+            [RequestStatus::Pending, RequestStatus::Cancelled],
+            "{status:?}"
+        );
+        let request = s.requests[0].id.clone();
+        let answer = command(
+            &mut s,
+            "answer",
+            Command::Respond {
+                request,
+                decision: None,
+                answers: Some(Answers::from([("q".into(), Answer::Text("Blue".into()))])),
+                attachments: BTreeMap::new(),
+            },
+        );
+        assert!(matches!(answer.reply, Reply::Run(_)));
+        assert_eq!(s.messages.last().unwrap().text, "Which?\nBlue");
+    }
 }

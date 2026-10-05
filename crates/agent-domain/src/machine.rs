@@ -372,10 +372,14 @@ impl Decision {
             }
             return;
         }
-        if let Some(plan) = &run.source_plan {
-            self.fact(FactBody::PlanImplemented {
-                id: plan.clone(),
-                run: id.clone(),
+        if self
+            .state
+            .thread
+            .as_ref()
+            .is_some_and(|thread| thread.selection != run.selection)
+        {
+            self.fact(FactBody::ModelSelected {
+                selection: run.selection.clone(),
             });
         }
         let thread = self.state.thread.as_ref().unwrap().clone();
@@ -731,18 +735,88 @@ impl Decision {
                 .thread
                 .as_ref()
                 .is_none_or(|t| t.archived_at.is_some() || t.deleted_at.is_some())
+            || self.state.queued_runs().iter().any(|r| r.queue_held)
+            || usage_limited(&self.state)
         {
             return;
         }
-        if let Some(run) = self
+        if let Some(run) = self.state.queued_runs().first().map(|r| r.id.clone()) {
+            self.start_run(&run);
+        }
+    }
+    /// A provider failure of the latest executed run holds queued input for
+    /// the same provider until the user resumes it.
+    fn hold_after_failure(&mut self, run: &RunId) {
+        let Some(failed) = self
+            .state
+            .runs
+            .iter()
+            .find(|r| &r.id == run && r.status == RunStatus::Failed)
+        else {
+            return;
+        };
+        if latest_executed_run(&self.state).map(|r| &r.id) != Some(run) {
+            return;
+        }
+        let Some(class) = failure_class(&self.state, run) else {
+            return;
+        };
+        if class == "validation_error" || class == "usage_limit" {
+            return;
+        }
+        if self
             .state
             .queued_runs()
             .first()
-            .filter(|r| !r.queue_held)
-            .map(|r| r.id.clone())
+            .is_some_and(|next| next.selection.instance == failed.selection.instance)
         {
-            self.start_run(&run);
+            self.hold_queue();
         }
+    }
+    fn dispose_cohorts(&mut self) {
+        let tasks = self
+            .state
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.app_owned()
+                    && matches!(
+                        task.delivery,
+                        DeliveryState::Pending | DeliveryState::Claimed
+                    )
+            })
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        for id in tasks {
+            self.fact(FactBody::TaskDeliveryChanged {
+                id,
+                state: DeliveryState::Disposed,
+            });
+        }
+    }
+    fn cancel_queued_run(&mut self, run: &RunId) {
+        let ids = self
+            .state
+            .runs
+            .iter()
+            .find(|r| &r.id == run)
+            .and_then(|r| self.state.message(&r.message))
+            .and_then(|message| message.notification.as_ref())
+            .and_then(|notification| match &notification.source {
+                NotificationSource::Delegated { task_ids } => Some(task_ids.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        for id in ids {
+            self.fact(FactBody::TaskDeliveryChanged {
+                id,
+                state: DeliveryState::Disposed,
+            });
+        }
+        self.fact(FactBody::RunFinished {
+            id: run.clone(),
+            status: RunStatus::Cancelled,
+        });
     }
     fn hold_queue(&mut self) {
         let runs = self
@@ -756,13 +830,9 @@ impl Decision {
             self.fact(FactBody::QueueHeld { id, held: true });
         }
     }
-    fn close_attempt_items(
-        &mut self,
-        attempt: &RunAttemptId,
-        status: ItemStatus,
-        keep_message_questions: bool,
-    ) {
-        let items=self.state.items.iter().filter(|i| i.attempt.as_ref()==Some(attempt) && !i.status.terminal() && !matches!(&i.kind,ItemKind::Subagent {task} if self.state.tasks.iter().any(|candidate|&candidate.id==task && !candidate.status.terminal())) && !(keep_message_questions && matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message)))).map(|i| i.id.clone()).collect::<Vec<_>>();
+    /// Message-capable questions outlive their turn; the user answers them later.
+    fn close_attempt_items(&mut self, attempt: &RunAttemptId, status: ItemStatus) {
+        let items=self.state.items.iter().filter(|i| i.attempt.as_ref()==Some(attempt) && !i.status.terminal() && !matches!(&i.kind,ItemKind::Subagent {task} if self.state.tasks.iter().any(|candidate|&candidate.id==task && !candidate.status.terminal())) && !matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message))).map(|i| i.id.clone()).collect::<Vec<_>>();
         for id in items {
             self.fact(FactBody::ItemCompleted { id, status });
         }
@@ -773,7 +843,7 @@ impl Decision {
             .filter(|r| {
                 &r.attempt == attempt
                     && r.status == RequestStatus::Pending
-                    && !(keep_message_questions && r.capability == ResponseCapability::Message)
+                    && r.capability != ResponseCapability::Message
             })
             .map(|r| r.id.clone())
             .collect::<Vec<_>>();
@@ -1027,7 +1097,7 @@ impl Decision {
                 id: attempt.clone(),
                 status: a,
             });
-            self.close_attempt_items(attempt, i, false);
+            self.close_attempt_items(attempt, i);
             if self.state.stopping.contains(attempt) {
                 self.interrupt_item(attempt, run, Some(i));
             }
@@ -1051,6 +1121,7 @@ impl Decision {
                 status,
             });
             self.complete_delegation(run, status);
+            self.hold_after_failure(run);
             self.promote();
         }
     }
@@ -1078,24 +1149,51 @@ impl Decision {
         if message.text.trim().is_empty() && message.attachments.is_empty() {
             return reject("empty-message");
         }
-        if message
-            .source_plan
-            .as_ref()
-            .is_some_and(|id| !self.state.plans.iter().any(|p| &p.id == id))
-        {
-            return reject("plan-not-found");
+        if let Some(plan) = &message.source_plan {
+            let Some(plan) = self
+                .state
+                .plans
+                .iter()
+                .find(|p| &p.id == plan && p.kind == PlanKind::Proposed)
+            else {
+                return reject("plan-not-found");
+            };
+            if plan.implemented_by.is_some() {
+                return reject("plan-not-active");
+            }
         }
         let selection = message
             .selection
             .clone()
             .unwrap_or_else(|| thread.selection.clone());
+        let thread_selection = thread.selection.clone();
+        if thread.settled.is_some() {
+            self.fact(FactBody::ThreadUnsettled);
+        }
+        if self
+            .state
+            .thread
+            .as_ref()
+            .is_some_and(|thread| thread.snoozed_until.is_some())
+        {
+            self.fact(FactBody::ThreadSnoozed { until: None });
+        }
         let active = self.state.active_run();
-        let mode = resolve_dispatch(
+        let support = TurnSupport::for_driver(selection.driver);
+        let mut mode = resolve_dispatch(
             active.map(|r| (&r.id, r.status)),
             &message.mode,
             message.intent,
-            TurnSupport::for_driver(selection.driver),
+            support,
         );
+        // A steer that missed its turn is kept as a new turn.
+        if let DispatchMode::SteerActive { run } = &mode
+            && self.state.runs.iter().any(|r| {
+                &r.id == run && matches!(r.status, RunStatus::Completed | RunStatus::Waiting)
+            })
+        {
+            mode = DispatchMode::StartImmediately;
+        }
         if let DispatchMode::SteerActive { run } | DispatchMode::RestartActive { run } = &mode {
             let Some(target) = self
                 .state
@@ -1112,6 +1210,28 @@ impl Decision {
             if selection.instance != target.selection.instance {
                 return reject("steering-provider-mismatch");
             }
+            if maintenance(&message.text, &message.attachments).is_some() {
+                return reject("maintenance-must-run-separately");
+            }
+            if self
+                .state
+                .message(&target.message)
+                .is_some_and(|m| maintenance(&m.text, &m.attachments).is_some())
+            {
+                return reject("maintenance-in-progress");
+            }
+            let restart = match mode {
+                DispatchMode::RestartActive { .. } => true,
+                _ => !support.steer,
+            };
+            if restart && !(support.interrupt && support.restart) {
+                return reject("restart-unsupported");
+            }
+            if selection != thread_selection {
+                self.fact(FactBody::ModelSelected {
+                    selection: selection.clone(),
+                });
+            }
             self.fact(FactBody::MessageCreated {
                 id: message.id.clone(),
                 run: Some(run.clone()),
@@ -1123,14 +1243,18 @@ impl Decision {
                 creation_source: message.creation_source.clone(),
             });
             self.user_item(&message.id, run);
-            if matches!(mode, DispatchMode::RestartActive { .. }) {
-                self.stop_tasks(&attempt, ItemStatus::Interrupted, true);
-                self.close_attempt_items(&attempt, ItemStatus::Interrupted, false);
+            if restart {
+                // Native children keep running until their own terminal events.
+                self.close_attempt_items(&attempt, ItemStatus::Interrupted);
                 self.fact(FactBody::AttemptFinished {
                     id: attempt.clone(),
                     status: AttemptStatus::Superseded,
                 });
                 self.interrupt_provider(&attempt);
+                self.fact(FactBody::RunRestarting {
+                    id: run.clone(),
+                    selection: selection.clone(),
+                });
                 let ordinal =
                     self.state.attempts.iter().filter(|a| a.run == *run).count() as u64 + 1;
                 let next =
@@ -1143,17 +1267,13 @@ impl Decision {
                 let t = self.state.thread.as_ref().unwrap();
                 let command = ProviderCommand::Start {
                     resume_interrupted_turn: false,
-                    selection: target.selection.clone(),
+                    selection: selection.clone(),
                     runtime_mode: t.runtime_mode,
                     interaction_mode: t.interaction_mode,
                     text: message.text.clone(),
                     note: None,
                     attachments: message.attachments.clone(),
-                    native_thread: self
-                        .state
-                        .native_sessions
-                        .get(&target.selection.instance)
-                        .cloned(),
+                    native_thread: self.state.native_sessions.get(&selection.instance).cloned(),
                     resume_at: None,
                     context: None,
                 };
@@ -1183,6 +1303,11 @@ impl Decision {
         } else {
             InputIntent::TurnStart
         };
+        if !queued && selection != thread_selection {
+            self.fact(FactBody::ModelSelected {
+                selection: selection.clone(),
+            });
+        }
         self.fact(FactBody::MessageCreated {
             id: message.id.clone(),
             run: Some(id.clone()),
@@ -1209,6 +1334,12 @@ impl Decision {
             held,
             source_plan: message.source_plan.clone(),
         });
+        if let Some(plan) = &message.source_plan {
+            self.fact(FactBody::PlanImplemented {
+                id: plan.clone(),
+                run: id.clone(),
+            });
+        }
         if deferred {
             self.effect(None, EffectBody::PrepareWorkspace { run: id.clone() });
         } else if !queued {
@@ -1440,12 +1571,40 @@ impl Decision {
                 Reply::Accepted
             }
             Archive { archived } => {
+                let thread = self.state.thread.as_ref().unwrap();
+                if thread.archived_at.is_some() == *archived {
+                    return reject(if *archived {
+                        "thread-already-archived"
+                    } else {
+                        "thread-not-archived"
+                    });
+                }
                 self.fact(FactBody::ThreadArchived {
                     archived: *archived,
                 });
-                if !archived {
-                    self.promote();
-                    self.wake_tasks();
+                if *archived {
+                    let queued = self
+                        .state
+                        .runs
+                        .iter()
+                        .filter(|r| r.status == RunStatus::Queued)
+                        .map(|r| r.id.clone())
+                        .collect::<Vec<_>>();
+                    for run in queued {
+                        self.fact(FactBody::RunFinished {
+                            id: run,
+                            status: RunStatus::Cancelled,
+                        });
+                    }
+                    self.dispose_cohorts();
+                    self.effect(
+                        None,
+                        EffectBody::DetachSessions {
+                            reason: "Thread archived.".into(),
+                            revoke_credentials: true,
+                        },
+                    );
+                    self.effect(None, EffectBody::CleanupTerminals);
                 }
                 Reply::Accepted
             }
@@ -1475,7 +1634,31 @@ impl Decision {
                         },
                     );
                 }
+                let requests = self
+                    .state
+                    .requests
+                    .iter()
+                    .filter(|r| r.status == RequestStatus::Pending)
+                    .map(|r| r.id.clone())
+                    .collect::<Vec<_>>();
+                for id in requests {
+                    self.resolve_request(
+                        &id,
+                        RequestStatus::Cancelled,
+                        None,
+                        ItemStatus::Cancelled,
+                    );
+                }
+                self.dispose_cohorts();
                 self.fact(FactBody::ThreadDeleted);
+                self.effect(
+                    None,
+                    EffectBody::DetachSessions {
+                        reason: "Thread deleted.".into(),
+                        revoke_credentials: true,
+                    },
+                );
+                self.effect(None, EffectBody::CleanupTerminals);
                 let paths = self
                     .state
                     .messages
@@ -1487,10 +1670,81 @@ impl Decision {
                 Reply::Accepted
             }
             Settle { settled, at } => {
+                let thread = self.state.thread.as_ref().unwrap().clone();
+                if thread.archived_at.is_some() {
+                    return reject("thread-archived");
+                }
+                if !settled {
+                    if thread.settled != Some(false) {
+                        self.fact(FactBody::ThreadSettled {
+                            settled: false,
+                            at: self.at.clone(),
+                        });
+                    }
+                    return Reply::Accepted;
+                }
+                let automatic = |run: &Run| {
+                    run.status == RunStatus::Queued
+                        && self
+                            .state
+                            .message(&run.message)
+                            .is_some_and(|m| m.notification.is_some())
+                };
+                let message_question = |request: &Request| {
+                    request.capability == ResponseCapability::Message
+                        && matches!(request.body, RequestBody::Questions { .. })
+                };
+                if self.state.runs.iter().any(|run| {
+                    (run.status.blocking() || run.status == RunStatus::Queued) && !automatic(run)
+                }) || self
+                    .state
+                    .requests
+                    .iter()
+                    .any(|r| r.status == RequestStatus::Pending && !message_question(r))
+                {
+                    return reject("thread-has-active-work");
+                }
+                let wakes = self
+                    .state
+                    .runs
+                    .iter()
+                    .filter(|run| automatic(run))
+                    .map(|run| run.id.clone())
+                    .collect::<Vec<_>>();
+                let questions = self
+                    .state
+                    .requests
+                    .iter()
+                    .filter(|r| r.status == RequestStatus::Pending)
+                    .map(|r| r.id.clone())
+                    .collect::<Vec<_>>();
+                for id in questions {
+                    self.resolve_request(
+                        &id,
+                        RequestStatus::Resolved,
+                        Some(ApprovalDecision::Cancel),
+                        ItemStatus::Cancelled,
+                    );
+                }
+                for run in wakes {
+                    self.cancel_queued_run(&run);
+                }
+                let keep = thread.settled == Some(true) && thread.pinned_at.is_none();
                 self.fact(FactBody::ThreadSettled {
-                    settled: *settled,
-                    at: at.clone().unwrap_or_else(|| self.at.clone()),
+                    settled: true,
+                    at: if keep {
+                        thread.settled_at.clone().unwrap()
+                    } else {
+                        at.clone().unwrap_or_else(|| self.at.clone())
+                    },
                 });
+                self.effect(
+                    None,
+                    EffectBody::DetachSessions {
+                        reason: "Thread settled.".into(),
+                        revoke_credentials: false,
+                    },
+                );
                 Reply::Accepted
             }
             Snooze { until } => {
@@ -1697,6 +1951,13 @@ impl Decision {
                 Reply::Accepted
             }
             ResumeQueue => {
+                let thread = self.state.thread.as_ref().unwrap();
+                if thread.archived_at.is_some() {
+                    return reject("thread-not-active");
+                }
+                if usage_limited(&self.state) {
+                    return reject("usage-limited");
+                }
                 let ids = self
                     .state
                     .queued_runs()
@@ -2611,7 +2872,41 @@ impl Decision {
         }
     }
 
+    fn resolve_request(
+        &mut self,
+        id: &RuntimeRequestId,
+        status: RequestStatus,
+        decision: Option<ApprovalDecision>,
+        card: ItemStatus,
+    ) {
+        self.fact(FactBody::RequestResolved {
+            id: id.clone(),
+            status,
+            decision,
+            answers: None,
+            attachments: BTreeMap::new(),
+        });
+        self.complete_request_cards(id, card);
+    }
+    fn complete_request_cards(&mut self, request: &RuntimeRequestId, status: ItemStatus) {
+        let items = self
+            .state
+            .items
+            .iter()
+            .filter(|i| {
+                !i.status.terminal()
+                    && matches!(&i.kind, ItemKind::ApprovalRequest { request: r } | ItemKind::UserInputRequest { request: r } if r == request)
+            })
+            .map(|i| i.id.clone())
+            .collect::<Vec<_>>();
+        for id in items {
+            self.fact(FactBody::ItemCompleted { id, status });
+        }
+    }
     fn error_item(&mut self, run: &RunId, message: &str) {
+        self.error_item_with_class(run, message, None);
+    }
+    fn error_item_with_class(&mut self, run: &RunId, message: &str, class: Option<&str>) {
         let id = TurnItemId::new(self.key("error", run.as_str())).unwrap();
         let attempt = self
             .state
@@ -2628,7 +2923,7 @@ impl Decision {
                 message: message.into(),
                 retrying: false,
                 code: None,
-                class: None,
+                class: class.map(str::to_owned),
                 retryable: None,
             },
         );
@@ -3137,7 +3432,6 @@ impl Decision {
                             RunStatus::Cancelled => ItemStatus::Cancelled,
                             _ => ItemStatus::Completed,
                         },
-                        false,
                     );
                     if let Some((parent, task)) = self.state.native_parent.clone() {
                         let boundary = self
@@ -3654,7 +3948,7 @@ impl Decision {
                         EffectBody::SendToThread {
                             thread: task.child_thread,
                             command: Box::new(Command::NativeInput {
-                                attempt: attempt.clone(),
+                                attempt: task.attempt,
                                 event: event.clone(),
                             }),
                         },
@@ -3796,17 +4090,7 @@ impl Decision {
     ) -> Reply {
         if root && self.state.stopping.contains(owner) {
             for event in events {
-                if matches!(
-                    event,
-                    ProviderEvent::Child { .. }
-                        | ProviderEvent::SubagentFinished { .. }
-                        | ProviderEvent::BackgroundTask {
-                            status: Some(_),
-                            ..
-                        }
-                ) {
-                    self.provider(owner, event);
-                }
+                self.provider(owner, event);
             }
             return Reply::Accepted;
         }
@@ -3993,7 +4277,8 @@ impl Decision {
                     if let Some(id) = message_id
                         && let Some(m) = self.state.messages.iter().find(|m| &m.id == id).cloned()
                     {
-                        // Reuse the accepted message instead of creating a second one.
+                        // Reuse the accepted message and its timeline row as a new turn on
+                        // the thread's saved selection.
                         let next =
                             RunId::new(format!("followup:{}:{}", id.as_str().len(), id)).unwrap();
                         if self.state.runs.iter().any(|r| r.id == next) {
@@ -4001,22 +4286,49 @@ impl Decision {
                         }
                         let ordinal =
                             self.state.runs.iter().map(|r| r.ordinal).max().unwrap_or(0) + 1;
+                        let queued =
+                            self.state.active_run().is_some() || !self.state.captures.is_empty();
+                        let held = queued && self.state.queued_runs().iter().any(|r| r.queue_held);
                         self.fact(FactBody::MessageAdopted {
                             id: m.id.clone(),
                             run: next.clone(),
-                            intent: InputIntent::QueuedTurn,
+                            intent: if queued {
+                                InputIntent::QueuedTurn
+                            } else {
+                                InputIntent::TurnStart
+                            },
                         });
                         self.fact(FactBody::RunRequested {
                             id: next.clone(),
-                            message: m.id,
+                            message: m.id.clone(),
                             ordinal,
-                            selection: run.selection,
-                            status: RunStatus::Queued,
-                            queue_position: Some(self.state.queued_runs().len() as u64 + 1),
-                            held: false,
+                            selection: self.state.thread.as_ref().unwrap().selection.clone(),
+                            status: if queued {
+                                RunStatus::Queued
+                            } else {
+                                RunStatus::Starting
+                            },
+                            queue_position: queued
+                                .then(|| self.state.queued_runs().len() as u64 + 1),
+                            held,
                             source_plan: None,
                         });
-                        self.promote();
+                        if let Some(item) = self
+                            .state
+                            .items
+                            .iter()
+                            .find(|i| matches!(&i.kind, ItemKind::UserMessage { message } if message == &m.id))
+                            .map(|i| i.id.clone())
+                        {
+                            self.fact(FactBody::ItemMoved {
+                                id: item,
+                                run: next.clone(),
+                                ordinal: (!queued).then(|| self.item_ordinal()),
+                            });
+                        }
+                        if !queued {
+                            self.start_run(&next);
+                        }
                         return Reply::Run(next);
                     }
                     return Reply::Ignored;
@@ -4044,13 +4356,13 @@ impl Decision {
                 }
                 match operation {
                     ProviderOperation::Start | ProviderOperation::Compact => {
-                        self.error_item(&run.id, message);
+                        self.error_item_with_class(&run.id, message, Some("provider_error"));
                         self.stop_tasks(attempt, ItemStatus::Failed, true);
                         self.finish(&run.id, RunStatus::Failed, false);
                     }
                     // Failed control requests keep the native turn authoritative.
                     _ => {
-                        self.error_item(&run.id, message);
+                        self.error_item_with_class(&run.id, message, Some("provider_error"));
                     }
                 }
             }
@@ -4401,7 +4713,7 @@ impl Decision {
                     id: attempt.clone(),
                     status: AttemptStatus::Cancelled,
                 });
-                self.close_attempt_items(attempt, ItemStatus::Cancelled, true);
+                self.close_attempt_items(attempt, ItemStatus::Cancelled);
             }
             self.fact(FactBody::RunFinished {
                 id: run.id.clone(),
@@ -4476,6 +4788,59 @@ impl Decision {
             );
         }
     }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Maintenance {
+    Compact,
+    Logout,
+}
+/// Native maintenance commands run as their own turn and never take restart
+/// notes, title generation or steering.
+pub fn maintenance(text: &str, attachments: &[Attachment]) -> Option<Maintenance> {
+    if !attachments.is_empty() {
+        return None;
+    }
+    match text.trim().to_lowercase().as_str() {
+        "/compact" => Some(Maintenance::Compact),
+        "/logout" => Some(Maintenance::Logout),
+        _ => None,
+    }
+}
+/// The latest run that executed, by completion order.
+pub fn latest_executed_run(state: &State) -> Option<&Run> {
+    state
+        .runs
+        .iter()
+        .filter(|run| {
+            run.status != RunStatus::Queued
+                && !(run.status == RunStatus::Cancelled && run.started_at.is_none())
+        })
+        .reduce(|latest, run| {
+            if run_ran_after(run, latest) {
+                run
+            } else {
+                latest
+            }
+        })
+}
+/// Class of the latest failure recorded on a failed run.
+pub fn failure_class(state: &State, run: &RunId) -> Option<String> {
+    state
+        .items
+        .iter()
+        .filter(|item| item.run.as_ref() == Some(run) && item.status == ItemStatus::Failed)
+        .filter_map(|item| match &item.kind {
+            ItemKind::Error { class, .. } => class.clone(),
+            _ => None,
+        })
+        .next_back()
+}
+/// A usage-limit failure of the latest executed run keeps the queue waiting.
+pub fn usage_limited(state: &State) -> bool {
+    latest_executed_run(state).is_some_and(|run| {
+        run.status == RunStatus::Failed
+            && failure_class(state, &run.id).as_deref() == Some("usage_limit")
+    })
 }
 fn reject(reason: &str) -> Reply {
     Reply::Rejected {
