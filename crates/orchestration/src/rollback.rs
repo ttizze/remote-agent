@@ -182,6 +182,9 @@ pub fn finish(
         {
             let mut run = run.clone();
             run.status = RunStatus::RolledBack;
+            if let Some(cohort) = &mut run.delegated_completion {
+                cohort.disposition = CohortDisposition::Disposed;
+            }
             let mut nodes = projection
                 .nodes
                 .iter()

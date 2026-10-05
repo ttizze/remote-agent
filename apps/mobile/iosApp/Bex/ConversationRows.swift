@@ -52,6 +52,11 @@ struct ConversationRow: View, Equatable {
                             Text(work.detail).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
                         }
                         Text(work.status).font(T3Theme.font(11)).foregroundStyle(T3Theme.color("textMuted"))
+                        if let id = work
+                            .childThreadId {
+                            Button("Open subagent thread") { perform(.openThread(threadId: id)) }
+                                .font(T3Theme.font(12))
+                        }
                     }.padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .leading)
                 }
             } label: {

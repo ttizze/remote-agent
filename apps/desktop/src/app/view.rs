@@ -581,6 +581,45 @@ impl Desktop {
                     ),
             );
         }
+        if !chat.agents.rows.is_empty() {
+            let roster = chat.agents.clone();
+            let entity = cx.entity().downgrade();
+            header = header.child(
+                Button::new("thread-agents")
+                    .label(format!(
+                        "Agents {}",
+                        roster
+                            .pill_label
+                            .clone()
+                            .unwrap_or_else(|| roster.rows.len().to_string())
+                    ))
+                    .small()
+                    .ghost()
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for agent in &roster.rows {
+                            let id = agent.child_thread_id.clone();
+                            let owner = entity.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(format!("{} · {}", agent.title, agent.metadata))
+                                    .disabled(id.is_none())
+                                    .on_click(move |_, _, cx| {
+                                        if let Some(thread_id) = &id {
+                                            let _ = owner.update(cx, |view, _| {
+                                                view.perform(
+                                                    Intent::OpenThread {
+                                                        thread_id: thread_id.clone(),
+                                                    },
+                                                    None,
+                                                )
+                                            });
+                                        }
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            );
+        }
         header = header.child(
             Button::new("thread-actions")
                 .label("•••")
@@ -853,25 +892,41 @@ impl Desktop {
                 );
                 if expanded {
                     for item in &row.work {
-                        body = body.child(
-                            v_flex()
-                                .pl_4()
-                                .gap_1()
-                                .border_l_1()
-                                .border_color(color("border"))
-                                .child(
-                                    div()
-                                        .text_color(color("textMuted"))
-                                        .child(format!("{} · {}", item.title, item.status)),
+                        let mut entry = v_flex()
+                            .pl_4()
+                            .gap_1()
+                            .border_l_1()
+                            .border_color(color("border"))
+                            .child(
+                                div()
+                                    .text_color(color("textMuted"))
+                                    .child(format!("{} · {}", item.title, item.status)),
+                            )
+                            .child(
+                                TextView::markdown(
+                                    SharedString::from(format!("work-{}", item.id)),
+                                    item.detail.clone(),
                                 )
-                                .child(
-                                    TextView::markdown(
-                                        SharedString::from(format!("work-{}", item.id)),
-                                        item.detail.clone(),
-                                    )
-                                    .selectable(true),
-                                ),
-                        );
+                                .selectable(true),
+                            );
+                        if let Some(thread_id) = &item.child_thread_id {
+                            let id = thread_id.clone();
+                            entry = entry.child(
+                                Button::new(SharedString::from(format!("open-agent-{}", item.id)))
+                                    .label("Open subagent thread")
+                                    .small()
+                                    .ghost()
+                                    .on_click(cx.listener(move |view, _, _, _| {
+                                        view.perform(
+                                            Intent::OpenThread {
+                                                thread_id: id.clone(),
+                                            },
+                                            None,
+                                        )
+                                    })),
+                            );
+                        }
+                        body = body.child(entry);
                     }
                 }
             }

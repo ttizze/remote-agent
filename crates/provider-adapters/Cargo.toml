@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tempfile = "3"
 scopeguard = "1.2"
 orchestration = { path = "../orchestration", features = ["adapter"] }
 codex-app-server = { path = "../codex-app-server" }
@@ -19,4 +20,3 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 proptest = "1.11"
-tempfile = "3"

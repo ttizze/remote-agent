@@ -160,6 +160,7 @@ impl Store {
                 .expect("derived id"),
             thread_id: effect.thread_id.clone(),
             body: CommandBody::MessageDispatch(MessageDispatch {
+                delegated_completion: message.delegated_completion.clone(),
                 source_plan_ref: None,
                 created_by: message.created_by,
                 creation_source: message.creation_source,
@@ -310,7 +311,24 @@ impl Store {
                 }
                 _ => None,
             });
-        let events = commit_decision(&transaction, decision, Some(&command.command_id), now)?;
+        let mut events = commit_decision(&transaction, decision, Some(&command.command_id), now)?;
+        if matches!(
+            command.body,
+            CommandBody::DelegatedTaskRequest(_)
+                | CommandBody::DelegatedTaskWakePolicy { .. }
+                | CommandBody::DelegatedTaskAcknowledge { .. }
+                | CommandBody::DelegatedTaskDispose { .. }
+                | CommandBody::RunInterrupt { .. }
+                | CommandBody::QueueResume
+                | CommandBody::MessageDispatch(_)
+                | CommandBody::ThreadDelete
+        ) {
+            events.extend(reconcile_delegations(
+                &transaction,
+                &command.thread_id,
+                now,
+            )?);
+        }
         if let Some((thread, rows)) = inherited {
             transaction.execute("INSERT INTO orchestration_v2_projection_fork_history(thread_id,payload_json) VALUES(?1,?2)", params![thread.as_str(), serde_json::to_string(&rows)?])?;
         }
@@ -351,12 +369,13 @@ impl Store {
     ) -> Result<Commit> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
-        let thread_id = &events
+        let thread_id = events
             .first()
             .ok_or_else(|| StoreError::InvalidEvent("empty rollback write".into()))?
-            .thread_id;
+            .thread_id
+            .clone();
         let projection =
-            load_projection(&transaction, thread_id)?.ok_or(StoreError::ThreadNotFound)?;
+            load_projection(&transaction, &thread_id)?.ok_or(StoreError::ThreadNotFound)?;
         if projection.thread.rollback_request_id.as_ref() != Some(request_id) {
             return Ok(Commit {
                 sequence: latest_sequence(&transaction, None)?,
@@ -375,7 +394,7 @@ impl Store {
                 *completed = current;
             }
         }
-        let stored = commit_decision(
+        let mut stored = commit_decision(
             &transaction,
             Decision {
                 events,
@@ -384,6 +403,7 @@ impl Store {
             None,
             now,
         )?;
+        stored.extend(reconcile_delegations(&transaction, &thread_id, now)?);
         let sequence = latest_sequence(&transaction, None)?;
         transaction.commit()?;
         self.publish(&stored);
@@ -465,7 +485,12 @@ impl Store {
             }
             let mut plans = projection.plans.clone();
             let mut ordered = vec![];
-            for event in events {
+            for mut event in events {
+                if let EventPayload::RunUpdated(run) = &mut event.payload
+                    && let Some(previous) = projection.runs.iter().find(|r| r.id == run.id)
+                {
+                    run.delegated_completion = previous.delegated_completion.clone();
+                }
                 if let EventPayload::PlanUpdated(plan) = &event.payload {
                     if matches!(plan.status, PlanStatus::Draft | PlanStatus::Active) {
                         for old in plans.iter_mut().filter(|old| {
@@ -493,6 +518,11 @@ impl Store {
             }
             events = ordered;
             if events.iter().any(|e| matches!(&e.payload, EventPayload::ProviderTurnUpdated(t) if t.status == TurnStatus::Running)) {
+                if let Some(message) = projection.runs.iter().find(|r|r.id==*run_id).and_then(|r|projection.messages.iter().find(|m|m.id==r.user_message_id && m.delegated_completion.is_some())) {
+                    let command=Command{command_id:CommandId::new(format!("notification-accepted:{}:{}",run_id,events.first().expect("guarded events").id)).expect("derived id"),thread_id:thread_id.clone(),body:CommandBody::NotificationDeliveryAccept{message_id:message.id.clone()}};
+                    events.extend(crate::delegation::update(&command,&projection,now)?.events);
+                }
+
                 let payloads = crate::context::consumed(&projection.context_transfers, run_id, now);
                 let trigger = events.first().expect("guarded events").id.to_string();
                 events.extend(crate::events(&thread_id, &format!("{trigger}:consume"), payloads, now));
@@ -558,6 +588,7 @@ impl Store {
             })
             .collect();
         for thread_id in terminal_threads {
+            committed.extend(reconcile_delegations(&transaction, &thread_id, now)?);
             let projection =
                 load_projection(&transaction, &thread_id)?.ok_or(StoreError::ThreadNotFound)?;
             let trigger = committed
@@ -612,7 +643,7 @@ impl Store {
         for effect in unsettled {
             transaction.execute("UPDATE orchestration_v2_effect_outbox SET status=?2,lease_owner=NULL,lease_expires_at=NULL,updated_at=?3 WHERE effect_id=?1", params![effect.id, if effect.body.process_bound() {"cancelled"} else {"pending"}, now.as_str()])?;
         }
-        let committed = commit_decision(
+        let mut committed = commit_decision(
             &transaction,
             Decision {
                 events,
@@ -621,6 +652,14 @@ impl Store {
             None,
             now,
         )?;
+        for id in thread_ids(&transaction)? {
+            committed.extend(reconcile_delegations_with_offer(
+                &transaction,
+                &id,
+                now,
+                false,
+            )?);
+        }
         let sequence = latest_sequence(&transaction, None)?;
         transaction.commit()?;
         self.publish(&committed);
@@ -892,10 +931,43 @@ impl Store {
         } else {
             "succeeded"
         };
-        let changed = self.lock()?.execute("UPDATE orchestration_v2_effect_outbox SET status=?3,available_at=?4,lease_owner=NULL,lease_expires_at=NULL,completed_at=?5,last_error=?6 WHERE effect_id=?1 AND lease_owner=?2 AND status='running'", params![claim.effect.id, claim.lease_owner, status, now_ms.saturating_add(delay), if retry {None} else {Some(now_ms)}, error])?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let changed=transaction.execute("UPDATE orchestration_v2_effect_outbox SET status=?3,available_at=?4,lease_owner=NULL,lease_expires_at=NULL,completed_at=?5,last_error=?6 WHERE effect_id=?1 AND lease_owner=?2 AND status='running'", params![claim.effect.id, claim.lease_owner, status, now_ms.saturating_add(delay), if retry {None} else {Some(now_ms)}, error])?;
         if changed != 1 {
             return Err(StoreError::LeaseLost);
         }
+        let mut committed = vec![];
+        if error.is_none()
+            && let EffectBody::Steer { message_id, .. } = &claim.effect.body
+        {
+            let projection = load_projection(&transaction, &claim.effect.thread_id)?
+                .ok_or(StoreError::ThreadNotFound)?;
+            if projection
+                .messages
+                .iter()
+                .any(|m| m.id == *message_id && m.delegated_completion.is_some())
+            {
+                let timestamp = Timestamp::from_millis(now_ms)
+                    .map_err(|e| StoreError::InvalidEvent(e.to_string()))?;
+                let command = Command {
+                    command_id: CommandId::new(format!("command:accepted:{}", claim.effect.id))
+                        .expect("derived id"),
+                    thread_id: claim.effect.thread_id.clone(),
+                    body: CommandBody::NotificationDeliveryAccept {
+                        message_id: message_id.clone(),
+                    },
+                };
+                committed = commit_decision(
+                    &transaction,
+                    crate::delegation::update(&command, &projection, &timestamp)?,
+                    None,
+                    &timestamp,
+                )?;
+            }
+        }
+        transaction.commit()?;
+        self.publish(&committed);
         Ok(retry)
     }
 }
@@ -968,6 +1040,140 @@ fn streaming_shell(
     shell.visible_item_count += count.saturating_sub(shell.item_count);
     shell.item_count = count;
     Ok(Some(shell))
+}
+
+fn delegation_children(
+    connection: &Connection,
+    parent: &ThreadProjection,
+) -> Result<Vec<ThreadProjection>> {
+    parent
+        .subagents
+        .iter()
+        .filter(|s| s.origin == SubagentOrigin::AppOwned)
+        .filter_map(|s| s.child_thread_id.as_ref())
+        .map(|id| load_projection(connection, id))
+        .collect::<Result<Vec<_>>>()
+        .map(|rows| rows.into_iter().flatten().collect())
+}
+fn cancel_delegation_descendants(
+    connection: &Connection,
+    parent: &ThreadProjection,
+    now: &Timestamp,
+    visited: &mut std::collections::BTreeSet<ThreadId>,
+) -> Result<Vec<StoredEvent>> {
+    if !visited.insert(parent.thread.id.clone()) || visited.len() > 128 {
+        return Err(StoreError::InvalidEvent(
+            "invalid delegation cancellation lineage".into(),
+        ));
+    }
+    let children = delegation_children(connection, parent)?;
+    let trigger = latest_sequence(connection, None)?.to_string();
+    let decision = crate::delegation::cancel_children(parent, &children, now, &trigger)?;
+    let changed: std::collections::BTreeSet<_> = decision
+        .events
+        .iter()
+        .filter(|e| e.thread_id != parent.thread.id)
+        .map(|e| e.thread_id.clone())
+        .collect();
+    let mut committed = commit_decision(connection, decision, None, now)?;
+    for id in changed {
+        let child = load_projection(connection, &id)?.ok_or(StoreError::ThreadNotFound)?;
+        if !child.subagents.is_empty() {
+            committed.extend(cancel_delegation_descendants(
+                connection, &child, now, visited,
+            )?);
+        }
+    }
+    Ok(committed)
+}
+
+fn reconcile_delegations(
+    connection: &Connection,
+    changed: &ThreadId,
+    now: &Timestamp,
+) -> Result<Vec<StoredEvent>> {
+    reconcile_delegations_with_offer(connection, changed, now, true)
+}
+fn reconcile_delegations_with_offer(
+    connection: &Connection,
+    changed: &ThreadId,
+    now: &Timestamp,
+    offer: bool,
+) -> Result<Vec<StoredEvent>> {
+    let projection = load_projection(connection, changed)?.ok_or(StoreError::ThreadNotFound)?;
+    let failed_wake = projection
+        .runs
+        .iter()
+        .max_by_key(|r| r.ordinal)
+        .is_some_and(|r| {
+            matches!(
+                r.status,
+                RunStatus::Failed | RunStatus::Cancelled | RunStatus::Interrupted
+            ) && projection
+                .messages
+                .iter()
+                .any(|m| m.id == r.user_message_id && m.delegated_completion.is_some())
+        });
+    let mut owners = vec![changed.clone()];
+    let mut ancestor = projection.thread;
+    while ancestor.lineage.relationship_to_parent == Some(Relationship::Subagent) {
+        let Some(parent) = ancestor.lineage.parent_thread_id else {
+            break;
+        };
+        if owners.contains(&parent) || owners.len() > 128 {
+            return Err(StoreError::InvalidEvent(
+                "invalid delegation lineage".into(),
+            ));
+        }
+        owners.push(parent.clone());
+        let Some(projection) = load_projection(connection, &parent)? else {
+            break;
+        };
+        ancestor = projection.thread;
+    }
+    let mut committed = vec![];
+    for id in owners {
+        let Some(parent) = load_projection(connection, &id)? else {
+            continue;
+        };
+        if parent.subagents.is_empty() {
+            continue;
+        }
+        committed.extend(cancel_delegation_descendants(
+            connection,
+            &parent,
+            now,
+            &mut std::collections::BTreeSet::new(),
+        )?);
+        let parent = load_projection(connection, &id)?.ok_or(StoreError::ThreadNotFound)?;
+        let children = delegation_children(connection, &parent)?;
+        let trigger = latest_sequence(connection, None)?.to_string();
+        committed.extend(commit_decision(
+            connection,
+            crate::delegation::finalize(&parent, &children, now, &trigger),
+            None,
+            now,
+        )?);
+        let parent = load_projection(connection, &id)?.ok_or(StoreError::ThreadNotFound)?;
+        let trigger = latest_sequence(connection, None)?.to_string();
+        committed.extend(commit_decision(
+            connection,
+            crate::delegation::repair(&parent, now, &trigger)?,
+            None,
+            now,
+        )?);
+        if offer && parent.thread.deleted_at.is_none() && !(id == *changed && failed_wake) {
+            let parent = load_projection(connection, &id)?.ok_or(StoreError::ThreadNotFound)?;
+            let trigger = latest_sequence(connection, None)?.to_string();
+            committed.extend(commit_decision(
+                connection,
+                crate::delegation::offer(&parent, now, &trigger)?,
+                None,
+                now,
+            )?);
+        }
+    }
+    Ok(committed)
 }
 
 fn kind_name(body: &impl Serialize) -> Result<String> {

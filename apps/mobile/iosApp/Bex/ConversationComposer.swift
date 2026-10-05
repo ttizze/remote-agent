@@ -4,6 +4,7 @@ import SwiftUI
 struct ConversationComposer: View {
     @ObservedObject var model: BexAppViewModel
     let showQueue: () -> Void
+    let showAgents: () -> Void
     @FocusState private var focused: Bool
     @StateObject private var recorder = DictationRecorder()
     @State private var preparation: DictationPreparation?
@@ -16,6 +17,10 @@ struct ConversationComposer: View {
         let composer = model.conversation.composer
         let draft = model.snapshot.draft()
         VStack(spacing: 8) {
+            if let label = model.conversation.agents.pillLabel {
+                Button("Agents \(label)", action: showAgents).font(T3Theme.font(12))
+                    .accessibilityLabel(model.conversation.agents.accessibilityLabel ?? "Agents")
+            }
             if composer.queueCount > 0 {
                 Button(action: showQueue) {
                     HStack {

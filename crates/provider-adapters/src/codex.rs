@@ -156,11 +156,12 @@ impl CodexAdapter {
         effect: &EffectBody,
         projection: &ThreadProjection,
         cwd: &Path,
-        browser: Option<Value>,
+        tool_servers: Option<Value>,
     ) -> Result<(), AdapterError> {
         match effect {
             EffectBody::Start { run_id } => {
-                self.start(projection, run_id, None, cwd, browser).await
+                self.start(projection, run_id, None, cwd, tool_servers)
+                    .await
             }
             EffectBody::Steer {
                 run_id,
@@ -241,7 +242,7 @@ impl CodexAdapter {
                 })
                 .await
                 .map_err(|_| error("Codex interrupt did not reach a terminal state"))??;
-                self.start(projection, run_id, Some(message_id), cwd, browser)
+                self.start(projection, run_id, Some(message_id), cwd, tool_servers)
                     .await
             }
             EffectBody::Respond {
@@ -303,7 +304,7 @@ impl CodexAdapter {
         run_id: &RunId,
         message_id: Option<&MessageId>,
         cwd: &Path,
-        browser: Option<Value>,
+        tool_servers: Option<Value>,
     ) -> Result<(), AdapterError> {
         let run = projection
             .runs
@@ -328,8 +329,8 @@ impl CodexAdapter {
             .clone();
         let mut projection = projection.clone();
         let mut params = json!({"cwd":cwd,"model":run.model_selection.model});
-        if let Some(browser) = browser {
-            params["config"] = json!({"mcp_servers":{"bex_browser":browser}});
+        if let Some(tool_servers) = tool_servers {
+            params["config"] = json!({"mcp_servers":tool_servers});
         }
         let resume_native = provider_thread
             .native_thread_ref

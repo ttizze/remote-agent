@@ -243,6 +243,7 @@ impl TurnState {
         } = &item.body
         {
             let message = ConversationMessage {
+                delegated_completion: None,
                 created_by: CreatedBy::Agent,
                 creation_source: CreationSource::Provider,
                 id: message_id.clone(),
@@ -1540,6 +1541,7 @@ pub(crate) mod tests {
             command_id: CommandId::new("send").unwrap(),
             thread_id: command.thread_id,
             body: CommandBody::MessageDispatch(MessageDispatch {
+                delegated_completion: None,
                 source_plan_ref: None,
                 created_by: CreatedBy::User,
                 creation_source: CreationSource::Desktop,

@@ -5,6 +5,7 @@ struct ThreadScreen: View {
     @ObservedObject var model: BexAppViewModel
     let openTools: (WorkspaceTab?, Bool) -> Void
     @State private var showingQueue = false
+    @State private var showingAgents = false
     @State private var renaming = false
     @State private var title = ""
     @State private var nearBottom = true
@@ -84,7 +85,7 @@ struct ThreadScreen: View {
                     }.padding(.horizontal, 20)
                 }.frame(maxHeight: 280)
             }
-            ConversationComposer(model: model, showQueue: { showingQueue = true })
+            ConversationComposer(model: model, showQueue: { showingQueue = true }, showAgents: { showingAgents = true })
         }
         .background(T3Theme.color("canvas")).foregroundStyle(T3Theme.color("text"))
         .navigationTitle(conversation.title).navigationBarTitleDisplayMode(.inline)
@@ -123,6 +124,9 @@ struct ThreadScreen: View {
                         )
                         Button("Rename") { title = conversation.title; renaming = true }
                     }
+                    if !conversation.agents.rows.isEmpty {
+                        Button("Agents") { showingAgents = true }
+                    }
                     Divider()
                     Button("Terminal") { openTools(.terminal, false) }.disabled(!model.snapshot.canOpenTerminal())
                     Button("Files") { openTools(.files, false) }
@@ -130,6 +134,36 @@ struct ThreadScreen: View {
                     Button("Browser") { openTools(.browser, false) }
                 } label: { Image(systemName: "ellipsis") }
             }
+        }
+        .sheet(isPresented: $showingAgents) {
+            NavigationStack {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(model.conversation.agents.rows, id: \.id) { agent in
+                            Button {
+                                if let id = agent
+                                    .childThreadId {
+                                    showingAgents = false; model.perform(.openThread(threadId: id))
+                                }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(agent.title).font(T3Theme.font(14, weight: .medium))
+                                    Text(agent.metadata).font(T3Theme.font(12))
+                                        .foregroundStyle(T3Theme.color("textMuted"))
+                                    if !agent.detail
+                                        .isEmpty {
+                                        Text(agent.detail).font(T3Theme.font(13))
+                                            .foregroundStyle(T3Theme.color("textMuted"))
+                                    }
+                                }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 14)
+                            }.buttonStyle(.plain).disabled(agent.childThreadId == nil)
+                            Divider()
+                        }
+                    }.padding(.horizontal, 20)
+                }.navigationTitle("Agents").navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { showingAgents = false } }
+                    }
+            }.presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showingQueue) { QueueSheet(model: model) }
         .alert("Rename thread", isPresented: $renaming) {

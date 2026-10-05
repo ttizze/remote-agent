@@ -21,6 +21,7 @@ pub use host_runtime::HostRuntime;
 
 pub use host_identity::{CredentialStore, FileKeyStore, HostCredentials, load_local_identity};
 
+pub use host_rpc::service::agent_tools;
 pub use host_rpc::{HostRpcService, HostSession, SessionId};
 pub use projects::ProjectStore;
 

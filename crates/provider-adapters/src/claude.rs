@@ -258,12 +258,12 @@ impl ClaudeAdapter {
         effect: &EffectBody,
         projection: &ThreadProjection,
         cwd: &Path,
-        browser: Option<Value>,
+        tool_servers: Option<Value>,
         credentials_home: &Path,
     ) -> Result<(), AdapterError> {
         match effect {
             EffectBody::Start { run_id } => {
-                self.start(projection, run_id, cwd, browser, credentials_home)
+                self.start(projection, run_id, cwd, tool_servers, credentials_home)
                     .await
             }
             EffectBody::Steer {
@@ -429,7 +429,7 @@ impl ClaudeAdapter {
         projection: &ThreadProjection,
         run_id: &RunId,
         cwd: &Path,
-        browser: Option<Value>,
+        tool_servers: Option<Value>,
         credentials_home: &Path,
     ) -> Result<(), AdapterError> {
         let _cancel = scopeguard::guard(run_id.clone(), |run| {
@@ -591,7 +591,7 @@ impl ClaudeAdapter {
             *handle.state.lock().unwrap_or_else(|e| e.into_inner()) = state;
             handle
         } else {
-            let command = process_command(
+            let (mut command, tool_config) = process_command(
                 &self.config,
                 credentials_home,
                 cwd,
@@ -600,9 +600,8 @@ impl ClaudeAdapter {
                 &run.model_selection,
                 projection.thread.runtime_mode,
                 projection.thread.interaction_mode,
-                browser.clone(),
+                tool_servers.clone(),
             )?;
-            let mut command = command;
             if let Some(transfer) = projection.context_transfers.iter().find(|t| {
                 t.target_run_id.as_ref() == Some(&run.id)
                     && t.status == TransferStatus::ResolvedNative
@@ -633,6 +632,7 @@ impl ClaudeAdapter {
             }
             spawn(
                 command,
+                tool_config,
                 state,
                 native,
                 permit.expect("new process has reserved capacity"),
@@ -654,7 +654,8 @@ impl ClaudeAdapter {
         {
             if resume || native_fork {
                 let fresh = crate::portable_fallback(&self.output, projection, &run).await?;
-                return Box::pin(self.start(&fresh, run_id, cwd, browser, credentials_home)).await;
+                return Box::pin(self.start(&fresh, run_id, cwd, tool_servers, credentials_home))
+                    .await;
             }
             return Err(initial);
         }
@@ -752,8 +753,8 @@ fn process_command(
     model: &ModelSelection,
     runtime: RuntimeMode,
     interaction: InteractionMode,
-    browser: Option<Value>,
-) -> Result<tokio::process::Command, AdapterError> {
+    tool_servers: Option<Value>,
+) -> Result<(tokio::process::Command, Option<tempfile::NamedTempFile>), AdapterError> {
     let mut command = bex_process::command(&config.program).map_err(error)?;
     command
         .env("CLAUDE_CONFIG_DIR", &config.config_home)
@@ -792,16 +793,21 @@ fn process_command(
     {
         command.arg("--effort").arg(effort);
     }
-    if let Some(browser) = browser {
-        command
-            .arg("--mcp-config")
-            .arg(json!({"mcpServers":{"bex_browser":browser}}).to_string());
-    }
+    let tool_config = tool_servers
+        .map(|servers| {
+            let mut file = tempfile::NamedTempFile::new().map_err(error)?;
+            serde_json::to_writer(file.as_file_mut(), &json!({"mcpServers":servers}))
+                .map_err(error)?;
+            file.as_file_mut().sync_all().map_err(error)?;
+            command.arg("--mcp-config").arg(file.path());
+            Ok::<_, AdapterError>(file)
+        })
+        .transpose()?;
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    Ok(command)
+    Ok((command, tool_config))
 }
 /// Short-lived native control query for provider-owned metadata; no inference input is sent.
 pub async fn query_control(
@@ -815,7 +821,7 @@ pub async fn query_control(
         model: "default".into(),
         options: Default::default(),
     };
-    let mut command = process_command(
+    let (mut command, _tool_config) = process_command(
         config,
         credentials_home,
         cwd,
@@ -871,6 +877,7 @@ fn user_frame(native: &str, message: &ConversationMessage, steer: bool) -> Value
 )]
 fn spawn(
     mut command: tokio::process::Command,
+    tool_config: Option<tempfile::NamedTempFile>,
     state: TurnState,
     native: String,
     permit: tokio::sync::OwnedSemaphorePermit,
@@ -912,6 +919,7 @@ fn spawn(
     });
     tokio::spawn(async move {
         let _permit = permit;
+        let _tool_config = tool_config;
         let mut writer = JsonlWriter::new(input);
         let mut reader = JsonlReader::new(stdout);
         let mut gate = PromptGate::default();
@@ -1025,6 +1033,52 @@ async fn ingest_claude_frame<W: tokio::io::AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mcp_scope_is_kept_in_a_private_ephemeral_file_instead_of_arguments() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = ClaudeConfig {
+            program: "/bin/sh".into(),
+            config_home: directory.path().into(),
+        };
+        let model = ModelSelection {
+            instance_id: ProviderInstanceId::new("claude").unwrap(),
+            model: "default".into(),
+            options: Default::default(),
+        };
+        let servers = json!({"bex_orchestration":{"command":"host-daemon","env":{"BEX_ORCHESTRATION_TOKEN":"fixture-scope"}}});
+        let (command, file) = process_command(
+            &config,
+            directory.path(),
+            directory.path(),
+            "native",
+            false,
+            &model,
+            RuntimeMode::ApprovalRequired,
+            InteractionMode::Default,
+            Some(servers.clone()),
+        )
+        .unwrap();
+        assert!(
+            command
+                .as_std()
+                .get_args()
+                .all(|arg| !arg.to_string_lossy().contains("fixture-scope"))
+        );
+        let file = file.unwrap();
+        let path = file.path().to_owned();
+        let saved: Value = serde_json::from_reader(file.reopen().unwrap()).unwrap();
+        assert_eq!(saved["mcpServers"], servers);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                file.as_file().metadata().unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        drop(file);
+        assert!(!path.exists());
+    }
     #[test]
     fn supervisor_admission_distinguishes_completion_from_stop_and_stale_run() {
         let run = RunId::new("run").unwrap();
@@ -1148,6 +1202,7 @@ mod tests {
             let permit = adapter.capacity.clone().try_acquire_owned().unwrap();
             let handle = spawn(
                 command,
+                None,
                 state,
                 uuid::Uuid::new_v4().to_string(),
                 permit,

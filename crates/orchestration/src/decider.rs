@@ -41,12 +41,20 @@ fn active(runs: &[Run]) -> Option<&Run> {
         .filter(|run| run.status.is_blocking())
         .max_by_key(|run| run.ordinal)
 }
-fn queued(runs: &[Run]) -> Vec<&Run> {
+pub fn queued_runs<'a>(runs: &'a [Run], messages: &[ConversationMessage]) -> Vec<&'a Run> {
     let mut queue: Vec<_> = runs
         .iter()
         .filter(|run| run.status == RunStatus::Queued)
         .collect();
-    queue.sort_by_key(|run| (run.queue_position.unwrap_or(run.ordinal), run.ordinal));
+    queue.sort_by_key(|run| {
+        (
+            !messages
+                .iter()
+                .any(|m| m.id == run.user_message_id && m.delegated_completion.is_some()),
+            run.queue_position.unwrap_or(run.ordinal),
+            run.ordinal,
+        )
+    });
     queue
 }
 
@@ -94,6 +102,20 @@ pub fn decide(
     capabilities: &TurnCapabilities,
     driver: Driver,
 ) -> Result<Decision, DecisionError> {
+    if let Some(projection) = projection {
+        if matches!(command.body, CommandBody::DelegatedTaskRequest(_)) {
+            return crate::delegation::request(command, projection, now);
+        }
+        if matches!(
+            command.body,
+            CommandBody::DelegatedTaskWakePolicy { .. }
+                | CommandBody::DelegatedTaskAcknowledge { .. }
+                | CommandBody::DelegatedTaskDispose { .. }
+                | CommandBody::NotificationDeliveryAccept { .. }
+        ) {
+            return crate::delegation::update(command, projection, now);
+        }
+    }
     let mut decision = Decision::default();
     if let CommandBody::ThreadCreate {
         created_by,
@@ -223,7 +245,7 @@ pub fn decide(
                 )),
             );
             if *hold_queue {
-                for queued in queued(&projection.runs) {
+                for queued in queued_runs(&projection.runs, &projection.messages) {
                     let mut queued = queued.clone();
                     queued.queue_held = true;
                     emit(
@@ -333,7 +355,28 @@ pub fn decide(
                 before_run_id.as_ref() != Some(run_id),
                 "cannot reorder run before itself",
             )?;
-            let mut queue = queued(&projection.runs);
+            require(
+                !projection.messages.iter().any(|m| {
+                    m.id == run(&projection.runs, run_id)
+                        .expect("known queued run")
+                        .user_message_id
+                        && m.delegated_completion.is_some()
+                }),
+                "delegated completion cannot be reordered",
+            )?;
+            if let Some(before) = before_run_id {
+                require(
+                    !projection.messages.iter().any(|m| {
+                        projection
+                            .runs
+                            .iter()
+                            .any(|r| &r.id == before && r.user_message_id == m.id)
+                            && m.delegated_completion.is_some()
+                    }),
+                    "cannot reorder before a delegated completion",
+                )?;
+            }
+            let mut queue = queued_runs(&projection.runs, &projection.messages);
             queue.retain(|candidate| candidate.id != *run_id);
             let position = match before_run_id {
                 Some(id) => queue
@@ -426,6 +469,7 @@ pub fn decide(
                 .find(|message| message.id == queued.user_message_id)
                 .ok_or_else(|| DecisionError("queued message not found".into()))?;
             let input = crate::MessageDispatch {
+                delegated_completion: None,
                 source_plan_ref: None,
                 created_by: message.created_by,
                 creation_source: message.creation_source,
@@ -726,7 +770,7 @@ pub fn decide(
                             .runtime_requests
                             .iter()
                             .any(|request| request.status == RequestStatus::Pending)
-                            && queued(&projection.runs).is_empty(),
+                            && queued_runs(&projection.runs, &projection.messages).is_empty(),
                         "pending or queued work cannot be snoozed",
                     )?;
                     thread.snoozed_until = Some(snoozed_until.clone());
@@ -850,6 +894,29 @@ pub fn decide(
                 _ => unreachable!(),
             };
             emit(&mut decision, command, now, payload);
+        }
+    }
+    if let CommandBody::RunInterrupt { run_id, .. } = &command.body {
+        for event in &mut decision.events {
+            if let EventPayload::RunUpdated(run) = &mut event.payload
+                && run.id == *run_id
+                && let Some(cohort) = &mut run.delegated_completion
+            {
+                cohort.disposition = CohortDisposition::Stopped;
+            }
+        }
+        if !decision
+            .events
+            .iter()
+            .any(|e| matches!(&e.payload,EventPayload::RunUpdated(r) if r.id == *run_id))
+            && let Some(run) = projection
+                .runs
+                .iter()
+                .find(|r| r.id == *run_id && r.delegated_completion.is_some())
+        {
+            let mut run = run.clone();
+            run.delegated_completion.as_mut().unwrap().disposition = CohortDisposition::Stopped;
+            emit(&mut decision, command, now, EventPayload::RunUpdated(run));
         }
     }
     let capture = crate::checkpoint::await_capture(
@@ -1098,7 +1165,10 @@ fn promote_next(
     if active(runs).is_some_and(|run| Some(&run.id) != excluding) {
         return;
     }
-    if let Some(next) = queued(runs).first().filter(|run| !run.queue_held) {
+    if let Some(next) = queued_runs(runs, messages)
+        .first()
+        .filter(|run| !run.queue_held)
+    {
         let mut run = (*next).clone();
         run.ordinal = runs
             .iter()
@@ -1289,6 +1359,7 @@ fn dispatch(
         }
         let preparing = !queue && matches!(mode, DispatchMode::DeferStart { .. });
         Run {
+            delegated_completion: None,
             id: RunId::new(format!("run:{}", command.command_id)).expect("derived id"),
             thread_id: command.thread_id.clone(),
             ordinal,
@@ -1440,6 +1511,7 @@ fn dispatch(
         InputIntent::TurnStart
     };
     let conversation = ConversationMessage {
+        delegated_completion: message.delegated_completion.clone(),
         created_by: message.created_by,
         creation_source: message.creation_source,
         id: message.message_id.clone(),
@@ -1531,6 +1603,9 @@ fn dispatch(
                 started_at: None,
                 completed_at: None,
             };
+            if let Some(cohort) = &mut target.delegated_completion {
+                cohort.disposition = CohortDisposition::Stopped;
+            }
             target.active_attempt_id = Some(attempt_id.clone());
             target.root_node_id = Some(root_node_id.clone());
             target.status = RunStatus::Starting;
@@ -1773,6 +1848,7 @@ fn respond(
                     }
                 });
             let input = MessageDispatch {
+                delegated_completion: None,
                 source_plan_ref: None,
                 created_by: CreatedBy::User,
                 creation_source: CreationSource::Server,
@@ -1865,6 +1941,9 @@ pub fn recover(
             result.push(EventPayload::RunUpdated(run));
         } else if run.status.is_blocking() && !replayable_captures.contains(&run.id) {
             run.status = RunStatus::Interrupted;
+            if let Some(cohort) = &mut run.delegated_completion {
+                cohort.disposition = CohortDisposition::Stopped;
+            }
             run.completed_at = Some(now.clone());
             result.push(EventPayload::RunUpdated(run));
         }
@@ -2181,6 +2260,36 @@ mod tests {
         assert!(matches!(decision.effects[0].body, EffectBody::Steer { .. }));
     }
     #[test]
+    fn restart_stops_the_old_delegation_cohort_before_the_new_attempt() {
+        let mut p = running();
+        p.runs[0].delegated_completion = Some(DelegatedCompletionCohort {
+            disposition: CohortDisposition::Open,
+            next_generation: 7,
+            delivery: None,
+        });
+        let (p, _) = apply(
+            &p,
+            &send(
+                "restart-cohort",
+                DispatchMode::RestartActive {
+                    target_run_id: p.runs[0].id.clone(),
+                },
+            ),
+        );
+        assert_eq!(
+            p.runs[0].delegated_completion.as_ref().unwrap().disposition,
+            CohortDisposition::Stopped
+        );
+        assert_eq!(
+            p.runs[0]
+                .delegated_completion
+                .as_ref()
+                .unwrap()
+                .next_generation,
+            7
+        );
+    }
+    #[test]
     fn restart_supersedes_attempt_and_creates_another_root() {
         let projection = running();
         let (projection, decision) = apply(
@@ -2390,7 +2499,7 @@ mod tests {
             for i in 0..count { projection = apply(&projection, &send(&format!("send-{i}"), DispatchMode::StartImmediately)).0; }
             for (i, cancelled) in cancel.iter().enumerate().take(count).skip(1) { if *cancelled { projection = apply(&projection, &command(&format!("cancel-{i}"), CommandBody::QueuedRunCancel { run_id: projection.runs[i].id.clone() })).0; } }
             prop_assert_eq!(projection.runs.iter().filter(|run| run.status.is_blocking()).count(), 1);
-            let positions: Vec<_> = queued(&projection.runs).iter().map(|run| run.queue_position.unwrap()).collect();
+            let positions: Vec<_> = queued_runs(&projection.runs, &projection.messages).iter().map(|run| run.queue_position.unwrap()).collect();
             prop_assert!(positions.windows(2).all(|positions| positions[0] < positions[1]));
         }
         #[test]

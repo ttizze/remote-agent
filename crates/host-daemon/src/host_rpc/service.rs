@@ -1,4 +1,6 @@
 //! Host owns persistence and effects; authenticated connections own only delivery.
+#[path = "agent_tools.rs"]
+pub mod agent_tools;
 use super::{
     connections::{Connections, HostReply, HostSession, HostSubscription, SessionId},
     identity::Identity,
@@ -96,6 +98,7 @@ struct HostResources {
     claude: OnceLock<Arc<ClaudeResources>>,
     startup_errors: std::sync::RwLock<HashMap<ProviderKind, Failure>>,
     browser: OnceLock<Arc<crate::browser::Browser>>,
+    agent_tools: OnceLock<agent_tools::AgentTools>,
     projects: ProjectStore,
     checkpoints: crate::checkpoints::Checkpoints,
     files: crate::workspace_files::WorkspaceFiles,
@@ -139,6 +142,7 @@ impl HostRpcService {
             claude: OnceLock::new(),
             startup_errors: Default::default(),
             browser: OnceLock::new(),
+            agent_tools: OnceLock::new(),
             files: crate::workspace_files::WorkspaceFiles::new(
                 projects.path().with_file_name("bex-attachments"),
             ),
@@ -238,6 +242,12 @@ impl HostRpcService {
     pub fn start(&self) {
         if self.inner.started.swap(true, Ordering::AcqRel) {
             return;
+        }
+        match agent_tools::AgentTools::start(self) {
+            Ok(tools) => {
+                let _ = self.inner.resources.agent_tools.set(tools);
+            }
+            Err(error) => tracing::error!(operation = "orchestration.mcp.start", message = %error),
         }
         if let Some(task) = self.inner.resources.codex.auth_requests() {
             let _ = self.inner.resources.auth_task.set(task);
@@ -364,6 +374,9 @@ impl HostRpcService {
             | CommandBody::ProviderSwitch { model_selection }
             | CommandBody::ThreadModelSelectionSet { model_selection } => {
                 model_selection.instance_id.clone()
+            }
+            CommandBody::DelegatedTaskRequest(request) => {
+                request.model_selection.instance_id.clone()
             }
             CommandBody::MessageDispatch(message) if message.model_selection.is_some() => message
                 .model_selection
@@ -1936,12 +1949,31 @@ impl ProviderAdapter for HostResources {
             .ensure_available(&cwd.to_string_lossy())
             .await
             .map_err(adapter_error)?;
-        let browser = self
-            .browser
-            .get()
-            .map(|browser| browser.provider_config(effect.thread_id.as_str()))
-            .transpose()
-            .map_err(adapter_error)?;
+        let mut servers = serde_json::Map::new();
+        servers.insert(
+            "bex_orchestration".into(),
+            self.agent_tools
+                .get()
+                .ok_or_else(|| adapter_error("Orchestration tools unavailable"))?
+                .provider_config(
+                    &effect.thread_id,
+                    &ProviderInstanceId::new(match driver {
+                        Driver::Codex => "codex",
+                        Driver::Claude => "claude",
+                    })
+                    .expect("provider id"),
+                )
+                .map_err(adapter_error)?,
+        );
+        if let Some(browser) = self.browser.get() {
+            servers.insert(
+                "bex_browser".into(),
+                browser
+                    .provider_config(effect.thread_id.as_str())
+                    .map_err(adapter_error)?,
+            );
+        }
+        let tool_servers = Some(serde_json::Value::Object(servers));
         if let EffectBody::Start { run_id } | EffectBody::Restart { run_id, .. } = &effect.body {
             projection = self.resolve_context(projection, run_id, &cwd).await?;
             let run = projection
@@ -2041,7 +2073,7 @@ impl ProviderAdapter for HostResources {
                 self.codex_adapter
                     .as_ref()
                     .ok_or_else(|| adapter_error("Codex unavailable"))?
-                    .execute(&effect.body, &projection, &cwd, browser)
+                    .execute(&effect.body, &projection, &cwd, tool_servers)
                     .await?;
             }
             Driver::Claude => {
@@ -2052,7 +2084,7 @@ impl ProviderAdapter for HostResources {
                 let home = claude.credentials_home().await.map_err(adapter_error)?;
                 claude
                     .adapter
-                    .execute(&effect.body, &projection, &cwd, browser, &home)
+                    .execute(&effect.body, &projection, &cwd, tool_servers, &home)
                     .await?;
             }
         }
@@ -2065,6 +2097,7 @@ mod tests {
     use super::*;
     fn input(text: &str) -> MessageDispatch {
         MessageDispatch {
+            delegated_completion: None,
             source_plan_ref: None,
             created_by: CreatedBy::User,
             creation_source: CreationSource::Desktop,

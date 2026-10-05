@@ -70,6 +70,7 @@ pub enum RowKind {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct WorkItem {
     pub id: String,
+    pub child_thread_id: Option<String>,
     pub title: String,
     pub detail: String,
     pub status: String,
@@ -206,7 +207,184 @@ pub struct ComposerView {
 }
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct AgentRow {
+    pub id: String,
+    pub child_thread_id: Option<String>,
+    pub title: String,
+    pub detail: String,
+    pub metadata: String,
+}
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct AgentRoster {
+    pub rows: Vec<AgentRow>,
+    pub pill_label: Option<String>,
+    pub accessibility_label: Option<String>,
+}
+fn format_duration(ms: u64) -> String {
+    if ms < 1000 {
+        return format!("{}ms", ms.max(1));
+    }
+    if ms < 10000 {
+        let tenths = (ms + 50) / 100;
+        return if tenths >= 100 {
+            "10s".into()
+        } else {
+            format!("{}.{:01}s", tenths / 10, tenths % 10)
+        };
+    }
+    let seconds = (ms + 500) / 1000;
+    if ms < 60000 {
+        return format!("{seconds}s");
+    }
+    let mut parts = vec![];
+    if seconds >= 3600 {
+        parts.push(format!("{}h", seconds / 3600));
+    }
+    if seconds % 3600 >= 60 {
+        parts.push(format!("{}m", seconds % 3600 / 60));
+    }
+    if !seconds.is_multiple_of(60) {
+        parts.push(format!("{}s", seconds % 60));
+    }
+    parts.join(" ")
+}
+pub fn agent_roster(runs: &[Run], subagents: &[Subagent], now: &Timestamp) -> AgentRoster {
+    let active = runs
+        .iter()
+        .filter(|r| r.status.is_blocking())
+        .max_by_key(|r| r.ordinal);
+    let Some(latest) = subagents.iter().max_by_key(|s| s.updated_at.as_str()) else {
+        return Default::default();
+    };
+    let run_id = active.map(|r| &r.id).or(latest.run_id.as_ref());
+    let mut tasks: Vec<_> = subagents
+        .iter()
+        .filter(|s| s.run_id.as_ref() == run_id)
+        .collect();
+    tasks.sort_by(|a, b| {
+        a.started_at
+            .as_ref()
+            .unwrap_or(&a.updated_at)
+            .as_str()
+            .cmp(b.started_at.as_ref().unwrap_or(&b.updated_at).as_str())
+            .then(a.id.cmp(&b.id))
+    });
+    let live = tasks
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.status,
+                NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
+            )
+        })
+        .count();
+    let total = tasks.len();
+    let (pill_label, accessibility_label) = if total == 0 || active.is_none() && live == 0 {
+        (None, None)
+    } else if live > 0 {
+        (
+            Some(format!("{live}/{total}")),
+            Some(format!("{live} of {total} agents working")),
+        )
+    } else {
+        (
+            Some(format!("{total} done")),
+            Some(format!(
+                "{total} {} done",
+                if total == 1 { "agent" } else { "agents" }
+            )),
+        )
+    };
+    let rows = tasks
+        .into_iter()
+        .map(|s| {
+            let status = match s.status {
+                NodeStatus::Pending | NodeStatus::Running => "Working",
+                NodeStatus::Waiting => "Waiting",
+                NodeStatus::Idle => "Idle",
+                NodeStatus::Completed => "Completed",
+                NodeStatus::Failed => "Failed",
+                NodeStatus::Cancelled => "Cancelled",
+                _ => "Interrupted",
+            };
+            let terminal = matches!(
+                s.status,
+                NodeStatus::Completed
+                    | NodeStatus::Failed
+                    | NodeStatus::Cancelled
+                    | NodeStatus::Interrupted
+            );
+            let detail = if terminal {
+                s.result.as_ref().or(s.progress.as_ref())
+            } else {
+                s.progress.as_ref().or(s.result.as_ref())
+            }
+            .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+            let detail = if detail.chars().count() > 280 {
+                format!(
+                    "{}…",
+                    detail.chars().take(280).collect::<String>().trim_end()
+                )
+            } else {
+                detail
+            };
+            let title = s
+                .title
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(&s.prompt)
+                .trim();
+            let title = if title.is_empty() {
+                "Subagent".into()
+            } else if title.chars().count() > 80 {
+                format!("{}...", title.chars().take(77).collect::<String>())
+            } else {
+                title.to_owned()
+            };
+            let title = title
+                .strip_prefix("Subagent: ")
+                .unwrap_or(&title)
+                .to_owned();
+            let live = matches!(
+                s.status,
+                NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
+            );
+            let elapsed = s
+                .started_at
+                .as_ref()
+                .zip(if live {
+                    Some(now)
+                } else {
+                    s.completed_at.as_ref()
+                })
+                .map(|(start, end)| format_duration((end.millis() - start.millis()).max(0) as u64));
+            let model = s.model.as_deref().unwrap_or("Not reported");
+            let metadata = format!(
+                "{model} · {status}{}",
+                elapsed.map(|s| format!(" · {s}")).unwrap_or_default()
+            );
+            AgentRow {
+                id: s.id.to_string(),
+                child_thread_id: s.child_thread_id.as_ref().map(ToString::to_string),
+                title,
+                detail,
+                metadata,
+            }
+        })
+        .collect();
+    AgentRoster {
+        rows,
+        pill_label,
+        accessibility_label,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ConversationView {
+    pub agents: AgentRoster,
     pub thread_id: Option<String>,
     pub title: String,
     pub project: String,
@@ -802,12 +980,19 @@ pub fn timeline(projection: &ThreadProjection) -> Vec<TimelineRow> {
                 let (title, text) = detail(&item);
                 let work = WorkItem {
                     id: item.id.to_string(),
-                    title,
+                    child_thread_id: match &item.body {
+                        TurnItemBody::Subagent {
+                            child_thread_id, ..
+                        } => child_thread_id.as_ref().map(ToString::to_string),
+                        _ => None,
+                    },
+                    title: item.title.clone().unwrap_or(title),
                     detail: text,
                     status: row.status.clone(),
                     kind: match &item.body {
                         TurnItemBody::Reasoning { .. } => "reasoning",
                         TurnItemBody::CommandExecution { .. } => "command",
+                        TurnItemBody::Subagent { .. } => "subagent",
                         _ => "tool",
                     }
                     .into(),
@@ -886,15 +1071,9 @@ pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
     let can_restart = live_turn
         && !maintenance
         && turns.is_some_and(|t| t.supports_steering_by_interrupt_restart);
-    let mut queued: Vec<_> = projection
-        .map(|p| {
-            p.runs
-                .iter()
-                .filter(|r| r.status == RunStatus::Queued)
-                .collect()
-        })
+    let queued = projection
+        .map(|p| orchestration::decider::queued_runs(&p.runs, &p.messages))
         .unwrap_or_default();
-    queued.sort_by_key(|r| r.queue_position);
     let queue = queued
         .iter()
         .map(|r| QueueRow {
@@ -1014,6 +1193,9 @@ pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
         .into_iter()
         .partition(|row| matches!(row.kind, RowKind::Approval | RowKind::Question));
     ConversationView {
+        agents: projection
+            .map(|p| agent_roster(&p.runs, &p.subagents, now))
+            .unwrap_or_default(),
         requests,
         thread_id: snapshot.selected_thread.as_ref().map(ToString::to_string),
         title: thread
@@ -1595,6 +1777,47 @@ mod review_presentation_tests {
         assert!(!snapshot_is_newer(10, 9));
         assert!(!snapshot_is_newer(10, 10));
         assert!(snapshot_is_newer(10, 11));
+    }
+    #[test]
+    fn agent_roster_uses_the_current_turn_and_hides_a_settled_pill() {
+        use crate::test_support::{now, projection};
+        let p = projection();
+        let mut task = Subagent {
+            id: NodeId::new("agent").unwrap(),
+            thread_id: p.thread.id.clone(),
+            run_id: None,
+            parent_node_id: NodeId::new("root").unwrap(),
+            origin: SubagentOrigin::AppOwned,
+            created_by: CreatedBy::Agent,
+            driver: Driver::Codex,
+            provider_instance_id: p.thread.provider_instance_id.clone(),
+            provider_thread_id: None,
+            child_thread_id: Some(ThreadId::new("child").unwrap()),
+            native_task_ref: None,
+            prompt: "Inspect changes".into(),
+            title: None,
+            model: Some("model".into()),
+            completion_wake: CompletionWake::Always,
+            completion_delivery: None,
+            status: NodeStatus::Running,
+            progress: Some("Inspecting   tests".into()),
+            result: Some("Older result".into()),
+            started_at: Some(now()),
+            completed_at: None,
+            updated_at: now(),
+        };
+        let live = agent_roster(&[], &[task.clone()], &now());
+        assert_eq!(live.pill_label.as_deref(), Some("1/1"));
+        assert_eq!(live.rows[0].detail, "Inspecting tests");
+        assert_eq!(live.rows[0].child_thread_id.as_deref(), Some("child"));
+        task.status = NodeStatus::Completed;
+        let settled = agent_roster(&[], &[task.clone()], &now());
+        assert!(settled.pill_label.is_none());
+        assert_eq!(settled.rows[0].detail, "Older result");
+        task.status = NodeStatus::Idle;
+        let idle = agent_roster(&[], &[task], &now());
+        assert!(idle.pill_label.is_none());
+        assert_eq!(idle.rows[0].metadata, "model · Idle");
     }
     #[test]
     fn runtime_labels_match_t3() {

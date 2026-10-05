@@ -67,6 +67,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
     val conversation = model.conversation
     val list = rememberLazyListState()
     var queue by remember { mutableStateOf(false) }
+    var agents by remember(conversation.threadId) { mutableStateOf(false) }
     var actions by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf(false) }
     var title by remember { mutableStateOf("") }
@@ -149,6 +150,14 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
                             },
                         )
                     }
+                    if (conversation.agents.rows.isNotEmpty())
+                        DropdownMenuItem(
+                            text = { Text("Agents") },
+                            onClick = {
+                                actions = false
+                                agents = true
+                            },
+                        )
                     HorizontalDivider()
                     listOf("Terminal", "Files", "Diff", "Browser").forEach { tool ->
                         DropdownMenuItem(
@@ -182,7 +191,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
                 items(conversation.requests, key = { it.id }) { request -> RequestCard(model, request) }
             }
         }
-        ThreadComposer(model) { queue = true }
+        ThreadComposer(model, queue = { queue = true }, agents = { agents = true })
     }
     if (queue) QueueSheet(model) { queue = false }
     if (rename)
@@ -202,6 +211,35 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
             },
             dismissButton = { TextButton(onClick = { rename = false }) { Text("Cancel") } },
         )
+    if (agents)
+        ModalBottomSheet(onDismissRequest = { agents = false }, containerColor = T3.color("canvas")) {
+            Text("Agents", Modifier.padding(horizontal = 20.dp), style = MaterialTheme.typography.titleMedium)
+            LazyColumn(contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp)) {
+                items(conversation.agents.rows, key = { it.id }) { agent ->
+                    TextButton(
+                        enabled = agent.childThreadId != null,
+                        onClick = {
+                            agent.childThreadId?.let {
+                                agents = false
+                                model.perform(Intent.OpenThread(it))
+                            }
+                        },
+                    ) {
+                        Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                            Text(agent.title, style = MaterialTheme.typography.labelLarge)
+                            Text(
+                                agent.metadata,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = T3.color("textMuted"),
+                            )
+                            if (agent.detail.isNotEmpty())
+                                Text(agent.detail, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    HorizontalDivider()
+                }
+            }
+        }
     when (tools) {
         "Terminal" -> key(model.profileId) { TerminalDialog(model.snapshot, model::perform) { tools = null } }
         "Files",
@@ -264,6 +302,11 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
                                             style = MaterialTheme.typography.bodySmall,
                                         )
                                     }
+                                work.childThreadId?.let { id ->
+                                    TextButton(onClick = { model.perform(Intent.OpenThread(id)) }) {
+                                        Text("Open subagent thread")
+                                    }
+                                }
                                 Text(
                                     work.status,
                                     style = MaterialTheme.typography.labelSmall,
@@ -309,7 +352,7 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
 @Composable
 // Declarative native layout; the conversation decisions are supplied by core.
 @Suppress("LongMethod", "CyclomaticComplexMethod")
-private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit) {
+private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit, agents: () -> Unit) {
     val composer = model.conversation.composer
     val draft = model.snapshot.draft()
     val choices = model.snapshot.modelChoices()
@@ -325,6 +368,7 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit) {
         Modifier.fillMaxWidth().imePadding().padding(horizontal = 14.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        model.conversation.agents.pillLabel?.let { label -> TextButton(onClick = agents) { Text("Agents $label") } }
         if (composer.queueCount > 0u)
             TextButton(onClick = queue) {
                 Text(

@@ -14,6 +14,14 @@ async fn main() {
         Err(error) => error.exit(),
     };
 
+    if let Some(command_line::Mode::AgentMcp { address }) = &config.mode {
+        if let Err(error) = host_daemon::agent_tools::serve(*address).await {
+            eprintln!("BEX orchestration bridge: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if let Some(command_line::Mode::BrowserMcp { socket, thread }) = &config.mode {
         if let Err(error) = host_daemon::browser::mcp::serve(socket, thread).await {
             eprintln!("BEX browser bridge: {error}");

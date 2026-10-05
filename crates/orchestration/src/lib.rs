@@ -5,6 +5,7 @@ pub mod adapter;
 pub mod checkpoint;
 pub mod contracts;
 pub mod decider;
+pub mod delegation;
 pub mod projector;
 #[cfg(feature = "runtime")]
 pub mod store;

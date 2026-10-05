@@ -45,6 +45,7 @@ pub fn send(id: &str, mode: DispatchMode) -> Command {
     command(
         id,
         CommandBody::MessageDispatch(MessageDispatch {
+            delegated_completion: None,
             source_plan_ref: None,
             created_by: CreatedBy::User,
             creation_source: CreationSource::Desktop,

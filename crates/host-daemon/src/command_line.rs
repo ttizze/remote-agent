@@ -51,6 +51,11 @@ pub(crate) enum Mode {
     /// Revoke a paired device and close its active connections.
     Revoke { node_id: String },
     #[command(hide = true)]
+    AgentMcp {
+        #[arg(long)]
+        address: std::net::SocketAddr,
+    },
+    #[command(hide = true)]
     BrowserMcp {
         #[arg(long)]
         socket: PathBuf,

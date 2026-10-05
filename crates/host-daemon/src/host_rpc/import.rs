@@ -602,6 +602,7 @@ fn events(transcript: &Transcript, project_id: ProjectId) -> Vec<DomainEvent> {
             CreatedBy::Agent
         };
         let message = ConversationMessage {
+            delegated_completion: None,
             created_by,
             creation_source: CreationSource::Server,
             id: message_id.clone(),
@@ -852,6 +853,7 @@ mod tests {
             command_id: CommandId::new("continue").unwrap(),
             thread_id: thread_id.clone(),
             body: CommandBody::MessageDispatch(MessageDispatch {
+                delegated_completion: None,
                 source_plan_ref: None,
                 created_by: CreatedBy::User,
                 creation_source: CreationSource::Desktop,

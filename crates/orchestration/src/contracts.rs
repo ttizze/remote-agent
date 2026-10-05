@@ -343,6 +343,7 @@ pub enum WorkspaceStrategy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Run {
+    pub delegated_completion: Option<DelegatedCompletionCohort>,
     pub id: RunId,
     pub thread_id: ThreadId,
     pub ordinal: u64,
@@ -362,6 +363,49 @@ pub struct Run {
     pub context_handoff_id: Option<ContextHandoffId>,
     pub source_plan_ref: Option<SourcePlanRef>,
     pub workspace_preparation: Option<WorkspaceStrategy>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegatedDeliveryState {
+    Pending,
+    Claimed,
+    Acknowledged,
+    Delivered,
+    Disposed,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegatedTaskDelivery {
+    pub state: DelegatedDeliveryState,
+    pub observed_by_run_id: Option<RunId>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CohortDisposition {
+    Open,
+    Stopped,
+    Disposed,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegatedCompletion {
+    pub parent_run_id: RunId,
+    pub generation: u64,
+    pub task_ids: Vec<NodeId>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegatedDelivery {
+    pub generation: u64,
+    pub message_id: MessageId,
+    pub task_ids: Vec<NodeId>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegatedCompletionCohort {
+    pub disposition: CohortDisposition,
+    pub next_generation: u64,
+    pub delivery: Option<DelegatedDelivery>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -421,6 +465,7 @@ pub struct Subagent {
     pub title: Option<String>,
     pub model: Option<String>,
     pub completion_wake: CompletionWake,
+    pub completion_delivery: Option<DelegatedTaskDelivery>,
     pub status: NodeStatus,
     pub progress: Option<String>,
     pub result: Option<String>,
@@ -583,6 +628,7 @@ pub enum ContextRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationMessage {
+    pub delegated_completion: Option<Box<DelegatedCompletion>>,
     pub created_by: CreatedBy,
     pub creation_source: CreationSource,
     pub id: MessageId,
@@ -1085,6 +1131,22 @@ pub struct Command {
     pub thread_id: ThreadId,
     pub body: CommandBody,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DelegatedTaskRequest {
+    pub parent_run_id: RunId,
+    pub parent_node_id: NodeId,
+    pub task: String,
+    pub title: Option<String>,
+    pub model_selection: ModelSelection,
+    pub runtime_mode: RuntimeMode,
+    pub interaction_mode: InteractionMode,
+    pub completion_wake: CompletionWake,
+    pub created_by: CreatedBy,
+    pub creation_source: CreationSource,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CommandBody {
     #[serde(rename = "thread.create")]
@@ -1205,12 +1267,29 @@ pub enum CommandBody {
         checkpoint_id: CheckpointId,
         restore_files: bool,
     },
+    #[serde(rename = "delegated_task.request")]
+    DelegatedTaskRequest(Box<DelegatedTaskRequest>),
+    #[serde(rename = "delegated_task.wake-policy")]
+    DelegatedTaskWakePolicy {
+        task_id: NodeId,
+        completion_wake: CompletionWake,
+    },
+    #[serde(rename = "delegated_task.completion-delivery.acknowledge")]
+    DelegatedTaskAcknowledge {
+        task_id: NodeId,
+        observed_by_run_id: Option<RunId>,
+    },
+    #[serde(rename = "delegated_task.completion-delivery.dispose")]
+    DelegatedTaskDispose { task_id: NodeId },
+    #[serde(rename = "notification.delivery.accept")]
+    NotificationDeliveryAccept { message_id: MessageId },
     #[serde(rename = "thread.user-input.dismiss")]
     ThreadUserInputDismiss { request_id: RuntimeRequestId },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageDispatch {
+    pub delegated_completion: Option<Box<DelegatedCompletion>>,
     pub source_plan_ref: Option<SourcePlanRef>,
     pub created_by: CreatedBy,
     pub creation_source: CreationSource,
