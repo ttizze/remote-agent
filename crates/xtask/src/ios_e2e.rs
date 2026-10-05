@@ -141,7 +141,8 @@ fn needs_media_fixtures(tests: &[String]) -> bool {
     })
 }
 
-fn runtime(runtimes: &Value) -> Result<String> {
+/// Select the newest stable iOS 26 runtime: its identifier and root file system.
+fn runtime(runtimes: &Value) -> Result<(String, PathBuf)> {
     let mut selected = None;
     for entry in runtimes["runtimes"]
         .as_array()
@@ -161,16 +162,18 @@ fn runtime(runtimes: &Value) -> Result<String> {
         let identifier = entry["identifier"]
             .as_str()
             .ok_or("missing Simulator runtime identifier")?;
+        let root = entry["runtimeRoot"]
+            .as_str()
+            .ok_or("missing Simulator runtime root")?;
         if selected
             .as_ref()
-            .is_none_or(|(current, _)| &version > current)
+            .is_none_or(|(current, _, _)| &version > current)
         {
-            selected = Some((version, identifier.to_owned()));
+            selected = Some((version, identifier.to_owned(), PathBuf::from(root)));
         }
     }
-    Ok(selected
-        .ok_or("Install a stable iOS 26 Simulator runtime")?
-        .1)
+    let (_, identifier, root) = selected.ok_or("Install a stable iOS 26 Simulator runtime")?;
+    Ok((identifier, root))
 }
 
 use crate::{
@@ -196,82 +199,78 @@ const SIMULATOR_DEVICE_TYPE: &str = "com.apple.CoreSimulator.SimDeviceType.iPhon
 /// first-boot work compresses memory until Host replies take 10-20 seconds.
 /// Bex uses only AVFoundation, Photos and QuickLook, so stop the system
 /// services for widgets, mail, maps, watch, health, Siri, Spotlight and stores.
+/// Paths are relative to the runtime root; one `launchctl bootout` takes them all.
 const IDLE_SIMULATOR_SERVICES: &[&str] = &[
-    "com.apple.chronod",
-    "com.apple.ScreenTimeAgent",
-    "com.apple.weatherd",
-    "com.apple.mobiletimerd",
-    "com.apple.newsd",
-    "com.apple.email.maild",
-    "com.apple.icloudmailagent",
-    "com.apple.remindd",
-    "com.apple.eventkitsyncd",
-    "com.apple.addressbooksyncd",
-    "com.apple.contacts.postersyncd",
-    "com.apple.dataaccess.dataaccessd",
-    "com.apple.Maps.mapssyncd",
-    "com.apple.navd",
-    "com.apple.nanomapscd",
-    "com.apple.geoanalyticsd",
-    "com.apple.MapKit.SnapshotService",
-    "com.apple.findmy.findmylocated",
-    "com.apple.routined",
-    "com.apple.nanoappregistryd",
-    "com.apple.nanoprefsyncd.2",
-    "com.apple.nanosystemsettingsd",
-    "com.apple.nanotimekitcompaniond",
-    "com.apple.wcd",
-    "com.apple.companionappd",
-    "com.apple.appconduitd",
-    "com.apple.NPKCompanionAgent",
-    "com.apple.brook.brookcompaniond",
-    "com.apple.healthd",
-    "com.apple.healthappd",
-    "com.apple.fitcore",
-    "com.apple.fitnesscoachingd",
-    "com.apple.fitnessintelligenced",
-    "com.apple.activityawardsd",
-    "com.apple.activitysharingd",
-    "com.apple.sleepd",
-    "com.apple.assistantd",
-    "com.apple.assistant_service",
-    "com.apple.assistant_cdmd",
-    "com.apple.siri.context.service",
-    "com.apple.siriactionsd",
-    "com.apple.siriinferenced",
-    "com.apple.siriknowledged",
-    "com.apple.sirittsd",
-    "com.apple.generativeexperiencesd",
-    "com.apple.intelligenceplatformd",
-    "com.apple.modelcatalogd",
-    "com.apple.modelmanagerd",
-    "com.apple.textunderstandingd",
-    "com.apple.translationd",
-    "com.apple.voicebankingd",
-    "com.apple.suggestd",
-    "com.apple.spotlightknowledged.updater",
-    "com.apple.searchd",
-    "com.apple.parsecd",
-    "com.apple.parsec-fbf",
-    "com.apple.photoanalysisd",
-    "com.apple.mediaanalysisd",
-    "com.apple.itunescloudd",
-    "com.apple.itunesstored",
-    "com.apple.appstored",
-    "com.apple.amsengagementd",
-    "com.apple.ap.promotedcontentd",
-    "com.apple.ap.adprivacyd",
-    "com.apple.tvremoted",
-    "com.apple.triald",
-    "com.apple.homed",
-    "com.apple.financed",
-    "com.apple.passd",
-    "com.apple.SafariBookmarksSyncAgent",
-    "com.apple.WebBookmarks.webbookmarksd",
-    "com.apple.GameController.gamecontrollerd",
-    "com.apple.avatarsd",
-    "com.apple.familycircled",
-    "com.apple.askpermissiond",
+    "System/Library/LaunchDaemons/com.apple.GameController.gamecontrollerd.plist",
+    "System/Library/LaunchDaemons/com.apple.Maps.mapssyncd.plist",
+    "System/Library/LaunchDaemons/com.apple.SafariBookmarksSyncAgent.plist",
+    "System/Library/LaunchDaemons/com.apple.ScreenTimeAgent.plist",
+    "System/Library/LaunchDaemons/com.apple.WebBookmarks.webbookmarksd.plist",
+    "System/Library/LaunchDaemons/com.apple.activityawardsd.plist",
+    "System/Library/LaunchDaemons/com.apple.activitysharingd.plist",
+    "System/Library/LaunchDaemons/com.apple.amsengagementd.plist",
+    "System/Library/LaunchDaemons/com.apple.ap.adprivacyd.plist",
+    "System/Library/LaunchDaemons/com.apple.ap.promotedcontentd.plist",
+    "System/Library/LaunchDaemons/com.apple.appstored.plist",
+    "System/Library/LaunchDaemons/com.apple.askpermissiond.plist",
+    "System/Library/LaunchDaemons/com.apple.assistant_cdmd.plist",
+    "System/Library/LaunchDaemons/com.apple.assistant_service.plist",
+    "System/Library/LaunchDaemons/com.apple.assistantd.plist",
+    "System/Library/LaunchDaemons/com.apple.avatarsd.plist",
+    "System/Library/LaunchDaemons/com.apple.chronod.plist",
+    "System/Library/LaunchDaemons/com.apple.contacts.postersyncd.plist",
+    "System/Library/LaunchDaemons/com.apple.dataaccess.dataaccessd.plist",
+    "System/Library/LaunchDaemons/com.apple.email.maild.plist",
+    "System/Library/LaunchDaemons/com.apple.familycircled.plist",
+    "System/Library/LaunchDaemons/com.apple.financed.plist",
+    "System/Library/LaunchDaemons/com.apple.findmy.findmylocated.plist",
+    "System/Library/LaunchDaemons/com.apple.fitcore.plist",
+    "System/Library/LaunchDaemons/com.apple.fitnesscoachingd.plist",
+    "System/Library/LaunchDaemons/com.apple.fitnessintelligenced.plist",
+    "System/Library/LaunchDaemons/com.apple.generativeexperiencesd.plist",
+    "System/Library/LaunchDaemons/com.apple.geoanalyticsd.plist",
+    "System/Library/LaunchDaemons/com.apple.healthappd.plist",
+    "System/Library/LaunchDaemons/com.apple.healthd.plist",
+    "System/Library/LaunchDaemons/com.apple.homed.plist",
+    "System/Library/LaunchDaemons/com.apple.icloudmailagent.plist",
+    "System/Library/LaunchDaemons/com.apple.intelligenceplatformd.plist",
+    "System/Library/LaunchDaemons/com.apple.itunescloudd.plist",
+    "System/Library/LaunchDaemons/com.apple.itunesstored.plist",
+    "System/Library/LaunchDaemons/com.apple.mediaanalysisd.plist",
+    "System/Library/LaunchDaemons/com.apple.mobiletimerd.plist",
+    "System/Library/LaunchDaemons/com.apple.modelcatalogd.plist",
+    "System/Library/LaunchDaemons/com.apple.modelmanagerd.plist",
+    "System/Library/LaunchDaemons/com.apple.nanotimekitcompaniond.plist",
+    "System/Library/LaunchDaemons/com.apple.navd.plist",
+    "System/Library/LaunchDaemons/com.apple.newsd.plist",
+    "System/Library/LaunchDaemons/com.apple.parsec-fbf.plist",
+    "System/Library/LaunchDaemons/com.apple.parsecd.plist",
+    "System/Library/LaunchDaemons/com.apple.passd.plist",
+    "System/Library/LaunchDaemons/com.apple.photoanalysisd.plist",
+    "System/Library/LaunchDaemons/com.apple.remindd.plist",
+    "System/Library/LaunchDaemons/com.apple.routined.plist",
+    "System/Library/LaunchDaemons/com.apple.searchd.plist",
+    "System/Library/LaunchDaemons/com.apple.siriactionsd.plist",
+    "System/Library/LaunchDaemons/com.apple.siriinferenced.plist",
+    "System/Library/LaunchDaemons/com.apple.siriknowledged.plist",
+    "System/Library/LaunchDaemons/com.apple.sirittsd.plist",
+    "System/Library/LaunchDaemons/com.apple.sleepd.plist",
+    "System/Library/LaunchDaemons/com.apple.spotlightknowledged.updater.plist",
+    "System/Library/LaunchDaemons/com.apple.suggestd.plist",
+    "System/Library/LaunchDaemons/com.apple.textunderstandingd.plist",
+    "System/Library/LaunchDaemons/com.apple.translationd.plist",
+    "System/Library/LaunchDaemons/com.apple.triald.plist",
+    "System/Library/LaunchDaemons/com.apple.tvremoted.plist",
+    "System/Library/LaunchDaemons/com.apple.voicebankingd.plist",
+    "System/Library/LaunchDaemons/com.apple.wcd.plist",
+    "System/Library/LaunchDaemons/com.apple.weatherd.plist",
+    "System/Library/NanoLaunchDaemons/com.apple.addressbooksyncd.plist",
+    "System/Library/NanoLaunchDaemons/com.apple.appconduitd.plist",
+    "System/Library/NanoLaunchDaemons/com.apple.brook.brookcompaniond.plist",
+    "System/Library/NanoLaunchDaemons/com.apple.companionappd.plist",
+    "System/Library/NanoLaunchDaemons/com.apple.eventkitsyncd.plist",
+    "System/Library/NanoLaunchDaemons/com.apple.nanoappregistryd.plist",
+    "System/Library/NanoLaunchDaemons/com.apple.nanomapscd.plist",
 ];
 /// System apps that the first boot opens in the background.
 const IDLE_SIMULATOR_APPS: &[&str] = &[
@@ -280,41 +279,56 @@ const IDLE_SIMULATOR_APPS: &[&str] = &[
     "com.apple.family",
 ];
 
-/// Stop unused system services; services absent from a runtime are skipped.
+fn service_label(path: &str) -> &str {
+    path.rsplit('/')
+        .next()
+        .and_then(|name| name.strip_suffix(".plist"))
+        .unwrap_or(path)
+}
+
+/// Stop unused system services and return how many of the runtime's services stopped.
 async fn quiet_simulator(
     simulator: &str,
+    runtime_root: &Path,
     cwd: &Path,
     log: &File,
     cancel: &watch::Receiver<bool>,
-) -> Result<usize> {
-    let timeout = Duration::from_secs(30);
-    let mut stopped = 0;
-    for service in IDLE_SIMULATOR_SERVICES {
-        let target = format!("system/{service}");
-        let arguments = args![
-            "xcrun",
-            "simctl",
-            "spawn",
-            simulator,
-            "launchctl",
-            "bootout",
-            target
-        ];
-        if supervision::run(&arguments, cwd, Io::Log(log), cancel, timeout)
-            .await
-            .is_ok()
-        {
-            stopped += 1;
-        }
-    }
+) -> Result<(usize, usize)> {
+    let timeout = Duration::from_secs(60);
+    let services = IDLE_SIMULATOR_SERVICES
+        .iter()
+        .filter(|path| runtime_root.join(path).is_file())
+        .collect::<Vec<_>>();
+    let mut arguments =
+        args![vec; "xcrun", "simctl", "spawn", simulator, "launchctl", "bootout", "system"];
+    arguments.extend(
+        services
+            .iter()
+            .map(|path| runtime_root.join(path).into_os_string()),
+    );
+    // Services that never started make bootout fail; the listing below checks the result.
+    let _ = supervision::run(&arguments, cwd, Io::Log(log), cancel, timeout).await;
     for app in IDLE_SIMULATOR_APPS {
         let arguments = args!["xcrun", "simctl", "terminate", simulator, app];
         let _ = supervision::run(&arguments, cwd, Io::Log(log), cancel, timeout).await;
     }
-    if *cancel.borrow() {
-        return Err(supervision::interrupted());
-    }
-    Ok(stopped)
+    let listed = supervision::run(
+        &args!["xcrun", "simctl", "spawn", simulator, "launchctl", "list"],
+        cwd,
+        Io::Capture,
+        cancel,
+        timeout,
+    )
+    .await?;
+    let listed = std::str::from_utf8(&listed.stdout)?
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(2))
+        .collect::<BTreeSet<_>>();
+    let running = services
+        .iter()
+        .filter(|path| listed.contains(service_label(path)))
+        .count();
+    Ok((services.len() - running, services.len()))
 }
 
 fn simulator_app_pid(processes: &str, simulator: &str) -> Option<u32> {
@@ -568,6 +582,7 @@ async fn worker(
     target: PathBuf,
     source: PathBuf,
     simulator_source: SimulatorSource,
+    runtime_root: PathBuf,
     prefix: PathBuf,
     without_codex: bool,
     driver: TestDriver,
@@ -650,8 +665,8 @@ async fn worker(
                 supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT).await
                     .map_err(|error| format!("{label}: {phase} failed: {error}"))?;
                 if phase == "bootstatus" {
-                    let stopped = quiet_simulator(simulator, &cwd, &log, &cancel).await?;
-                    println!("{label}: stopped {stopped}/{} unused system services", IDLE_SIMULATOR_SERVICES.len());
+                    let (stopped, present) = quiet_simulator(simulator, &runtime_root, &cwd, &log, &cancel).await?;
+                    println!("{label}: stopped {stopped}/{present} unused system services");
                 }
             }
             if tests.iter().any(|test| test == "testSimulatorCanAttachDownloadAndPrepareAIEdit") {
@@ -936,7 +951,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool, driver: TestDriver) ->
         SETUP_TIMEOUT,
     )
     .await?;
-    let runtime = runtime(&serde_json::from_slice(&runtimes.stdout)?)?;
+    let (runtime, runtime_root) = runtime(&serde_json::from_slice(&runtimes.stdout)?)?;
     println!("Preparing the iOS Simulator runtime");
     let template_started = Instant::now();
     // Hosted CI devices disappear with the runner. Migrate the worker's own
@@ -979,6 +994,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool, driver: TestDriver) ->
                 target.clone(),
                 runs[0].clone(),
                 simulator_source.clone(),
+                runtime_root.clone(),
                 records.join(label),
                 without_codex,
                 driver,
@@ -1173,8 +1189,8 @@ mod tests {
 
     #[test]
     fn newest_available_ios_runtime_is_selected_numerically() {
-        let entry = |version, platform, available| json!({"version": version, "platform": platform, "isAvailable": available, "identifier": version});
-        assert_eq!(runtime(&json!({"runtimes": [entry("26.9", "iOS", true), entry("26.10", "iOS", true), entry("26.11", "iOS", false), entry("27.1", "iOS", true), entry("26.12", "tvOS", true)]})).unwrap(), "26.10");
+        let entry = |version: &str, platform, available| json!({"version": version, "platform": platform, "isAvailable": available, "identifier": version, "runtimeRoot": format!("/runtimes/{version}")});
+        assert_eq!(runtime(&json!({"runtimes": [entry("26.9", "iOS", true), entry("26.10", "iOS", true), entry("26.11", "iOS", false), entry("27.1", "iOS", true), entry("26.12", "tvOS", true)]})).unwrap(), ("26.10".to_owned(), PathBuf::from("/runtimes/26.10")));
         assert!(runtime(&json!({"runtimes": [entry("26.1", "iOS", false)]})).is_err());
     }
 
@@ -1199,8 +1215,17 @@ mod tests {
 
     #[test]
     fn quiet_simulator_keeps_services_used_by_bex_and_ui_tests() {
-        let services = IDLE_SIMULATOR_SERVICES.iter().collect::<BTreeSet<_>>();
+        let services = IDLE_SIMULATOR_SERVICES
+            .iter()
+            .map(|path| service_label(path))
+            .collect::<BTreeSet<_>>();
         assert_eq!(services.len(), IDLE_SIMULATOR_SERVICES.len());
+        // Each entry is a launchd plist under the runtime root, named by its label.
+        assert!(
+            IDLE_SIMULATOR_SERVICES.iter().all(|path| {
+                path.starts_with("System/Library/") && service_label(path) != *path
+            })
+        );
         for required in [
             "com.apple.SpringBoard",
             "com.apple.backboardd",
@@ -1214,10 +1239,7 @@ mod tests {
             "com.apple.mediaremoted",
             "com.apple.corespeechd",
         ] {
-            assert!(
-                !services.contains(&required),
-                "{required} must keep running"
-            );
+            assert!(!services.contains(required), "{required} must keep running");
         }
     }
 

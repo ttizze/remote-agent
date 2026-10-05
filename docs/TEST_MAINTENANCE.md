@@ -237,7 +237,8 @@ transfer server just to delete that check would reverse A14.
   first-boot work compressed about 7 GiB of memory and delayed Host replies by
   10-20 seconds. After boot, each isolated Simulator boots out the system
   services Bex and its tests do not use (widgets, mail, maps, watch, health,
-  Siri, Spotlight and stores), which halves its processes.
+  Siri, Spotlight and stores) with one `launchctl bootout`, which halves its
+  processes.
   The Simulator app, package dependencies and UI test runner build only arm64,
   matching the supported Apple Silicon test host rather than also compiling
   unused x86_64 test products.
