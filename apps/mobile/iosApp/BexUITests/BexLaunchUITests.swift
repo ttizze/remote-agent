@@ -37,14 +37,20 @@ final class BexLaunchUITests: XCTestCase {
     }
 
     @discardableResult
-    func simulatorFixture(_ path: String, expectedStatus: Int = 204, timeout: TimeInterval = 10,
-                          file: StaticString = #filePath, line: UInt = #line) throws -> Data {
+    func simulatorFixture(
+        _ path: String,
+        method: String = "POST",
+        expectedStatus: Int = 204,
+        timeout: TimeInterval = 10,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws -> Data {
         let pairingURL =
             try XCTUnwrap(try URL(string: XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
         var request = URLRequest(url: pairingURL.deletingLastPathComponent().appendingPathComponent(path))
-        request.httpMethod = "POST"
+        request.httpMethod = method
         request.timeoutInterval = timeout
-        let completed = expectation(description: "Fixture POST \(path)")
+        let completed = expectation(description: "Fixture \(method) \(path)")
         var body = Data()
         URLSession.shared.dataTask(with: request) { data, response, error in
             XCTAssertNil(error, file: file, line: line)
@@ -206,8 +212,7 @@ final class BexLaunchUITests: XCTestCase {
     }
 
     func simulatorPairingPayload() throws -> String {
-        let url = try XCTUnwrap(try URL(string: XCTUnwrap(ProcessInfo.processInfo.environment["BEX_PAIRING_URL"])))
-        let data = try Data(contentsOf: url)
+        let data = try simulatorFixture("pairing", method: "GET", expectedStatus: 200, timeout: 30)
         let payload = try XCTUnwrap(String(data: data, encoding: .utf8))
         guard !payload.isEmpty else { throw PairingPayloadError.invalidResponse }
         // XCTest typing can drop characters unavailable on the active keyboard.
