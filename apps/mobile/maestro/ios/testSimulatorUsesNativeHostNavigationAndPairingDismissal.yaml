@@ -13,6 +13,14 @@ name: testSimulatorUsesNativeHostNavigationAndPairingDismissal
     visible:
       id: pairing.cancel
     timeout: 10000
+- runFlow:
+    when:
+      visible: .*Ready for Apple Intelligence.*
+    commands:
+      - swipe:
+          start: 50%,13%
+          end: 50%,2%
+          duration: 300
 - swipe:
     start: 50%,13%
     end: 50%,90%

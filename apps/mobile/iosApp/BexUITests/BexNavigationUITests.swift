@@ -95,6 +95,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(addHost.waitForExistence(timeout: 10)); addHost.tap()
         let cancel = app.buttons["pairing.cancel"]
         XCTAssertTrue(cancel.waitForExistence(timeout: 10))
+        dismissSimulatorSetupNotification()
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.13))
             .press(forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)))
         XCTAssertTrue(addHost.waitForExistence(timeout: 10))
@@ -107,8 +108,7 @@ extension BexLaunchUITests {
             "profiles.add"
         )).firstMatch
         XCTAssertTrue(host.waitForExistence(timeout: 10))
-        XCTAssertTrue(host.label.contains("検証 Host"))
-        host.tap()
+        XCTAssertTrue(host.label.contains("検証 Host")); host.tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 15))
 
         app.buttons["tasks.hosts"].tap()
@@ -137,6 +137,14 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(
             format: "label BEGINSWITH %@", "検証 Host、"
         )).firstMatch.waitForExistence(timeout: 10))
+    }
+
+    private func dismissSimulatorSetupNotification() {
+        let banner = XCUIApplication(bundleIdentifier: "com.apple.springboard").descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Ready for Apple Intelligence")).firstMatch
+        if banner.exists {
+            banner.swipeUp()
+        }
     }
 
     func testSimulatorSearchesFromBottomBarAndCreatesInCollapsedProject() throws {

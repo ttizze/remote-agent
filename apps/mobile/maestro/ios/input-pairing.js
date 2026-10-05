@@ -12,9 +12,9 @@ if (REFRESH_PAIRING === "true") {
 if (!output.pairingInvitation) {
     throw new Error("A pairing invitation must be fetched before reuse");
 }
-const input = http.post("http://127.0.0.1:22087/inputText", {
+const input = http.post(BEX_IOS_DRIVER_URL + "/inputText", {
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: output.pairingInvitation })
+    body: JSON.stringify({ text: output.pairingInvitation, appIds: ["com.ttizze.b-codex"] })
 });
 if (input.status !== 200) {
     throw new Error("The iOS driver could not enter the pairing invitation");

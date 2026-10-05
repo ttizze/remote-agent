@@ -1,6 +1,12 @@
 name: iPhone driver comparison
 on:
   workflow_dispatch:
+    inputs:
+      driver:
+        description: Drivers to measure
+        type: choice
+        options: [both, xctest, maestro]
+        default: both
 permissions:
   contents: read
 concurrency:
@@ -45,11 +51,13 @@ jobs:
           key: ios-swift-xcode-26.6-${{ hashFiles('flake.lock', 'Cargo.lock', 'crates/agent-core/src/**', 'crates/agent-protocol/src/**', 'crates/xtask/src/ios_markdown.rs', 'scripts/build-agent*.sh', 'apps/mobile/iosApp/**') }}
           restore-keys: ios-swift-xcode-26.6-
       - name: Prepare the pinned Maestro CLI and validate the flow
+        if: inputs.driver != 'xctest'
         run: nix run .#maestro -- check-syntax apps/mobile/maestro/ios/testSimulatorUsesNativeHostNavigationAndPairingDismissal.yaml
       - name: Measure the maintained XCTest navigation and pairing case
+        if: inputs.driver != 'maestro'
         run: nix develop . --command bash scripts/ios-e2e.sh testSimulatorUsesNativeHostNavigationAndPairingDismissal
       - name: Measure the equivalent Maestro flow on a fresh Simulator and Host
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.driver != 'xctest' }}
         run: nix develop . --command just ios-maestro
       - name: Retain timings, commands, screenshots and test reports
         if: always()

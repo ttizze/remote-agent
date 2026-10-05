@@ -229,7 +229,15 @@ transfer server just to delete that check would reverse A14.
   The manual `iPhone driver comparison` workflow measures the maintained native
   navigation/pairing XCTest case and its Maestro flow on separate fresh
   Simulator/Host pairs. `just ios-maestro` selects only that comparison flow;
-  normal acceptance retains all 33 XCTest cases. Maestro 2.11.0 and Java 21 are
+  normal acceptance retains all 33 XCTest cases. The workflow's `driver` input
+  selects both drivers or one driver for focused
+  retries without repeating an unchanged baseline.
+  Each pair receives its own loopback driver port, passed to the CLI and flow
+  scripts together, so scripts reach the driver selected for their Simulator.
+  The navigation case dismisses the Simulator's one-time Apple Intelligence
+  notification when present before exercising the unchanged sheet-dismissal
+  gesture and absence assertions; that banner can cover the gesture's origin.
+  Maestro 2.11.0 and Java 21 are
   pinned through `nix run .#maestro`, with no hosted Maestro service. Reports
   require the exact selected flow names, successful status and no skipped or
   failed cases. Compare UI durations after subtracting each pair's setup;
