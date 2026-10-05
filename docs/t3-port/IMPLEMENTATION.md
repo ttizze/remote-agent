@@ -56,7 +56,7 @@ pixel・実機操作の受入確認はこのビルド検証に含めない。
 共有キャッシュの削除・書き換えは行っていない。
 
 - `scripts/dev-env.sh just unit-tests`: workspace 230件すべて通過、既存3件 skip。
-  standalone agent-peer の4つの CLI テスト群も通過。
+  standalone agent-peer の5つの CLI テスト群も通過。
 - workspace と agent-peer の全 target clippy `-D warnings`、両方の fmt、
   actionlint、`git diff --check` が通過。
 - CI が呼ぶ依存境界・build cleanup の2テストが通過。依存境界は共有
