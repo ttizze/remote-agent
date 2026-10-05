@@ -1,0 +1,428 @@
+[
+  {
+    "scenario": "claude_background_monitor_wake",
+    "driver": "claude",
+    "file": "claude_background_monitor_wake/claude_transcript.ndjson",
+    "sha256": "8313a981ab066743cded9437a125374a8e158cd7ab3e1d051d2bc05ad0cc287c"
+  },
+  {
+    "scenario": "claude_background_subagent_after_root",
+    "driver": "claude",
+    "file": "claude_background_subagent_after_root/claude_transcript.ndjson",
+    "sha256": "98a0c0ed452af2c094fab3a92770b49dbac843bb6760f4441438bda6fcb52015"
+  },
+  {
+    "scenario": "claude_background_subagent_lifecycle",
+    "driver": "claude",
+    "file": "claude_background_subagent_lifecycle/claude_transcript.ndjson",
+    "sha256": "a3cbb59e34553d0e8dac059a9e915b97439ee1a439ad350e3b7b2a9d90304cd3"
+  },
+  {
+    "scenario": "claude_background_task_after_root",
+    "driver": "claude",
+    "file": "claude_background_task_after_root/claude_transcript.ndjson",
+    "sha256": "776ff24964b413c573cf9b31019e80239faf3f59c24773a759e5dda0996e066f"
+  },
+  {
+    "scenario": "claude_background_task_interrupt",
+    "driver": "claude",
+    "file": "claude_background_task_interrupt/claude_transcript.ndjson",
+    "sha256": "9c81933e5f142bb252e2735ff52b4650c2682bd4c0e29aed3430bb2ae6737c9b"
+  },
+  {
+    "scenario": "claude_background_task_wake",
+    "driver": "claude",
+    "file": "claude_background_task_wake/claude_transcript.ndjson",
+    "sha256": "de18478a47148e80dbdacb401a310644c336db7a141c3bcec6a2ef60bce00c3d"
+  },
+  {
+    "scenario": "claude_background_wake_before_queued_prompt",
+    "driver": "claude",
+    "file": "claude_background_wake_before_queued_prompt/claude_transcript.ndjson",
+    "sha256": "4fb1d2a84ef87f7489977e0b81845596f7a54d1be773741c1bd240e6b6744607"
+  },
+  {
+    "scenario": "claude_background_wake_before_queued_prompt_no_echo",
+    "driver": "claude",
+    "file": "claude_background_wake_before_queued_prompt_no_echo/claude_transcript.ndjson",
+    "sha256": "b57cb85e602c47c901d1e2b4857150177aa81d3a5103a5420c8f8c0d230df5d5"
+  },
+  {
+    "scenario": "claude_compact_after_peer_turn",
+    "driver": "claude",
+    "file": "claude_compact_after_peer_turn/claude_transcript.ndjson",
+    "sha256": "5b50b037a6a3b4e3cc435696b13bfd81011edd7971399b40de8b92722547e559"
+  },
+  {
+    "scenario": "claude_compact_after_peer_turn_no_echo",
+    "driver": "claude",
+    "file": "claude_compact_after_peer_turn_no_echo/claude_transcript.ndjson",
+    "sha256": "6fdeaba93d6a765c7292d05f6ea70e90a2e43c7f339ff50ff3b3fbea1477ab88"
+  },
+  {
+    "scenario": "claude_compact_after_resume_wake",
+    "driver": "claude",
+    "file": "claude_compact_after_resume_wake/claude_transcript.ndjson",
+    "sha256": "b2c1f5491800d2fee3dded3f75bdf59eff1fefaca6264d99be98319324e1b200"
+  },
+  {
+    "scenario": "claude_idle_resume",
+    "driver": "claude",
+    "file": "claude_idle_resume/claude_transcript.ndjson",
+    "sha256": "76e17a8e5b8b6ae93b0d42a77d71536e391af2b12a7244c26e86b1529e16fd84"
+  },
+  {
+    "scenario": "claude_local_bash_task",
+    "driver": "claude",
+    "file": "claude_local_bash_task/claude_transcript.ndjson",
+    "sha256": "edde4ed0805057f90d53f8af1b4d2041b2aa60493aadf6dc9c120a2fbcbc4983"
+  },
+  {
+    "scenario": "claude_mcp_tool_presentation",
+    "driver": "claude",
+    "file": "claude_mcp_tool_presentation/claude_transcript.ndjson",
+    "sha256": "be2f65e66486cce5fda63e883c63a5d53f221f20a88d082b944c9fe2f8305cab"
+  },
+  {
+    "scenario": "claude_nested_background_subagent_wake",
+    "driver": "claude",
+    "file": "claude_nested_background_subagent_wake/claude_transcript.ndjson",
+    "sha256": "2ee8717d6b69acbc24b7f81d3a49183c505cedbc04f4a51cd8cda030842f334a"
+  },
+  {
+    "scenario": "claude_nested_subagent_model",
+    "driver": "claude",
+    "file": "claude_nested_subagent_model/claude_transcript.ndjson",
+    "sha256": "b1d3ef9535e85624968e09747ec64d1f5a2e7f7f77978d7aedc999b654b56305"
+  },
+  {
+    "scenario": "claude_result_is_error",
+    "driver": "claude",
+    "file": "claude_result_is_error/claude_transcript.ndjson",
+    "sha256": "a5cd69b7a1d5a93ef77c0a1c2ea24bd63408cd5b2ec663b8a3ca424cf472a8a4"
+  },
+  {
+    "scenario": "claude_subagent_resume_after_restart",
+    "driver": "claude",
+    "file": "claude_subagent_resume_after_restart/claude_transcript.ndjson",
+    "sha256": "c52ea7ab8bc0a727a8501b38897975d6c5e021d5acc18d008d4c0057d5852962"
+  },
+  {
+    "scenario": "delegated_task_status",
+    "driver": "codex",
+    "file": "delegated_task_status/codex_transcript.ndjson",
+    "sha256": "c53d40949d7b24383eabd12d0328129d587317bb14374c2d4fb0583e56d1365c"
+  },
+  {
+    "scenario": "message_steering",
+    "driver": "claude",
+    "file": "message_steering/claude_transcript.ndjson",
+    "sha256": "82335bd2e5783b10db90ee15afb74ed5aabbe9746d97878e53a1d5866b390fd6"
+  },
+  {
+    "scenario": "message_steering",
+    "driver": "codex",
+    "file": "message_steering/codex_transcript.ndjson",
+    "sha256": "4fa62a6108994d75157a7a41fb32b1c82c08edbb4c56147a9f6d457ab32f77be"
+  },
+  {
+    "scenario": "multi_turn",
+    "driver": "claude",
+    "file": "multi_turn/claude_transcript.ndjson",
+    "sha256": "19c7756bd7c76f96ef62c2d2b1fdfb63bb8f28e9be6ca51c709f8220188e31d0"
+  },
+  {
+    "scenario": "multi_turn",
+    "driver": "codex",
+    "file": "multi_turn/codex_transcript.ndjson",
+    "sha256": "2b5e7af6ddf46855f5da6e4686970c45aa20045443def2d5c777a2ece363a9eb"
+  },
+  {
+    "scenario": "multi_turn_restart",
+    "driver": "claude",
+    "file": "multi_turn_restart/claude_transcript.ndjson",
+    "sha256": "1003986f2a35e224d0c383779c71ce7456066e53886a85de5588bcf3c9c27e08"
+  },
+  {
+    "scenario": "plan_questions",
+    "driver": "codex",
+    "file": "plan_questions/codex_transcript.ndjson",
+    "sha256": "05dba29f0e22f9f2a339d55dee03c0cf1b0e22511cf40d6ffed612c86f01a39e"
+  },
+  {
+    "scenario": "proposed_plan",
+    "driver": "codex",
+    "file": "proposed_plan/codex_transcript.ndjson",
+    "sha256": "9fe7c911501a2c96efe2967520e18ac79d0c2c3d7a3d294a18f993317bebbaec"
+  },
+  {
+    "scenario": "provider_thread_resume",
+    "driver": "codex",
+    "file": "provider_thread_resume/codex_transcript.ndjson",
+    "sha256": "e4df2b5068fcbf9c48d8ee034fbaf663cc5e9548eafa1aa6e68e4433581dfeda"
+  },
+  {
+    "scenario": "queued_turn",
+    "driver": "claude",
+    "file": "queued_turn/claude_transcript.ndjson",
+    "sha256": "6129d454f3964a6d8175df4e7b46cf82fc67dbaa09a8412347d90c8d86077ccc"
+  },
+  {
+    "scenario": "queued_turn",
+    "driver": "codex",
+    "file": "queued_turn/codex_transcript.ndjson",
+    "sha256": "5bb730a348a7b86949b7031e929e87e01ca56aa52f047c1adcc1124d182fe8e4"
+  },
+  {
+    "scenario": "simple",
+    "driver": "claude",
+    "file": "simple/claude_transcript.ndjson",
+    "sha256": "9f91d2512a6042df4dba74b132cc99f31ded5f4d010ad3529269fb6ee2fd6a11"
+  },
+  {
+    "scenario": "simple",
+    "driver": "codex",
+    "file": "simple/codex_transcript.ndjson",
+    "sha256": "f4188c96133d551c5c9f704ae07fc014fd9fa87ceb1eac9a94660e38e70c4dcd"
+  },
+  {
+    "scenario": "subagent",
+    "driver": "claude",
+    "file": "subagent/claude_transcript.ndjson",
+    "sha256": "8d0ab6896db2e957cea2077735f742313ce4a747ad087636fda811c60a5cb6a0"
+  },
+  {
+    "scenario": "subagent",
+    "driver": "codex",
+    "file": "subagent/codex_transcript.ndjson",
+    "sha256": "4554c9dc19357f42707728d43e3a3000251aa3a79901a453a427aae71615cd59"
+  },
+  {
+    "scenario": "subagent_continue",
+    "driver": "codex",
+    "file": "subagent_continue/codex_transcript.ndjson",
+    "sha256": "0c3de4e6b631059602bcb9d833fea441eaa3bd62e4d562946ee681dcc04aff9a"
+  },
+  {
+    "scenario": "subagent_v2",
+    "driver": "codex",
+    "file": "subagent_v2/codex_transcript.ndjson",
+    "sha256": "6f3250e5f6cc3e0cc2edd791faced4fba8007ddbca96c2e86715f514de4188cc"
+  },
+  {
+    "scenario": "subagent_v2_approval",
+    "driver": "codex",
+    "file": "subagent_v2_approval/codex_transcript.ndjson",
+    "sha256": "16c95c6e81cc2519544a2b8350f184905ec5e42be258ee654e76de1e1ec1b484"
+  },
+  {
+    "scenario": "subagent_v2_nested",
+    "driver": "codex",
+    "file": "subagent_v2_nested/codex_transcript.ndjson",
+    "sha256": "985aafd1b41e4bfb651151fd0850cdb1e778a49ad37d6bf43446802062bacd36"
+  },
+  {
+    "scenario": "subagent_v2_nested_approval",
+    "driver": "codex",
+    "file": "subagent_v2_nested_approval/codex_transcript.ndjson",
+    "sha256": "abfeeb998c64fe72cced89685a85de371c68417b45245c1a2dadc8d807d29103"
+  },
+  {
+    "scenario": "thread_fork_native",
+    "driver": "claude",
+    "file": "thread_fork_native/claude_transcript.ndjson",
+    "sha256": "e83474d74e7538d81ef0d1555e1e1fa58dcca2971022d96335d5b4c12564b6d8"
+  },
+  {
+    "scenario": "thread_fork_native",
+    "driver": "codex",
+    "file": "thread_fork_native/codex_transcript.ndjson",
+    "sha256": "216f4014036dc7753adf8f0981b433ca8a51dae77df0a97f2f45aa66fd2bcfbf"
+  },
+  {
+    "scenario": "thread_fork_native_continue",
+    "driver": "claude",
+    "file": "thread_fork_native_continue/claude_transcript.ndjson",
+    "sha256": "89278856480ba6871ebcf0ac5fb0fd3c6de590087e0bc3cbb2595990bd7be451"
+  },
+  {
+    "scenario": "thread_fork_native_continue",
+    "driver": "codex",
+    "file": "thread_fork_native_continue/codex_transcript.ndjson",
+    "sha256": "87b81d487981683e150639925ca47b9304cdaac9b90b52d8b7a358fa72bbe8b4"
+  },
+  {
+    "scenario": "thread_fork_native_fork_local_rollback",
+    "driver": "claude",
+    "file": "thread_fork_native_fork_local_rollback/claude_transcript.ndjson",
+    "sha256": "3f7074b8f80112af7681229d50330d2dcf5aa1e35c9514cb129feb3213ae0362"
+  },
+  {
+    "scenario": "thread_fork_native_prior_turn",
+    "driver": "claude",
+    "file": "thread_fork_native_prior_turn/claude_transcript.ndjson",
+    "sha256": "15ed96f9368774051a1fe3249b72e1250927e1e5206e47561f640878409e9e66"
+  },
+  {
+    "scenario": "thread_fork_native_prior_turn",
+    "driver": "codex",
+    "file": "thread_fork_native_prior_turn/codex_transcript.ndjson",
+    "sha256": "0fe5a607a1e06531770fac7a30d5a559253ee1756bd5dc390187e8e6e1543d8d"
+  },
+  {
+    "scenario": "thread_fork_native_siblings",
+    "driver": "claude",
+    "file": "thread_fork_native_siblings/claude_transcript.ndjson",
+    "sha256": "62ce0b0050556a24cd8a9b580be2fe999553bf8d43d6c783a128e1e8d659dce0"
+  },
+  {
+    "scenario": "thread_fork_native_siblings",
+    "driver": "codex",
+    "file": "thread_fork_native_siblings/codex_transcript.ndjson",
+    "sha256": "264e7198f46687963e17b80c4a394fbe10d0c6cb75764737646e05a91bdad0ff"
+  },
+  {
+    "scenario": "thread_merge_back_continue",
+    "driver": "claude",
+    "file": "thread_merge_back_continue/claude_transcript.ndjson",
+    "sha256": "7c20317c319da0b573dace2a5fe8912ffcabec42a8d49956fb0d7dcecc37c14f"
+  },
+  {
+    "scenario": "thread_merge_back_continue",
+    "driver": "codex",
+    "file": "thread_merge_back_continue/codex_transcript.ndjson",
+    "sha256": "1cb19a54430041ef540f536f76658bfb6873c55fe0907af1a5e17a07c2f35b5b"
+  },
+  {
+    "scenario": "thread_merge_back_siblings",
+    "driver": "claude",
+    "file": "thread_merge_back_siblings/claude_transcript.ndjson",
+    "sha256": "8bba6bd2a90f2a2854cab5609bb6982e7e25a21d6b6dc97b880000e8b640a342"
+  },
+  {
+    "scenario": "thread_merge_back_siblings",
+    "driver": "codex",
+    "file": "thread_merge_back_siblings/codex_transcript.ndjson",
+    "sha256": "f34475131ede5fc0223200b9e608d4d93b82755dc2ed69d6678f47d394cf6d4d"
+  },
+  {
+    "scenario": "thread_rollback",
+    "driver": "claude",
+    "file": "thread_rollback/claude_transcript.ndjson",
+    "sha256": "adeea7eb17c2bef726fb6556a0fad7c280c14c01122c9dee9da3c775321eec00"
+  },
+  {
+    "scenario": "thread_rollback",
+    "driver": "codex",
+    "file": "thread_rollback/codex_transcript.ndjson",
+    "sha256": "ac4b7bfced54918110cc456c00555a03fa38d71b30efb1dc012945325866a161"
+  },
+  {
+    "scenario": "thread_rollback_after_restart",
+    "driver": "codex",
+    "file": "thread_rollback_after_restart/codex_transcript.ndjson",
+    "sha256": "f3738400345bce331f6c1d48f5bfd62035eed4fc73498da732cf21fae01526c1"
+  },
+  {
+    "scenario": "thread_rollback_to_stopped_turn",
+    "driver": "codex",
+    "file": "thread_rollback_to_stopped_turn/codex_transcript.ndjson",
+    "sha256": "a6955741836183081241050dc19be7f9ee34ca0c7e8d38b777636468c0811f30"
+  },
+  {
+    "scenario": "todo_list",
+    "driver": "codex",
+    "file": "todo_list/codex_transcript.ndjson",
+    "sha256": "bfcf8fcb9a54704d569733f21c875e996677985c0dd28b43ee128deae50856e4"
+  },
+  {
+    "scenario": "tool_call_denied_write",
+    "driver": "claude",
+    "file": "tool_call_denied_write/claude_transcript.ndjson",
+    "sha256": "0ff71a2f07d55a12394f5185032d1b90451afba9d3f084eee5960353a85a0610"
+  },
+  {
+    "scenario": "tool_call_read_only",
+    "driver": "claude",
+    "file": "tool_call_read_only/claude_transcript.ndjson",
+    "sha256": "6b9903d5e959366b8f6b43cfbaa7739d1234cea8edfbcfd16adbd1a954e003b2"
+  },
+  {
+    "scenario": "tool_call_read_only_on_request",
+    "driver": "claude",
+    "file": "tool_call_read_only_on_request/claude_transcript.ndjson",
+    "sha256": "4656125ba1ebfc3c54ab7bc6eb6eaa2f66fbf098a9a236c6dacb572903c748dc"
+  },
+  {
+    "scenario": "tool_call_read_only_on_request",
+    "driver": "codex",
+    "file": "tool_call_read_only_on_request/codex_transcript.ndjson",
+    "sha256": "5c14852fadb317a42363f0337cbd7891d014caf64d9ebdf60d97c5fee342ef44"
+  },
+  {
+    "scenario": "tool_call_restricted_granular",
+    "driver": "claude",
+    "file": "tool_call_restricted_granular/claude_transcript.ndjson",
+    "sha256": "249c6eb1b8a69117e19e62a8d7b18dff9fd83371a3635a50977b5bbbb7aba66f"
+  },
+  {
+    "scenario": "tool_call_restricted_granular",
+    "driver": "codex",
+    "file": "tool_call_restricted_granular/codex_transcript.ndjson",
+    "sha256": "8b1df55872dc8041b269b2d2e7b6cf7d5f22baa95b0c8efdd2900ca34f6f9540"
+  },
+  {
+    "scenario": "tool_call_workspace_never",
+    "driver": "claude",
+    "file": "tool_call_workspace_never/claude_transcript.ndjson",
+    "sha256": "a4be4584844ad25af4f3862c02837c797c6a8761f35d3a73a8be907a4375e03e"
+  },
+  {
+    "scenario": "tool_call_workspace_never",
+    "driver": "codex",
+    "file": "tool_call_workspace_never/codex_transcript.ndjson",
+    "sha256": "654ad7b2976c235044f343638e802253c5b45eadbf9aa16d23fa27861a0789f0"
+  },
+  {
+    "scenario": "turn_interrupt",
+    "driver": "claude",
+    "file": "turn_interrupt/claude_transcript.ndjson",
+    "sha256": "ec1add44e9f24280ab8b94c1468399ff2ce2dfc6e880ee46a021a128fac379de"
+  },
+  {
+    "scenario": "turn_interrupt",
+    "driver": "codex",
+    "file": "turn_interrupt/codex_transcript.ndjson",
+    "sha256": "36bdf250632fc154cc63033280411c271534f11b84c02f9449f2dc15789d22b5"
+  },
+  {
+    "scenario": "turn_interrupt_mid_tool",
+    "driver": "claude",
+    "file": "turn_interrupt_mid_tool/claude_transcript.ndjson",
+    "sha256": "8a2bbaa646cf05fa2a804d4dd875933825af6fda047b98e20024de43c057a065"
+  },
+  {
+    "scenario": "turn_interrupt_mid_tool",
+    "driver": "codex",
+    "file": "turn_interrupt_mid_tool/codex_transcript.ndjson",
+    "sha256": "72e0e4c50b64189b78eaba8139973954b2dbcecae3c984e92170dc0aceb16b4b"
+  },
+  {
+    "scenario": "turn_interrupt_restart",
+    "driver": "claude",
+    "file": "turn_interrupt_restart/claude_transcript.ndjson",
+    "sha256": "095b42be1829f00fae3446e7813b92c08a833654cce95783d5d07510fc4eb6f6"
+  },
+  {
+    "scenario": "web_search",
+    "driver": "claude",
+    "file": "web_search/claude_transcript.ndjson",
+    "sha256": "1255d89a03e4d21ee0169980d56269679cd330a46c5d4410310f3bbb5f3e374d"
+  },
+  {
+    "scenario": "web_search",
+    "driver": "codex",
+    "file": "web_search/codex_transcript.ndjson",
+    "sha256": "dffcf7bb6af67c1b1f4b7ad89ee44c226229c9ce5a029852374424967a92c25b"
+  }
+]

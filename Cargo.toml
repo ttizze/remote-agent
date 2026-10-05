@@ -11,6 +11,8 @@ members = [
     "crates/xtask",
     "crates/orchestration",
     "crates/provider-adapters",
+    "crates/agent-domain",
+    "crates/agent-providers",
 ]
 resolver = "2"
 

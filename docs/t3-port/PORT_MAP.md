@@ -1043,3 +1043,20 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | `packages/contracts/src/worktreeMcp.ts` (127) | — | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
 | `packages/contracts/src/worktreeSetup.ts` (124) | — | — | 対象外：M3 の独立機能・契約。今回保留（会話から使う関連型は該当ファイルで個別に記録）。 |
 | `packages/contracts/tsconfig.json` (5) | `crates/orchestration/src/contracts/tsconfig.rs` | — | 未翻訳 |
+
+## 新設計の挙動テスト対応（段階 1・2）
+
+固定版 `4ee6bfd` を参照する。旧ファイル表の逐語翻訳先より、この新設計の責務を優先する。Host の永続化・購読・履歴取り込みは段階 3、接続 reducer と表示は段階 4 で接続する。
+
+| T3 の挙動／テスト | 新しい実装と検証 | 判定 |
+|---|---|---|
+| `QueuedRunOrder.test.ts` の automatic / visible-first / visible-second | `agent-domain::State::queued_runs`、`automatic_completion_delivery_precedes_visible_queued_messages`（ordinal 4,2,3） | 優先順位を維持 |
+| `CommandPolicy.test.ts` の automatic / preparing / starting / steer / restart | `agent-domain::resolve_dispatch`、`automatic_delivery_obeys_negotiated_turn_capabilities` | 入力を明示した純粋な判断 |
+| `fixtures/queued_turn/*_output.ts` | `queued_turn_starts_after_active_turn_and_only_then_enters_the_timeline` | queued → starting、ordinal 1,2、queued_turn を維持 |
+| `fixtures/message_steering/claude_output.ts` | `steering_preserves_run_and_attempt_and_records_the_input_intent` | 1 run / 1 attempt、steer 発言を維持 |
+| `ProviderRuntimeRecoveryService.test.ts` | recovery / waiting_capture / prepared_failure のテスト | cancelled、queueHeld、async question、replayable capture を維持 |
+| `RuntimeRequestService.test.ts` | `approvals_resolve_once_and_questions_keep_attachment_answers` | 二重応答・期限切れ応答を拒否 |
+| `client-runtime/state/orchestrationV2Projection.test.ts` | usage / authoritative ordinal / inherited row の fold テスト | token usage を終端で保持、rollback で local だけ隠す |
+| reducer の JavaScript object identity assertions | 同じ項目 ID、内容、表示順序を fold で検証 | 内部の参照同一性は対象外：Rust の projection と facts に再構成 |
+| SQLite の control-read 回数、Effect service の mock 呼出し構造 | domain の入力→事実→projection、Host の境界テストへ分離 | T3 の内部 service 配線は対象外：actor が唯一の書込 owner |
+| V1 import / migration と他 provider 専用テスト | 対象外 | 現行形式だけ、provider は Codex と Claude の指定 |

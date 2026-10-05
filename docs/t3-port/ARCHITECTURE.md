@@ -92,3 +92,14 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 2. **事実は細かくする**。エンティティ丸ごとの upsert にはしない。
 3. **クライアントは Host の確定を待って表示する**。楽観的な仮の状態は作らない。必要になってから足す。
 4. **ID は入力から決定的に作る**。再実行と replay で同じ結果になるようにする。
+
+## 実装時の判断（新設計）
+
+- 2026-10-05: 新設計は `agent-domain` と `agent-providers` に置く。段階 3〜5 の承認までは Host・既存クライアントは接続し直さない。旧方針の未コミット policy/order は保持し、新設計にはその挙動とテストを取り込む。
+- 2026-10-05: 時刻と ID の seed は `InputEnvelope` に明示する。receipt は projection に含めず、actor が永続化した receipt を再送入力に渡す。fingerprint が異なる同一 command ID は拒否する。
+- 2026-10-05: 事実のテキスト offset は UTF-8 の byte offset とする。Rust の Host とクライアントで同じ fold を使うため、T3 の JavaScript 文字位置との wire 互換性は不要。表示されるテキストと順序は変えない。
+- 2026-10-05: キューの発言は受け付け時に保存するが、タイムライン項目は昇格時に作る。項目 ordinal はスレッド全体で単調に増やす。通常の追記は既存 item と attempt のみ参照し、履歴や累積テキストを複製しない。
+- 2026-10-05: fork は作成時の履歴・portable context を子への command に固定する。rollback の結果は要求 ID と checkpoint だけを確定し、途中の rename 等を上書きしない。rollback 中は新規実行・resume・retry・fork・merge back を拒否する。
+- 2026-10-05: provider 層は app の ID や entity を生成しない。native key の対応だけを扱い、子スレッドへの書き込みは親の状態機械から saga effect で行う。独自の provider capacity、wake buffer の件数・byte 上限、steer UUID gate は設けない。
+- 2026-10-05: Claude の prompt echo の早期／result-only／未対応の判定と、先行した provider ターンの run への帰属は状態機械に置く。翻訳層はフレームの UUID・origin・turn 数だけを正規化する。steer は `PromptOffered` を発行せず、進行中 prompt の所有者を変えない。provider continuation は既に流れてきた出力を受け取り、CLI へ新しい prompt を送らない。
+- 2026-10-05: 発言の作成者と作成元は明示的な入力にする。自動発言の重複した boolean は持たず、agent 作成の発言でキュー優先順位を決める。CLI の background roster と通知は domain の事実として記録する。
