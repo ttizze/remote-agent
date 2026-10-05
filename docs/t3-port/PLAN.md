@@ -165,3 +165,6 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 
 - 2026-10-05: ユーザーの2回目レビューを優先し、前回の「M2/M3は再開しない」を更新する。R2 の各指摘と前回の部分修正・誤判断を現在のコードで確認し、修正・回帰テスト・全 unit-tests/clippy/fmt・push/PR 更新の後、M2 の subagent/委任・添付・nested checkpoint scope を完成させる。M3、main の取り込み、稼働中 Host、他 worktree、CI 待ち、mutants、E2E/Simulator UI は対象外。
 - 2026-10-05: 取り込み会話の worktreePath は固定 T3 の importer と同じ null とする。effect は error/panic/期限切れ lease を含め5回で終端にし、同じ thread の後続 effect を解放する。Start と Restart の停止を同じ owner で監視する。rollback は一件だけを受け付け、完了は rollback フィールドだけを現在の thread に反映する。
+- 2026-10-05: R2 の rollback は、実際に受理された native turn ID を絶対境界に使い、再試行時に境界の存在を確認する。ファイルを scope cwd に限定して先に退避・復元し、provider の失敗時は補償する。Git checkout ごとの journal は途中終了から復旧する。submodule・パス衝突は変更前に拒否し、checkpoint の capture/diff/restore の範囲を揃える。
+- 2026-10-05: queue のユーザー item は固定 T3 と同じく promote 時に作る。実行へ昇格した run の ordinal は既存の最大値より大きくし、実行順と rewind 順を一致させる。直前の状態は before-run checkpoint ID と parentCheckpointId で関連付け、欠番を ordinal−1 で補わない。rollback 後の stale refs を削除する。
+- 2026-10-05: fork の継承表示は作成 transaction で固定して SQLite に保存し、親の現在の visible items を再走査して作り直さない。merge back は最新の Completed/Waiting run を明示して、より新しい active run がある間は拒否する。同じ差分の重複 transfer を作らず、未消費の古い merge を supersede する。provider handoff は直前に実行された run を基準にする。compact は未送信の handoff を消費しない。

@@ -275,7 +275,45 @@ impl Store {
             }
         };
         transaction.execute("INSERT INTO orchestration_command_receipts(command_id,aggregate_kind,aggregate_id,accepted_at,result_sequence,status,command_type) VALUES(?1,'thread',?2,?3,0,'accepted',?4)", params![command.command_id.as_str(), command.thread_id.as_str(), now.as_str(), kind_name(&command.body)?])?;
+        let inherited = decision
+            .events
+            .iter()
+            .find_map(|event| match &event.payload {
+                EventPayload::ContextTransferCreated(transfer)
+                    if transfer.kind == TransferKind::Fork =>
+                {
+                    let source = projection.as_ref()?;
+                    let ordinal = source
+                        .runs
+                        .iter()
+                        .find(|r| Some(&r.id) == transfer.source_point.run_id.as_ref())?
+                        .ordinal;
+                    let rows: Vec<_> = source
+                        .visible_turn_items
+                        .iter()
+                        .filter(|row| {
+                            row.visibility == Visibility::Inherited
+                                || row.item.run_id.as_ref().is_none_or(|id| {
+                                    source
+                                        .runs
+                                        .iter()
+                                        .any(|r| &r.id == id && r.ordinal <= ordinal)
+                                })
+                        })
+                        .cloned()
+                        .map(|mut row| {
+                            row.visibility = Visibility::Inherited;
+                            row
+                        })
+                        .collect();
+                    Some((transfer.target_thread_id.clone(), rows))
+                }
+                _ => None,
+            });
         let events = commit_decision(&transaction, decision, Some(&command.command_id), now)?;
+        if let Some((thread, rows)) = inherited {
+            transaction.execute("INSERT INTO orchestration_v2_projection_fork_history(thread_id,payload_json) VALUES(?1,?2)", params![thread.as_str(), serde_json::to_string(&rows)?])?;
+        }
         let sequence = events
             .last()
             .map_or(latest_sequence(&transaction, None)?, |event| event.sequence);
@@ -980,16 +1018,6 @@ fn load_projection(
     connection: &Connection,
     thread_id: &ThreadId,
 ) -> Result<Option<ThreadProjection>> {
-    load_projection_inner(connection, thread_id, &mut BTreeSet::new())
-}
-fn load_projection_inner(
-    connection: &Connection,
-    thread_id: &ThreadId,
-    visited: &mut BTreeSet<ThreadId>,
-) -> Result<Option<ThreadProjection>> {
-    if !visited.insert(thread_id.clone()) {
-        return Err(StoreError::InvalidEvent("fork lineage cycle".into()));
-    }
     let row: Option<(String, String)> = connection.query_row("SELECT payload_json,projection_updated_at FROM orchestration_v2_projection_threads WHERE thread_id=?1", [thread_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
     let Some((json, updated_at)) = row else {
         return Ok(None);
@@ -1012,41 +1040,17 @@ fn load_projection_inner(
     projection.checkpoints = records(connection, "checkpoints", thread_id)?;
     projection.context_handoffs = records(connection, "context_handoffs", thread_id)?;
     projection.context_transfers = records(connection, "context_transfers", thread_id)?;
-    if let Some(transfer) = projection
-        .context_transfers
-        .iter()
-        .find(|t| t.kind == TransferKind::Fork && t.target_thread_id == *thread_id)
-        && let Some(source) =
-            load_projection_inner(connection, &transfer.source_thread_id, visited)?
-    {
-        let ordinal = transfer
-            .source_point
-            .run_id
-            .as_ref()
-            .and_then(|id| source.runs.iter().find(|r| &r.id == id))
-            .map(|r| r.ordinal)
-            .unwrap_or(0);
-        projection.visible_turn_items = source
-            .visible_turn_items
-            .iter()
-            .filter(|row| {
-                row.visibility == Visibility::Inherited
-                    || row.item.run_id.as_ref().is_none_or(|id| {
-                        source
-                            .runs
-                            .iter()
-                            .any(|r| &r.id == id && r.ordinal <= ordinal)
-                    })
-            })
-            .cloned()
-            .map(|mut row| {
-                row.visibility = Visibility::Inherited;
-                row
-            })
-            .collect();
+    let inherited: Option<String> = connection
+        .query_row(
+            "SELECT payload_json FROM orchestration_v2_projection_fork_history WHERE thread_id=?1",
+            [thread_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(json) = inherited {
+        projection.visible_turn_items = serde_json::from_str(&json)?;
     }
     projection.visible_turn_items = projector::visible_items(&projection);
-    visited.remove(thread_id);
     Ok(Some(projection))
 }
 fn upsert<T: Serialize>(
@@ -1996,10 +2000,68 @@ mod tests {
             payload: EventPayload::RunUpdated(run),
         };
         let commit = store.ingest(vec![event], None, &now()).unwrap();
-        assert_eq!(commit.events.len(), 2);
+        assert_eq!(commit.events.len(), 3);
         assert_eq!(
             store.projection(&projection.thread.id).unwrap().runs[1].status,
             RunStatus::Starting
+        );
+    }
+    #[test]
+    fn queued_input_is_created_after_the_active_runs_last_output() {
+        let store = setup();
+        dispatch(&store, &send("active", DispatchMode::StartImmediately));
+        dispatch(&store, &send("queued", DispatchMode::QueueAfterActive));
+        let p = store.projection(&create().thread_id).unwrap();
+        assert!(
+            !p.turn_items
+                .iter()
+                .any(|item| item.run_id.as_ref() == Some(&p.runs[1].id))
+        );
+        let mut output = p.turn_items[0].clone();
+        output.id = TurnItemId::new("last-output").unwrap();
+        output.ordinal = 0;
+        output.body = TurnItemBody::AssistantMessage {
+            message_id: MessageId::new("last-answer").unwrap(),
+            text: "final output".into(),
+            attachments: vec![],
+            streaming: false,
+        };
+        let mut finished = p.runs[0].clone();
+        finished.status = RunStatus::Completed;
+        finished.completed_at = Some(now());
+        store
+            .ingest(
+                crate::events(
+                    &p.thread.id,
+                    "finish-active",
+                    vec![
+                        EventPayload::TurnItemUpdated(output),
+                        EventPayload::RunUpdated(finished),
+                    ],
+                    &now(),
+                ),
+                None,
+                &now(),
+            )
+            .unwrap();
+        let p = store.projection(&p.thread.id).unwrap();
+        let last = p
+            .turn_items
+            .iter()
+            .find(|i| i.id.as_str() == "last-output")
+            .unwrap();
+        let queued = p
+            .turn_items
+            .iter()
+            .find(|i| i.run_id.as_ref() == Some(&p.runs[1].id))
+            .unwrap();
+        assert!(queued.ordinal > last.ordinal);
+        assert_eq!(
+            p.turn_items
+                .iter()
+                .filter(|i| i.run_id.as_ref() == Some(&p.runs[1].id))
+                .count(),
+            1
         );
     }
     #[test]
@@ -2125,7 +2187,7 @@ mod tests {
                 &now(),
             )
             .unwrap();
-        assert_eq!(commit.events.len(), 5);
+        assert_eq!(commit.events.len(), 6);
         let projection = store.projection(&run.thread_id).unwrap();
         assert_eq!(projection.runs[0].status, RunStatus::Completed);
         assert!(projection.runs[0].checkpoint_id.is_some());

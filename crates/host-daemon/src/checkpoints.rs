@@ -34,6 +34,19 @@ pub(crate) fn reference(scope: &CheckpointScopeId, ordinal: u64) -> CheckpointRe
     .expect("derived ref")
 }
 
+fn before_reference(scope: &CheckpointScopeId, run: &RunId) -> CheckpointRef {
+    let baseline = reference(scope, 0);
+    let (namespace, _) = baseline
+        .as_str()
+        .rsplit_once("/ordinal/")
+        .expect("checkpoint namespace");
+    CheckpointRef::new(format!(
+        "{namespace}/before/{}",
+        URL_SAFE_NO_PAD.encode(run.as_str())
+    ))
+    .expect("derived ref")
+}
+
 async fn git(cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<Vec<u8>> {
     let mut command = tokio::process::Command::new("git");
     command
@@ -89,35 +102,174 @@ async fn text(cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<String>
         .into())
 }
 
+pub(crate) async fn checkout_root(cwd: &Path) -> Result<PathBuf> {
+    Ok(dunce::canonicalize(
+        text(cwd, &["rev-parse", "--show-toplevel"], None).await?,
+    )?)
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RestorePath {
+    path: String,
+    existed: bool,
+}
+fn validate_restore_path(root: &Path, scope: &Path, path: &str) -> Result<()> {
+    let relative = Path::new(path);
+    if !relative
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+        || !root.join(relative).starts_with(scope)
+    {
+        return Err(anyhow!("checkpoint path escapes its scope"));
+    }
+    let target = root.join(relative);
+    if target.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+        return Err(anyhow!(
+            "checkpoint restore cannot replace a directory or submodule with a file"
+        ));
+    }
+    let mut parent = target.parent();
+    while let Some(directory) = parent.filter(|p| *p != root) {
+        if directory.symlink_metadata().is_ok_and(|m| !m.is_dir()) {
+            return Err(anyhow!(
+                "checkpoint restore path has a non-directory ancestor"
+            ));
+        }
+        parent = directory.parent();
+    }
+    Ok(())
+}
+fn recover_files(root: &Path, directory: &Path, journal: &[RestorePath]) -> Result<()> {
+    for entry in journal {
+        let path = Path::new(&entry.path);
+        if !path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(anyhow!("invalid restore recovery path"));
+        }
+        let target = root.join(path);
+        let backup = directory.join("backup").join(path);
+        if backup.symlink_metadata().is_ok() {
+            if target.symlink_metadata().is_ok() {
+                std::fs::remove_file(&target)?;
+            }
+            std::fs::create_dir_all(target.parent().context("recovery parent missing")?)?;
+            std::fs::rename(backup, target)?;
+        } else if !entry.existed && target.symlink_metadata().is_ok() {
+            std::fs::remove_file(target)?;
+        }
+    }
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+/// Retains the original files until provider rollback and its durable events
+/// succeed. Drop compensates any error; the journal also survives a crash.
+pub(crate) struct RestoredFiles {
+    root: PathBuf,
+    directory: PathBuf,
+    journal: Vec<RestorePath>,
+    committed: bool,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+impl RestoredFiles {
+    fn undo(&mut self) -> Result<()> {
+        recover_files(&self.root, &self.directory, &self.journal)?;
+        self.committed = true;
+        Ok(())
+    }
+    pub fn commit(mut self) -> Result<()> {
+        let completed = self
+            .directory
+            .with_file_name("bex-checkpoint-restore-completed");
+        if completed.exists() {
+            std::fs::remove_dir_all(&completed)?;
+        }
+        std::fs::rename(&self.directory, &completed)?;
+        self.committed = true;
+        if std::fs::remove_dir_all(completed).is_err() {
+            tracing::warn!(
+                operation = "checkpoint.restore.cleanup",
+                message = "completed restore cleanup deferred"
+            );
+        }
+        Ok(())
+    }
+}
+impl Drop for RestoredFiles {
+    fn drop(&mut self) {
+        if !self.committed && self.undo().is_err() {
+            tracing::error!(
+                operation = "checkpoint.restore.recover",
+                message = "restore journal retained for recovery"
+            );
+        }
+    }
+}
+
 impl Checkpoints {
+    #[cfg(test)]
     pub async fn restore(&self, scope: &CheckpointScope, checkpoint: &Checkpoint) -> Result<()> {
-        let cwd = Path::new(&scope.cwd);
-        let lock = self.lock(cwd);
-        let _guard = lock.lock().await;
-        let root = PathBuf::from(text(cwd, &["rev-parse", "--show-toplevel"], None).await?);
+        self.prepare_restore(scope, checkpoint).await?.commit()
+    }
+    pub async fn prepare_restore(
+        &self,
+        scope: &CheckpointScope,
+        checkpoint: &Checkpoint,
+    ) -> Result<RestoredFiles> {
+        let cwd = dunce::canonicalize(&scope.cwd)?;
+        let root = checkout_root(&cwd).await?;
+        let guard = self.lock(&root).lock_owned().await;
+        let relative = cwd.strip_prefix(&root)?;
+        let prefix = if relative.as_os_str().is_empty() {
+            ".".to_owned()
+        } else {
+            relative
+                .to_str()
+                .context("checkpoint path is not UTF-8")?
+                .to_owned()
+        };
+        let git_dir = PathBuf::from(
+            text(
+                &root,
+                &["rev-parse", "--path-format=absolute", "--git-dir"],
+                None,
+            )
+            .await?,
+        );
+        let directory = git_dir.join("bex-checkpoint-restore");
+        // A process may have died between native rollback and committing the
+        // staged files. Recover the previous contents before retrying.
+        if directory.join("journal.json").exists() {
+            let journal: Vec<RestorePath> =
+                serde_json::from_slice(&std::fs::read(directory.join("journal.json"))?)?;
+            recover_files(&root, &directory, &journal)?;
+        }
+        if directory.exists() {
+            std::fs::remove_dir_all(&directory)?;
+        }
         let saved = git(
-            cwd,
+            &root,
             &[
                 "ls-tree",
                 "-rz",
                 "--full-tree",
-                "--name-only",
                 checkpoint.reference.as_str(),
+                "--",
+                &prefix,
             ],
             None,
         )
         .await?;
-        let saved: std::collections::HashSet<_> =
-            saved.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
-        let temporary = tempfile::tempdir()?;
-        let index = temporary.path().join("index");
-        git(
-            cwd,
-            &["read-tree", checkpoint.reference.as_str()],
-            Some(&index),
-        )
-        .await?;
-        // Use checkout-relative names even when the thread's cwd is nested.
+        let mut saved_paths = std::collections::BTreeSet::new();
+        for entry in saved.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+            let entry = std::str::from_utf8(entry)?;
+            let (metadata, path) = entry.split_once('\t').context("invalid checkpoint tree")?;
+            if metadata.starts_with("160000 ") {
+                return Err(anyhow!("checkpoint restore does not replace submodules"));
+            }
+            validate_restore_path(&root, &cwd, path)?;
+            saved_paths.insert(path.to_owned());
+        }
         let current = git(
             &root,
             &[
@@ -126,39 +278,92 @@ impl Checkpoints {
                 "--others",
                 "--exclude-standard",
                 "-z",
+                "--",
+                &prefix,
             ],
             None,
         )
         .await?;
-        let removed = current
-            .split(|b| *b == 0)
-            .filter(|p| !p.is_empty() && !saved.contains(p))
-            .map(|p| String::from_utf8(p.to_vec()))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        for path in removed {
-            let path = root.join(path);
-            match std::fs::remove_file(&path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-            let mut parent = path.parent();
-            while let Some(directory) = parent.filter(|p| *p != root && p.starts_with(&root)) {
-                match std::fs::remove_dir(directory) {
-                    Ok(()) => parent = directory.parent(),
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
-                        ) =>
-                    {
-                        break;
-                    }
-                    Err(error) => return Err(error.into()),
+        let mut paths = saved_paths.clone();
+        for path in current.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+            let path = std::str::from_utf8(path)?;
+            validate_restore_path(&root, &cwd, path)?;
+            paths.insert(path.to_owned());
+        }
+        let journal: Vec<_> = paths
+            .into_iter()
+            .map(|path| RestorePath {
+                existed: root.join(&path).symlink_metadata().is_ok(),
+                path,
+            })
+            .collect();
+        std::fs::create_dir_all(directory.join("stage"))?;
+        std::fs::create_dir_all(directory.join("backup"))?;
+        let index = directory.join("index");
+        git(
+            &root,
+            &["read-tree", checkpoint.reference.as_str()],
+            Some(&index),
+        )
+        .await?;
+        let stage = format!(
+            "{}/",
+            directory
+                .join("stage")
+                .to_str()
+                .context("restore staging path is not UTF-8")?
+        );
+        git(
+            &root,
+            &["checkout-index", "--all", "--force", "--prefix", &stage],
+            Some(&index),
+        )
+        .await?;
+        let mut file = std::fs::File::create(directory.join("journal.json"))?;
+        use std::io::Write as _;
+        file.write_all(&serde_json::to_vec(&journal)?)?;
+        file.sync_all()?;
+        std::fs::File::open(&directory)?.sync_all()?;
+        let mut restored = RestoredFiles {
+            root,
+            directory,
+            journal,
+            committed: false,
+            _guard: guard,
+        };
+        let result = (|| -> Result<()> {
+            for entry in &restored.journal {
+                if entry.existed {
+                    let backup = restored.directory.join("backup").join(&entry.path);
+                    std::fs::create_dir_all(backup.parent().context("backup parent missing")?)?;
+                    std::fs::rename(restored.root.join(&entry.path), backup)?;
                 }
             }
+            for path in &saved_paths {
+                let target = restored.root.join(path);
+                std::fs::create_dir_all(target.parent().context("restore parent missing")?)?;
+                std::fs::rename(restored.directory.join("stage").join(path), target)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            restored.undo()?;
+            return Err(error);
         }
-        git(&root, &["checkout-index", "--all", "--force"], Some(&index)).await?;
+        Ok(restored)
+    }
+    pub async fn delete_stale_refs(
+        &self,
+        scope: &CheckpointScope,
+        checkpoints: &[Checkpoint],
+    ) -> Result<()> {
+        let root = checkout_root(Path::new(&scope.cwd)).await?;
+        let _guard = self.lock(&root).lock_owned().await;
+        for checkpoint in checkpoints.iter().filter(|c| c.scope_id == scope.id) {
+            let mut args = DURABLE.to_vec();
+            args.extend(["update-ref", "-d", checkpoint.reference.as_str()]);
+            git(&root, &args, None).await?;
+        }
         Ok(())
     }
     fn lock(&self, cwd: &Path) -> Arc<AsyncMutex<()>> {
@@ -255,35 +460,61 @@ impl Checkpoints {
         git(cwd, &args, None).await?;
         Ok(CheckpointStatus::Ready)
     }
-    pub async fn baseline(
-        &self,
-        scope: &CheckpointScope,
-        ordinal: u64,
-        now: &Timestamp,
-    ) -> Vec<EventPayload> {
-        let lock = self.lock(Path::new(&scope.cwd));
+    pub async fn baseline(&self, scope: &CheckpointScope, now: &Timestamp) -> Vec<EventPayload> {
+        let workspace = checkout_root(Path::new(&scope.cwd))
+            .await
+            .unwrap_or_else(|_| PathBuf::from(&scope.cwd));
+        let lock = self.lock(&workspace);
         let _guard = lock.lock().await;
-        let mut events = vec![EventPayload::CheckpointScopeCreated(scope.clone())];
-        let mut ordinals = vec![0];
-        if ordinal > 0 {
-            ordinals.push(ordinal);
-        }
-        for ordinal in ordinals {
-            let reference = reference(&scope.id, ordinal);
-            let status = Self::capture_ref(Path::new(&scope.cwd), &reference)
-                .await
-                .unwrap_or(CheckpointStatus::Error);
-            events.push(EventPayload::CheckpointCaptured(record(
+        let reference = reference(&scope.id, 0);
+        let status = Self::capture_ref(Path::new(&scope.cwd), &reference)
+            .await
+            .unwrap_or(CheckpointStatus::Error);
+        vec![
+            EventPayload::CheckpointScopeCreated(scope.clone()),
+            EventPayload::CheckpointCaptured(record(
                 scope,
                 None,
-                ordinal,
+                0,
                 reference,
                 status,
                 vec![],
                 now,
-            )));
-        }
-        events
+            )),
+        ]
+    }
+    pub async fn prepare_run(
+        &self,
+        scope: &CheckpointScope,
+        run_id: &RunId,
+        ordinal: u64,
+        previous: Option<&Checkpoint>,
+        now: &Timestamp,
+    ) -> Vec<EventPayload> {
+        let mut payloads = self.baseline(scope, now).await;
+        let reference = before_reference(&scope.id, run_id);
+        let workspace = checkout_root(Path::new(&scope.cwd))
+            .await
+            .unwrap_or_else(|_| PathBuf::from(&scope.cwd));
+        let lock = self.lock(&workspace);
+        let _guard = lock.lock().await;
+        let status = Self::capture_ref(Path::new(&scope.cwd), &reference)
+            .await
+            .unwrap_or(CheckpointStatus::Error);
+        let mut before = record(
+            scope,
+            Some(run_id.clone()),
+            previous.and_then(|c| c.app_run_ordinal).unwrap_or(0),
+            reference,
+            status,
+            vec![],
+            now,
+        );
+        before.id = orchestration::checkpoint::before_run_id(&scope.id, run_id);
+        before.ordinal_within_scope = ordinal;
+        before.parent_checkpoint_id = previous.map(|c| c.id.clone());
+        payloads.push(EventPayload::CheckpointCaptured(before));
+        payloads
     }
     pub async fn capture(
         &self,
@@ -293,15 +524,30 @@ impl Checkpoints {
         ordinal: u64,
         now: &Timestamp,
     ) -> Checkpoint {
-        let lock = self.lock(Path::new(&scope.cwd));
+        let workspace = checkout_root(Path::new(&scope.cwd))
+            .await
+            .unwrap_or_else(|_| PathBuf::from(&scope.cwd));
+        let lock = self.lock(&workspace);
         let _guard = lock.lock().await;
         let reference = reference(&scope.id, ordinal);
         let status = Self::capture_ref(Path::new(&scope.cwd), &reference)
             .await
             .unwrap_or(CheckpointStatus::Error);
+        let before = before_reference(&scope.id, run_id);
+        let has_before = text(
+            Path::new(&scope.cwd),
+            &["rev-parse", "--verify", before.as_str()],
+            None,
+        )
+        .await
+        .is_ok();
         let mut files = vec![];
         if status == CheckpointStatus::Ready {
-            let previous = self::reference(&scope.id, ordinal.saturating_sub(1));
+            let previous = if has_before {
+                before
+            } else {
+                self::reference(&scope.id, 0)
+            };
             if let Ok(bytes) = git(
                 Path::new(&scope.cwd),
                 &[
@@ -313,6 +559,7 @@ impl Checkpoints {
                     previous.as_str(),
                     reference.as_str(),
                     "--",
+                    ".",
                 ],
                 None,
             )
@@ -338,6 +585,10 @@ impl Checkpoints {
             now,
         );
         checkpoint.node_id = node_id.clone();
+        if has_before {
+            checkpoint.parent_checkpoint_id =
+                Some(orchestration::checkpoint::before_run_id(&scope.id, run_id));
+        }
         checkpoint
     }
     pub async fn diff(
@@ -353,13 +604,16 @@ impl Checkpoints {
         {
             return Err(anyhow!("checkpoint unavailable"));
         }
-        let lock = self.lock(Path::new(cwd));
+        let workspace = checkout_root(Path::new(cwd))
+            .await
+            .unwrap_or_else(|_| PathBuf::from(cwd));
+        let lock = self.lock(&workspace);
         let _guard = lock.lock().await;
         let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--no-color"];
         if ignore_whitespace {
             args.push("--ignore-all-space");
         }
-        args.extend([from.reference.as_str(), to.reference.as_str(), "--"]);
+        args.extend([from.reference.as_str(), to.reference.as_str(), "--", "."]);
         Ok(String::from_utf8(git(Path::new(cwd), &args, None).await?)?)
     }
 }
@@ -378,10 +632,7 @@ fn record(
         scope_id: scope.id.clone(),
         run_id,
         node_id: scope.node_id.clone(),
-        parent_checkpoint_id: (ordinal > 0).then(|| {
-            CheckpointId::new(format!("checkpoint:{}:{}", scope.id, ordinal - 1))
-                .expect("derived id")
-        }),
+        parent_checkpoint_id: None,
         ordinal_within_scope: ordinal,
         app_run_ordinal: Some(ordinal),
         reference,
@@ -476,7 +727,7 @@ mod tests {
         let head = text(cwd, &["rev-parse", "HEAD"], None).await.unwrap();
         let owner = Checkpoints::default();
         let scope = scope(cwd);
-        let baseline = owner.baseline(&scope, 0, &scope.created_at).await;
+        let baseline = owner.baseline(&scope, &scope.created_at).await;
         let EventPayload::CheckpointCaptured(from) = &baseline[1] else {
             panic!("baseline")
         };
@@ -569,6 +820,156 @@ mod tests {
             .await
             .unwrap(),
             "original"
+        );
+        std::fs::write(cwd.join("scope/file"), "later\n").unwrap();
+        std::fs::write(cwd.join("scope/new"), "remove\n").unwrap();
+        owner.restore(&scope, &captured).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("scope/file")).unwrap(),
+            "inside\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("sibling")).unwrap(),
+            "outside\n"
+        );
+        assert!(!cwd.join("scope/new").exists());
+    }
+    #[tokio::test]
+    async fn restore_compensates_provider_failure_and_recovers_an_interrupted_transaction() {
+        let dir = repo().await;
+        std::fs::write(dir.path().join("file"), "checkpoint").unwrap();
+        let scope = scope(dir.path());
+        let owner = Checkpoints::default();
+        let checkpoint = owner
+            .capture(
+                &scope,
+                scope.run_id.as_ref().unwrap(),
+                &scope.node_id,
+                1,
+                &scope.created_at,
+            )
+            .await;
+        std::fs::write(dir.path().join("file"), "later").unwrap();
+        std::fs::write(dir.path().join("new"), "keep on failure").unwrap();
+        let restored = owner.prepare_restore(&scope, &checkpoint).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("file")).unwrap(),
+            "checkpoint"
+        );
+        drop(restored);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("file")).unwrap(),
+            "later"
+        );
+        assert!(dir.path().join("new").exists());
+        let mut restored = owner.prepare_restore(&scope, &checkpoint).await.unwrap();
+        // Preserve the journal as if the process exited without destructors.
+        restored.committed = true;
+        drop(restored);
+        let restored = owner.prepare_restore(&scope, &checkpoint).await.unwrap();
+        drop(restored);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("file")).unwrap(),
+            "later"
+        );
+        assert!(dir.path().join("new").exists());
+    }
+    #[tokio::test]
+    async fn restore_rejects_path_collisions_before_mutating_any_files() {
+        let dir = repo().await;
+        std::fs::write(dir.path().join("a"), "checkpoint").unwrap();
+        std::fs::write(dir.path().join("z"), "checkpoint").unwrap();
+        let scope = scope(dir.path());
+        let owner = Checkpoints::default();
+        let checkpoint = owner
+            .capture(
+                &scope,
+                scope.run_id.as_ref().unwrap(),
+                &scope.node_id,
+                1,
+                &scope.created_at,
+            )
+            .await;
+        std::fs::write(dir.path().join("a"), "later").unwrap();
+        std::fs::remove_file(dir.path().join("z")).unwrap();
+        std::fs::create_dir(dir.path().join("z")).unwrap();
+        std::fs::write(dir.path().join("z/keep"), "keep").unwrap();
+        assert!(owner.prepare_restore(&scope, &checkpoint).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a")).unwrap(),
+            "later"
+        );
+        assert!(dir.path().join("z/keep").exists());
+    }
+    #[tokio::test]
+    async fn before_run_links_survive_gaps_and_stale_refs_are_deleted() {
+        let dir = repo().await;
+        let scope = scope(dir.path());
+        let owner = Checkpoints::default();
+        std::fs::write(dir.path().join("file"), "baseline\n").unwrap();
+        let events = owner.baseline(&scope, &scope.created_at).await;
+        let EventPayload::CheckpointCaptured(baseline) = &events[1] else {
+            panic!("baseline");
+        };
+        let run = RunId::new("run-after-gap").unwrap();
+        std::fs::write(dir.path().join("file"), "before\n").unwrap();
+        let events = owner
+            .prepare_run(&scope, &run, 4, Some(baseline), &scope.created_at)
+            .await;
+        let EventPayload::CheckpointCaptured(before) = events.last().unwrap() else {
+            panic!("before");
+        };
+        assert_eq!(before.app_run_ordinal, Some(0));
+        assert_eq!(before.status, CheckpointStatus::Ready);
+        assert_eq!(before.parent_checkpoint_id.as_ref(), Some(&baseline.id));
+        std::fs::write(dir.path().join("file"), "after\n").unwrap();
+        let captured = owner
+            .capture(&scope, &run, &scope.node_id, 4, &scope.created_at)
+            .await;
+        assert_eq!(captured.parent_checkpoint_id.as_ref(), Some(&before.id));
+        assert_eq!(captured.files.len(), 1);
+        assert!(
+            owner
+                .diff(&scope.cwd, before, &captured, false)
+                .await
+                .unwrap()
+                .contains("-before\n")
+        );
+        owner
+            .delete_stale_refs(&scope, &[captured.clone(), before.clone()])
+            .await
+            .unwrap();
+        assert!(
+            text(
+                dir.path(),
+                &["rev-parse", "--verify", captured.reference.as_str()],
+                None
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            text(
+                dir.path(),
+                &["rev-parse", "--verify", before.reference.as_str()],
+                None
+            )
+            .await
+            .is_err()
+        );
+        std::fs::write(dir.path().join("file"), "new checkpoint\n").unwrap();
+        let recaptured = owner
+            .capture(&scope, &run, &scope.node_id, 4, &scope.created_at)
+            .await;
+        assert_eq!(
+            text(
+                dir.path(),
+                &["show", &format!("{}:file", recaptured.reference)],
+                None
+            )
+            .await
+            .unwrap(),
+            "new checkpoint"
         );
     }
     #[tokio::test]

@@ -266,6 +266,36 @@ impl ClaudeAdapter {
         }
         Ok(())
     }
+    async fn initialized(
+        &self,
+        handle: &ProcessHandle,
+        timeout: std::time::Duration,
+    ) -> Result<(), AdapterError> {
+        let mut ready = handle.ready.clone();
+        let result = tokio::time::timeout(timeout, async {
+            loop {
+                if let Some(result) = ready.borrow().clone() {
+                    return result.map_err(error);
+                }
+                ready.changed().await.map_err(error)?;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| Err(error("Claude initialization timed out")));
+        if result.is_err() {
+            let provider = handle
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .provider_thread
+                .id
+                .clone();
+            self.processes.lock().await.remove(&provider);
+            let _ = handle.stop.send(true);
+            wait_done(handle).await?;
+        }
+        result
+    }
     async fn start(
         &self,
         projection: &ThreadProjection,
@@ -321,6 +351,11 @@ impl ClaudeAdapter {
                 && handle.model == run.model_selection
                 && handle.runtime_mode == projection.thread.runtime_mode
                 && handle.interaction_mode == projection.thread.interaction_mode
+                && provider_thread
+                    .native_thread_ref
+                    .as_ref()
+                    .and_then(|r| r.native_id.as_ref())
+                    == Some(&handle.native_session)
                 && !*handle.done.borrow()
         });
         if !reusable && let Some(handle) = &existing {
@@ -485,28 +520,10 @@ impl ClaudeAdapter {
             .lock()
             .await
             .insert(provider_thread_id, handle.clone());
-        let mut ready = handle.ready.clone();
-        let initialized = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            loop {
-                if let Some(result) = ready.borrow().clone() {
-                    return result.map_err(error);
-                }
-                ready.changed().await.map_err(error)?;
-            }
-        })
-        .await
-        .map_err(|_| error("Claude initialization timed out"))?;
-        if let Err(initial) = initialized {
-            let provider_id = handle
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .provider_thread
-                .id
-                .clone();
-            self.processes.lock().await.remove(&provider_id);
-            let _ = handle.stop.send(true);
-            wait_done(&handle).await?;
+        if let Err(initial) = self
+            .initialized(&handle, std::time::Duration::from_secs(30))
+            .await
+        {
             if resume || native_fork {
                 let fresh = crate::portable_fallback(&self.output, projection, &run).await?;
                 return Box::pin(self.start(&fresh, run_id, cwd, browser, credentials_home)).await;
@@ -518,11 +535,21 @@ impl ClaudeAdapter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(run_id)
-            || *handle.done.borrow()
         {
             let _ = handle.stop.send(true);
             wait_done(&handle).await?;
             return Ok(());
+        }
+        if *handle.done.borrow() {
+            let provider_id = handle
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .provider_thread
+                .id
+                .clone();
+            self.processes.lock().await.remove(&provider_id);
+            return Err(error("Claude exited before accepting input"));
         }
         let message = projection
             .messages
@@ -782,17 +809,24 @@ fn spawn(
             .err()
             .map(|error| error.message.as_str())
             .unwrap_or("Claude process closed");
-        let batch = {
-            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-            let translated = normalize::disconnected(&state, message, &timestamp);
-            *state = translated.state;
-            state.batch(translated.payloads, &timestamp)
-        };
-        if !batch.events.is_empty() {
-            let _ = output.send(batch).await;
-        }
+        let initialized = ready.borrow().as_ref().is_some_and(Result::is_ok);
         if ready.borrow().is_none() {
             ready.send_replace(Some(Err("Claude exited before initialization".into())));
+        }
+        let batch = {
+            let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+            if initialized {
+                let translated = normalize::disconnected(&state, message, &timestamp);
+                *state = translated.state;
+                Some(state.batch(translated.payloads, &timestamp))
+            } else {
+                None
+            }
+        };
+        if let Some(batch) = batch
+            && !batch.events.is_empty()
+        {
+            let _ = output.send(batch).await;
         }
         drop(writer);
         let _ = child.wait().await;
@@ -841,6 +875,59 @@ async fn ingest_claude_frame<W: tokio::io::AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_initialization_releases_the_process_and_does_not_terminalize_resume_fallback() {
+        for reject in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let (output, mut batches) = mpsc::channel(8);
+            let adapter = ClaudeAdapter::new(
+                ClaudeConfig {
+                    program: "/bin/sh".into(),
+                    config_home: directory.path().into(),
+                },
+                output.clone(),
+            );
+            let state = crate::normalize::tests::state(Driver::Claude);
+            let provider = state.provider_thread.id.clone();
+            let model = state.run.model_selection.clone();
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.arg("-c").arg(if reject {
+                "read -r initialize; printf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"request_id\":\"initialize\",\"subtype\":\"error\"}}'; cat >/dev/null"
+            } else { "cat >/dev/null" }).stdin(Stdio::piped()).stdout(Stdio::piped());
+            let permit = adapter.capacity.clone().try_acquire_owned().unwrap();
+            let handle = spawn(
+                command,
+                state,
+                uuid::Uuid::new_v4().to_string(),
+                permit,
+                output,
+                directory.path(),
+                directory.path(),
+                RuntimeMode::FullAccess,
+                InteractionMode::Default,
+                model,
+            )
+            .unwrap();
+            adapter
+                .processes
+                .lock()
+                .await
+                .insert(provider, handle.clone());
+            let error = adapter
+                .initialized(&handle, std::time::Duration::from_millis(100))
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains(if reject { "rejected" } else { "timed out" })
+            );
+            assert!(adapter.processes.lock().await.is_empty());
+            assert_eq!(adapter.capacity.available_permits(), 8);
+            assert!(batches.try_recv().is_err());
+        }
+    }
     #[test]
     fn plan_mode_overrides_runtime_permissions() {
         for mode in [

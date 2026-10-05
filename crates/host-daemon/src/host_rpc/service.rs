@@ -86,7 +86,7 @@ struct ServiceInner {
     connections: Connections,
     provider_receiver: Mutex<Option<tokio::sync::mpsc::Receiver<provider_adapters::ProviderBatch>>>,
     started: AtomicBool,
-    launches: tokio::sync::Mutex<()>,
+    launches: Mutex<HashMap<CommandId, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     stop: tokio::sync::watch::Sender<bool>,
 }
 struct HostResources {
@@ -159,7 +159,7 @@ impl HostRpcService {
                 connections: Connections::new(),
                 provider_receiver: Mutex::new(Some(receiver)),
                 started: AtomicBool::new(false),
-                launches: tokio::sync::Mutex::new(()),
+                launches: Mutex::new(HashMap::new()),
                 stop: tokio::sync::watch::channel(false).0,
             }),
         })
@@ -461,6 +461,11 @@ impl HostRpcService {
                         "project is not registered",
                     ));
                 }
+                let _workspace = if matches!(command.body, CommandBody::ThreadCreate { .. }) {
+                    Some(self.inner.resources.worktree_access.write().await)
+                } else {
+                    None
+                };
                 self.dispatch_command(command)?.into()
             }
             Call::LaunchThread(params) => {
@@ -510,16 +515,23 @@ impl HostRpcService {
                             Failure::new("checkpoint_unavailable", "turn checkpoint missing")
                         })
                 };
+                let to = checkpoint(params.to_turn_count)?;
+                let from = to
+                    .parent_checkpoint_id
+                    .as_ref()
+                    .and_then(|id| {
+                        projection.checkpoints.iter().find(|c| {
+                            &c.id == id
+                                && c.status == CheckpointStatus::Ready
+                                && c.app_run_ordinal == Some(params.from_turn_count)
+                        })
+                    })
+                    .unwrap_or(checkpoint(params.from_turn_count)?);
                 let diff = self
                     .inner
                     .resources
                     .checkpoints
-                    .diff(
-                        &scope.cwd,
-                        checkpoint(params.from_turn_count)?,
-                        checkpoint(params.to_turn_count)?,
-                        params.ignore_whitespace,
-                    )
+                    .diff(&scope.cwd, from, to, params.ignore_whitespace)
                     .await
                     .map_err(|error| Failure::new("checkpoint_unavailable", error))?;
                 agent_protocol::orchestration::TurnDiff {
@@ -819,16 +831,44 @@ impl HostRpcService {
         Ok(())
     }
 
+    fn launch_lock(&self, id: &CommandId) -> Arc<tokio::sync::Mutex<()>> {
+        let mut launches = self
+            .inner
+            .launches
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        launches.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = launches.get(id).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        launches.insert(id.clone(), Arc::downgrade(&lock));
+        lock
+    }
     async fn launch_thread(
         &self,
         params: &agent_protocol::orchestration::LaunchThread,
     ) -> Result<Body, Failure> {
-        let _launch = self.inner.launches.lock().await;
-        let _workspace = self.inner.resources.worktree_access.read().await;
+        let _launch = self
+            .launch_lock(&params.create.command_id)
+            .lock_owned()
+            .await;
         if !matches!(params.create.body, CommandBody::ThreadCreate { .. }) {
             return Err(Failure::new(
                 "invalid_launch",
                 "launch requires thread.create",
+            ));
+        }
+        if let CommandBody::ThreadCreate { project_id, .. } = &params.create.body
+            && !self
+                .projects()
+                .await?
+                .iter()
+                .any(|project| project.id == project_id.as_str())
+        {
+            return Err(Failure::new(
+                "project_unavailable",
+                "project is not registered",
             ));
         }
         let mut create = params.create.clone();
@@ -884,6 +924,7 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("workspace_preparation_failed", error))?
                 .map(|path| path.to_string_lossy().into_owned());
         }
+        let _workspace = self.inner.resources.worktree_access.write().await;
         self.dispatch_command(&create)?;
         self.dispatch_command(&input_command)
             .map_err(|mut failure| {
@@ -1139,6 +1180,7 @@ fn subscription_frames(
                 })
                 .collect::<std::io::Result<Vec<_>>>()
                 .map_err(|error| Failure::new("encode_failed", error))?;
+            ensure_subscription_frames(&frames)?;
             Ok((frames, subscription.receiver, subscription.cursor))
         }
         StreamTarget::Thread(id) => {
@@ -1156,9 +1198,22 @@ fn subscription_frames(
                 })
                 .collect::<std::io::Result<Vec<_>>>()
                 .map_err(|error| Failure::new("encode_failed", error))?;
+            ensure_subscription_frames(&frames)?;
             Ok((frames, subscription.receiver, subscription.cursor))
         }
     }
+}
+fn ensure_subscription_frames(frames: &[Vec<u8>]) -> Result<(), Failure> {
+    if frames
+        .iter()
+        .any(|frame| frame.len() > protocol::MAX_FRAME_BYTES)
+    {
+        return Err(Failure::new(
+            "response_too_large",
+            "conversation snapshot exceeds the frame limit",
+        ));
+    }
+    Ok(())
 }
 fn store_failure(error: orchestration::store::StoreError) -> Failure {
     Failure::new("orchestration_failed", error)
@@ -1200,7 +1255,17 @@ impl HostResources {
             return Err(fail());
         };
         let cwd = dunce::canonicalize(cwd).map_err(|_| fail())?;
-        if dunce::canonicalize(worktree).map_err(|_| fail())? != cwd {
+        let worktree = dunce::canonicalize(worktree).map_err(|_| fail())?;
+        let checkout = crate::checkpoints::checkout_root(&worktree)
+            .await
+            .map_err(|_| fail())?;
+        if !cwd.starts_with(&worktree)
+            || checkout != worktree
+            || crate::checkpoints::checkout_root(&cwd)
+                .await
+                .map_err(|_| fail())?
+                != checkout
+        {
             return Err(fail());
         }
         let shell = self.orchestration.shell_snapshot().map_err(store_failure)?;
@@ -1210,6 +1275,14 @@ impl HostResources {
             .await
             .map_err(|e| Failure::new("workspace_unavailable", e))?
             .projects;
+        for root in projects.iter().flat_map(|project| &project.roots) {
+            if crate::checkpoints::checkout_root(Path::new(&root.path))
+                .await
+                .is_ok_and(|root| root == checkout)
+            {
+                return Err(fail());
+            }
+        }
         for other in shell
             .threads
             .iter()
@@ -1245,10 +1318,15 @@ impl HostResources {
             );
             for path in paths {
                 match dunce::canonicalize(path) {
-                    Ok(path) if path.starts_with(&cwd) || cwd.starts_with(&path) => {
-                        return Err(fail());
+                    Ok(path) => {
+                        let overlaps = match crate::checkpoints::checkout_root(&path).await {
+                            Ok(root) => root == checkout,
+                            Err(_) => path.starts_with(&checkout) || checkout.starts_with(&path),
+                        };
+                        if overlaps {
+                            return Err(fail());
+                        }
                     }
-                    Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(_) => return Err(fail()),
                 }
@@ -1276,7 +1354,15 @@ impl HostResources {
             .find(|p| Some(&p.id) == run.provider_thread_id.as_ref())
             .ok_or_else(|| adapter_error("provider missing"))?
             .clone();
-        if !run.status.is_blocking() {
+        if !run.status.is_blocking()
+            || projection
+                .messages
+                .iter()
+                .find(|m| m.id == run.user_message_id)
+                .is_some_and(|m| {
+                    orchestration::native_maintenance(&m.text, !m.attachments.is_empty())
+                })
+        {
             return Ok(projection);
         }
         let pending: Vec<_> = projection
@@ -1356,12 +1442,26 @@ impl HostResources {
                 ));
             }
         }
-        let previous = projection.thread.active_provider_thread_id.as_ref();
-        let missed = run.ordinal.saturating_sub(1);
+        let previous = projection
+            .runs
+            .iter()
+            .filter(|r| {
+                r.ordinal < run.ordinal
+                    && r.started_at.is_some()
+                    && r.status != RunStatus::RolledBack
+            })
+            .max_by_key(|r| r.ordinal);
+        let missed = previous.map_or(0, |r| r.ordinal);
         let seen = provider.last_run_ordinal.unwrap_or(0);
+        let lost_native_context = provider.native_thread_ref.is_none()
+            && projection.visible_turn_items.iter().any(|row| {
+                row.visibility == Visibility::Inherited
+                    || matches!(&row.item.body, TurnItemBody::AssistantMessage { .. })
+            });
         if pending.is_empty()
-            && previous.is_some_and(|id| *id != provider.id)
-            && seen < missed
+            && (previous.is_some_and(|r| r.provider_thread_id.as_ref() != Some(&provider.id))
+                || lost_native_context)
+            && (seen < missed || lost_native_context)
             && !projection
                 .context_handoffs
                 .iter()
@@ -1464,6 +1564,16 @@ impl ProviderAdapter for HostResources {
                     .map_err(adapter_error)?;
             }
             let cwd = PathBuf::from(&scope.cwd);
+            let files = if *restore_files {
+                Some(
+                    self.checkpoints
+                        .prepare_restore(scope, checkpoint)
+                        .await
+                        .map_err(adapter_error)?,
+                )
+            } else {
+                None
+            };
             let provider = match provider.driver {
                 Driver::Codex => {
                     self.codex_adapter
@@ -1481,12 +1591,18 @@ impl ProviderAdapter for HostResources {
                         .await?
                 }
             };
-            if *restore_files {
-                self.checkpoints
-                    .restore(scope, checkpoint)
-                    .await
-                    .map_err(adapter_error)?;
+            if let Some(files) = files {
+                files.commit().map_err(adapter_error)?;
             }
+            let stale = orchestration::rollback::stale_checkpoints(&projection, checkpoint);
+            self.checkpoints
+                .delete_stale_refs(scope, &stale)
+                .await
+                .map_err(|error| AdapterError {
+                    message: error.to_string(),
+                    retryable: true,
+                    turn_completed: false,
+                })?;
             return Ok(orchestration::rollback::finish(
                 &projection,
                 checkpoint,
@@ -1843,21 +1959,26 @@ impl ProviderAdapter for HostResources {
                     created_at: now(),
                 };
                 let timestamp = now();
-                let baseline_recorded =
-                    projection.checkpoint_scopes.iter().any(|existing| {
-                        existing.id == scope.id
-                            && existing.run_id == scope.run_id
-                            && existing.node_id == scope.node_id
-                    }) && [0, run.ordinal.saturating_sub(1)].iter().all(|ordinal| {
-                        projection.checkpoints.iter().any(|checkpoint| {
-                            checkpoint.scope_id == scope.id
-                                && checkpoint.app_run_ordinal == Some(*ordinal)
+                let before = orchestration::checkpoint::before_run_id(&scope.id, run_id);
+                if !projection
+                    .checkpoints
+                    .iter()
+                    .any(|c| c.id == before && c.status == CheckpointStatus::Ready)
+                {
+                    let previous = projection
+                        .runs
+                        .iter()
+                        .filter(|r| {
+                            r.ordinal < run.ordinal
+                                && r.started_at.is_some()
+                                && r.status != RunStatus::RolledBack
                         })
-                    });
-                if !baseline_recorded {
+                        .max_by_key(|r| r.ordinal)
+                        .and_then(|r| r.checkpoint_id.as_ref())
+                        .and_then(|id| projection.checkpoints.iter().find(|c| &c.id == id));
                     let mut payloads = self
                         .checkpoints
-                        .baseline(&scope, run.ordinal.saturating_sub(1), &timestamp)
+                        .prepare_run(&scope, &run.id, run.ordinal, previous, &timestamp)
                         .await;
                     payloads.retain(|payload| !matches!(payload, EventPayload::CheckpointCaptured(checkpoint) if projection.checkpoints.iter().any(|existing| existing.id == checkpoint.id && existing.status == CheckpointStatus::Ready)));
                     let (receipt, completed) = tokio::sync::oneshot::channel();
@@ -1927,6 +2048,147 @@ mod tests {
             delivery_intent: None,
             dispatch_mode: DispatchMode::StartImmediately,
         }
+    }
+    #[test]
+    fn oversized_subscription_is_a_typed_failure_before_delivery() {
+        let failure =
+            ensure_subscription_frames(&[vec![0; protocol::MAX_FRAME_BYTES + 1]]).unwrap_err();
+        assert_eq!(failure.code, "response_too_large");
+        assert!(ensure_subscription_frames(&[vec![0; protocol::MAX_FRAME_BYTES]]).is_ok());
+    }
+    #[tokio::test]
+    async fn launch_checks_registered_projects_even_with_an_explicit_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            Err("fixture".into()),
+            ProjectStore::new(directory.path().join("projects.json")),
+        )
+        .unwrap();
+        let mut create = create();
+        if let CommandBody::ThreadCreate {
+            project_id,
+            worktree_path,
+            ..
+        } = &mut create.body
+        {
+            *project_id = ProjectId::new("unregistered").unwrap();
+            *worktree_path = Some(directory.path().to_string_lossy().into_owned());
+        }
+        let failure = service
+            .launch_thread(&agent_protocol::orchestration::LaunchThread {
+                create,
+                input: input("start"),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "project_unavailable");
+    }
+    #[tokio::test]
+    async fn restore_rejects_project_checkouts_and_accepts_a_separate_nested_git_worktree() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        std::fs::create_dir(&root).unwrap();
+        crate::git::text(&root, &["init"]).unwrap();
+        crate::git::text(
+            &root,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+        )
+        .unwrap();
+        let worktree = root.join(".worktree/isolated");
+        crate::git::text(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        )
+        .unwrap();
+        let projects = ProjectStore::new(directory.path().join("projects.json"));
+        let project = ProjectId::new(projects.register(&root).await.unwrap()).unwrap();
+        let service = HostRpcService::new(Err("fixture".into()), projects).unwrap();
+        let mut create = create();
+        if let CommandBody::ThreadCreate {
+            project_id,
+            worktree_path,
+            ..
+        } = &mut create.body
+        {
+            *project_id = project;
+            *worktree_path = Some(worktree.to_string_lossy().into_owned());
+        }
+        service.dispatch_command(&create).unwrap();
+        let mut thread = service
+            .inner
+            .store
+            .projection(&create.thread_id)
+            .unwrap()
+            .thread;
+        assert!(
+            service
+                .inner
+                .resources
+                .ensure_restore_isolated(&thread, worktree.to_str().unwrap())
+                .await
+                .is_ok()
+        );
+        let nested = worktree.join("scope");
+        std::fs::create_dir(&nested).unwrap();
+        assert!(
+            service
+                .inner
+                .resources
+                .ensure_restore_isolated(&thread, nested.to_str().unwrap())
+                .await
+                .is_ok()
+        );
+        thread.worktree_path = Some(root.to_string_lossy().into_owned());
+        assert!(
+            service
+                .inner
+                .resources
+                .ensure_restore_isolated(&thread, root.to_str().unwrap())
+                .await
+                .is_err()
+        );
+        thread.worktree_path = None;
+        assert!(
+            service
+                .inner
+                .resources
+                .ensure_restore_isolated(&thread, root.to_str().unwrap())
+                .await
+                .is_err()
+        );
+        let mut other = create.clone();
+        other.thread_id = ThreadId::new("other").unwrap();
+        other.command_id = CommandId::new("other-create").unwrap();
+        service.dispatch_command(&other).unwrap();
+        thread.worktree_path = Some(worktree.to_string_lossy().into_owned());
+        assert!(
+            service
+                .inner
+                .resources
+                .ensure_restore_isolated(&thread, worktree.to_str().unwrap())
+                .await
+                .is_err()
+        );
+        let first = service.launch_lock(&create.command_id);
+        let second = service.launch_lock(&other.command_id);
+        let _guard = first.lock().await;
+        assert!(second.try_lock().is_ok());
+        assert!(service.launch_lock(&create.command_id).try_lock().is_err());
     }
     #[cfg(unix)]
     #[tokio::test]
@@ -2101,7 +2363,10 @@ mod tests {
                     .is_empty()
             );
             launch.input.text = "start".into();
-            let guard = service.inner.launches.lock().await;
+            let guard = service
+                .launch_lock(&launch.create.command_id)
+                .lock_owned()
+                .await;
             let session = service.inner.connections.open_session();
             let delivery_service = service.clone();
             let call = Call::LaunchThread(Box::new(launch.clone()));

@@ -419,6 +419,9 @@ impl TurnState {
         self.session.status = SessionStatus::Ready;
         self.session.updated_at = now.clone();
         self.provider_thread.status = ProviderThreadStatus::Idle;
+        if self.provider_thread.driver == Driver::Claude && status == TurnStatus::Completed {
+            self.provider_thread.native_conversation_head_ref = None;
+        }
         self.provider_thread.updated_at = now.clone();
         payloads.extend([
             EventPayload::ProviderTurnUpdated(self.turn.clone()),
@@ -985,6 +988,16 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
                 }
                 "content_block_start" => {
                     let block = &event["content_block"];
+                    if !matches!(
+                        block["type"].as_str(),
+                        Some("thinking" | "tool_use" | "text")
+                    ) {
+                        return Translation {
+                            state: next,
+                            payloads,
+                            immediate_responses,
+                        };
+                    }
                     let key = block["id"]
                         .as_str()
                         .map(str::to_owned)
@@ -1001,7 +1014,7 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
                             block["name"].as_str().unwrap_or("Tool"),
                             &block["input"],
                         ),
-                        _ => TurnItemBody::AssistantMessage {
+                        Some("text") => TurnItemBody::AssistantMessage {
                             message_id: MessageId::new(format!(
                                 "message:{}:{key}",
                                 next.attempt.id
@@ -1011,6 +1024,7 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
                             attachments: vec![],
                             streaming: true,
                         },
+                        _ => unreachable!("validated Claude block type"),
                     };
                     let item = next.item(&key, body, ItemStatus::Running, now);
                     next.record_item(&key, item, now, &mut payloads);
@@ -1281,7 +1295,7 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
                 next.record_item(&key, item, now, &mut payloads);
             }
         }
-        "rate_limit_event" => {
+        "rate_limit_event" if frame["rate_limit_info"]["status"] == "rejected" => {
             let item = next.item(
                 "rate-limit",
                 TurnItemBody::SystemNotice {
@@ -1441,7 +1455,7 @@ pub(crate) mod tests {
     fn timestamp() -> Timestamp {
         Timestamp::parse("2026-10-05T00:00:00Z").unwrap()
     }
-    pub(crate) fn state(driver: Driver) -> TurnState {
+    pub(crate) fn projection(driver: Driver) -> ThreadProjection {
         let now = timestamp();
         let command = Command {
             command_id: CommandId::new("create").unwrap(),
@@ -1496,7 +1510,11 @@ pub(crate) mod tests {
         {
             projection = projector::apply(projection.as_ref(), &event, Default::default());
         }
-        let p = projection.unwrap();
+        projection.unwrap()
+    }
+    pub(crate) fn state(driver: Driver) -> TurnState {
+        let now = timestamp();
+        let p = projection(driver);
         let session = ProviderSession {
             id: ProviderSessionId::new("session").unwrap(),
             driver,
@@ -1688,6 +1706,61 @@ pub(crate) mod tests {
                 &json!({}),
                 Some(&json!(5)),
                 &now
+            )
+            .payloads
+            .is_empty()
+        );
+    }
+    #[test]
+    fn claude_completion_consumes_the_rollback_resume_cursor_once() {
+        let mut initial = state(Driver::Claude);
+        initial.provider_thread.native_conversation_head_ref = Some(ProviderRef {
+            driver: Driver::Claude,
+            native_id: Some("rollback-cursor".into()),
+            strength: Strength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        });
+        let done = claude(
+            &initial,
+            &json!({"type":"result","subtype":"success","result":"continued"}),
+            &timestamp(),
+        );
+        assert_eq!(done.state.run.status, RunStatus::Completed);
+        assert!(
+            done.state
+                .provider_thread
+                .native_conversation_head_ref
+                .is_none()
+        );
+        assert!(done.payloads.iter().any(|p| matches!(p, EventPayload::ProviderThreadUpdated(t) if t.native_conversation_head_ref.is_none())));
+    }
+    #[test]
+    fn unsupported_claude_blocks_and_healthy_rate_limits_do_not_create_notices() {
+        let initial = state(Driver::Claude);
+        let unsupported = claude(
+            &initial,
+            &json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"future_block"}}}),
+            &timestamp(),
+        );
+        assert!(unsupported.payloads.is_empty());
+        assert!(unsupported.state.items.is_empty());
+        for status in ["allowed", "allowed_warning"] {
+            assert!(
+                claude(
+                    &initial,
+                    &json!({"type":"rate_limit_event","rate_limit_info":{"status":status}}),
+                    &timestamp()
+                )
+                .payloads
+                .is_empty()
+            );
+        }
+        assert!(
+            !claude(
+                &initial,
+                &json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}),
+                &timestamp()
             )
             .payloads
             .is_empty()

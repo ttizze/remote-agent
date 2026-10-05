@@ -68,28 +68,15 @@ impl CodexAdapter {
             .as_ref()
             .and_then(|r| r.native_id.as_ref())
             .ok_or_else(|| error("native thread missing"))?;
-        let removed: std::collections::BTreeSet<_> = projection
-            .runs
-            .iter()
-            .filter(|r| r.status == RunStatus::RolledBack)
-            .map(|r| &r.id)
-            .collect();
-        let count = projection
-            .provider_turns
-            .iter()
-            .filter(|t| {
-                t.provider_thread_id == provider.id
-                    && target.is_none_or(|target| t.ordinal > target.ordinal)
-                    && t.run_attempt_id.as_ref().is_none_or(|id| {
-                        projection
-                            .attempts
-                            .iter()
-                            .find(|a| &a.id == id)
-                            .is_none_or(|a| !removed.contains(&a.run_id))
-                    })
-            })
-            .count();
-        if count > 0 {
+        // An absolute native boundary makes retrying a completed revert safe.
+        let boundary = rollback_boundary(
+            &provider.id,
+            target.map(|t| t.ordinal),
+            &projection.provider_turns,
+            &projection.attempts,
+            &projection.runs,
+        );
+        if let Some(before) = boundary {
             let metadata = self
                 .request(
                     "thread/read",
@@ -100,41 +87,28 @@ impl CodexAdapter {
                 return Err(error("Codex legacy history cannot be reverted"));
             }
             self.request("thread/resume", json!({"threadId":native,"excludeTurns":true,"cwd":cwd,"model":projection.thread.model_selection.model})).await?;
-            let mut remaining = count;
             let mut cursor = Value::Null;
             let mut visited = std::collections::BTreeSet::new();
-            let mut before = None;
-            while remaining > 0 {
+            loop {
                 if !visited.insert(cursor.to_string()) {
                     return Err(error("Codex history pagination repeated a cursor"));
                 }
-                let page = self.request("thread/turns/list", json!({"threadId":native,"cursor":cursor,"limit":remaining.min(100),"sortDirection":"desc","itemsView":"summary"})).await?;
-                for turn in page["data"]
+                let page = self.request("thread/turns/list", json!({"threadId":native,"cursor":cursor,"limit":100,"sortDirection":"desc","itemsView":"summary"})).await?;
+                let turns = page["data"]
                     .as_array()
-                    .ok_or_else(|| error("Codex history page is invalid"))?
-                {
-                    before = Some(
-                        turn["id"]
-                            .as_str()
-                            .ok_or_else(|| error("native turn id missing"))?
-                            .to_owned(),
-                    );
-                    remaining -= 1;
-                    if remaining == 0 {
-                        break;
-                    }
+                    .ok_or_else(|| error("Codex history page is invalid"))?;
+                if turns.iter().any(|turn| turn["id"].as_str() == Some(before)) {
+                    self.request(
+                        "thread/revert",
+                        json!({"threadId":native,"beforeTurnId":before}),
+                    )
+                    .await?;
+                    break;
                 }
                 cursor = page["nextCursor"].clone();
                 if cursor.is_null() {
                     break;
                 }
-            }
-            if let Some(before) = before {
-                self.request(
-                    "thread/revert",
-                    json!({"threadId":native,"beforeTurnId":before}),
-                )
-                .await?;
             }
         }
         let mut provider = provider.clone();
@@ -223,6 +197,9 @@ impl CodexAdapter {
                     let completed = self.state(run.provider_thread_id.as_ref().expect("provider thread")).is_ok_and(|(_, state)| state.terminal)
                         || error.message.to_ascii_lowercase().contains("turn completed")
                         || error.message.to_ascii_lowercase().contains("no active turn");
+                    let completed = completed
+                        || error.message.to_ascii_lowercase().contains("cannot steer a compact turn")
+                        || error.message.to_ascii_lowercase().contains("expected active turn id");
                     return Err(if completed { crate::turn_completed() } else { error });
                 }
                 Ok(())
@@ -662,6 +639,40 @@ pub fn turn_start_params(
     }
     params
 }
+fn rollback_boundary<'a>(
+    provider: &ProviderThreadId,
+    target_ordinal: Option<u64>,
+    turns: &'a [ProviderTurn],
+    attempts: &[RunAttempt],
+    runs: &[Run],
+) -> Option<&'a str> {
+    let removed: std::collections::BTreeSet<_> = runs
+        .iter()
+        .filter(|r| r.status == RunStatus::RolledBack)
+        .map(|r| &r.id)
+        .collect();
+    turns
+        .iter()
+        .filter(|turn| {
+            &turn.provider_thread_id == provider
+                && target_ordinal.is_none_or(|ordinal| turn.ordinal > ordinal)
+                && turn
+                    .native_turn_ref
+                    .as_ref()
+                    .and_then(|r| r.native_id.as_ref())
+                    .is_some()
+                && turn.run_attempt_id.as_ref().is_none_or(|id| {
+                    attempts
+                        .iter()
+                        .find(|a| &a.id == id)
+                        .is_none_or(|a| !removed.contains(&a.run_id))
+                })
+        })
+        .min_by_key(|turn| turn.ordinal)
+        .and_then(|turn| turn.native_turn_ref.as_ref())
+        .and_then(|r| r.native_id.as_deref())
+}
+
 async fn pump(
     adapter: std::sync::Weak<CodexAdapter>,
     mut events: tokio::sync::broadcast::Receiver<PeerEvent>,
@@ -695,7 +706,17 @@ async fn pump(
                         let _ = buffer.flush();
                         tracing::warn!(target: "bex", operation="orchestration.codex.lag", message=%format_args!("cause=event_stream_lagged last_processed_sequence={last_processed_sequence} missed_events={count}"));
                         let natives: Vec<_> = adapter.states.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
-                        for native in natives { let _ = adapter.disconnected(&native, "Codex notification stream lost events").await; }
+                        for native in natives {
+                            let state = adapter.states.lock().unwrap_or_else(|e| e.into_inner()).get(&native).cloned();
+                            if let Some(state) = state {
+                                if !state.terminal && let Some(turn) = state.turn.native_turn_ref.as_ref().and_then(|r| r.native_id.as_ref()) {
+                                    if adapter.request("turn/interrupt", json!({"threadId":native,"turnId":turn})).await.is_err() {
+                                        adapter.server.shutdown().await.ok();
+                                    }
+                                }
+                            }
+                            let _ = adapter.disconnected(&native, "Codex notification stream lost events").await;
+                        }
                     }
                     result => {
                         if let Some(frame) = buffer.flush() { ingest_frame(&adapter, frame).await; }
@@ -725,6 +746,176 @@ async fn ingest_frame(adapter: &CodexAdapter, value: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_retried_rollback_does_not_revert_valid_native_turns_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("fixture-provider");
+        let calls = directory.path().join("reverts.jsonl");
+        std::fs::write(&program, format!(r#"#!/usr/bin/env python3
+import json, sys
+turns = ["one", "two"]
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request: continue
+    method = request["method"]
+    if method == "initialize": result = {{"userAgent":"fixture","codexHome":"/tmp"}}
+    elif method == "thread/turns/list": result = {{"data":[{{"id":id}} for id in reversed(turns)],"nextCursor":None}}
+    elif method == "thread/revert":
+        before = request["params"]["beforeTurnId"]
+        with open({calls:?}, "a") as log: log.write(json.dumps(request["params"]) + "\n")
+        turns = turns[:turns.index(before)]
+        result = {{"thread":{{"id":"native"}}}}
+    else: result = {{"thread":{{"id":"native","historyMode":"paginated"}}}}
+    print(json.dumps({{"id":request["id"],"result":result}}), flush=True)
+"#)).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let server = Arc::new(
+            CodexAppServer::spawn(codex_app_server::AppServerConfig {
+                program,
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let (output, _) = mpsc::channel(8);
+        let adapter = CodexAdapter::new(server.clone(), output);
+        let mut p = crate::normalize::tests::projection(Driver::Codex);
+        let state = crate::normalize::tests::state(Driver::Codex);
+        let mut provider = state.provider_thread.clone();
+        provider.provider_session_id = Some(state.session.id.clone());
+        provider.native_thread_ref = Some(ProviderRef {
+            driver: Driver::Codex,
+            native_id: Some("native".into()),
+            strength: Strength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        });
+        p.thread.active_provider_thread_id = Some(provider.id.clone());
+        p.provider_threads = vec![provider];
+        p.provider_sessions.push(state.session);
+        p.runs[0].status = RunStatus::Completed;
+        let mut second = p.runs[0].clone();
+        second.id = RunId::new("second").unwrap();
+        second.ordinal = 2;
+        let mut attempt = p.attempts[0].clone();
+        attempt.id = RunAttemptId::new("second-attempt").unwrap();
+        attempt.run_id = second.id.clone();
+        second.active_attempt_id = Some(attempt.id.clone());
+        let mut first_turn = state.turn.clone();
+        first_turn.status = TurnStatus::Completed;
+        first_turn.native_turn_ref = Some(ProviderRef {
+            driver: Driver::Codex,
+            native_id: Some("one".into()),
+            strength: Strength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        });
+        let mut second_turn = first_turn.clone();
+        second_turn.id = ProviderTurnId::new("second-turn").unwrap();
+        second_turn.ordinal = 2;
+        second_turn.run_attempt_id = Some(attempt.id.clone());
+        second_turn.native_turn_ref.as_mut().unwrap().native_id = Some("two".into());
+        let mut failed_before_input = second_turn.clone();
+        failed_before_input.id = ProviderTurnId::new("never-started").unwrap();
+        failed_before_input.ordinal = 3;
+        failed_before_input.status = TurnStatus::Failed;
+        failed_before_input.native_turn_ref = None;
+        p.runs.push(second);
+        p.attempts.push(attempt);
+        p.provider_turns = vec![first_turn, second_turn, failed_before_input];
+        let scope = CheckpointScope {
+            id: CheckpointScopeId::new("scope").unwrap(),
+            thread_id: p.thread.id.clone(),
+            run_id: Some(p.runs[0].id.clone()),
+            node_id: p.runs[0].root_node_id.clone().unwrap(),
+            parent_scope_id: None,
+            provider_thread_id: p.runs[0].provider_thread_id.clone(),
+            kind: ScopeKind::RootRun,
+            ordinal_within_parent: 0,
+            advances_app_run_count: true,
+            cwd: directory.path().to_string_lossy().into_owned(),
+            created_at: now(),
+        };
+        let checkpoint = Checkpoint {
+            id: CheckpointId::new("checkpoint").unwrap(),
+            thread_id: p.thread.id.clone(),
+            scope_id: scope.id.clone(),
+            run_id: scope.run_id.clone(),
+            node_id: scope.node_id.clone(),
+            parent_checkpoint_id: None,
+            ordinal_within_scope: 1,
+            app_run_ordinal: Some(1),
+            reference: CheckpointRef::new("refs/test/1").unwrap(),
+            status: CheckpointStatus::Ready,
+            files: vec![],
+            captured_at: now(),
+        };
+        p.checkpoint_scopes.push(scope.clone());
+        p.checkpoints.push(checkpoint.clone());
+        for _ in 0..2 {
+            adapter
+                .rollback(&p, &scope.id, &checkpoint.id, directory.path())
+                .await
+                .unwrap();
+        }
+        let reverts = std::fs::read_to_string(calls).unwrap();
+        assert_eq!(reverts.lines().count(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&reverts).unwrap()["beforeTurnId"],
+            "two"
+        );
+        server.shutdown().await.unwrap();
+    }
+    #[test]
+    fn rollback_uses_a_native_boundary_and_ignores_pre_input_failures() {
+        let state = crate::normalize::tests::state(Driver::Codex);
+        let mut accepted = state.turn.clone();
+        accepted.ordinal = 2;
+        accepted.native_turn_ref = Some(ProviderRef {
+            driver: Driver::Codex,
+            native_id: Some("accepted-turn".into()),
+            strength: Strength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        });
+        let mut never_started = state.turn.clone();
+        never_started.ordinal = 3;
+        never_started.status = TurnStatus::Failed;
+        assert_eq!(
+            rollback_boundary(
+                &state.provider_thread.id,
+                Some(1),
+                &[accepted.clone(), never_started],
+                &[state.attempt.clone()],
+                &[state.run.clone()]
+            ),
+            Some("accepted-turn")
+        );
+        let mut removed = state.run.clone();
+        removed.status = RunStatus::RolledBack;
+        assert_eq!(
+            rollback_boundary(
+                &state.provider_thread.id,
+                Some(1),
+                &[accepted.clone()],
+                &[state.attempt.clone()],
+                &[removed]
+            ),
+            None
+        );
+        assert_eq!(
+            rollback_boundary(
+                &state.provider_thread.id,
+                Some(2),
+                &[accepted],
+                &[state.attempt],
+                &[state.run]
+            ),
+            None
+        );
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn notification_pump_recovers_and_records_causes_without_conversation_payloads() {

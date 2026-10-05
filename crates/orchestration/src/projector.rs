@@ -146,7 +146,10 @@ pub fn updated_thread_for_provider(
         && provider.first_run_ordinal.is_none()
         && provider.native_thread_ref.is_none()
         && provider.provider_session_id.is_none();
-    if provider.app_thread_id.as_ref() != Some(&thread.id) || placeholder {
+    if provider.app_thread_id.as_ref() != Some(&thread.id)
+        || provider.status == ProviderThreadStatus::Closed
+        || placeholder
+    {
         return None;
     }
     let mut thread = thread.clone();

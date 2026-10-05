@@ -1,6 +1,10 @@
 //! Checkpoint finalization is an explicit, durable step before queue promotion.
 use crate::*;
 
+pub fn before_run_id(scope: &CheckpointScopeId, run: &RunId) -> CheckpointId {
+    CheckpointId::new(format!("checkpoint:{scope}:before:{run}")).expect("derived id")
+}
+
 pub fn await_capture(events: Vec<DomainEvent>, scopes: &[CheckpointScope]) -> Decision {
     let mut decision = Decision {
         events,

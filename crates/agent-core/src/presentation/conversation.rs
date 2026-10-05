@@ -675,7 +675,7 @@ pub fn timeline(projection: &ThreadProjection) -> Vec<TimelineRow> {
                         .checkpoints
                         .iter()
                         .find(|c| {
-                            c.app_run_ordinal == Some(r.ordinal.saturating_sub(1))
+                            c.id == orchestration::checkpoint::before_run_id(&c.scope_id, &r.id)
                                 && c.status == CheckpointStatus::Ready
                                 && orchestration::rollback::target(projection, &c.scope_id, &c.id)
                                     .is_ok()

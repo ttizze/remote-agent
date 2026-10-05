@@ -68,3 +68,8 @@ CREATE INDEX IF NOT EXISTS orchestration_v2_effect_lane ON orchestration_v2_effe
 
 CREATE TABLE IF NOT EXISTS orchestration_host_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 INSERT OR IGNORE INTO orchestration_host_metadata VALUES('instance', lower(hex(randomblob(16))));
+
+CREATE TABLE IF NOT EXISTS orchestration_v2_projection_fork_history (
+    thread_id TEXT PRIMARY KEY,
+    payload_json TEXT NOT NULL
+);

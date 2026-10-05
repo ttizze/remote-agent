@@ -132,6 +132,30 @@ pub fn request(
     })
 }
 
+pub fn stale_checkpoints(projection: &ThreadProjection, target: &Checkpoint) -> Vec<Checkpoint> {
+    let ordinal = target.app_run_ordinal.unwrap_or(0);
+    let removed: std::collections::BTreeSet<_> = projection
+        .runs
+        .iter()
+        .filter(|r| {
+            r.ordinal > ordinal && r.status.is_terminal() && r.status != RunStatus::RolledBack
+        })
+        .map(|r| &r.id)
+        .collect();
+    projection
+        .checkpoints
+        .iter()
+        .filter(|c| {
+            c.id != target.id
+                && c.scope_id == target.scope_id
+                && c.status == CheckpointStatus::Ready
+                && (c.app_run_ordinal.is_some_and(|n| n > ordinal)
+                    || c.run_id.as_ref().is_some_and(|id| removed.contains(id)))
+        })
+        .cloned()
+        .collect()
+}
+
 pub fn finish(
     projection: &ThreadProjection,
     checkpoint: &Checkpoint,
@@ -141,6 +165,18 @@ pub fn finish(
 ) -> Vec<DomainEvent> {
     let ordinal = checkpoint.app_run_ordinal.unwrap_or(0);
     let mut payloads = vec![EventPayload::ProviderThreadUpdated(provider)];
+    for other in projection.provider_threads.iter().filter(|p| {
+        Some(&p.id) != projection.thread.active_provider_thread_id.as_ref()
+            && p.last_run_ordinal.is_some_and(|n| n > ordinal)
+    }) {
+        let mut other = other.clone();
+        other.native_thread_ref = None;
+        other.native_conversation_head_ref = None;
+        other.last_run_ordinal = None;
+        other.status = ProviderThreadStatus::Closed;
+        other.updated_at = now.clone();
+        payloads.push(EventPayload::ProviderThreadUpdated(other));
+    }
     for run in &projection.runs {
         if run.ordinal > ordinal && run.status.is_terminal() && run.status != RunStatus::RolledBack
         {
@@ -160,12 +196,7 @@ pub fn finish(
             }
         }
     }
-    for stale in projection.checkpoints.iter().filter(|c| {
-        c.scope_id == checkpoint.scope_id
-            && c.ordinal_within_scope > checkpoint.ordinal_within_scope
-            && c.status == CheckpointStatus::Ready
-    }) {
-        let mut stale = stale.clone();
+    for mut stale in stale_checkpoints(projection, checkpoint) {
         stale.status = CheckpointStatus::Stale;
         payloads.push(EventPayload::CheckpointCaptured(stale));
     }
@@ -221,6 +252,7 @@ mod tests {
         projection.nodes[0].status = NodeStatus::Completed;
         let checkpoint = checkpoint(&projection.runs[0], CheckpointStatus::Ready);
         let mut baseline = checkpoint.clone();
+        baseline.id = CheckpointId::new("baseline").unwrap();
         baseline.app_run_ordinal = Some(0);
         baseline.ordinal_within_scope = 0;
         projection.checkpoints.push(checkpoint);

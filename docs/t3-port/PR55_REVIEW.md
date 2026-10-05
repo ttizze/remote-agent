@@ -108,3 +108,22 @@
 - **Swift**: swiftformat / Swiftlint strict、native unit tests **2件通過**、Rust/Swift bindings と generic iOS Simulator destination の **build 成功**（Simulator の起動・UI 操作はしていない）。
 - **Android**: ktfmt / detekt、JVM unit tests **3件通過**（実ファイル保存の失敗時保護を含む）、arm64-v8a/x86_64 の **assembleDebug 成功**。
 - transport、pairing、management、process ownership、browser bridge、診断、依存境界、build cleanup の現行 integration tests を全体テストに含めた。5件の skip は microphone/Chrome/Codex/public relay/手動 WebKit に依存する明示的な外部・手動検証。
+
+## 2回目のレビュー（224eeb3d への指摘）
+
+前回の O8 の「job を隔離すれば十分」という判断は誤りだった。loop の生存に加え、同じ thread の outbox を解放する必要がある。O3 は Restart、O4 は steer の終了競合、O7 は lag 時の native interrupt、O12 は長時間の連続 stream、C3/C4/C8/C14 と D8/D20 は追加修正が必要として扱う。2回目の対応を先に完了し、その後に M2 の残りを実装する。M3 と main の取り込みは行わない。
+
+| R2 指摘 | 現在の対応 | 回帰検証 |
+|---|---|---|
+| O1 / 前回 O8 | error/panic/期限切れ lease の再試行を5回で終端にし、後続 effect を解放。rejected steer follow-up も境界で終端化 | worker の同じ thread の後続 run・繰り返し panic・期限切れ lease |
+| O3, O11 | rollback の重複要求を拒否。完了は現在の thread の rollback フィールドだけを更新 | rollback request と並行 rename/pin/delete |
+| O2, O5, O6, O16 | Claude の成功時に resume cursor を消費。初期化の timeout/reject は process/capacity を解放し、fallback 前に Failed イベントを出さない。ack 中の process 終了は失敗として扱う | normalize cursor、初期化 timeout/reject と容量解放 |
+| O4 / H4 | native ID の絶対的な revert 境界を使い、境界が既に消えていれば再度 revert しない。native input 前の失敗を数えない。ファイル復元を provider 操作前に検証・退避し、provider 失敗は元に戻す | native boundary、補償と journal recovery |
+| H1, H5, H6, H7 | import の worktreePath は null。Git checkout の identity で隔離を確認。capture/diff/restore は同じ cwd の範囲。衝突/submodule を変更前に拒否 | import、nested cwd/sibling、directory collision、原 checkout/linked worktree |
+| H3 / C4 | before-run checkpoint と parent ID で関連付け。stale refs を削除して再利用を防ぐ。diff は番号の欠番を許可 | 欠番・parent link・stale ref 削除と再 capture |
+| O8, O9 / 前回 O3 | queued item は promote 時に作成。Start/Restart 両方を stop でキャンセル | queued output 順序・Restart の開始中 stop |
+| H2, O13, O14, O15, O17 | handoff は実際の直前 run を基準にし、compact は未送信 transfer を保持。fork history を固定。merge の run 判定・重複/supersede を共通化。非 active provider の巻き戻された native context は無効化 | fork の親 rollback・merge run 判定・queue/checkpoint tests |
+| O18（rate limit / unknown block） | 正常な rate limit status と未対応の content block は空の UI 行を作らない | normalize の status/block 回帰テスト |
+| H9, H10, H11 | explicit worktree の launch も project 登録を検証。launch の lock は command ごと。snapshot の frame size を送信前に検証し型付き failure を返す | explicit workspace、lock identity、oversized subscription |
+
+残る R2 指摘（Claude の echo/steer 所有権、transfer 再試行、連続 stream の差分化、core の下書き/送信/再開、desktop と mobile の更新・操作・保存回復）は引き続き修正中。最終検証と対応理由の全表は完了時に更新する。

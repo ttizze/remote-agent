@@ -273,7 +273,15 @@ pub fn decide(
                     )),
                 );
                 if !hold_queue {
-                    promote_next(&mut decision, command, &projection.runs, now, Some(run_id));
+                    promote_next(
+                        &mut decision,
+                        command,
+                        &projection.runs,
+                        &projection.messages,
+                        next_ordinal(projection),
+                        now,
+                        Some(run_id),
+                    );
                 }
             }
         }
@@ -293,7 +301,15 @@ pub fn decide(
                 );
             }
             if active(&runs).is_none() {
-                promote_next(&mut decision, command, &runs, now, None);
+                promote_next(
+                    &mut decision,
+                    command,
+                    &runs,
+                    &projection.messages,
+                    next_ordinal(projection),
+                    now,
+                    None,
+                );
             }
             if decision.events.is_empty() {
                 thread.updated_at = now.clone();
@@ -534,7 +550,15 @@ pub fn decide(
                     next_ordinal(projection),
                 )),
             );
-            promote_next(&mut decision, command, &projection.runs, now, Some(run_id));
+            promote_next(
+                &mut decision,
+                command,
+                &projection.runs,
+                &projection.messages,
+                next_ordinal(projection),
+                now,
+                Some(run_id),
+            );
         }
         PreparedRunRetry { run_id } => {
             require(active(&projection.runs).is_none(), "another run is active")?;
@@ -1066,6 +1090,8 @@ fn promote_next(
     decision: &mut Decision,
     command: &Command,
     runs: &[Run],
+    messages: &[ConversationMessage],
+    ordinal: u64,
     now: &Timestamp,
     excluding: Option<&RunId>,
 ) {
@@ -1074,6 +1100,12 @@ fn promote_next(
     }
     if let Some(next) = queued(runs).first().filter(|run| !run.queue_held) {
         let mut run = (*next).clone();
+        run.ordinal = runs
+            .iter()
+            .map(|run| run.ordinal)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         run.status = RunStatus::Starting;
         run.started_at = Some(now.clone());
         run.queue_position = None;
@@ -1084,7 +1116,57 @@ fn promote_next(
                 run_id: run.id.clone(),
             },
         );
+        if let Some(message) = messages.iter().find(|m| m.id == run.user_message_id) {
+            emit(
+                decision,
+                command,
+                now,
+                EventPayload::TurnItemUpdated(user_item(
+                    message,
+                    &run,
+                    InputIntent::QueuedTurn,
+                    ordinal,
+                    None,
+                    now,
+                )),
+            );
+        }
         emit(decision, command, now, EventPayload::RunUpdated(run));
+    }
+}
+
+fn user_item(
+    message: &ConversationMessage,
+    run: &Run,
+    input_intent: InputIntent,
+    ordinal: u64,
+    provider_turn_id: Option<ProviderTurnId>,
+    now: &Timestamp,
+) -> TurnItem {
+    TurnItem {
+        id: TurnItemId::new(format!("item:user:{}", message.id)).expect("derived id"),
+        thread_id: message.thread_id.clone(),
+        run_id: Some(run.id.clone()),
+        node_id: run.root_node_id.clone(),
+        provider_thread_id: run.provider_thread_id.clone(),
+        provider_turn_id,
+        native_item_ref: None,
+        parent_item_id: None,
+        ordinal,
+        status: ItemStatus::Completed,
+        title: None,
+        started_at: Some(now.clone()),
+        completed_at: Some(now.clone()),
+        updated_at: now.clone(),
+        body: TurnItemBody::UserMessage {
+            created_by: message.created_by,
+            creation_source: message.creation_source,
+            message_id: message.id.clone(),
+            input_intent,
+            text: message.text.clone(),
+            context: message.context.clone(),
+            attachments: message.attachments.clone(),
+        },
     }
 }
 
@@ -1372,31 +1454,16 @@ fn dispatch(
         created_at: now.clone(),
         updated_at: now.clone(),
     };
-    let item = TurnItem {
-        id: TurnItemId::new(format!("item:user:{}", message.message_id)).expect("derived id"),
-        thread_id: command.thread_id.clone(),
-        run_id: Some(target.id.clone()),
-        node_id: target.root_node_id.clone(),
-        provider_thread_id: target.provider_thread_id.clone(),
-        provider_turn_id: running_turn(projection, &target).map(|turn| turn.id.clone()),
-        native_item_ref: None,
-        parent_item_id: None,
-        ordinal: next_ordinal(projection),
-        status: ItemStatus::Completed,
-        title: None,
-        started_at: Some(now.clone()),
-        completed_at: Some(now.clone()),
-        updated_at: now.clone(),
-        body: TurnItemBody::UserMessage {
-            created_by: message.created_by,
-            creation_source: message.creation_source,
-            message_id: message.message_id.clone(),
+    let item = (target.status != RunStatus::Queued).then(|| {
+        user_item(
+            &conversation,
+            &target,
             input_intent,
-            text: message.text.clone(),
-            context: message.context.clone(),
-            attachments: message.attachments.clone(),
-        },
-    };
+            next_ordinal(projection),
+            running_turn(projection, &target).map(|t| t.id.clone()),
+            now,
+        )
+    });
     if steering {
         let turn = running_turn(projection, &target)
             .ok_or_else(|| DecisionError("no running provider turn to steer".into()))?;
@@ -1545,7 +1612,9 @@ fn dispatch(
         now,
         EventPayload::MessageUpdated(conversation),
     );
-    emit(decision, command, now, EventPayload::TurnItemUpdated(item));
+    if let Some(item) = item {
+        emit(decision, command, now, EventPayload::TurnItemUpdated(item));
+    }
     let mut thread = projection.thread.clone();
     thread.settled_override = Some(SettledOverride::Active);
     thread.settled_at = None;
@@ -1879,7 +1948,15 @@ pub fn after_terminal(
     };
     let mut decision = Decision::default();
     if projection.thread.archived_at.is_none() && projection.thread.deleted_at.is_none() {
-        promote_next(&mut decision, &command, &projection.runs, now, None);
+        promote_next(
+            &mut decision,
+            &command,
+            &projection.runs,
+            &projection.messages,
+            next_ordinal(projection),
+            now,
+            None,
+        );
     }
     decision
 }

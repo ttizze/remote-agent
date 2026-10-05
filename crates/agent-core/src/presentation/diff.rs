@@ -223,9 +223,6 @@ pub fn turn_diff_options(
     ordinals.dedup();
     let mut options = vec![];
     for pair in ordinals.windows(2).rev() {
-        if pair[0].checked_add(1) != Some(pair[1]) {
-            continue;
-        }
         options.push(TurnDiffOption {
             label: format!("Turn {}", pair[1]),
             from_turn_count: pair[0],
@@ -309,7 +306,7 @@ mod tests {
                 status: CheckpointStatus::Ready, files: vec![], captured_at: crate::test_support::now(),
             }).collect();
             let mut sorted = ordinals.clone(); sorted.sort_unstable(); sorted.dedup();
-            let expected: Vec<_> = sorted.iter().rev().copied().filter(|ordinal| *ordinal > 0 && sorted.contains(&(ordinal - 1))).collect();
+            let expected: Vec<_> = sorted.iter().skip(1).rev().copied().collect();
             let options = turn_diff_options(&checkpoints, &root);
             let actual: Vec<_> = options.iter().filter(|option| option.label != "All turns").map(|option| option.to_turn_count).collect();
             prop_assert_eq!(actual, expected);

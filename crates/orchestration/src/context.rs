@@ -36,6 +36,16 @@ pub fn forkable(status: RunStatus) -> bool {
             | RunStatus::Cancelled
     )
 }
+pub fn merge_back_run(runs: &[Run]) -> Option<&Run> {
+    let run = runs
+        .iter()
+        .filter(|r| matches!(r.status, RunStatus::Completed | RunStatus::Waiting))
+        .max_by_key(|r| r.ordinal)?;
+    (!runs
+        .iter()
+        .any(|r| r.ordinal > run.ordinal && r.status.is_blocking()))
+    .then_some(run)
+}
 pub fn point(projection: &ThreadProjection, run: &Run) -> ContextSourcePoint {
     let provider = projection
         .provider_threads
@@ -85,11 +95,16 @@ pub fn plan(
     if *target_id == source.thread.id {
         return Err(DecisionError("source and target must differ".into()));
     }
-    let run = source_run(&source.runs, &source.checkpoints, source_point)?;
     let kind = if matches!(command.body, CommandBody::ThreadFork { .. }) {
         TransferKind::Fork
     } else {
         TransferKind::MergeBack
+    };
+    let run = if kind == TransferKind::MergeBack && *source_point == ForkPoint::LatestStable {
+        merge_back_run(&source.runs)
+            .ok_or_else(|| DecisionError("no provider-finished run to merge".into()))?
+    } else {
+        source_run(&source.runs, &source.checkpoints, source_point)?
     };
     let base_point = if kind == TransferKind::MergeBack {
         let target = target
@@ -98,6 +113,10 @@ pub fn plan(
         if source.thread.lineage.parent_thread_id.as_ref() != Some(&target.thread.id)
             || source.thread.lineage.relationship_to_parent != Some(Relationship::Fork)
             || !matches!(run.status, RunStatus::Completed | RunStatus::Waiting)
+            || source
+                .runs
+                .iter()
+                .any(|r| r.ordinal > run.ordinal && r.status.is_blocking())
         {
             return Err(DecisionError(
                 "merge back requires a provider-finished fork of the target".into(),
@@ -119,6 +138,33 @@ pub fn plan(
         None
     };
     let mut payloads = vec![];
+    if kind == TransferKind::MergeBack
+        && let Some(target) = target
+    {
+        for old in target.context_transfers.iter().filter(|t| {
+            t.kind == TransferKind::MergeBack
+                && t.source_thread_id == source.thread.id
+                && t.status != TransferStatus::Superseded
+        }) {
+            if old.source_point.run_id.as_ref() == Some(&run.id) {
+                return Ok(Decision::default());
+            }
+            if old.status != TransferStatus::Consumed {
+                let mut old = old.clone();
+                old.status = TransferStatus::Superseded;
+                old.updated_at = now.clone();
+                for handoff in target.context_handoffs.iter().filter(|h| {
+                    h.transfer_id.as_ref() == Some(&old.id) && h.status == HandoffStatus::Ready
+                }) {
+                    let mut handoff = handoff.clone();
+                    handoff.status = HandoffStatus::Superseded;
+                    handoff.updated_at = now.clone();
+                    payloads.push(EventPayload::ContextHandoffUpdated(handoff));
+                }
+                payloads.push(EventPayload::ContextTransferUpdated(old));
+            }
+        }
+    }
     if let CommandBody::ThreadFork {
         title,
         creation_source,
@@ -188,10 +234,11 @@ pub fn history_text(
     to: u64,
     runs: &[Run],
     budget: usize,
+    include_inherited: bool,
 ) -> String {
     let messages: Vec<_> = items
         .iter()
-        .filter(|row| from <= 1 || row.visibility == Visibility::Local)
+        .filter(|row| include_inherited || row.visibility == Visibility::Local)
         .filter(|row| {
             row.item.run_id.as_ref().is_none_or(|id| {
                 runs.iter().find(|r| &r.id == id).is_none_or(|r| {
@@ -300,7 +347,14 @@ pub fn portable(
         summary_message_id: None,
         summary_text: format!(
             "{}\nRecover omitted history with t3_thread_read({{threadId:\"{}\",view:\"activity\",limit:20,maxCharsPerItem:4000}}); paginate with afterPosition=nextPosition. For long items use itemId/textOffset=nextTextOffset.",
-            history_text(&source.visible_turn_items, from, to, &source.runs, 16_000),
+            history_text(
+                &source.visible_turn_items,
+                from,
+                to,
+                &source.runs,
+                16_000,
+                strategy != HandoffStrategy::ForkDeltaSummary && from <= 1
+            ),
             source.thread.id
         ),
         created_by_provider_instance_id: Some(run.provider_instance_id.clone()),
@@ -333,10 +387,13 @@ pub fn portable(
                 ),
             base_point: None,
             source_provider_instance_id: source
-                .provider_threads
+                .runs
                 .iter()
-                .find(|p| Some(&p.id) == source.thread.active_provider_thread_id.as_ref())
-                .map(|p| p.provider_instance_id.clone()),
+                .filter(|r| {
+                    r.ordinal <= to && r.started_at.is_some() && r.status != RunStatus::RolledBack
+                })
+                .max_by_key(|r| r.ordinal)
+                .map(|r| r.provider_instance_id.clone()),
             target_provider_instance_id: None,
             target_run_id: None,
             status: TransferStatus::Pending,
@@ -467,6 +524,20 @@ mod tests {
         )
     }
     #[test]
+    fn merge_uses_the_latest_provider_finished_run_and_waits_for_newer_active_work() {
+        let store = finished();
+        let p = store.projection(&create().thread_id).unwrap();
+        let mut runs = p.runs.clone();
+        let mut failed = runs[0].clone();
+        failed.id = RunId::new("failed").unwrap();
+        failed.ordinal = 4;
+        failed.status = RunStatus::Failed;
+        runs.push(failed);
+        assert_eq!(merge_back_run(&runs).map(|r| &r.id), Some(&runs[0].id));
+        runs[1].status = RunStatus::Starting;
+        assert!(merge_back_run(&runs).is_none());
+    }
+    #[test]
     fn fork_is_deferred_atomic_idempotent_and_inherits_only_source_history() {
         let store = finished();
         let c = fork("fork", "child");
@@ -485,6 +556,25 @@ mod tests {
                 .replayed
         );
         assert_eq!(store.sequence().unwrap(), sequence);
+        let inherited = p.visible_turn_items.clone();
+        let mut run = store.projection(&create().thread_id).unwrap().runs[0].clone();
+        run.status = RunStatus::RolledBack;
+        store
+            .ingest(
+                crate::events(
+                    &create().thread_id,
+                    "parent-rewound",
+                    vec![EventPayload::RunUpdated(run)],
+                    &now(),
+                ),
+                None,
+                &now(),
+            )
+            .unwrap();
+        assert_eq!(
+            store.projection(&p.thread.id).unwrap().visible_turn_items,
+            inherited
+        );
         assert!(
             store
                 .dispatch(&fork("second", "child"), &now(), &turns(), Driver::Codex)
@@ -571,7 +661,7 @@ mod tests {
         if let TurnItemBody::UserMessage { text, .. } = &mut items[0].item.body {
             *text = "漢".repeat(10_000);
         }
-        let text = history_text(&items, 1, 1, &p.runs, 1024);
+        let text = history_text(&items, 1, 1, &p.runs, 1024, true);
         assert!(text.len() <= 1024);
         assert!(text.contains("omitted 1"));
         assert!(!text.contains('漢'));
