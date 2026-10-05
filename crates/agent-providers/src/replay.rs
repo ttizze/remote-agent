@@ -163,6 +163,12 @@ impl Replay {
                 EffectBody::Provider(command) => self
                     .provider_commands
                     .push((thread.clone(), command.clone())),
+                EffectBody::Rollback { providers, .. } => {
+                    for rollback in providers {
+                        self.provider_commands
+                            .push((thread.clone(), rollback.command.clone()));
+                    }
+                }
                 EffectBody::ForkNative { command, provider } => {
                     self.native_forks
                         .push((thread.clone(), command.clone(), provider.clone()))

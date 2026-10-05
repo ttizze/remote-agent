@@ -70,6 +70,7 @@ impl GraphReplay {
                 vec![]
             } else {
                 vec![CapturedBaseline {
+                    status: CheckpointStatus::Ready,
                     checkpoint: CheckpointId::new(format!("{thread}-baseline")).unwrap(),
                     ordinal: 0,
                     file_ref: "baseline".into(),
@@ -79,6 +80,7 @@ impl GraphReplay {
             let reply = self.replay.apply(
                 &thread,
                 Input::Effect(EffectResult::CheckpointCaptured {
+                    status: CheckpointStatus::Ready,
                     baselines,
                     run: run.id.clone(),
                     attempt: run.attempt,

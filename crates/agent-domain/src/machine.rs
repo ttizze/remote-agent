@@ -1855,30 +1855,59 @@ impl Decision {
                 else {
                     return reject("checkpoint-not-found");
                 };
+                if cp.status != CheckpointStatus::Ready {
+                    return reject("checkpoint-not-ready");
+                }
                 self.fact(FactBody::RollbackRequested {
                     command: id.clone(),
                     checkpoint: checkpoint.clone(),
                     restore_files: *restore_files,
                 });
-                for (instance, native_thread) in self.state.native_sessions.clone() {
-                    self.effect(
-                        None,
-                        EffectBody::Provider(ProviderCommand::Rollback {
-                            native_thread,
-                            absolute_head: cp.native_heads.get(&instance).cloned().flatten(),
-                        }),
-                    );
-                }
-                if *restore_files {
-                    self.effect(
-                        None,
-                        EffectBody::RestoreCheckpoint {
-                            checkpoint: checkpoint.clone(),
-                            file_ref: cp.file_ref,
-                            scope: cp.scope,
+                let rewound = |instance: &str| {
+                    self.state.runs.iter().any(|run| {
+                        run.ordinal > cp.run_ordinal
+                            && run.selection.instance == instance
+                            && run.status.terminal()
+                            && run.status != RunStatus::RolledBack
+                    })
+                };
+                let providers = self
+                    .state
+                    .native_sessions
+                    .iter()
+                    .filter(|(instance, _)| rewound(instance))
+                    .map(|(instance, native_thread)| ProviderRollback {
+                        instance: instance.clone(),
+                        command: ProviderCommand::Rollback {
+                            native_thread: native_thread.clone(),
+                            absolute_head: cp.native_heads.get(instance).cloned().flatten(),
                         },
-                    );
-                }
+                    })
+                    .collect();
+                let stale_file_refs = self
+                    .state
+                    .checkpoints
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.scope == cp.scope
+                            && candidate.run_ordinal > cp.run_ordinal
+                            && candidate.status == CheckpointStatus::Ready
+                    })
+                    .map(|candidate| candidate.file_ref.clone())
+                    .collect();
+                self.effect(
+                    None,
+                    EffectBody::Rollback {
+                        command: id.clone(),
+                        providers,
+                        restore: restore_files.then(|| RestoreFiles {
+                            scope: cp.scope.clone(),
+                            checkpoint: checkpoint.clone(),
+                            file_ref: cp.file_ref.clone(),
+                        }),
+                        stale_file_refs,
+                    },
+                );
                 Reply::Accepted
             }
             Fork {
@@ -3826,6 +3855,7 @@ impl Decision {
                 }
             }
             EffectResult::CheckpointCaptured {
+                status: capture_status,
                 baselines,
                 run,
                 attempt,
@@ -3867,11 +3897,13 @@ impl Decision {
                 }
                 for baseline in baselines {
                     if !self.state.checkpoints.iter().any(|checkpoint| {
-                        checkpoint.id == baseline.checkpoint
-                            || checkpoint.scope == r.checkpoint_scope
-                                && checkpoint.run_ordinal == baseline.ordinal
+                        checkpoint.status == CheckpointStatus::Ready
+                            && (checkpoint.id == baseline.checkpoint
+                                || checkpoint.scope == r.checkpoint_scope
+                                    && checkpoint.run_ordinal == baseline.ordinal)
                     }) {
                         self.fact(FactBody::CheckpointCaptured {
+                            status: baseline.status,
                             id: baseline.checkpoint.clone(),
                             scope: r.checkpoint_scope.clone(),
                             run: None,
@@ -3882,6 +3914,7 @@ impl Decision {
                     }
                 }
                 self.fact(FactBody::CheckpointCaptured {
+                    status: *capture_status,
                     scope: r.checkpoint_scope.clone(),
                     id: checkpoint.clone(),
                     run: Some(run.clone()),
@@ -3926,21 +3959,6 @@ impl Decision {
                     });
                     self.complete_delegation(run, status);
                     self.promote();
-                }
-            }
-            EffectResult::CheckpointFailed { run, attempt, .. } => {
-                if !self
-                    .state
-                    .runs
-                    .iter()
-                    .any(|r| &r.id == run && &r.attempt == attempt)
-                {
-                    return Reply::Ignored;
-                }
-                // The outbox retries a failed capture. Keep its durable target
-                // and block promotion until a successful result arrives.
-                if !self.state.captures.contains_key(run) {
-                    return Reply::Ignored;
                 }
             }
             EffectResult::RollbackFinished { command, bindings } => {

@@ -472,6 +472,7 @@ fn checkpoint(s: &mut State, run: &RunId, attempt: &RunAttemptId, key: &str) -> 
             })
         })
         .map(|ordinal| CapturedBaseline {
+            status: CheckpointStatus::Ready,
             checkpoint: CheckpointId::new(format!("{key}-baseline-{ordinal}")).unwrap(),
             ordinal,
             file_ref: format!("baseline-{ordinal}"),
@@ -488,6 +489,7 @@ fn checkpoint(s: &mut State, run: &RunId, attempt: &RunAttemptId, key: &str) -> 
         s,
         key,
         EffectResult::CheckpointCaptured {
+            status: CheckpointStatus::Ready,
             baselines,
             run: run.clone(),
             attempt: Some(attempt.clone()),
@@ -1841,8 +1843,9 @@ fn visible_items_sort_by_authoritative_ordinal_and_keep_inherited_rows() {
     );
 }
 
+// T3 CheckpointCaptureService.test.ts: a capture without a readable workspace still settles the run.
 #[test]
-fn failed_capture_is_retryable_and_stopped_capture_keeps_its_terminal_status() {
+fn failed_capture_settles_the_run_and_stopped_capture_keeps_its_terminal_status() {
     let mut s = state();
     let (first, a) = running(&mut s, "baseline");
     finish(&mut s, &a);
@@ -1860,25 +1863,190 @@ fn failed_capture_is_retryable_and_stopped_capture_keeps_its_terminal_status() {
     );
     assert_eq!(s.runs[1].status, RunStatus::Interrupted);
     assert_eq!(s.captures.get(&second), Some(&RunStatus::Interrupted));
-    result(
-        &mut s,
-        "capture-failed",
-        EffectResult::CheckpointFailed {
-            run: second.clone(),
-            attempt: Some(b.clone()),
-            message: "temporary failure".into(),
-        },
-    );
-    assert_eq!(s.captures.get(&second), Some(&RunStatus::Interrupted));
     command(
         &mut s,
         "next",
         send_message("next", DispatchMode::StartImmediately),
     );
     assert_eq!(s.runs[2].status, RunStatus::Queued);
-    checkpoint(&mut s, &second, &b, "stopped-cp");
+    result(
+        &mut s,
+        "capture-error",
+        EffectResult::CheckpointCaptured {
+            status: CheckpointStatus::Error,
+            baselines: vec![],
+            run: second.clone(),
+            attempt: Some(b.clone()),
+            checkpoint: CheckpointId::new("stopped-cp").unwrap(),
+            file_ref: "stopped-cp".into(),
+        },
+    );
+    assert!(s.captures.is_empty());
     assert_eq!(s.runs[1].status, RunStatus::Interrupted);
+    assert_eq!(
+        s.runs[1].checkpoint.as_ref().unwrap().as_str(),
+        "stopped-cp"
+    );
+    assert_eq!(
+        s.checkpoints.last().unwrap().status,
+        CheckpointStatus::Error
+    );
     assert_eq!(s.runs[2].status, RunStatus::Starting);
+    let (third, c) = (s.runs[2].id.clone(), s.runs[2].attempt.clone().unwrap());
+    provider(
+        &mut s,
+        "third-started",
+        &c,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &c);
+    result(
+        &mut s,
+        "not-git",
+        EffectResult::CheckpointCaptured {
+            status: CheckpointStatus::Missing,
+            baselines: vec![],
+            run: third,
+            attempt: Some(c),
+            checkpoint: CheckpointId::new("missing-cp").unwrap(),
+            file_ref: String::new(),
+        },
+    );
+    assert_eq!(s.runs[2].status, RunStatus::Completed);
+    assert_eq!(
+        command(
+            &mut s,
+            "rollback-missing",
+            Command::Rollback {
+                checkpoint: CheckpointId::new("missing-cp").unwrap(),
+                restore_files: false,
+            },
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "checkpoint-not-ready".into()
+        }
+    );
+}
+// T3 CheckpointRollbackService.ts: rolled-back captures are discarded and later checkpoints become stale.
+#[test]
+fn rollback_discards_pending_captures_and_invalidates_later_checkpoints() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp = checkpoint(&mut s, &first, &a, "cp-first");
+    let (second, b) = running(&mut s, "second");
+    finish(&mut s, &b);
+    let later = checkpoint(&mut s, &second, &b, "cp-second");
+    let (third, c) = running(&mut s, "third");
+    command(&mut s, "stop-third", Command::Stop);
+    provider(
+        &mut s,
+        "stopped",
+        &c,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Interrupted,
+            native_head: None,
+        },
+    );
+    assert!(s.captures.contains_key(&third));
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    let rollback = command(
+        &mut s,
+        "rollback",
+        Command::Rollback {
+            checkpoint: cp,
+            restore_files: true,
+        },
+    );
+    let [effect] = rollback.effects.as_slice() else {
+        panic!("{:?}", rollback.effects)
+    };
+    let EffectBody::Rollback {
+        command: id,
+        providers,
+        restore,
+        stale_file_refs,
+    } = &effect.body
+    else {
+        panic!()
+    };
+    assert_eq!(id.as_str(), "rollback");
+    assert_eq!(providers.len(), 1);
+    assert_eq!(restore.as_ref().unwrap().file_ref, "cp-first");
+    assert_eq!(stale_file_refs, &vec!["cp-second".to_string()]);
+    result(
+        &mut s,
+        "rolled-back",
+        EffectResult::RollbackFinished {
+            command: CommandId::new("rollback").unwrap(),
+            bindings: vec![],
+        },
+    );
+    assert!(s.captures.is_empty());
+    assert_eq!(s.runs[1].status, RunStatus::RolledBack);
+    assert_eq!(s.runs[2].status, RunStatus::RolledBack);
+    assert_eq!(s.runs[3].status, RunStatus::Queued);
+    assert_eq!(
+        s.checkpoints.iter().find(|c| c.id == later).unwrap().status,
+        CheckpointStatus::Stale
+    );
+    assert_eq!(
+        command(
+            &mut s,
+            "rollback-stale",
+            Command::Rollback {
+                checkpoint: later,
+                restore_files: true,
+            },
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "checkpoint-not-ready".into()
+        }
+    );
+    command(&mut s, "resume", Command::ResumeQueue);
+    assert_eq!(s.runs[3].status, RunStatus::Starting);
+    let _ = second;
+}
+#[test]
+fn rollback_without_provider_rewind_or_file_restore_still_reports_one_result() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp = checkpoint(&mut s, &first, &a, "cp-first");
+    let step = command(
+        &mut s,
+        "rollback",
+        Command::Rollback {
+            checkpoint: cp,
+            restore_files: false,
+        },
+    );
+    assert!(matches!(
+        &step.effects[..],
+        [Effect {
+            body: EffectBody::Rollback {
+                providers,
+                restore: None,
+                ..
+            },
+            ..
+        }] if providers.is_empty()
+    ));
+    result(
+        &mut s,
+        "done",
+        EffectResult::RollbackFinished {
+            command: CommandId::new("rollback").unwrap(),
+            bindings: vec![],
+        },
+    );
+    assert!(s.rollback.is_none());
 }
 
 #[test]
@@ -1971,8 +2139,39 @@ fn rollback_resets_post_boundary_sessions_and_uses_replacement_native_identity()
     let (first, a) = running(&mut s, "first");
     finish(&mut s, &a);
     let cp = checkpoint(&mut s, &first, &a, "cp-first");
-    s.native_sessions
-        .insert("later-provider".into(), "native-later".into());
+    let mut later = selection();
+    later.instance = "later-provider".into();
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider { selection: later },
+    );
+    let Reply::Run(second) = command(
+        &mut s,
+        "second",
+        send_message("second", DispatchMode::StartImmediately),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    let b = s.runs[1].attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "later-session",
+        &b,
+        ProviderEvent::SessionReady {
+            native_thread: "native-later".into(),
+        },
+    );
+    provider(
+        &mut s,
+        "later-started",
+        &b,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &b);
+    checkpoint(&mut s, &second, &b, "cp-second");
     let step = command(
         &mut s,
         "rollback",
@@ -1981,9 +2180,21 @@ fn rollback_resets_post_boundary_sessions_and_uses_replacement_native_identity()
             restore_files: false,
         },
     );
-    assert!(step.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Rollback {native_thread,absolute_head:None}) if native_thread == "native-later")));
+    let EffectBody::Rollback { providers, .. } = &step.effects[0].body else {
+        panic!()
+    };
+    assert_eq!(
+        providers,
+        &vec![ProviderRollback {
+            instance: "later-provider".into(),
+            command: ProviderCommand::Rollback {
+                native_thread: "native-later".into(),
+                absolute_head: None,
+            },
+        }]
+    );
     let binding = NativeBinding {
-        instance: "codex".into(),
+        instance: "later-provider".into(),
         thread: "native-replacement".into(),
         head: None,
     };
@@ -2511,6 +2722,7 @@ fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_s
     assert_eq!(s.runs[0].status, RunStatus::Waiting);
     assert!(done.effects.iter().any(|effect|matches!(&effect.body,EffectBody::CaptureCheckpoint {scope:captured,native_baseline_heads,..} if captured==&scope && native_baseline_heads.is_empty())));
     let missing = EffectResult::CheckpointCaptured {
+        status: CheckpointStatus::Ready,
         run: run.clone(),
         attempt: Some(a.clone()),
         checkpoint: CheckpointId::new("captured").unwrap(),
@@ -2544,6 +2756,7 @@ fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_s
     let mut captured = missing;
     if let EffectResult::CheckpointCaptured { baselines, .. } = &mut captured {
         baselines.push(CapturedBaseline {
+            status: CheckpointStatus::Ready,
             checkpoint: CheckpointId::new("initial").unwrap(),
             ordinal: 0,
             file_ref: "before".into(),
@@ -2566,7 +2779,7 @@ fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_s
             restore_files: true,
         },
     );
-    assert!(rollback.effects.iter().any(|effect|matches!(&effect.body,EffectBody::RestoreCheckpoint {scope:Some(scope),file_ref,..} if scope.cwd=="/workspace/one" && file_ref=="before")));
+    assert!(rollback.effects.iter().any(|effect|matches!(&effect.body,EffectBody::Rollback {restore:Some(RestoreFiles {scope:Some(scope),file_ref,..}),..} if scope.cwd=="/workspace/one" && file_ref=="before")));
 }
 
 #[test]

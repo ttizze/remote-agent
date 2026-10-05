@@ -327,6 +327,7 @@ pub enum FactBody {
         run: RunId,
     },
     CheckpointCaptured {
+        status: CheckpointStatus,
         scope: Option<CheckpointScope>,
         id: CheckpointId,
         run: Option<RunId>,
@@ -1149,6 +1150,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             find_mut(&mut state.plans, "plan", |p| &p.id == id)?.implemented_by = Some(run.clone())
         }
         CheckpointCaptured {
+            status,
             scope,
             id,
             run,
@@ -1156,14 +1158,20 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             native_heads,
             file_ref,
         } => {
-            state.checkpoints.push(Checkpoint {
+            let checkpoint = Checkpoint {
+                status: *status,
                 scope: scope.clone(),
                 id: id.clone(),
                 run: run.clone(),
                 run_ordinal: *run_ordinal,
                 native_heads: native_heads.clone(),
                 file_ref: file_ref.clone(),
-            });
+            };
+            if let Some(existing) = state.checkpoints.iter_mut().find(|c| &c.id == id) {
+                *existing = checkpoint;
+            } else {
+                state.checkpoints.push(checkpoint);
+            }
             if let Some(run) = run {
                 find_mut(&mut state.runs, "run", |r| &r.id == run)?.checkpoint = Some(id.clone());
             }
@@ -1196,13 +1204,26 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 .iter()
                 .find(|c| &c.id == checkpoint)
                 .ok_or(FoldError::Missing("checkpoint"))?;
+            let (target, scope) = (cp.run_ordinal, cp.scope.clone());
+            state.native_heads = cp.native_heads.clone();
             for run in &mut state.runs {
-                if run.ordinal > cp.run_ordinal {
+                if run.ordinal > target
+                    && run.status.terminal()
+                    && run.status != RunStatus::RolledBack
+                {
                     run.status = RunStatus::RolledBack;
                     run.completed_at = Some(at.clone());
+                    state.captures.remove(&run.id);
                 }
             }
-            state.native_heads = cp.native_heads.clone();
+            for checkpoint in &mut state.checkpoints {
+                if checkpoint.scope == scope
+                    && checkpoint.run_ordinal > target
+                    && checkpoint.status == CheckpointStatus::Ready
+                {
+                    checkpoint.status = CheckpointStatus::Stale;
+                }
+            }
             state.rollback = None;
         }
         RollbackFailed { command, message } => {

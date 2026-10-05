@@ -27,6 +27,7 @@ values! {
     BackgroundKind { Command, Monitor, Subagent, BackgroundTask }
     AttachmentKind { Image, File }
     PlanKind { Proposed, Todo }
+    CheckpointStatus { Ready, Missing, Error, Stale }
 }
 impl RunStatus {
     pub fn blocking(self) -> bool {
@@ -390,6 +391,7 @@ pub struct CheckpointScope {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CapturedBaseline {
+    pub status: CheckpointStatus,
     pub checkpoint: CheckpointId,
     pub ordinal: u64,
     pub file_ref: String,
@@ -397,6 +399,7 @@ pub struct CapturedBaseline {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoint {
+    pub status: CheckpointStatus,
     pub scope: Option<CheckpointScope>,
     pub id: CheckpointId,
     pub run: Option<RunId>,
@@ -1062,10 +1065,14 @@ pub enum EffectBody {
         native_baseline_heads: BTreeMap<String, Option<String>>,
         run: RunId,
     },
-    RestoreCheckpoint {
-        scope: Option<CheckpointScope>,
-        checkpoint: CheckpointId,
-        file_ref: String,
+    /// One rollback request: provider rewinds, then the optional file
+    /// restore, then removal of stale checkpoint references. It reports one
+    /// `RollbackFinished` or `RollbackFailed`.
+    Rollback {
+        command: CommandId,
+        providers: Vec<ProviderRollback>,
+        restore: Option<RestoreFiles>,
+        stale_file_refs: Vec<String>,
     },
     PrepareWorkspace {
         run: RunId,
@@ -1080,6 +1087,17 @@ pub enum EffectBody {
     GenerateTitle {
         text: String,
     },
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderRollback {
+    pub instance: String,
+    pub command: ProviderCommand,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestoreFiles {
+    pub scope: Option<CheckpointScope>,
+    pub checkpoint: CheckpointId,
+    pub file_ref: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectResult {
@@ -1098,17 +1116,15 @@ pub enum EffectResult {
         message_id: Option<MessageId>,
         turn_completed: bool,
     },
+    /// A capture that could not read the workspace reports `Missing` or
+    /// `Error`; the run still finishes.
     CheckpointCaptured {
+        status: CheckpointStatus,
         baselines: Vec<CapturedBaseline>,
         run: RunId,
         attempt: Option<RunAttemptId>,
         checkpoint: CheckpointId,
         file_ref: String,
-    },
-    CheckpointFailed {
-        run: RunId,
-        attempt: Option<RunAttemptId>,
-        message: String,
     },
     RollbackFinished {
         bindings: Vec<NativeBinding>,
