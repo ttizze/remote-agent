@@ -183,7 +183,7 @@ authentication remain machine-local; see the standalone README for details.
 
 ## Verify
 
-The T3 port runs changed-crate unit/property tests and native builds. CI waits,
+The T3 port verifies unit/property tests and native builds. CI waits,
 mutants, E2E and Simulator UI tests are excluded. Retired conversation types,
 fixtures and acceptance runners are removed.
 
@@ -204,7 +204,7 @@ The `default` and `native` Nix shells enable sccache for local Rust compilation.
 
 `just unit-tests` runs all Rust workspace library and binary tests with native bindings enabled, and the standalone agent-peer CLI assertions with Cargo. The Nix-pinned cargo-nextest runner executes workspace tests in parallel with agent-peer; the command waits for both results and collects failures. The supervisor is built before tests start. Enable `agent-ffi/bindgen` only for binding generation. Retired conversation fixtures, Swift Markdown tests and native conversation acceptance runners are removed. Build cleanup and connection diagnostics remain Rust commands in `cargo xtask`. On macOS, the Nix shells select the operating system's `lsof` for kernel process inspection; Linux uses Nix's `lsof`.
 
-`scripts/dev-env.sh` reuses a fixed Nix environment across worktrees when `flake.nix`, `flake.lock` and the platform match; cached runs do not invoke Nix. Its shared profile protects the pinned tools from garbage collection. Cargo indexes, locks and `target` belong to each worktree; tests and dev builds within that worktree use the same Cargo cache and outputs. Only locked dependency sources and archives are seeded from existing caches, using APFS copy-on-write or reflinks where available to share their bytes. Changed test/code sources still require compilation; unchanged outputs are reused. Tests build their required helpers and bindings, while dev app builds, installation and restarts happen when applying changes to dev.
+`scripts/dev-env.sh` reuses a fixed Nix environment across worktrees when `flake.nix`, `flake.lock` and the platform match; cached runs do not invoke Nix. It selects the pinned Bash before loading that environment, including when started with macOS Bash 3. Its shared profile protects the pinned tools from garbage collection. Cargo indexes, locks and `target` belong to each worktree; tests and dev builds within that worktree use the same Cargo cache and outputs. Only locked dependency sources and archives are seeded from existing caches, using APFS copy-on-write or reflinks where available to share their bytes. Changed test/code sources still require compilation; unchanged outputs are reused. Tests build their required helpers and bindings, while dev app builds, installation and restarts happen when applying changes to dev.
 
 To place new worktrees' build outputs on an external disk, create a directory on
 the mounted disk and set `git config --local bex.buildRoot /absolute/path/to/builds`.
@@ -217,9 +217,9 @@ when it is unavailable, including when the disk is unplugged. Remove the setting
 with `git config --local --unset bex.buildRoot` to use local targets for new
 worktrees again.
 
-Every completed `just quality` run prunes inactive Cargo outputs across registered worktrees. Profiles last modified more than 3 days ago are removed; otherwise the oldest profiles are removed until inactive outputs total at most 32 GiB. Run `scripts/dev-env.sh just clean-builds --dry-run` to inspect the JSON plan, or omit `--dry-run` to apply it. Cleanup scans conventional `target` directories and their direct nested Cargo caches; it does not follow symlinked caches.
+The build cleanup command prunes inactive Cargo outputs across registered worktrees. Profiles last modified more than 3 days ago are removed; otherwise the oldest profiles are removed until inactive outputs total at most 32 GiB. Run `scripts/dev-env.sh just clean-builds --dry-run` to inspect the JSON plan, or omit `--dry-run` to apply it. Cleanup scans conventional `target` directories and their direct nested Cargo caches; it does not follow symlinked caches.
 
-Cleanup holds Cargo's build/artifact locks and preserves their inodes. Running binaries, active worktree processes and locked builds are excluded from the idle budget. This is a post-check retention policy, not a hard disk quota: active builds can temporarily exceed it. Only recognized Cargo `debug`/`release` output directories are disposable; keep application backups and verification records outside those directories. Bundled apps, `target/qa` results, summaries and source files are retained. Rebuilding a cleaned profile regenerates its outputs.
+Cleanup holds Cargo's build/artifact locks and preserves their inodes. Running binaries, active worktree processes and locked builds are excluded from the idle budget. This retention tool does not impose a hard disk quota: active builds can temporarily exceed it. Only recognized Cargo `debug`/`release` output directories are disposable; keep application backups and verification records outside those directories. Bundled apps, `target/qa` results, summaries and source files are retained. Rebuilding a cleaned profile regenerates its outputs.
 
 See [TEST_MAINTENANCE.md](docs/TEST_MAINTENANCE.md) for general policy.
 

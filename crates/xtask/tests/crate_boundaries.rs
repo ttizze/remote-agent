@@ -41,24 +41,30 @@ fn reachable(manifest: &Path, visited: &mut BTreeSet<PathBuf>) -> BTreeSet<Strin
 }
 
 #[test]
-fn production_host_transport_and_protocol_stay_independent_of_clients() {
+fn production_orchestration_host_transport_and_protocol_stay_independent_of_clients() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for crate_name in ["host-daemon", "agent-transport", "agent-protocol"] {
+    for crate_name in [
+        "host-daemon",
+        "agent-transport",
+        "agent-protocol",
+        "orchestration",
+    ] {
         let names = reachable(
             &root.join("crates").join(crate_name).join("Cargo.toml"),
             &mut BTreeSet::new(),
         );
-        if crate_name != "agent-protocol" {
+        if matches!(crate_name, "host-daemon" | "agent-transport") {
             assert!(names.contains("agent-protocol"));
         }
-        let forbidden = if crate_name == "agent-protocol" {
+        // Shared orchestration owns contracts, storage and the async worker;
+        // Tokio is now a legitimate transitive dependency of the protocol.
+        let forbidden = if matches!(crate_name, "agent-protocol" | "orchestration") {
             &[
                 "agent-core",
                 "agent-transport",
                 "host-daemon",
                 "agent-ffi",
                 "uniffi",
-                "tokio",
                 "iroh",
                 "markdown",
             ][..]

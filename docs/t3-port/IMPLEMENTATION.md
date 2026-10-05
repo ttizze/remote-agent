@@ -44,3 +44,25 @@ iOS Rust/Swift の build、Android の formatting と両 ABI の assembleDebug �
 CI の結果待ち、cargo-mutants、live-provider E2E、Simulator UI テストは行わない。
 pixel・実機操作の受入確認はこのビルド検証に含めない。
 稼働中 Host を再起動せず、main と他 worktree は変更しない。
+
+## PR #55 の仕上げ
+
+追加依頼に従い origin/main の `2af069b3` を merge commit `5ad1dd70` で
+取り込んだ。CI の queue・変更検出・Mac/iPhone 分離を保持し、削除済みの
+会話テスト・runner に依存する箇所を現行構成へ合わせた。M2・M3 は追加していない。
+
+`dev-env.sh` はキャッシュ破損ではなく Bash 3 と Nix の生成構文の不一致が
+原因だった。キャッシュ内の固定 Bash へ切り替えてから環境を評価する。
+共有キャッシュの削除・書き換えは行っていない。
+
+- `scripts/dev-env.sh just unit-tests`: workspace 230件すべて通過、既存3件 skip。
+  standalone agent-peer の4つの CLI テスト群も通過。
+- workspace と agent-peer の全 target clippy `-D warnings`、両方の fmt、
+  actionlint、`git diff --check` が通過。
+- CI が呼ぶ依存境界・build cleanup の2テストが通過。依存境界は共有
+  orchestration の Tokio 依存を許可し、その crate のクライアント非依存も検証する。
+- Bash 3 からの初回 bootstrap、Nix なしのキャッシュ再利用、引数・TMPDIR・
+  終了コードの保持を隔離した環境で確認。
+
+今回の差分は開発環境・CI・テスト・文書に限定する。native app の再ビルド、
+CI 待ち、mutants、E2E、Simulator UI テストは行っていない。
