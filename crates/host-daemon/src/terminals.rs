@@ -363,12 +363,18 @@ impl Worker {
             let mut output = JsonlReader::new(child.stdout().take().ok_or("terminal output pipe unavailable")?);
             let initialize = PtyCommand::Start { command:crate::platform::terminal_command().iter().map(|value| (*value).into()).collect(), cwd:cwd.to_string_lossy().into_owned(), rows:size.rows, cols:size.cols };
             let mut next_id = 0u64;
+            let mut query_in_flight = false;
+            let mut query_bytes = Vec::new();
             let interaction: Result<(), String> = async {
                 write(&mut stdin, &initialize).await?;
                 loop {
                     tokio::select! {
                         biased;
                         _ = self.stop.cancelled() => return Ok(()),
+                        _ = std::future::ready(()), if !query_in_flight && !query_bytes.is_empty() => {
+                            query_in_flight = true;
+                            write(&mut stdin, &PtyCommand::Write {id:bex_process::TERMINAL_QUERY_REPLY_ID,data:std::mem::take(&mut query_bytes)}).await?;
+                        }
                         line = output.read_line() => {
                             let line = line.map_err(|error| error.to_string())?.ok_or("terminal supervisor exited without a result")?;
                             match serde_json::from_str::<PtyEvent>(&line).map_err(|error| error.to_string())? {
@@ -391,11 +397,13 @@ impl Worker {
                                             Event::ClipboardLoad(_,format)=>format(""),
                                             _=>unreachable!(),
                                         };
-                                        write(&mut stdin,&PtyCommand::Write{id:0,data:data.into_bytes()}).await?;
+                                        query_bytes.extend_from_slice(data.as_bytes());
+                                        if query_bytes.len() > agent_protocol::protocol::MAX_FRAME_BYTES { return Err("terminal query replies exceed the buffer limit".into()); }
                                     }
                                     self.publish(Notification::Output { handle: self.handle.clone(), data });
                                 },
                                 PtyEvent::Ack { id, error } => {
+                                    if id == bex_process::TERMINAL_QUERY_REPLY_ID { query_in_flight=false; if let Some(error)=error {return Err(error);} continue; }
                                     if id == 0 { if let Some(error)=error {return Err(error);} continue; }
                                     let (expected, complete) = pending.take().ok_or("unexpected terminal acknowledgement")?;
                                     if expected != id { let _ = complete.send(Err("terminal acknowledgement ID changed".into())); return Err("terminal acknowledgement ID changed".into()); }
@@ -425,6 +433,7 @@ impl Worker {
                                 continue;
                             }
                             next_id = next_id.checked_add(1).ok_or("terminal operation ID exhausted")?;
+                            if next_id == bex_process::TERMINAL_QUERY_REPLY_ID { return Err("terminal operation ID exhausted".into()); }
                             let action = match command.action {
                                 Action::Write(data) => PtyCommand::Write {id:next_id,data},
                                 Action::Resize(size) => {screen.resize(Dimensions(size)); PtyCommand::Resize {id:next_id,rows:size.rows,cols:size.cols}},
@@ -582,10 +591,10 @@ mod tests {
                 if std::fs::read_to_string(directory.path().join("retained")).ok().as_deref()==Some("survived") {break;}
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            terminals.request(second.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "one".into(), data: "stty -echo -icanon min 0 time 5; printf '\\033[6n'; dd bs=64 count=1 of=query-reply 2>/dev/null; stty sane\n".as_bytes().to_vec() })).await.unwrap();
+            terminals.request(second.id(), &Call::WriteTerminal(agent_protocol::operations::TerminalWrite { process_handle: "one".into(), data: "stty -echo -icanon min 0 time 5; python3 -c 'import os; os.write(1,b\"\\x1b[6n\"*40); data=b\"\"\nwhile data.count(b\"R\")<40:\n part=os.read(0,4096)\n if not part: break\n data+=part\nopen(\"query-reply\",\"wb\").write(data)'; stty sane\n".as_bytes().to_vec() })).await.unwrap();
             loop {
                 if let Ok(bytes)=std::fs::read(directory.path().join("query-reply"))
-                    && bytes.starts_with(b"\x1b[") && bytes.ends_with(b"R") {break;}
+                    && bytes.starts_with(b"\x1b[") && bytes.iter().filter(|byte| **byte==b'R').count()==40 {break;}
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
             let stranger=router.open_authenticated_session(Some("other-phone".into()));

@@ -223,22 +223,13 @@ impl Endpoint {
     }
     /// TLS identifies the peer; RPC and blob streams remain inaccessible until
     /// the caller supplies the committed authorization state.
-    /// `None` means endpoint shutdown. Handshake errors belong to one connection.
-    pub async fn accept(&self) -> Option<Result<IncomingSession, TransportError>> {
-        let incoming = self.0.accept().await?;
-        Some(
-            incoming
-                .await
-                .map(|connection| {
-                    IncomingSession(Some(Session {
-                        connection,
-                        _endpoint: self.clone(),
-                        resolution_ms: 0,
-                        diagnostic_id: identifier(),
-                    }))
-                })
-                .map_err(connection),
-        )
+    /// `None` means endpoint shutdown. The owner completes each handshake in
+    /// its own task so a slow peer cannot block accepting another connection.
+    pub async fn accept(&self) -> Option<PendingSession> {
+        Some(PendingSession {
+            incoming: self.0.accept().await?,
+            endpoint: self.clone(),
+        })
     }
     pub fn connection_diagnostics_active(&self) -> bool {
         self.1.active()
@@ -260,6 +251,21 @@ impl Endpoint {
         self.0.close().await;
     }
 }
+pub struct PendingSession {
+    incoming: iroh::endpoint::Incoming,
+    endpoint: Endpoint,
+}
+impl PendingSession {
+    pub async fn establish(self) -> Result<IncomingSession, TransportError> {
+        let connection = self.incoming.await.map_err(connection)?;
+        Ok(IncomingSession(Some(Session {
+            connection,
+            _endpoint: self.endpoint,
+            resolution_ms: 0,
+            diagnostic_id: identifier(),
+        })))
+    }
+}
 /// An authenticated node identity without permission to exchange application data.
 /// Dropping or rejecting it closes the connection.
 pub struct IncomingSession(Option<Session>);
@@ -272,7 +278,7 @@ impl IncomingSession {
     pub async fn pairing(self) -> Result<PairingRequest, TransportError> {
         let session = self.0.as_ref().unwrap();
         let peer = session.accept_peer().await?;
-        let IncomingRequest::Call(call) = session.accept_request().await? else {
+        let IncomingRequest::Call(call) = session.accept_stream().await?.decode().await? else {
             return Err(TransportError::Unauthorized);
         };
         let crate::protocol::Call::Pair(params) = &call.call else {
@@ -368,43 +374,15 @@ impl Session {
         }
         Ok(send)
     }
-    /// Hand each accepted stream directly to the resource owner.
-    pub async fn accept_request(&self) -> Result<IncomingRequest, TransportError> {
-        use crate::client::{BLOB, CALL, CLOSE};
-        let (mut send, mut recv) = self.connection.accept_bi().await.map_err(connection)?;
-        let accepted_at = std::time::Instant::now();
-        let mut kind = [0u8; 1];
-        recv.read_exact(&mut kind).await.map_err(connection)?;
-        match kind[0] {
-            BLOB => Ok(IncomingRequest::Blob(Stream {
-                send,
-                recv,
-                _session: self.clone(),
-                shutdown: None,
-            })),
-            CALL => {
-                let call = crate::framing::Reader::new(recv)
-                    .read::<crate::protocol::Call>()
-                    .await
-                    .map_err(connection)?
-                    .ok_or_else(|| connection("request stream ended before its request"))?;
-                if matches!(call, crate::protocol::Call::SubscribeShell(_)) {
-                    self._endpoint.1.activate();
-                }
-                Ok(IncomingRequest::Call(Box::new(HostRequest {
-                    call,
-                    send,
-                    accepted_at,
-                    decoded_at: std::time::Instant::now(),
-                })))
-            }
-            CLOSE => {
-                send.write_all(&[0]).await.map_err(connection)?;
-                send.finish().map_err(connection)?;
-                Ok(IncomingRequest::Close)
-            }
-            _ => Err(connection("unknown stream kind")),
-        }
+    /// Accept independently of decoding, which belongs to this stream's task.
+    pub async fn accept_stream(&self) -> Result<IncomingStream, TransportError> {
+        let (send, recv) = self.connection.accept_bi().await.map_err(connection)?;
+        Ok(IncomingStream {
+            session: self.clone(),
+            send,
+            recv,
+            accepted_at: std::time::Instant::now(),
+        })
     }
     pub async fn open_peer(
         &self,
@@ -422,6 +400,55 @@ impl Session {
     }
     pub fn close(&self) {
         self.connection.close(0u8.into(), b"session closed");
+    }
+}
+pub struct IncomingStream {
+    session: Session,
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+    accepted_at: std::time::Instant,
+}
+impl IncomingStream {
+    pub async fn decode(self) -> Result<IncomingRequest, TransportError> {
+        use crate::client::{BLOB, CALL, CLOSE};
+        let Self {
+            session,
+            mut send,
+            mut recv,
+            accepted_at,
+        } = self;
+        let mut kind = [0u8; 1];
+        recv.read_exact(&mut kind).await.map_err(connection)?;
+        match kind[0] {
+            BLOB => Ok(IncomingRequest::Blob(Stream {
+                send,
+                recv,
+                _session: session,
+                shutdown: None,
+            })),
+            CALL => {
+                let call = crate::framing::Reader::new(recv)
+                    .read::<crate::protocol::Call>()
+                    .await
+                    .map_err(connection)?
+                    .ok_or_else(|| connection("request stream ended before its request"))?;
+                if matches!(call, crate::protocol::Call::SubscribeShell(_)) {
+                    session._endpoint.1.activate();
+                }
+                Ok(IncomingRequest::Call(Box::new(HostRequest {
+                    call,
+                    send,
+                    accepted_at,
+                    decoded_at: std::time::Instant::now(),
+                })))
+            }
+            CLOSE => {
+                send.write_all(&[0]).await.map_err(connection)?;
+                send.finish().map_err(connection)?;
+                Ok(IncomingRequest::Close)
+            }
+            _ => Err(connection("unknown stream kind")),
+        }
     }
 }
 pub enum IncomingRequest {
@@ -474,5 +501,128 @@ impl AsyncWrite for Stream {
             }));
         }
         stream.shutdown.as_mut().unwrap().as_mut().poll(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn accepting_is_independent_of_pending_handshakes() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let host = Endpoint::bind(Identity::generate(), Relays::Loopback)
+                .await
+                .unwrap();
+            let first = Endpoint::bind(Identity::generate(), Relays::Loopback)
+                .await
+                .unwrap();
+            let second = Endpoint::bind(Identity::generate(), Relays::Loopback)
+                .await
+                .unwrap();
+            let ticket = host.local_ticket();
+            let first_connect = {
+                let endpoint = first.clone();
+                let ticket = ticket.clone();
+                tokio::spawn(async move { endpoint.connect(&ticket).await })
+            };
+            let first_pending = host.accept().await.unwrap();
+            // Deliberately do not poll the first handshake yet.
+            let second_connect = {
+                let endpoint = second.clone();
+                tokio::spawn(async move { endpoint.connect(&ticket).await })
+            };
+            let second_pending = host.accept().await.unwrap();
+            let (one, two) = tokio::join!(first_pending.establish(), second_pending.establish());
+            assert_eq!(one.unwrap().node_id(), first.node_id());
+            assert_eq!(two.unwrap().node_id(), second.node_id());
+            first_connect.await.unwrap().unwrap().close();
+            second_connect.await.unwrap().unwrap().close();
+            first.close().await;
+            second.close().await;
+            host.close().await;
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn malformed_and_stalled_streams_leave_sibling_requests_usable() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let host = Endpoint::bind(Identity::generate(), Relays::Loopback)
+                .await
+                .unwrap();
+            let client = Endpoint::bind(Identity::generate(), Relays::Loopback)
+                .await
+                .unwrap();
+            let ticket = host.local_ticket();
+            let (outgoing, incoming) = tokio::join!(client.connect(&ticket), async {
+                host.accept().await.unwrap().establish().await
+            });
+            let outgoing = outgoing.unwrap();
+            let incoming = incoming
+                .unwrap()
+                .authorize(&Trust {
+                    allowed: [client.node_id()].into(),
+                    ..Default::default()
+                })
+                .unwrap();
+            for bytes in [
+                vec![crate::client::CALL],
+                vec![255],
+                {
+                    let mut bytes = vec![crate::client::CALL];
+                    bytes.extend_from_slice(
+                        &((crate::protocol::MAX_FRAME_BYTES + 1) as u32).to_be_bytes(),
+                    );
+                    bytes
+                },
+                vec![crate::client::CALL, 0, 0, 0, 1, 255],
+            ] {
+                let (mut send, _recv) = outgoing.connection.open_bi().await.unwrap();
+                send.write_all(&bytes).await.unwrap();
+                send.finish().unwrap();
+                assert!(
+                    incoming
+                        .accept_stream()
+                        .await
+                        .unwrap()
+                        .decode()
+                        .await
+                        .is_err()
+                );
+                assert!(outgoing.connection.close_reason().is_none());
+            }
+            let (mut stalled, _recv) = outgoing.connection.open_bi().await.unwrap();
+            stalled
+                .write_all(&[crate::client::CALL, 0, 0, 0, 100])
+                .await
+                .unwrap();
+            let slow = incoming.accept_stream().await.unwrap().decode();
+            tokio::pin!(slow);
+            assert!(futures_util::poll!(&mut slow).is_pending());
+            let call = crate::protocol::Call::HostName(crate::models::Empty {});
+            let (mut send, _recv) = outgoing.connection.open_bi().await.unwrap();
+            send.write_all(&[crate::client::CALL]).await.unwrap();
+            crate::framing::write(&mut send, &call).await.unwrap();
+            send.finish().unwrap();
+            let IncomingRequest::Call(request) = incoming
+                .accept_stream()
+                .await
+                .unwrap()
+                .decode()
+                .await
+                .unwrap()
+            else {
+                panic!("call expected")
+            };
+            assert!(matches!(request.call, crate::protocol::Call::HostName(_)));
+            assert!(futures_util::poll!(&mut slow).is_pending());
+            drop(stalled);
+            outgoing.close();
+            incoming.close();
+            client.close().await;
+            host.close().await;
+        })
+        .await
+        .unwrap();
     }
 }

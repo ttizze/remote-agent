@@ -221,4 +221,8 @@ R2 の O4（native rollback 境界）、O6（resume fallback）、O7（interrupt
 | O7 | 固定 T3 にない8プロセスの上限・eviction を削除 | 模擬 Claude の9本の同時 active thread |
 | O8, O9 | live な子/native turn がある rollback と、pending rollback 中の実行・fork/merge・provider 設定変更を拒否。metadata は編集可能 | rollback admission、pending 中の command と rename/delete |
 
-残りの指摘と最終検証は、各修正の検証後に追記する。
+| H1, H7 | 接続受入と TLS handshake、stream 受入と decode を分離。decode 失敗/timeout は session を閉じない。client の encode/サイズ検証を stream 開始前へ移動 | malformed/oversized/途中/停滞 stream と sibling RPC、未処理 handshake 間の並行受入、Host の oversized call 後の正常 RPC |
+| H2 | terminal query reply を coalesce し、専用 ID で1個だけ in-flight にする。PTY writer は user/query の2個を受理 | 実 PTY への40連続 query と返信、attach/detach/再利用の既存テスト |
+| H14（Ctrl-C） | supervisor を別 process group にし、Host の group SIGINT で cleanup を妨げない | 隔離した Host stand-in の group SIGINT 後、provider と tool の消滅 |
+
+接続/PTY の段階検証は6件通過。残りの指摘と最終検証は、各修正の検証後に追記する。

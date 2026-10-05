@@ -95,7 +95,9 @@ pub async fn run() -> io::Result<i32> {
     let mut reader = pair.master.try_clone_reader().map_err(io_error)?;
     let mut writer = pair.master.take_writer().map_err(io_error)?;
     let (send, mut received) = tokio::sync::mpsc::channel(16);
-    let (write_input, write_commands) = std::sync::mpsc::sync_channel::<(u64, Vec<u8>)>(1);
+    // The Host owns at most one user write and one coalesced query reply.
+    // Both can arrive before the writer thread has consumed either message.
+    let (write_input, write_commands) = std::sync::mpsc::sync_channel::<(u64, Vec<u8>)>(2);
     let written = send.clone();
     std::thread::spawn(move || {
         while let Ok((id, data)) = write_commands.recv() {

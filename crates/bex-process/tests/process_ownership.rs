@@ -60,6 +60,16 @@ fn abrupt_host_exit_terminates_owned_provider_and_tool() {
         });
         return;
     }
+    provider_cleanup_after_host_exit(None);
+}
+
+#[test]
+fn host_process_group_interrupt_preserves_supervisor_cleanup() {
+    provider_cleanup_after_host_exit(Some(libc::SIGINT));
+}
+
+fn provider_cleanup_after_host_exit(signal: Option<i32>) {
+    use std::os::unix::process::CommandExt;
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("owned-pids");
     let mut host = std::process::Command::new(std::env::current_exe().unwrap())
@@ -70,6 +80,7 @@ fn abrupt_host_exit_terminates_owned_provider_and_tool() {
         ])
         .env("BEX_TEST_OWNED_PID_FILE", &file)
         .stdout(Stdio::null())
+        .process_group(0)
         .spawn()
         .unwrap();
     let started = Instant::now();
@@ -85,7 +96,11 @@ fn abrupt_host_exit_terminates_owned_provider_and_tool() {
         );
         std::thread::sleep(Duration::from_millis(20));
     };
-    host.kill().unwrap();
+    if let Some(signal) = signal {
+        assert_eq!(unsafe { libc::kill(-(host.id() as i32), signal) }, 0);
+    } else {
+        host.kill().unwrap();
+    }
     host.wait().unwrap();
     for pid in pids.split_whitespace() {
         loop {

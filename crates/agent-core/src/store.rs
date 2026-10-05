@@ -2801,9 +2801,9 @@ mod tests {
             let host = Endpoint::bind(Identity::generate(), Relays::Loopback).await.unwrap();
             let endpoint = Endpoint::bind(Identity::generate(), Relays::Loopback).await.unwrap();
             let ticket = host.local_ticket();
-            let (outgoing, incoming) = tokio::join!(endpoint.connect(&ticket), host.accept());
+            let (outgoing, incoming) = tokio::join!(endpoint.connect(&ticket), async { host.accept().await.unwrap().establish().await });
             let session = outgoing.unwrap();
-            let incoming = incoming.unwrap().unwrap().authorize(&Trust { allowed: BTreeSet::from([endpoint.node_id()]), ..Default::default() }).unwrap();
+            let incoming = incoming.unwrap().authorize(&Trust { allowed: BTreeSet::from([endpoint.node_id()]), ..Default::default() }).unwrap();
             let (client, _events) = session.open_peer(Duration::from_millis(150), 8).await.unwrap();
             let _host_events = incoming.accept_peer().await.unwrap();
             let client = Arc::new(client);
@@ -2813,13 +2813,13 @@ mod tests {
             owner.sender = sender;
             let (complete, timed_out) = oneshot::channel();
             owner.handle(OwnerEvent::Resume { endpoint: endpoint.clone(), ticket: ticket.clone(), complete }).await;
-            let IncomingRequest::Call(unanswered) = incoming.accept_request().await.unwrap() else { panic!("health probe") };
+            let IncomingRequest::Call(unanswered) = incoming.accept_stream().await.unwrap().decode().await.unwrap() else { panic!("health probe") };
             assert!(matches!(unanswered.call, Call::HostStatus(_)));
             assert!(timed_out.await.unwrap().is_none(), "open transport flags do not prove liveness");
             drop(unanswered);
             let (complete, answer) = oneshot::channel();
             owner.handle(OwnerEvent::Resume { endpoint: endpoint.clone(), ticket, complete }).await;
-            let IncomingRequest::Call(mut probe) = incoming.accept_request().await.unwrap() else { panic!("health probe") };
+            let IncomingRequest::Call(mut probe) = incoming.accept_stream().await.unwrap().decode().await.unwrap() else { panic!("health probe") };
             assert!(matches!(probe.call, Call::HostStatus(_)));
             agent_transport::framing::write(&mut probe.send, protocol::Response::Success { result: m::HostStatus { name: "fixture".into(), node_id: "node".into(), devices: vec![], provider_errors: None } }).await.unwrap();
             probe.send.finish().unwrap();
@@ -2833,7 +2833,7 @@ mod tests {
             let server = tokio::spawn(async move {
                 let mut held = vec![];
                 for (index, expected) in expected.into_iter().enumerate() {
-                    let IncomingRequest::Call(mut request) = incoming.accept_request().await.unwrap() else { panic!("mutation request"); };
+                    let IncomingRequest::Call(mut request) = incoming.accept_stream().await.unwrap().decode().await.unwrap() else { panic!("mutation request"); };
                     assert!(matches!(&request.call, Call::DispatchCommand(actual) if actual == &expected));
                     if index == 0 {
                         // Keep the response stream open until the client times out.

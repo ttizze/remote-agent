@@ -158,6 +158,12 @@ impl Client {
         let deadline = Instant::now() + self.timeout;
         let measured = self.trace.active() && !matches!(call, Call::ConnectionPerformance(_));
         let work = async {
+            let encoding = std::time::Instant::now();
+            let bytes = protocol::encode(call).map_err(invalid)?;
+            if bytes.len() > protocol::MAX_FRAME_BYTES {
+                return Err(invalid("message exceeds frame limit"));
+            }
+            let encoding_us = encoding.elapsed().as_micros() as u64;
             let permit = self
                 .permits
                 .clone()
@@ -182,14 +188,12 @@ impl Client {
                 );
             }
             send.write_all(&[CALL]).await.map_err(disconnected)?;
-            let encoding = std::time::Instant::now();
-            let bytes = protocol::encode(call).map_err(invalid)?;
             if measured {
                 self.trace.record(
                     Phase::RequestEncoded,
                     self.diagnostic_id,
                     stream,
-                    encoding.elapsed().as_micros() as u64,
+                    encoding_us,
                 );
             }
             framing::write_frame(&mut send, &bytes)
@@ -398,9 +402,11 @@ mod tests {
                 ..Default::default()
             };
             let ticket = host.ticket();
-            let (session, incoming) = tokio::join!(endpoint.connect(&ticket), host.accept());
+            let (session, incoming) = tokio::join!(endpoint.connect(&ticket), async {
+                host.accept().await.unwrap().establish().await
+            });
             let session = session.unwrap();
-            let incoming = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+            let incoming = incoming.unwrap().authorize(&trust).unwrap();
             let (peer, events) = tokio::join!(
                 session.open_peer(Duration::from_secs(2), 1),
                 incoming.accept_peer()
@@ -423,7 +429,13 @@ mod tests {
             tokio::time::resume();
             let receiver = async {
                 for recovered in [false, true] {
-                    let IncomingRequest::Call(request) = incoming.accept_request().await.unwrap()
+                    let IncomingRequest::Call(request) = incoming
+                        .accept_stream()
+                        .await
+                        .unwrap()
+                        .decode()
+                        .await
+                        .unwrap()
                     else {
                         panic!("diagnostic call expected")
                     };
@@ -479,15 +491,15 @@ mod tests {
             let client = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
             let trust = Trust { allowed: [client.node_id()].into(), ..Default::default() };
             let ticket = host.ticket();
-            let (session, incoming) = tokio::join!(client.connect(&ticket), host.accept());
+            let (session, incoming) = tokio::join!(client.connect(&ticket), async { host.accept().await.unwrap().establish().await });
             let session = session.unwrap();
-            let incoming = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+            let incoming = incoming.unwrap().authorize(&trust).unwrap();
             let (remote, events) = tokio::join!(session.open_peer(Duration::from_secs(2), 1), incoming.accept_peer());
             let (remote, _updates) = remote.unwrap();
             let _events = events.unwrap();
             let call = Call::HostName(crate::models::Empty {});
             let mut pending = remote.start_call(&call).await.unwrap();
-            let crate::transport::IncomingRequest::Call(mut request) = incoming.accept_request().await.unwrap() else { panic!("call expected") };
+            let crate::transport::IncomingRequest::Call(mut request) = incoming.accept_stream().await.unwrap().decode().await.unwrap() else { panic!("call expected") };
             let stream = u64::from(request.send.id());
             framing::write(&mut request.send, Response::Success { result: "private-payload" }).await.unwrap();
             request.send.finish().unwrap();
@@ -522,9 +534,9 @@ mod tests {
                 ..Default::default()
             };
             let ticket = host.ticket();
-            let (session, incoming) = tokio::join!(client.connect(&ticket), host.accept());
+            let (session, incoming) = tokio::join!(client.connect(&ticket), async { host.accept().await.unwrap().establish().await });
             let session = session.unwrap();
-            let incoming = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+            let incoming = incoming.unwrap().authorize(&trust).unwrap();
             let (remote, host_peer) = tokio::join!(
                 session.open_peer(Duration::from_secs(3), 8),
                 incoming.accept_peer()
@@ -546,7 +558,7 @@ mod tests {
                 }
                 let mut requests = tokio::task::JoinSet::new();
                 loop {
-                    match incoming.accept_request().await.unwrap() {
+                    match incoming.accept_stream().await.unwrap().decode().await.unwrap() {
                         IncomingRequest::Call(request) => {
                             requests.spawn(async move {
                                 let mut send = request.send;

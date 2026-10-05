@@ -68,8 +68,8 @@ impl HostRuntime {
         let mut sessions = JoinSet::new();
         let authorized_slots = Arc::new(tokio::sync::Semaphore::new(64));
         let pairing_slots = Arc::new(tokio::sync::Semaphore::new(16));
+        let handshake_slots = Arc::new(tokio::sync::Semaphore::new(64));
         let result = {
-            // Preserve an in-flight handshake when another session finishes.
             let accept = self.endpoint.accept();
             tokio::pin!(accept);
             loop {
@@ -78,18 +78,24 @@ impl HostRuntime {
                     incoming = &mut accept => {
                         accept.set(self.endpoint.accept());
                         match incoming {
-                            Some(Ok(incoming)) => {
-                                let known = self.credentials.record.lock().await.trust.allowed.contains(&incoming.node_id());
-                                let slots = if known { &authorized_slots } else { &pairing_slots };
-                                let Ok(permit) = slots.clone().try_acquire_owned() else { continue; };
+                            Some(incoming) => {
+                                let Ok(handshake) = handshake_slots.clone().try_acquire_owned() else { continue; };
                                 let runtime = self.clone();
                                 let stop = shutdown.child_token();
                                 let authorized_slots = authorized_slots.clone();
+                                let pairing_slots = pairing_slots.clone();
                                 sessions.spawn(async move {
+                                    let incoming = tokio::select! {
+                                        _ = stop.cancelled() => return Ok(()),
+                                        result = tokio::time::timeout(Duration::from_secs(15), incoming.establish()) => result.context("QUIC handshake timed out")??,
+                                    };
+                                    drop(handshake);
+                                    let known = runtime.credentials.record.lock().await.trust.allowed.contains(&incoming.node_id());
+                                    let slots = if known { &authorized_slots } else { &pairing_slots };
+                                    let Ok(permit) = slots.clone().try_acquire_owned() else { return Ok(()); };
                                     runtime.serve(incoming, stop, permit, authorized_slots).await
                                 });
                             }
-                            Some(Err(error)) => tracing::error!(target: "bex", operation = "host.accept", message = %error),
                             None => break Ok(()),
                         }
                     },
@@ -196,15 +202,33 @@ impl HostRuntime {
         tokio::pin!(outgoing);
         let mut requests = JoinSet::new();
         let mut transfers = JoinSet::new();
-        let accepting = connection.accept_request();
+        let mut decoders = JoinSet::new();
+        let accepting = connection.accept_stream();
         tokio::pin!(accepting);
         let result = loop {
             tokio::select! {
                 _ = stop.cancelled() => break Ok(()),
                 incoming = &mut accepting => {
-                    accepting.set(connection.accept_request());
+                    accepting.set(connection.accept_stream());
                     match incoming {
-                        Ok(IncomingRequest::Call(request)) => {
+                        Ok(stream) => {
+                            if decoders.len() >= 32 { continue; }
+                            decoders.spawn(async move {
+                                tokio::time::timeout(Duration::from_secs(30), stream.decode()).await
+                                    .context("request decode timed out")?.map_err(anyhow::Error::from)
+                            });
+                        }
+                        Err(error) => break Err(error.into()),
+                    }
+                },
+                Some(decoded) = decoders.join_next(), if !decoders.is_empty() => {
+                    let incoming = match decoded {
+                        Ok(Ok(incoming)) => incoming,
+                        Ok(Err(error)) => { tracing::warn!(target:"bex", operation="host.request.decode", message=%error); continue; }
+                        Err(error) => { tracing::warn!(target:"bex", operation="host.request.decode", message=%error); continue; }
+                    };
+                    match incoming {
+                        IncomingRequest::Call(request) => {
                             if requests.len() >= 128 { break Err(anyhow::anyhow!("maximum in-flight request count reached")); }
                             let runtime = self.clone();
                             requests.spawn(async move {
@@ -255,13 +279,12 @@ impl HostRuntime {
                                 Ok::<(), anyhow::Error>(())
                             });
                         }
-                        Ok(IncomingRequest::Blob(stream)) => {
+                        IncomingRequest::Blob(stream) => {
                             if transfers.len() >= 16 { continue; }
                             let service = self.service.clone();
                             transfers.spawn(async move { service.files().transfer(id, stream).await });
                         }
-                        Ok(IncomingRequest::Close) => break Ok(()),
-                        Err(error) => break Err(error.into()),
+                        IncomingRequest::Close => break Ok(()),
                     }
                 },
                 result = &mut outgoing => break result,
@@ -271,8 +294,10 @@ impl HostRuntime {
         };
         requests.abort_all();
         transfers.abort_all();
+        decoders.abort_all();
         while requests.join_next().await.is_some() {}
         while transfers.join_next().await.is_some() {}
+        while decoders.join_next().await.is_some() {}
         self.active.lock().unwrap().remove(&id);
         self.service.close_session(id);
         result
