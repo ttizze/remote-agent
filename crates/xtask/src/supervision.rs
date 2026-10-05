@@ -330,7 +330,8 @@ mod tests {
     }
 
     async fn ready(child: &mut Child, root: &Path) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        // Fixture executable loading is separate from the cancellation/cleanup budget.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         while !root.join("ready").exists() {
             assert!(child.try_wait().unwrap().is_none());
             assert!(tokio::time::Instant::now() < deadline);

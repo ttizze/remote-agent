@@ -1153,11 +1153,20 @@ mod tests {
         );
     }
     #[test]
-    fn approval_raises_a_snoozed_thread_and_pin_outranks_other_shelves() {
+    fn approval_wakes_snoozed_threads_without_changing_parked_shelf_precedence() {
         let mut shell = projector::shell(&projection());
         shell.thread.snoozed_until = Some(Timestamp::parse("2026-10-06T00:00:00Z").unwrap());
         shell.thread.snoozed_at = Some(now());
+        shell.thread.pinned_at = Some(now());
         assert_eq!(shelf_kind(&shell, &now()), ShelfKind::Snoozed);
+        shell.thread.settled_override = Some(SettledOverride::Settled);
+        assert_eq!(shelf_kind(&shell, &now()), ShelfKind::Snoozed);
+        let mut settled = shell.clone();
+        settled.thread.snoozed_until = None;
+        settled.thread.snoozed_at = None;
+        assert_eq!(shelf_kind(&settled, &now()), ShelfKind::Settled);
+        shell.thread.pinned_at = None;
+        shell.thread.settled_override = None;
         shell.pending_runtime_request = Some(PendingRuntimeRequest {
             id: RuntimeRequestId::new("request").unwrap(),
             kind: RequestKind::Command,
