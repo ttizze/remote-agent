@@ -2,6 +2,7 @@
 //! the client-facing conversation and adapts the CLI's streaming protocol.
 use agent_protocol::{execution::*, items::*};
 mod accounts;
+mod catalog;
 mod history;
 mod native;
 mod process;
@@ -92,6 +93,7 @@ pub(crate) struct Claude {
     program: PathBuf,
     environment: Vec<(String, String)>,
     launch_args: Vec<String>,
+    catalog: catalog::Catalog,
     directory: PathBuf,
     native_home: PathBuf,
     accounts: AsyncMutex<accounts::Accounts>,
@@ -115,8 +117,7 @@ struct Record {
 struct Idle {
     process: Process,
     auth_revision: u64,
-    model: String,
-    effort: Option<String>,
+    query: catalog::Query,
     released: CancellationToken,
 }
 
@@ -146,6 +147,7 @@ impl Claude {
         native_home: Option<PathBuf>,
         environment: Vec<(String, String)>,
         launch_args: Vec<String>,
+        custom_models: Vec<agent_protocol::models::CustomModel>,
     ) -> anyhow::Result<Self> {
         crate::platform::create_state_directory(&directory)?;
         let native_home = native_home.map(Ok).unwrap_or_else(history::home)?;
@@ -164,6 +166,7 @@ impl Claude {
             program,
             environment,
             launch_args,
+            catalog: catalog::Catalog::bundled(custom_models).map_err(anyhow::Error::msg)?,
             directory,
             native_home,
             records: AsyncMutex::new(HashMap::new()),
@@ -179,66 +182,10 @@ impl Claude {
         if self.availability().is_err() {
             return Ok(Vec::new());
         }
-        let Some(auth_home) = self.accounts.lock().await.selected_home()? else {
-            return Ok(Vec::new());
-        };
-        let cwd = tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
-        let (process, initialized) = Process::start(
-            &self.environment,
-            &self.launch_args,
-            &self.program,
-            &self.native_home,
-            &auth_home,
-            cwd.path(),
-            None,
-            None,
-            None,
-        )
-        .await?;
-        process.finish().await?;
-        let entries = initialized["models"]
-            .as_array()
-            .ok_or("Claude Code did not return a model catalog")?;
-        entries
-            .iter()
-            .map(|entry| {
-                let name = entry["value"]
-                    .as_str()
-                    .filter(|name| !name.is_empty())
-                    .ok_or("Claude model has no value")?;
-                let display = entry["displayName"]
-                    .as_str()
-                    .ok_or("Claude model has no display name")?;
-                // The CLI's short display name omits the model generation.
-                // Its description starts with the versioned name and context size.
-                let title = entry["description"]
-                    .as_str()
-                    .and_then(|description| description.split('·').next())
-                    .map(str::trim)
-                    .filter(|title| !title.is_empty())
-                    .unwrap_or(display);
-                let display = if name == "default" && title != display {
-                    format!("{display} · {title}")
-                } else {
-                    title.to_owned()
-                };
-                let capabilities = crate::host_rpc::model_catalog::claude_capabilities(
-                    entry.get("supportedEffortLevels"),
-                )?;
-                let model = agent_protocol::models::ModelRef {
-                    instance_id: self.reference.instance_id.clone(),
-                    id: name.into(),
-                };
-                Ok(Model {
-                    id: name.into(),
-                    model,
-                    display_name: format!("Claude · {display}"),
-                    capabilities,
-                    is_custom: false,
-                    is_default: Some(false),
-                })
-            })
-            .collect::<Result<Vec<Model>, String>>()
+        let version = process::version(&self.program, &self.environment, &self.native_home).await?;
+        Ok(self
+            .catalog
+            .models(version.as_ref(), &self.reference.instance_id))
     }
 
     async fn create(&self, cwd: &str, model: &str) -> anyhow::Result<ThreadResponse> {
@@ -617,7 +564,6 @@ impl Claude {
         if self.stop.is_cancelled() {
             return Err("Host is shutting down".into());
         }
-        let content = input_content(&self.reference.instance_id, &params.input).await?;
         let mut state = record.lock().await;
         if state.running.is_some() {
             return Err("Claudeはすでに実行中です。".into());
@@ -628,7 +574,13 @@ impl Claude {
             .map(|model| model.id.as_str())
             .unwrap_or(&state.model)
             .to_owned();
-        let effort = agent_protocol::models::model_option_string(&params.options, "effort");
+        let selection = self.catalog.compile(&model, &params.options);
+        let content = input_content(
+            &self.reference.instance_id,
+            &params.input,
+            selection.prompt_effort.as_deref(),
+        )
+        .await?;
         let session = state.session_id.to_string();
         let cwd = state.cwd.clone();
         let (auth_home, auth_revision) = {
@@ -642,9 +594,7 @@ impl Claude {
         };
         let idle = state.idle.take();
         let mut process = if idle.as_ref().is_some_and(|idle| {
-            idle.auth_revision == auth_revision
-                && idle.model == model
-                && idle.effort.as_deref() == effort
+            idle.auth_revision == auth_revision && idle.query == selection.query
         }) {
             let idle = idle.unwrap();
             idle.released.cancel();
@@ -664,7 +614,7 @@ impl Claude {
                 &auth_home,
                 Path::new(&cwd),
                 Some((&session, state.resumable)),
-                Some((&model, effort)),
+                Some(&selection.query),
                 browser,
             )
             .await?;
@@ -720,8 +670,7 @@ impl Claude {
             stop: self.stop.child_token(),
             stream: None,
             interrupt,
-            model,
-            effort: effort.map(str::to_owned),
+            query: selection.query,
             auth_revision,
         };
         while let Some(result) = workers.try_join_next() {
@@ -739,14 +688,11 @@ impl Claude {
         params: &op::Submission,
         turn_id: &str,
     ) -> Result<agent_protocol::ids::TurnId, Failure> {
-        let content = input_content(&self.reference.instance_id, &params.input)
-            .await
-            .map_err(|error| Failure::new("invalid_input", error))?;
         let record = self
             .record(native_id)
             .await
             .map_err(|error| Failure::new("invalid_session", error))?;
-        let (input, session) = {
+        let (input, session, prompt_effort) = {
             let state = record.lock().await;
             let running = state
                 .running
@@ -758,8 +704,19 @@ impl Claude {
                         "Claude's observed turn is no longer running",
                     )
                 })?;
-            (running.input.clone(), state.session_id)
+            let model = params
+                .model
+                .as_ref()
+                .map_or(state.model.as_str(), |model| model.id.as_str());
+            (
+                running.input.clone(),
+                state.session_id,
+                self.catalog.prompt_effort(model, &params.options),
+            )
         };
+        let content = input_content(&self.reference.instance_id, &params.input, prompt_effort)
+            .await
+            .map_err(|error| Failure::new("invalid_input", error))?;
         let (delivered, receipt) = tokio::sync::oneshot::channel();
         input.send(Command {
             value: json!({"type":"user","uuid":params.client_user_message_id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null,"priority":"now"}),
@@ -808,8 +765,7 @@ struct Worker {
     stop: CancellationToken,
     stream: Option<String>,
     interrupt: watch::Sender<Option<Result<(), String>>>,
-    model: String,
-    effort: Option<String>,
+    query: catalog::Query,
 }
 
 impl Worker {
@@ -1002,8 +958,7 @@ impl Worker {
             record.idle = Some(Idle {
                 process,
                 auth_revision: self.auth_revision,
-                model: self.model.clone(),
-                effort: self.effort.clone(),
+                query: self.query.clone(),
                 released: released.clone(),
             });
         }
@@ -1476,6 +1431,7 @@ fn skill_invocation(
 async fn input_content(
     instance_id: &ProviderInstanceId,
     input: &[op::Input],
+    prompt_effort: Option<&str>,
 ) -> Result<Vec<Value>, String> {
     if input.is_empty() {
         return Err("メッセージを入力してください。".into());
@@ -1491,7 +1447,8 @@ async fn input_content(
                     }
                     _ => text,
                 });
-                content.push(json!({"type":"text","text":text}));
+                content
+                    .push(json!({"type":"text","text":catalog::prompt_text(&text, prompt_effort)}));
             }
             op::Input::Skill { name, path } => {
                 let invocation = skill_invocation(instance_id, name, path);
@@ -1663,10 +1620,22 @@ impl Agent for Claude {
         let available = if program.components().count() > 1 {
             program.is_file()
         } else {
-            std::env::var_os("PATH").is_some_and(|path| {
-                std::env::split_paths(&path)
-                    .any(|directory| directory.join(program.as_os_str()).is_file())
-            })
+            self.environment
+                .iter()
+                .rev()
+                .find(|(name, _)| {
+                    if cfg!(windows) {
+                        name.eq_ignore_ascii_case("PATH")
+                    } else {
+                        name == "PATH"
+                    }
+                })
+                .map(|(_, value)| std::ffi::OsString::from(value))
+                .or_else(|| std::env::var_os("PATH"))
+                .is_some_and(|path| {
+                    std::env::split_paths(&path)
+                        .any(|directory| directory.join(program.as_os_str()).is_file())
+                })
         };
         if !available {
             return Err(Failure::new(
@@ -1737,9 +1706,13 @@ impl Agent for Claude {
         model: Option<&str>,
         _browser: Option<Value>,
     ) -> Result<ThreadResponse, Failure> {
-        Claude::create(self, cwd, model.unwrap_or("default"))
-            .await
-            .map_err(|e| Failure::new("provider_unavailable", e))
+        Claude::create(
+            self,
+            cwd,
+            model.unwrap_or_else(|| self.catalog.default_model()),
+        )
+        .await
+        .map_err(|e| Failure::new("provider_unavailable", e))
     }
     async fn state(&self, id: &str) -> Result<SubmissionState, Failure> {
         let mut response = self
@@ -1968,6 +1941,28 @@ mod execution_tests {
     use super::*;
 
     #[tokio::test]
+    async fn availability_uses_the_configured_instance_path() {
+        let root = tempfile::tempdir().unwrap();
+        let filename = format!("instance-only-cli{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(root.path().join(&filename), "fixture").unwrap();
+        let claude = Claude::load(
+            ProviderRef {
+                instance_id: "claude".parse().unwrap(),
+                driver: "claudeAgent".parse().unwrap(),
+            },
+            filename.into(),
+            root.path().join("state"),
+            Some(root.path().join("native")),
+            vec![("PATH".into(), root.path().to_string_lossy().into())],
+            Vec::new(),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert!(claude.availability().is_ok());
+    }
+
+    #[tokio::test]
     async fn steer_uses_priority_now_and_waits_for_the_active_owner_receipt() {
         let root = tempfile::tempdir().unwrap();
         let claude = Claude::load(
@@ -1978,6 +1973,7 @@ mod execution_tests {
             root.path().join("unused-cli"),
             root.path().join("state"),
             Some(root.path().join("native")),
+            Vec::new(),
             Vec::new(),
             Vec::new(),
         )
@@ -2194,8 +2190,11 @@ mod execution_tests {
             stop: CancellationToken::new(),
             stream: None,
             interrupt,
-            model: "default".into(),
-            effort: None,
+            query: catalog::Query {
+                model: "default".into(),
+                effort: None,
+                settings: Default::default(),
+            },
         };
         for child in [
             json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"child"}}}),

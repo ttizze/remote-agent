@@ -33,6 +33,53 @@ pub(super) fn command(
     Ok(command)
 }
 
+pub(super) async fn version(
+    program: &Path,
+    environment: &[(String, String)],
+    native_home: &Path,
+) -> Result<Option<semver::Version>, String> {
+    let mut command = command(program, environment, native_home, native_home)
+        .map_err(|error| error.to_string())?;
+    command
+        .arg("--version")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    // Keep the supervisor's lifetime pipe open until the version probe ends.
+    // On timeout its EOF terminates and reaps the entire owned process group.
+    let lifetime = child.stdin.take();
+    let output = tokio::time::timeout(Duration::from_secs(4), child.wait_with_output()).await;
+    drop(lifetime);
+    let output = output
+        .map_err(|_| "Claude version probe timed out")?
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err("Claude version probe failed".into());
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(parse_version(&text))
+}
+
+// Match T3's first three-part CLI version, independent of surrounding labels
+// and prerelease text. Manifest bounds use full semver precedence separately.
+fn parse_version(output: &str) -> Option<semver::Version> {
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        regex::Regex::new(r"\bv?([0-9]+)\.([0-9]+)\.([0-9]+)\b").expect("constant version pattern")
+    });
+    let value = pattern.captures(output)?;
+    Some(semver::Version::new(
+        value[1].parse().ok()?,
+        value[2].parse().ok()?,
+        value[3].parse().ok()?,
+    ))
+}
+
 impl Process {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn start(
@@ -43,10 +90,11 @@ impl Process {
         credentials_home: &Path,
         cwd: &Path,
         session: Option<(&str, bool)>,
-        model: Option<(&str, Option<&str>)>,
+        model: Option<&super::catalog::Query>,
         browser: Option<Value>,
     ) -> Result<(Self, Value), String> {
-        let launch_args = settings_args(launch_args, cwd).await?;
+        let launch_args =
+            settings_args(launch_args, cwd, model.map(|query| &query.settings)).await?;
         let mut command = command(program, environment, config_home, credentials_home)
             .map_err(|error| error.to_string())?;
         // Account changes must not replace skills, settings, plugins or history.
@@ -65,7 +113,12 @@ impl Process {
                 "--permission-prompt-tool",
                 "stdio",
             ]);
-        command.args(&launch_args);
+        let position = launch_args
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(launch_args.len());
+        let (options, positional) = launch_args.split_at(position);
+        command.args(options);
         if let Some(browser) = browser {
             command
                 .arg("--mcp-config")
@@ -76,12 +129,13 @@ impl Process {
                 .arg(if resume { "--resume" } else { "--session-id" })
                 .arg(session);
         }
-        if let Some((model, effort)) = model {
-            command.arg("--model").arg(model);
-            if let Some(effort) = effort {
+        if let Some(model) = model {
+            command.arg("--model").arg(&model.model);
+            if let Some(effort) = &model.effort {
                 command.arg("--effort").arg(effort);
             }
         }
+        command.args(positional);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -203,20 +257,24 @@ impl Process {
 
 // The instance's auto-compact setting and user CLI settings share one flag.
 // Resolve files at the native process's cwd and retain the user's other keys.
-async fn settings_args(args: &[String], cwd: &Path) -> Result<Vec<String>, String> {
-    let original = args;
+async fn settings_args(
+    args: &[String],
+    cwd: &Path,
+    overrides: Option<&std::collections::BTreeMap<String, bool>>,
+) -> Result<Vec<String>, String> {
     let mut retained = Vec::new();
     let mut sources = Vec::new();
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
+    let mut remaining = args.iter();
+    while let Some(arg) = remaining.next() {
         if arg == "--" {
             retained.push(arg.clone());
-            retained.extend(args.cloned());
+            retained.extend(remaining.cloned());
             break;
         }
         if arg == "--settings" {
             sources.push(
-                args.next()
+                remaining
+                    .next()
                     .ok_or("Claude settings flag requires a value")?
                     .clone(),
             );
@@ -226,9 +284,9 @@ async fn settings_args(args: &[String], cwd: &Path) -> Result<Vec<String>, Strin
             retained.push(arg.clone());
         }
     }
-    if sources.len() <= 1 {
+    if sources.len() <= 1 && overrides.is_none_or(|settings| settings.is_empty()) {
         // Preserve native CLI validation and file loading for unmodified flags.
-        return Ok(original.to_vec());
+        return Ok(args.to_vec());
     }
     let mut settings = serde_json::Map::new();
     for source in sources {
@@ -247,6 +305,13 @@ async fn settings_args(args: &[String], cwd: &Path) -> Result<Vec<String>, Strin
         };
         settings.extend(fields);
     }
+    if let Some(overrides) = overrides {
+        settings.extend(
+            overrides
+                .iter()
+                .map(|(key, value)| (key.clone(), json!(value))),
+        );
+    }
     // Insert before a positional delimiter, if one was supplied.
     let position = retained
         .iter()
@@ -262,6 +327,58 @@ async fn settings_args(args: &[String], cwd: &Path) -> Result<Vec<String>, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_version_matches_t3_core_version_and_ignores_surrounding_labels() {
+        for output in [
+            "2.1.280 (Claude Code)",
+            "claude v2.1.280-beta.1",
+            "version:2.1.280+build",
+            "2.1.280\n2.1.284",
+            "02.01.280",
+        ] {
+            assert_eq!(parse_version(output), Some(semver::Version::new(2, 1, 280)));
+        }
+        for output in ["unknown", "2.1", "build2.1.280x", "v2.1.x"] {
+            assert_eq!(parse_version(output), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn query_settings_override_native_flags_without_losing_other_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let args = vec![
+            "--settings".into(),
+            r#"{"fastMode":true,"autoCompactWindow":500000,"permissions":{"allow":["Read"]}}"#
+                .into(),
+            "--".into(),
+            "prompt".into(),
+        ];
+        let overrides = std::collections::BTreeMap::from([
+            ("fastMode".into(), false),
+            ("alwaysThinkingEnabled".into(), true),
+        ]);
+        let actual = settings_args(&args, root.path(), Some(&overrides))
+            .await
+            .unwrap();
+        assert_eq!(actual[0], "--settings");
+        assert_eq!(
+            serde_json::from_str::<Value>(&actual[1]).unwrap(),
+            json!({
+                "fastMode":false, "alwaysThinkingEnabled":true, "autoCompactWindow":500000,
+                "permissions":{"allow":["Read"]}
+            })
+        );
+        assert_eq!(&actual[2..], &["--", "prompt"]);
+        let actual = settings_args(&[], root.path(), Some(&overrides))
+            .await
+            .unwrap();
+        assert_eq!(actual.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<Value>(&actual[1]).unwrap(),
+            json!({"fastMode":false,"alwaysThinkingEnabled":true})
+        );
+    }
 
     #[test]
     fn configured_environment_cannot_replace_bound_history_or_account_storage() {
@@ -329,7 +446,7 @@ mod tests {
                 "--".into(),
                 "--settings".into(),
             ];
-            let actual = settings_args(&args, root.path()).await.unwrap();
+            let actual = settings_args(&args, root.path(), None).await.unwrap();
             assert_eq!(&actual[..2], &["--effort", "high"]);
             assert_eq!(actual[2], "--settings");
             assert_eq!(
@@ -339,7 +456,10 @@ mod tests {
             assert_eq!(&actual[4..], &["--", "--settings"]);
         }
         let single = vec!["--settings=native.json".into()];
-        assert_eq!(settings_args(&single, root.path()).await.unwrap(), single);
+        assert_eq!(
+            settings_args(&single, root.path(), None).await.unwrap(),
+            single
+        );
         for first in ["missing.json", "[]", "false"] {
             let invalid = vec![
                 "--settings".into(),
@@ -347,10 +467,10 @@ mod tests {
                 "--settings".into(),
                 "{}".into(),
             ];
-            assert!(settings_args(&invalid, root.path()).await.is_err());
+            assert!(settings_args(&invalid, root.path(), None).await.is_err());
         }
         assert!(
-            settings_args(&["--settings".into()], root.path())
+            settings_args(&["--settings".into()], root.path(), None)
                 .await
                 .is_err()
         );

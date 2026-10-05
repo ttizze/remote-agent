@@ -24,3 +24,5 @@ at commit `7f892275e31002f0422477c6219189284560e689`, specifically the persisted
 protocol, thread history builder and paginated history projection. Copyright
 OpenAI. Its Apache 2.0 license is in `Codex-LICENSE`. Bex owns the bounded source
 reads; it does not use Codex's rollout writer or database repair runtime.
+
+`T3-Model-Manifest.json` is the bundled model manifest from T3 Code commit `4ee6bfd50ef4a089440d5c3662db2298da9cc50e`, Copyright (c) 2026 T3 Tools Inc., under `T3-Code-LICENSE`. The Claude driver resolves its canonical models and runtime profiles from this data.

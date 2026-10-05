@@ -2764,7 +2764,7 @@
       "macos_android_environment": "pinned Nix SDK, JDK, cargo-ndk and Rust Android targets; Cargo/Rustc explicitly selected for Gradle"
     },
     "remaining": [
-      "remaining provider drivers, managed setup, Claude option execution and handoff",
+      "remaining provider drivers, managed setup, complete model metadata, prompt-controlled traits and handoff",
       "complete T3 feature parity",
       "all native views and interactions matched to T3",
       "signed Nightly artifacts, updates and publication"
@@ -2801,7 +2801,7 @@
       "ci": "deferred by user"
     },
     "remaining": [
-      "Claude canonical model manifest and complete runtime option execution",
+      "T3 prompt-controlled traits, complete model metadata and context token reporting",
       "managed Codex installation and maintenance",
       "other six runtime drivers and portable handoff",
       "all native interaction and visual acceptance"
@@ -2811,7 +2811,7 @@
     "state": "implemented",
     "scope": [
       "select and boolean capability descriptors across protocol and native bindings",
-      "Codex app-server and Claude initialized catalog conversion at the provider boundary",
+      "Codex app-server catalog conversion and Claude bundled canonical manifest/version profiles at the provider boundary",
       "instance-scoped custom models appended after all native pages with duplicate suppression",
       "explicit custom capabilities, empty overrides and Codex fallback capabilities",
       "T3 Codex default model preference after complete catalog aggregation",
@@ -2825,12 +2825,13 @@
       "crates/agent-core/src/presentation/model_settings.rs",
       "crates/agent-core/src/presentation/providers.rs",
       "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidModelSettings.kt",
-      "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidModelPicker.kt"
+      "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidModelPicker.kt",
+      "crates/host-daemon/src/claude/catalog.rs"
     ],
     "verification": {
-      "unit_tests": "535 passed, 3 existing skips; Markdown regressions and standalone CLI assertions passed; Rust execution 117.691 seconds",
+      "unit_tests": "547 passed, 3 existing skips; Markdown regressions and standalone CLI assertions passed; Rust execution 108.762 seconds",
       "store_and_core_integration": "66 Store, 27 state and 6 model default tests passed",
-      "native_rpc_integration": "custom Codex model paging and actual turn/start options passed; Claude live model refresh passed",
+      "native_rpc_integration": "20 Claude and provider-instance cases passed; version-gated canonical catalogs refresh without Host restart and actual native query options/reuse are verified",
       "focused_mutations": "36 caught, 4 unviable; no final survivors or timeouts",
       "rust_clippy": "all workspace targets passed",
       "cold_initialization": "isolated executable staging preserves system proxies, TLS and all timeouts; 9 focused cases passed, cold recording TLS 0.338 seconds",
@@ -2839,7 +2840,7 @@
       "ci": "deferred by user"
     },
     "remaining": [
-      "Claude canonical model manifest, aliases, version profiles, thinking and fast mode",
+      "manifest remote refresh/cache, complete model metadata and context token reporting",
       "Android account login, logout and maintenance UI",
       "all native interaction and visual acceptance"
     ]
@@ -2875,9 +2876,41 @@
       "rust_clippy": "all workspace targets passed with bindings and warnings denied"
     },
     "remaining": [
-      "Claude canonical manifest, aliases, version profiles and runtime fast/thinking/context/prompt compilation",
+      "manifest remote refresh/cache, complete model metadata and context token reporting",
       "T3 prompt-controlled traits and complete composer appearance",
       "all native interaction and visual acceptance"
+    ]
+  },
+  "claude_model_runtime": {
+    "state": "implemented",
+    "scope": [
+      "bundled T3 canonical Claude models, runtime profiles, version gates and default selection",
+      "instance custom-capability compilation and custom alias shadowing",
+      "native context suffixes, mapped effort and explicit thinking/fastMode/ultracode settings",
+      "query and auth revision control retained-process reuse",
+      "prompt effort prefixing for starts and steer with slash command preservation",
+      "authentication-independent model listing with unauthenticated execution rejection"
+    ],
+    "owners": [
+      "crates/host-daemon/src/claude/catalog.rs",
+      "crates/host-daemon/src/claude/process.rs",
+      "crates/host-daemon/src/claude.rs"
+    ],
+    "verification": {
+      "native_rpc": "20 passed, 2 existing manual live skips; 28.046 seconds",
+      "native_query_cases": "10 consecutive configurations including positional delimiter, false, query changes, alias reuse, prompt effort, slash commands and original user text after reopen",
+      "native_acceptance_and_visual_comparison": "pending",
+      "ci": "deferred by user",
+      "catalog_mutation_audit": "36 mutants: 30 caught, 6 unviable; no survivors or timeouts",
+      "settings_mutation_audit": "10 mutants: 9 caught, 1 unviable; no survivors or timeouts; audited pure parser/settings tests with unchanged supervisor-construction test outside this isolated audit",
+      "unit_tests": "547 passed, 3 existing skips; Markdown regressions and standalone CLI assertions passed; Rust execution 108.762 seconds",
+      "focused_mutations": "46 unique mutants: 39 caught and 7 unviable; no survivors or timeouts",
+      "rust_clippy": "all workspace targets passed with bindings and warnings denied"
+    },
+    "remaining": [
+      "manifest remote refresh/cache and upgrade reporting",
+      "legacy/badge/shortName metadata and context-token usage",
+      "T3 prompt-controlled traits and all native interaction/visual acceptance"
     ]
   }
 }

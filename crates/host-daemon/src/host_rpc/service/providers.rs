@@ -399,6 +399,7 @@ impl HostRpcService {
                     Some(home),
                     environment,
                     launch_args,
+                    agent_protocol::models::read_custom_models(config.config.get("customModels")),
                 )
                 .await
                 .map(|adapter| Arc::new(adapter) as Arc<dyn Agent>)

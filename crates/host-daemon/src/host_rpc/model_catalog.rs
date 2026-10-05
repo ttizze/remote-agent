@@ -178,33 +178,6 @@ pub(super) fn codex_page(
     })
 }
 
-pub(crate) fn claude_capabilities(values: Option<&Value>) -> Result<ModelCapabilities, String> {
-    let Some(values) = values else {
-        return Ok(ModelCapabilities::default());
-    };
-    let efforts = values.as_array().ok_or("invalid Claude effort levels")?;
-    let mut options = Vec::new();
-    for value in efforts {
-        let id = value
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .ok_or("invalid Claude effort level")?;
-        options.push(choice(id.into(), id.into(), None, id == "high"));
-    }
-    let current = options
-        .iter()
-        .find(|option| option.is_default)
-        .or(options.first())
-        .map(|option| option.id.clone());
-    Ok(ModelCapabilities {
-        option_descriptors: if options.is_empty() {
-            Vec::new()
-        } else {
-            vec![select("effort", "Effort", options, current)]
-        },
-    })
-}
-
 /// The native cursor alone cannot distinguish custom slugs from earlier pages.
 /// This state travels with the generation-fenced Host catalog cursor.
 #[derive(Default, Serialize, Deserialize)]
@@ -477,43 +450,6 @@ mod tests {
             claude
                 .iter()
                 .all(|model| model.capabilities.option_descriptors.is_empty())
-        );
-    }
-
-    #[test]
-    fn claude_effort_levels_are_native_and_absence_is_not_an_invented_capability() {
-        let caps = claude_capabilities(Some(&json!(["low", "high", "max"]))).unwrap();
-        let effort = caps.select(&["effort"]).unwrap();
-        assert_eq!(effort.selected(None), Some("high"));
-        assert_eq!(
-            effort
-                .choices()
-                .iter()
-                .map(|choice| choice.id.as_str())
-                .collect::<Vec<_>>(),
-            ["low", "high", "max"]
-        );
-        assert!(
-            claude_capabilities(None)
-                .unwrap()
-                .option_descriptors
-                .is_empty()
-        );
-        assert!(
-            claude_capabilities(Some(&json!([])))
-                .unwrap()
-                .option_descriptors
-                .is_empty()
-        );
-        assert!(claude_capabilities(Some(&json!([42]))).is_err());
-        assert!(claude_capabilities(Some(&json!("high"))).is_err());
-        assert_eq!(
-            claude_capabilities(Some(&json!(["low"])))
-                .unwrap()
-                .select(&["effort"])
-                .unwrap()
-                .selected(None),
-            Some("low")
         );
     }
 

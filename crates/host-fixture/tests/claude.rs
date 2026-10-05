@@ -161,60 +161,55 @@ async fn model_refresh_observes_catalog_changes_without_restarting_host() {
         std::fs::create_dir_all(root.path().join("claude-native")).unwrap();
         let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
-        assert!(store.snapshot().models.iter().any(|model| {
-            model.model
-                == agent_protocol::models::ModelRef {
-                    instance_id: "claude"
-                        .parse::<agent_protocol::session::ProviderInstanceId>()
-                        .unwrap(),
-                    id: "default".into(),
-                }
-        }));
-        let catalog = root.path().join("claude-native/fixture-models.json");
-        std::fs::write(
-            &catalog,
-            serde_json::to_vec(&json!([
-                {"value":"default","displayName":"Updated default"},
-                {"value":"new-model","displayName":"New model","supportedEffortLevels":["high"]}
-            ]))
-            .unwrap(),
-        )
-        .unwrap();
+        let models = |snapshot: &Snapshot| {
+            snapshot
+                .models
+                .iter()
+                .filter(|model| model.model.instance_id.as_str() == "claude")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let original = models(&store.snapshot());
+        assert_eq!(original.len(), 10);
+        assert_eq!(
+            original
+                .iter()
+                .find(|model| model.is_default == Some(true))
+                .unwrap()
+                .model
+                .id,
+            "claude-fable-5-1"
+        );
+        let version = root.path().join("claude-native/fixture-version.txt");
+        std::fs::write(&version, "2.1.284").unwrap();
         store
             .dispatch(Intent::LoadModels(op::LoadModels {}))
             .await
             .unwrap();
-        let snapshot = store.snapshot();
-        let claude = snapshot
-            .models
-            .iter()
-            .filter(|model| {
-                model.model.instance_id
-                    == "claude"
-                        .parse::<agent_protocol::session::ProviderInstanceId>()
-                        .unwrap()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(claude.len(), 2, "removed models must disappear");
-        assert_eq!(claude[0].display_name, "Claude · Updated default");
+        let newer = models(&store.snapshot());
+        assert_eq!(newer.len(), 12);
+        assert_eq!(newer[0].model.id, "claude-opus-5-5");
         assert_eq!(
-            claude[1].model,
-            agent_protocol::models::ModelRef {
-                instance_id: "claude"
-                    .parse::<agent_protocol::session::ProviderInstanceId>()
-                    .unwrap(),
-                id: "new-model".into()
-            }
-        );
-        assert_eq!(
-            claude[1]
+            newer[0]
                 .capabilities
                 .select(&["effort"])
                 .unwrap()
                 .selected(None),
-            Some("high")
+            Some("medium")
         );
-        assert!(snapshot.model_errors.is_empty());
+        std::fs::write(&version, "2.1.110").unwrap();
+        store
+            .dispatch(Intent::LoadModels(op::LoadModels {}))
+            .await
+            .unwrap();
+        let older = models(&store.snapshot());
+        assert_eq!(older.len(), 5, "unsupported models must disappear");
+        assert!(
+            !older
+                .iter()
+                .any(|model| model.model.id == "claude-opus-4-7")
+        );
+        assert!(store.snapshot().model_errors.is_empty());
         store.close().await.unwrap();
         endpoint.close().await;
         fixture.close().await.unwrap();
@@ -224,23 +219,22 @@ async fn model_refresh_observes_catalog_changes_without_restarting_host() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_reads() {
+async fn claude_execution_compiles_declared_options_without_catalog_reads() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("claude-native")).unwrap();
         let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
-        // Any additional catalog read would now fail to parse.
-        std::fs::write(
-            root.path().join("claude-native/fixture-models.json"),
-            "null",
-        )
-        .unwrap();
+        // Executing a turn must use the owned catalog without probing the CLI again.
+        std::fs::write(root.path().join("claude-native/fixture-version-error"), "").unwrap();
         let local = fixture.local().await.unwrap();
-        for (model, effort) in [("unlisted-model", "low"), ("default", "xhigh")] {
+        for (model, effort, api_model, api_effort) in [
+            ("unlisted-model", "low", "unlisted-model", None),
+            ("opus", "ultracode", "claude-opus-5[1m]", Some("xhigh")),
+        ] {
             std::fs::write(
                 root.path().join("claude-fixture.json"),
-                json!({"expectedModel":model}).to_string(),
+                json!({"expectedModel":api_model}).to_string(),
             )
             .unwrap();
             let response = local
@@ -291,8 +285,11 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
                 &std::fs::read(root.path().join(format!("claude-session-{session}.json"))).unwrap(),
             )
             .unwrap();
-            assert_eq!(inputs[0]["model"], model);
-            assert_eq!(inputs[0]["effort"], effort);
+            assert_eq!(inputs[0]["model"], api_model);
+            assert_eq!(inputs[0]["effort"], json!(api_effort));
+            if effort == "ultracode" {
+                assert_eq!(inputs[0]["settings"], json!({"ultracode":true}));
+            }
         }
         local.close().await;
         store.close().await.unwrap();
@@ -301,6 +298,238 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
     })
     .await
     .expect("CLI settings delegation deadline");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compiled_native_query_controls_reuse_and_prompt_effort_preserves_commands() {
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+        let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
+        let local = fixture.local().await.unwrap();
+        let settings = local.peer.call(&agent_protocol::providers::ReadProviderSettings {}).await.unwrap();
+        let config = agent_protocol::providers::ProviderConfig {
+            driver: "claudeAgent".parse().unwrap(), display_name: None, accent_color: None,
+            enabled: true, environment: Vec::new(),
+            config: json!({"binaryPath":fixture_program(), "homePath":root.path().join("claude-native"), "launchArgs":"--"}),
+        };
+        local.peer.call(&agent_protocol::providers::UpdateProviderInstance {
+            operation_id: uuid::Uuid::new_v4(), revision: settings.revision,
+            mutation: agent_protocol::providers::ProviderMutation::Upsert { instance_id: "claude".parse().unwrap(), config },
+        }).await.unwrap();
+        let instance = "claude"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap();
+        let response = local
+            .peer
+            .call(&op::CreateSession {
+                instance_id: instance.clone(),
+                cwd: Some(root.path().to_string_lossy().into()),
+                model: Some(agent_protocol::models::ModelRef {
+                    instance_id: instance.clone(),
+                    id: "opus".into(),
+                }),
+            })
+            .await
+            .unwrap();
+        let id = response.response.thread.id.unwrap();
+        store
+            .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
+            .await
+            .unwrap();
+        for (
+            index,
+            (model, context, effort, fast, thinking, text, api_model, api_effort, settings),
+        ) in [
+            (
+                "opus",
+                Some("1m"),
+                Some("high"),
+                Some(false),
+                None,
+                "first",
+                "claude-opus-5[1m]",
+                Some("high"),
+                json!({"fastMode":false}),
+            ),
+            (
+                "claude-opus-5",
+                Some("1m"),
+                Some("high"),
+                Some(false),
+                None,
+                "same query",
+                "claude-opus-5[1m]",
+                Some("high"),
+                json!({"fastMode":false}),
+            ),
+            (
+                "opus",
+                Some("1m"),
+                Some("high"),
+                Some(true),
+                None,
+                "fast on",
+                "claude-opus-5[1m]",
+                Some("high"),
+                json!({"fastMode":true}),
+            ),
+            (
+                "opus",
+                Some("1m"),
+                Some("high"),
+                Some(false),
+                None,
+                "fast off",
+                "claude-opus-5[1m]",
+                Some("high"),
+                json!({"fastMode":false}),
+            ),
+            (
+                "opus",
+                Some("200k"),
+                Some("high"),
+                Some(false),
+                None,
+                "smaller window",
+                "claude-opus-5",
+                Some("high"),
+                json!({"fastMode":false}),
+            ),
+            (
+                "opus",
+                Some("200k"),
+                Some("ultrathink"),
+                Some(false),
+                None,
+                "investigate",
+                "claude-opus-5",
+                Some("high"),
+                json!({"fastMode":false}),
+            ),
+            (
+                "opus",
+                Some("200k"),
+                Some("ultrathink"),
+                Some(false),
+                None,
+                "/plugin:skill now",
+                "claude-opus-5",
+                Some("high"),
+                json!({"fastMode":false}),
+            ),
+            (
+                "haiku",
+                None,
+                None,
+                None,
+                Some(false),
+                "thinking off",
+                "claude-haiku-4-5",
+                None,
+                json!({"alwaysThinkingEnabled":false}),
+            ),
+            (
+                "haiku",
+                None,
+                None,
+                Some(true),
+                Some(false),
+                "unsupported fast",
+                "claude-haiku-4-5",
+                None,
+                json!({"alwaysThinkingEnabled":false}),
+            ),
+            (
+                "haiku",
+                None,
+                None,
+                None,
+                Some(true),
+                "thinking on",
+                "claude-haiku-4-5",
+                None,
+                json!({"alwaysThinkingEnabled":true}),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            std::fs::write(
+                root.path().join("claude-fixture.json"),
+                json!({"expectedModel":api_model}).to_string(),
+            )
+            .unwrap();
+            let mut options = Vec::new();
+            for (id, value) in [("contextWindow", context), ("effort", effort)] {
+                if let Some(value) = value {
+                    options.push(agent_protocol::models::ModelOptionSelection {
+                        id: id.into(),
+                        value: agent_protocol::models::ModelOptionValue::String(value.into()),
+                    });
+                }
+            }
+            for (id, value) in [("fastMode", fast), ("thinking", thinking)] {
+                if let Some(value) = value {
+                    options.push(agent_protocol::models::ModelOptionSelection {
+                        id: id.into(),
+                        value: agent_protocol::models::ModelOptionValue::Boolean(value),
+                    });
+                }
+            }
+            local
+                .peer
+                .call(&rpc::Submission {
+                    thread_id: id.clone(),
+                    client_user_message_id: format!("compiled-{index}").into(),
+                    input: vec![rpc::Input::Text { text: text.into() }],
+                    model: Some(agent_protocol::models::ModelRef {
+                        instance_id: instance.clone(),
+                        id: model.into(),
+                    }),
+                    options,
+                })
+                .await
+                .unwrap();
+            completed(&store, &id, index + 1, "completed").await;
+            if index == 5 {
+                store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
+                let snapshot = store.snapshot();
+                let turn = &snapshot.conversations[&id].turns.as_ref().unwrap()[index];
+                let user = turn.items.as_ref().unwrap().iter().find(|item| item.client_input_id.as_deref() == Some("compiled-5")).unwrap();
+                assert!(matches!(user.body(), agent_protocol::items::ItemBody::UserMessage { content, .. } if content.first() == Some(&agent_protocol::items::MessagePart::Text { text: text.into() })), "Host-owned user text must survive the native prompt prefix and reopen");
+            }
+            let native = host_fixture::test_support::native_id(root.path(), &id);
+            let inputs: Value = serde_json::from_slice(
+                &std::fs::read(root.path().join(format!("claude-session-{native}.json"))).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(inputs[index]["model"], api_model);
+            assert_eq!(inputs[index]["effort"], json!(api_effort));
+            assert_eq!(inputs[index]["settings"], settings);
+            assert_eq!(
+                inputs[index]["content"][0]["text"],
+                if index == 5 {
+                    "Ultrathink:\ninvestigate"
+                } else {
+                    text
+                }
+            );
+            if index > 0 {
+                assert_eq!(
+                    inputs[index]["pid"] == inputs[index - 1]["pid"],
+                    matches!(index, 1 | 5 | 6 | 8),
+                    "reuse at case {index}"
+                );
+            }
+        }
+        local.close().await;
+        store.close().await.unwrap();
+        endpoint.close().await;
+        fixture.close().await.unwrap();
+    })
+    .await
+    .expect("compiled native query deadline");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -325,7 +554,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                     let (mut store, mut endpoint) = connect(&fixture, Snapshot::default()).await;
                     store.dispatch(Intent::NewChat { cwd: if selected { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
                     let key = store.snapshot().navigation.draft_key.clone();
-                    store.dispatch(Intent::SelectModel { thread_id: key.clone(), model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "default".into() } }).await.unwrap();
+                    store.dispatch(Intent::SelectModel { thread_id: key.clone(), model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "claude-fable-5-1".into() } }).await.unwrap();
                     store.dispatch(Intent::SelectModelOption { thread_id: key, id: "effort".into(), value: Some(agent_protocol::models::ModelOptionValue::String("low".into()))}).await.unwrap();
                     let mut previous_id = None;
                     let mut previous_cwd = None;
@@ -347,7 +576,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                         assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
                         assert!(snapshot.pending_submissions.is_empty());
                         assert!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].text.is_empty() && snapshot.drafts[&agent_core::state::DraftKey::from(&id)].attachments.is_empty());
-                        assert_eq!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].model.as_ref().map(|model| model.id.as_str()), Some("default"));
+                        assert_eq!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].model.as_ref().map(|model| model.id.as_str()), Some("claude-fable-5-1"));
                         assert_eq!(agent_protocol::models::model_option_string(&snapshot.drafts[&agent_core::state::DraftKey::from(&id)].options, "effort"), Some("low"));
                         let cwd = snapshot.navigation.cwd.clone();
                         if let Some(previous) = &previous_cwd { assert_eq!(&cwd, previous); }
@@ -413,7 +642,7 @@ async fn unsupported_controls_and_session_elicitation_keep_claude_running() {
                     instance_id: "claude"
                         .parse::<agent_protocol::session::ProviderInstanceId>()
                         .unwrap(),
-                    id: "default".into(),
+                    id: "claude-fable-5-1".into(),
                 },
             })
             .await
@@ -472,7 +701,7 @@ async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_inter
                     instance_id: "claude"
                         .parse::<agent_protocol::session::ProviderInstanceId>()
                         .unwrap(),
-                    id: "default".into(),
+                    id: "claude-fable-5-1".into(),
                 },
             })
             .await
@@ -663,26 +892,20 @@ async fn provider_selection_cannot_redirect_an_existing_conversation() {
         let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
         for (model, display) in [
-            ("default", "Default (recommended) · Opus 5 with 1M context"),
-            ("opus[1m]", "Opus 5 with 1M context"),
-            ("claude-fable-5-1[1m]", "Fable 5.1"),
-            ("sonnet", "Sonnet 5"),
-            ("haiku", "Haiku 4.5"),
-            ("custom", "Custom model"),
+            ("claude-fable-5-1", "Claude Fable 5.1"),
+            ("claude-opus-5", "Claude Opus 5"),
+            ("claude-sonnet-5", "Claude Sonnet 5"),
+            ("claude-haiku-4-5", "Claude Haiku 4.5"),
         ] {
             let snapshot = store.snapshot();
             let entry = snapshot
                 .models
                 .iter()
                 .find(|entry| {
-                    entry.model.instance_id
-                        == "claude"
-                            .parse::<agent_protocol::session::ProviderInstanceId>()
-                            .unwrap()
-                        && entry.model.id == model
+                    entry.model.instance_id.as_str() == "claude" && entry.model.id == model
                 })
                 .unwrap();
-            assert_eq!(entry.display_name, format!("Claude · {display}"));
+            assert_eq!(entry.display_name, display);
         }
         let codex_model = store
             .snapshot()
@@ -701,7 +924,7 @@ async fn provider_selection_cannot_redirect_an_existing_conversation() {
             instance_id: "claude"
                 .parse::<agent_protocol::session::ProviderInstanceId>()
                 .unwrap(),
-            id: "default".into(),
+            id: "claude-fable-5-1".into(),
         };
         for (original, other) in [
             (codex_model.clone(), claude_model.clone()),
@@ -808,7 +1031,7 @@ async fn unconfigured_claude_keeps_codex_usable_without_model_errors() {
                     instance_id: "claude"
                         .parse::<agent_protocol::session::ProviderInstanceId>()
                         .unwrap(),
-                    id: "sonnet".into(),
+                    id: "claude-sonnet-5".into(),
                 }),
                 options: vec![
                     agent_protocol::models::ModelOptionSelection {
@@ -816,8 +1039,8 @@ async fn unconfigured_claude_keeps_codex_usable_without_model_errors() {
                         value: agent_protocol::models::ModelOptionValue::String("high".into()),
                     },
                     agent_protocol::models::ModelOptionSelection {
-                        id: "serviceTier".into(),
-                        value: agent_protocol::models::ModelOptionValue::String("default".into()),
+                        id: "contextWindow".into(),
+                        value: agent_protocol::models::ModelOptionValue::String("200k".into()),
                     },
                 ],
                 text: "Keep the Claude draft".into(),
@@ -837,12 +1060,27 @@ async fn unconfigured_claude_keeps_codex_usable_without_model_errors() {
                 "installed={installed}: {:?}",
                 store.snapshot().model_errors
             );
-            assert!(store.snapshot().models.iter().all(|model| {
-                model.model.instance_id
-                    == "codex"
-                        .parse::<agent_protocol::session::ProviderInstanceId>()
-                        .unwrap()
-            }));
+            let models = store.snapshot();
+            assert!(
+                models
+                    .models
+                    .iter()
+                    .any(|model| model.model.instance_id.as_str() == "codex")
+            );
+            let claude_models = models
+                .models
+                .iter()
+                .filter(|model| model.model.instance_id.as_str() == "claude")
+                .collect::<Vec<_>>();
+            assert_eq!(claude_models.len(), if installed { 10 } else { 0 });
+            if installed {
+                assert!(
+                    claude_models
+                        .iter()
+                        .any(|model| model.is_default == Some(true)
+                            && model.model.id == "claude-fable-5-1")
+                );
+            }
 
             store
                 .dispatch(Intent::NewChat { cwd: String::new() })
@@ -898,7 +1136,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                     } else {
                         store.dispatch(Intent::NewChat { cwd: if selected { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
                         let key = store.snapshot().navigation.draft_key.clone();
-                        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "default".into() } }).await.unwrap();
+                        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "claude-fable-5-1".into() } }).await.unwrap();
                     }
                     let id = send(&store, &format!("independent {index}"), &format!("independent-{index}")).await;
                     let snapshot = until(&store, |snapshot| snapshot.conversations.get(&id)
@@ -984,7 +1222,7 @@ async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
                     instance_id: "claude"
                         .parse::<agent_protocol::session::ProviderInstanceId>()
                         .unwrap(),
-                    id: "default".into(),
+                    id: "claude-fable-5-1".into(),
                 },
             })
             .await
@@ -1130,7 +1368,7 @@ async fn claude_authentication_and_inference_failures_are_visible_and_retry_pres
                     instance_id: "claude"
                         .parse::<agent_protocol::session::ProviderInstanceId>()
                         .unwrap(),
-                    id: "default".into(),
+                    id: "claude-fable-5-1".into(),
                 },
             })
             .await
@@ -1235,7 +1473,7 @@ async fn live_claude_subscription_completes_and_resumes_through_store_and_host()
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
         store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();
         let key = store.snapshot().navigation.draft_key.clone();
-        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "haiku".into() } }).await.unwrap();
+        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "claude-haiku-4-5".into() } }).await.unwrap();
         let id = send(&store, "Remember marker BEX_CLAUDE_STORE_OK. Reply with exactly that marker. Do not use tools.", "live-1").await;
         let snapshot = completed(&store, &id, 1, "completed").await;
         assert!(snapshot.error.is_none());
@@ -1295,7 +1533,7 @@ async fn consecutive_claude_inputs_reuse_one_native_process() {
                 instance_id: "claude"
                     .parse::<agent_protocol::session::ProviderInstanceId>()
                     .unwrap(),
-                id: "default".into(),
+                id: "claude-fable-5-1".into(),
             },
         })
         .await
@@ -1368,7 +1606,7 @@ async fn deleted_claude_worktree_restarts_the_retained_process_and_continues_the
                     instance_id: "claude"
                         .parse::<agent_protocol::session::ProviderInstanceId>()
                         .unwrap(),
-                    id: "default".into(),
+                    id: "claude-fable-5-1".into(),
                 },
             })
             .await
@@ -1536,7 +1774,7 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         assert_eq!(store.snapshot().account.accounts.as_ref().unwrap().selected.get(&"claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap()).map(String::as_str), Some("claude:desktop"));
         store.dispatch(Intent::NewChat { cwd: root.to_string_lossy().into() }).await.unwrap();
         let key = store.snapshot().navigation.draft_key.clone();
-        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "default".into() } }).await.unwrap();
+        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "claude-fable-5-1".into() } }).await.unwrap();
         let thread = send(&store, "first account", "account-first").await;
         completed(&store, &thread, 1, "completed").await;
 
@@ -1578,11 +1816,21 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         let fixture = start().await.unwrap();
         let endpoint = Endpoint::bind(fixture.credentials.local_identity().await, Relays::Disabled).await.unwrap();
         let store = Store::connect(&endpoint, &fixture.ticket, snapshot, None).await.unwrap();
-        assert!(store.dispatch(Intent::LoadModels(op::LoadModels {})).await.is_err(), "logged-out Claude and unavailable Codex must not expose models");
+        store.dispatch(Intent::LoadModels(op::LoadModels {})).await.unwrap();
+        assert!(store.snapshot().models.iter().all(|model| model.model.instance_id.as_str() == "claude"));
+        assert!(store.snapshot().models.iter().any(|model| model.is_default == Some(true) && model.model.id == "claude-fable-5-1"));
+        let local = fixture.local().await.unwrap();
+        let error = local.peer.call(&rpc::Submission {
+            thread_id: thread.clone(), client_user_message_id: "logged-out-reject".into(),
+            input: vec![rpc::Input::Text { text: "must not execute".into() }],
+            model: Some(models::ModelRef { instance_id: "claude".parse().unwrap(), id: "claude-fable-5-1".into() }), options: Vec::new(),
+        }).await.unwrap_err();
+        assert!(error.to_string().contains("Claude アカウントを選択"));
+        local.close().await;
         store.dispatch(Intent::ListAccounts(op::ListAccounts {})).await.unwrap();
         assert!(!store.snapshot().account.accounts.as_ref().unwrap().selected.contains_key(&"claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap()), "restart must preserve logout without selecting the native account");
         store.dispatch(Intent::SelectAccount(op::SelectAccount { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "claude:desktop".into() })).await.unwrap();
-        until(&store, |snapshot| snapshot.models.iter().any(|model| model.model == agent_protocol::models::ModelRef {instance_id:"claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(),id:"default".into()})).await;
+        until(&store, |snapshot| snapshot.models.iter().any(|model| model.model == agent_protocol::models::ModelRef {instance_id:"claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(),id:"claude-fable-5-1".into()})).await;
         send(&store, "back to native account", "account-fourth").await;
         completed(&store, &thread, 4, "completed").await;
         let homes = std::fs::read_to_string(root.join("claude-auth-homes.jsonl")).unwrap();
@@ -1684,7 +1932,7 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
                     instance_id: "claude"
                         .parse::<agent_protocol::session::ProviderInstanceId>()
                         .unwrap(),
-                    id: "default".into(),
+                    id: "claude-fable-5-1".into(),
                 },
             })
             .await
@@ -1873,7 +2121,7 @@ async fn claude_host_queue_preserves_edits_order_and_hold_across_restart() {
                 instance_id: "claude"
                     .parse::<agent_protocol::session::ProviderInstanceId>()
                     .unwrap(),
-                id: "default".into(),
+                id: "claude-fable-5-1".into(),
             },
         })
         .await
@@ -2168,7 +2416,7 @@ async fn creating_default_claude_chat_does_not_launch_the_cli_or_read_models() {
             instance_id: "claude"
                 .parse::<agent_protocol::session::ProviderInstanceId>()
                 .unwrap(),
-            id: "default".into()
+            id: "claude-fable-5-1".into()
         }
     );
     assert_eq!(

@@ -715,6 +715,7 @@ impl HostRpcService {
             native_home,
             Vec::new(),
             Vec::new(),
+            Vec::new(),
         )
         .await;
         let error = result

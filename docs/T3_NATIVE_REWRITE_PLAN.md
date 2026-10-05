@@ -293,3 +293,15 @@ Coreが設定scope・継承・正規化に加えて、表示名と型付きの�
 最終の`scripts/dev-env.sh just unit-tests`は539件成功、既存skipは3件、Rust testの実行時間は117.889秒だった。Markdown回帰とstandalone CLIのassertionも成功した。Store 66件・state 27件・model defaults 6件・operation corpus 1件・persistence 3件の計103件が成功した。実際のCodex app-server/Claude CLI fixtureを使う送信・履歴再開・process再利用などの選択した4件も成功した。今回の汎用optionと表示controlsのfocused mutation監査は42件中35件を検出し、7件はbuild不能、最終の未検出・timeoutは0件だった。全workspace targetのClippyもbindings有効・warnings禁止で成功した。SwiftLint/SwiftFormatとktfmt、Androidのarm64/x86_64 JNI・debug APK・test Kotlin・detekt、iOS core・Swift binding・app・UI test bundleのbuild-for-testingが成功した。native UIの実行と外観照合は未実行である。
 
 Claudeのcanonical manifest・alias・version profileとfast mode/thinking/context window/prompt effortの実行変換、managed setup、残りのdriverと全機能、全画面の外観照合、署名済みNightlyの実配布は引き続き移行する。mainへmerge・pushせず、変更はPR #51へまとめる。CIはユーザー指定で保留する。
+
+### Claude の canonical catalog と native option 実行
+
+参照 Nightly と同じ `model-manifest.json` を MIT notice とともに bundle した。Claude の初期化応答をモデル一覧へ変換する処理と、その専用 effort capability helper を削除した。Host は canonical slug・表示名・profile の descriptor・default と native CLI の version gate を使う。CLI の `--version` probe は T3 と同じ4秒の枠を使い、認証前にもモデル一覧を返す。ログアウトは実行を拒否し、一覧を隠さない。モデル未指定の作成も bundle の既定モデルを選び、CLI を起動しない。
+
+Claude owner が instance ごとの custom capability を使って option 配列をコンパイルする。custom slug が shadow した標準 alias は解決せず、canonical slug と未知の opaque slug を維持する。context window の model suffix、モデル別の effort map、明示的な fastMode/thinking と ultracode を native CLI 引数へ変換する。既存の `--settings`・相対 JSON file・auto compact 設定を保持してから実行設定を重ねる。user launch args の `--` より前に session・model・effort・browser のnative引数を置き、CLIが位置引数として扱わないようにする。native API model・effort・boolean settings が同じ場合だけ process を再利用し、認証 revision が変わった場合も置き換える。custom 表示名や compatibility を runtime 用に重複保存しない。
+
+prompt-injected effort は文章へ適用し、通常の API effort を維持する。`Ultrathink:` は重複挿入せず、`/plugin:skill` や `/deploy.prod` などの slash command を文章へ変えない。steer でも同じ prompt の決定を使う。native history を開き直しても Host が受け付けた元の user text を保持する。
+
+実際の Claude CLI と Codex app-server fixture による20件が成功した（28.046秒、既存の手動 live test 2件はskip）。モデル version の変更を Host 再起動なしで再読込し、10ケースの連続実行で boolean false・設定による process 交換・alias と canonical slug の同一 query・prompt による process 再利用・元の文章の再読込を確認した。ログイン・切替・logout・認証なしの拒否、履歴再開、添付、承認、キュー、worktree と Codex の障害時も成功した。catalog の focused mutation 監査は36件中30件を検出し、6件はbuild不能、未検出・timeoutは0件だった。version/parser/settings の監査も10件中9件を検出し、1件はbuild不能、未検出・timeoutは0件だった。計46件中39件を検出・7件がbuild不能。settings の隔離監査は純粋な変換テストを選び、companion supervisorを必要とする未変更のcommand構築テストは通常unitと実行検証で確認する。最終の `scripts/dev-env.sh just unit-tests` は547件成功、既存skipは3件、Rust testは108.762秒だった。Markdown回帰とstandalone CLIのassertionも成功した。全workspace targetのClippyもbindings有効・warnings禁止で成功した。
+
+manifest の remote refresh/cache・upgrade 表示、legacy/badge/shortName などの全 metadata、context token の使用量表示、T3 の prompt-controlled traits と各 native 画面の外観は残っている。managed setup、他6 driver、残りの全機能と署名済み Nightly の実配布も引き続き実装する。main と稼働中 Host は更新せず、検証した変更を PR #51 へ反映する。

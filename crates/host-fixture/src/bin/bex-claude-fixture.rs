@@ -154,13 +154,29 @@ fn main() {
         default_hook(panic);
     }));
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--version") {
+        let home = std::env::var_os("CLAUDE_CONFIG_DIR").unwrap();
+        let home = Path::new(&home);
+        if home.join("fixture-version-error").exists() {
+            std::process::exit(17);
+        }
+        let version = fs::read_to_string(home.join("fixture-version.txt"))
+            .unwrap_or_else(|_| "2.1.266".into());
+        println!("{} (Claude Code)", version.trim());
+        return;
+    }
     if args.first().map(String::as_str) == Some("auth") {
         auth(&args);
         return;
     }
 
+    let options = &args[..args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len())];
     let option = |name: &str| {
-        args.windows(2)
+        options
+            .windows(2)
             .find(|pair| pair[0] == name)
             .map(|pair| pair[1].clone())
     };
@@ -232,17 +248,6 @@ fn main() {
                 } else {
                     emit(
                         json!({"type":"control_response","response":{"subtype":"success","request_id":value["request_id"],"response":{
-                            "models":fs::read(Path::new(&std::env::var_os("CLAUDE_CONFIG_DIR").unwrap()).join("fixture-models.json"))
-                                .ok()
-                                .map(|bytes| serde_json::from_slice::<Value>(&bytes).unwrap())
-                                .unwrap_or_else(|| json!([
-                                {"value":"default","displayName":"Default (recommended)","description":"Opus 5 with 1M context · Best for everyday, complex tasks","supportedEffortLevels":["low","high"]},
-                                {"value":"opus[1m]","displayName":"Opus (1M context)","description":"Opus 5 with 1M context · Best for everyday, complex tasks"},
-                                {"value":"claude-fable-5-1[1m]","displayName":"Fable","description":"Fable 5.1 · Most capable for your hardest and longest-running tasks"},
-                                {"value":"sonnet","displayName":"Sonnet","description":"Sonnet 5 · Efficient for routine tasks"},
-                                {"value":"haiku","displayName":"Haiku","description":"Haiku 4.5 · Fastest for quick answers"},
-                                {"value":"custom","displayName":"Custom model"}
-                            ])),
                             "commands":[{"name":"fixture-skill","description":"Fixture skill"}],
                             "account":if config["unauthenticated"] == true {json!({})} else {json!({"subscriptionType":"Claude Max"})}
                         }}}),
@@ -270,10 +275,9 @@ fn main() {
                     config["unauthenticated"] != true,
                     "unauthenticated input must never reach Claude"
                 );
-                assert_eq!(
-                    option("--model").as_deref(),
-                    Some(config["expectedModel"].as_str().unwrap_or("default"))
-                );
+                if let Some(expected) = config["expectedModel"].as_str() {
+                    assert_eq!(option("--model").as_deref(), Some(expected));
+                }
                 if waiting.take() == Some("wait") {
                     // The previous input can finish before the queued input is consumed.
                     emit(
@@ -289,7 +293,7 @@ fn main() {
                 }
                 let content = value["message"]["content"].clone();
                 inputs.push(
-                    json!({"content":content,"model":option("--model"),"effort":option("--effort"),"pid":std::process::id()}),
+                    json!({"content":content,"model":option("--model"),"effort":option("--effort"),"settings":option("--settings").map(|settings| serde_json::from_str::<Value>(&settings).unwrap()),"pid":std::process::id()}),
                 );
                 let bytes = serde_json::to_vec(&inputs).unwrap();
                 fs::create_dir_all(history.parent().unwrap()).unwrap();
