@@ -180,6 +180,7 @@ dependencies = [
 name = "agent-protocol"
 version = "0.1.0"
 dependencies = [
+ "agent-domain",
  "base64 0.23.1",
  "orchestration",
  "postcard",

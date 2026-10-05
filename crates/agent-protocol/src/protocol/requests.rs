@@ -1,6 +1,6 @@
 //! One contract per native request; provider JSON conversion stays at its boundary.
 use super::*;
-use crate::{models as m, operations as op};
+use crate::{conversation as c, models as m, operations as op};
 macro_rules! contracts {
     ($($variant:ident, $method:literal => ($params:ty, $result:ty) $([$clone:ident])?),* $(,)?) => {
         // Bind metadata to the operation, not the parameter type: ReadFile and
@@ -47,6 +47,17 @@ contracts! {
     GetTurnDiff, "orchestration/getTurnDiff" => (crate::orchestration::GetTurnDiff, crate::orchestration::TurnDiff) [clone],
     ReadThreadHistory, "orchestration/readThreadHistory" => (crate::orchestration::ReadThreadHistory, ::orchestration::ThreadHistoryPage) [clone],
     SearchThreads, "orchestration/searchThreads" => (crate::orchestration::SearchThreads, Vec<::orchestration::SearchMatch>) [clone],
+    Dispatch, "conversation/dispatch" => (Box<c::Dispatch>, c::Committed) [clone],
+    Launch, "conversation/launch" => (Box<c::Launch>, c::Launched) [clone],
+    ThreadStream, "conversation/subscribeThread" => (c::SubscribeThread, c::ThreadUpdate),
+    ShellStream, "conversation/subscribeShell" => (c::SubscribeShell, c::ShellUpdate),
+    GetThread, "conversation/getThread" => (c::GetThread, c::ThreadSnapshot) [clone],
+    TurnItem, "conversation/getTurnItem" => (c::GetTurnItem, Option<c::HistoryRow>) [clone],
+    ReadHistory, "conversation/readHistory" => (c::ReadHistory, c::HistoryPage) [clone],
+    Search, "conversation/search" => (c::Search, Vec<c::SearchMatch>) [clone],
+    TurnDiff, "conversation/turnDiff" => (c::GetTurnDiff, c::TurnDiff) [clone],
+    ScanAgentSessions, "conversation/agentSessions/scan" => (c::ScanAgentSessions, c::SessionScan) [clone],
+    ImportAgentSessions, "conversation/agentSessions/import" => (c::ImportAgentSessions, c::ImportCounts) [clone],
     ListProjects, "host/project/list" => (m::Empty, Vec<m::Project>),
     AddProject, "host/project/add" => (op::AddProject, String) [clone],
     ReadPermissionSettings, "host/permissions/read" => (crate::permissions::ReadPermissionSettings, crate::permissions::PermissionSettings) [clone],
