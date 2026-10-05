@@ -168,3 +168,6 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 - 2026-10-05: R2 の rollback は、実際に受理された native turn ID を絶対境界に使い、再試行時に境界の存在を確認する。ファイルを scope cwd に限定して先に退避・復元し、provider の失敗時は補償する。Git checkout ごとの journal は途中終了から復旧する。submodule・パス衝突は変更前に拒否し、checkpoint の capture/diff/restore の範囲を揃える。
 - 2026-10-05: queue のユーザー item は固定 T3 と同じく promote 時に作る。実行へ昇格した run の ordinal は既存の最大値より大きくし、実行順と rewind 順を一致させる。直前の状態は before-run checkpoint ID と parentCheckpointId で関連付け、欠番を ordinal−1 で補わない。rollback 後の stale refs を削除する。
 - 2026-10-05: fork の継承表示は作成 transaction で固定して SQLite に保存し、親の現在の visible items を再走査して作り直さない。merge back は最新の Completed/Waiting run を明示して、より新しい active run がある間は拒否する。同じ差分の重複 transfer を作らず、未消費の古い merge を supersede する。provider handoff は直前に実行された run を基準にする。compact は未送信の handoff を消費しない。
+
+- 2026-10-05: R2 の下書き復元は Host の rollback 完了 sequence と成功状態を確認してから、操作後の入力へ追記する。fork/merge は navigation だけ行い、両側の下書きを移動しない。モデルや mode は text 編集の payload に含めず core の現在値を保持する。mobile は list で開始し、保存済み selection を visit しない。Store の revision は Store ID 内だけで比較する。配送 Unknown は同じ ID で再試行し、利用者の「Stop retrying」で未確認 command を外せる。
+- 2026-10-05: 固定 T3 Sidebar の Pinned/Active は通常表示では高さ0の drag marker、Working/Snoozed は既定で折り畳み、選択中の行だけ残す。hero と Edit from here の文言も固定ソースに合わせる。desktop terminal entity の終了は共通 Store へ Detach を送り、Browser は同じウィンドウ内で保持する。

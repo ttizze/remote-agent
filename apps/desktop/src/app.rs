@@ -196,20 +196,25 @@ impl Desktop {
         });
         let hosts = cx.new(|cx| Hosts::new(window, cx));
         let subscriptions = vec![
+            cx.subscribe(&rename, |view, _, event, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    view.thread_action(ThreadAction::Rename {
+                        title: view.rename.read(cx).value().to_string(),
+                    });
+                    view.renaming = false;
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&composer, |view, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
                     let text = input.read(cx).value().to_string();
-                    if view.session.is_some() && text != view.snapshot.current_draft().text {
-                        let mut draft = view.snapshot.current_draft();
-                        draft.text = text;
+                    if view.session.is_some() && text != view.composer_base {
                         view.composer_revision += 1;
                         view.pending_draft = Some(view.composer_revision);
-                        let base_text = Some(std::mem::replace(
-                            &mut view.composer_base,
-                            draft.text.clone(),
-                        ));
+                        let base_text =
+                            Some(std::mem::replace(&mut view.composer_base, text.clone()));
                         view.perform(
-                            Intent::EditDraft { draft, base_text },
+                            Intent::EditDraft { text, base_text },
                             Some(BufferRevision::Draft(view.composer_revision)),
                         );
                     }
@@ -277,7 +282,7 @@ impl Desktop {
         let mut view = Self {
             session: None,
             snapshot: Arc::default(),
-            conversation: Arc::new(conversation(&Snapshot::default())),
+            conversation: Arc::new(conversation(&Snapshot::default(), &now())),
             runtime,
             updates,
             epoch: 0,
@@ -294,7 +299,7 @@ impl Desktop {
             search,
             rename,
             renaming: false,
-            collapsed_shelves: BTreeSet::new(),
+            collapsed_shelves: BTreeSet::from([ShelfKind::Working, ShelfKind::Snoozed]),
             settled_limit: 10,
             show_archive: false,
             expanded: BTreeSet::new(),
@@ -328,7 +333,7 @@ impl Desktop {
         self.remote = remote;
         self.pending_draft = None;
         self.snapshot = Arc::default();
-        self.conversation = Arc::new(conversation(&self.snapshot));
+        self.conversation = Arc::new(conversation(&self.snapshot, &now()));
         self.timeline.reset(1);
         self.editor_path = None;
         self.editor_value.clear();
@@ -358,10 +363,7 @@ impl Desktop {
                 let preferences =
                     std::fs::read(path.with_file_name("orchestration-model-preferences.json"))
                         .unwrap_or_default();
-                let snapshot =
-                    agent_core::persistence::apply_model_preferences(&bytes, &preferences)
-                        .and_then(|bytes| agent_core::persistence::decode(&bytes))
-                        .unwrap_or_default();
+                let snapshot = agent_core::persistence::recover(&bytes, &preferences);
                 Ok((path, snapshot))
             })();
             match state {
@@ -517,16 +519,14 @@ impl Desktop {
                     .update(cx, |input, cx| input.set_value(text, window, cx));
             }
         }
-        let conversation = conversation(&self.snapshot);
+        let conversation = conversation(&self.snapshot, &now());
         let switched = before.thread_id != conversation.thread_id || before.cwd != conversation.cwd;
         if switched {
             self.renaming = false;
-            self.pending_draft = None;
             self.pending_editor = None;
             self.editor_path = None;
             self.editor_value.clear();
             self.terminal = None;
-            self.browser = None;
             if !conversation.cwd.is_empty() {
                 match self.panel {
                     Some(Panel::Diff) => self.perform(
@@ -656,6 +656,7 @@ impl Desktop {
             self.panel = None;
         } else {
             match panel {
+                Panel::Terminal if !self.snapshot.terminal_available() => return,
                 Panel::Terminal if self.terminal.is_none() => {
                     if let Some(session) = &self.session {
                         self.terminal = Some(crate::terminal::Terminal::new(

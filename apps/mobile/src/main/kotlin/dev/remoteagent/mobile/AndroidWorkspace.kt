@@ -1,3 +1,4 @@
+import kotlinx.coroutines.sync.withLock
 @file:Suppress("TooGenericExceptionCaught")
 
 package dev.remoteagent.mobile
@@ -384,7 +385,10 @@ private fun WorkspaceDiff(model: AndroidAppModel, modifier: Modifier) {
     }
     LaunchedEffect(cwd, thread, selection) { refresh() }
     val review = model.snapshot.review()
-    val files = remember(model.snapshot.reviewRevision()) { review?.diffFiles().orEmpty() }
+    var files by remember { mutableStateOf<List<dev.remoteagent.core.WorkspaceDiffFile>>(emptyList()) }
+    LaunchedEffect(model.snapshot.reviewRevision()) {
+        files = withContext(Dispatchers.Default) { review?.diffFiles().orEmpty() }
+    }
     Column(modifier) {
         Row {
             Box(Modifier.weight(1f)) {
@@ -471,9 +475,10 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
         lifecycle?.addObserver(observer)
         onDispose { lifecycle?.removeObserver(observer) }
     }
-    suspend fun request(action: BrowserAction) {
-        if (sending || !active) return
-        sending = true
+    val requests = remember(thread) { kotlinx.coroutines.sync.Mutex() }
+    suspend fun request(action: BrowserAction, user: Boolean = true) = requests.withLock {
+        if (!active) return@withLock
+        if (user) sending = true
         try {
             val current = frame
             val next = model.browser(BrowserRequest(thread, current?.tabId ?: "", current?.imageId ?: "", action))
@@ -483,7 +488,7 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
         } catch (failure: Exception) {
             error = failure.message
         } finally {
-            sending = false
+            if (user) sending = false
         }
     }
     fun send(action: BrowserAction) {
@@ -491,7 +496,7 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
     }
     LaunchedEffect(thread, active) {
         while (active && isActive) {
-            if (model.snapshot.connected()) request(BrowserAction.Read)
+            if (model.snapshot.connected()) request(BrowserAction.Read, user = false)
             delay(BROWSER_REFRESH_MILLIS)
         }
     }

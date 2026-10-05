@@ -55,6 +55,7 @@ pub struct ThreadCache {
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
+    pub store_id: String,
     pub revision: u64,
     pub connected: bool,
     pub host_name: Option<String>,
@@ -73,6 +74,7 @@ pub struct Snapshot {
     pub models: Vec<crate::models::Model>,
     pub projects: Vec<crate::models::Project>,
     pub model_errors: BTreeMap<String, String>,
+    pub uncertain_commands: std::collections::BTreeSet<CommandId>,
     pub pending_commands: Vec<Command>,
     pub pending_launches: Vec<agent_protocol::orchestration::LaunchThread>,
     pub workspace: Workspace,
@@ -84,6 +86,12 @@ pub struct Snapshot {
     pub invitation: Option<crate::models::Invitation>,
 }
 impl Snapshot {
+    pub fn accepts_after(&self, previous: &Snapshot) -> bool {
+        self.store_id != previous.store_id || self.revision >= previous.revision
+    }
+    pub fn terminal_available(&self) -> bool {
+        self.connected && !self.cwd().is_empty()
+    }
     pub fn draft_key(&self) -> String {
         if let (Some(thread), Some(run)) = (&self.selected_thread, &self.editing_run) {
             return format!("queue:{thread}:{run}");
@@ -101,49 +109,66 @@ impl Snapshot {
     pub fn draft_pending(&self) -> bool {
         let draft = self.current_draft();
         self.pending_commands.iter().any(|command| self.selected_thread.as_ref() == Some(&command.thread_id) && match &command.body {
-            CommandBody::MessageDispatch(message) => self.editing_run.is_none() && message.text == draft.text,
+            CommandBody::MessageDispatch(message) => self.editing_run.is_none() && (message.text == draft.text || message.source_plan_ref.as_ref().is_some_and(|r| self.selected_thread.as_ref() == Some(&r.thread_id))),
             CommandBody::QueuedRunEdit { run_id, text, .. } => self.editing_run.as_ref() == Some(run_id) && *text == draft.text,
             _ => false,
-        }) || self.selected_thread.is_none() && self.pending_launches.iter().any(|launch| matches!(&launch.create.body, CommandBody::ThreadCreate { project_id, .. } if project_id.as_str() == self.selected_project.as_deref().unwrap_or("bex:chats")))
+        }) || self.pending_launches.iter().any(|launch| launch.input.source_plan_ref.as_ref().is_some_and(|r| self.selected_thread.as_ref() == Some(&r.thread_id))
+            || self.selected_thread.is_none() && matches!(&launch.create.body, CommandBody::ThreadCreate { project_id, .. } if project_id.as_str() == self.selected_project.as_deref().unwrap_or("bex:chats")))
+    }
+    pub fn context_pending(&self, thread_id: &ThreadId) -> bool {
+        self.pending_commands.iter().any(|command| {
+            command.thread_id == *thread_id
+                && matches!(
+                    command.body,
+                    CommandBody::ThreadFork { .. } | CommandBody::ThreadMergeBack { .. }
+                )
+        })
     }
     pub fn current_draft(&self) -> Draft {
         self.drafts
             .get(&self.draft_key())
             .cloned()
             .unwrap_or_else(|| {
-                if let Some(thread) = self.selected_thread.as_ref().and_then(|id| {
-                    self.shell
-                        .as_ref()?
-                        .threads
-                        .iter()
-                        .chain(&self.shell.as_ref()?.archived_threads)
-                        .find(|s| &s.thread.id == id)
-                }) {
-                    Draft {
-                        text: String::new(),
-                        instance_id: thread.thread.provider_instance_id.to_string(),
-                        model: thread.thread.model_selection.model.clone(),
-                        effort: thread
-                            .thread
-                            .model_selection
-                            .options
-                            .get("reasoningEffort")
-                            .and_then(|j| j.0.as_str())
-                            .map(str::to_owned),
-                        service_tier: thread
-                            .thread
-                            .model_selection
-                            .options
-                            .get("serviceTier")
-                            .and_then(|j| j.0.as_str())
-                            .map(str::to_owned),
-                        runtime_mode: thread.thread.runtime_mode.as_str().into(),
-                        interaction_mode: thread.thread.interaction_mode.as_str().into(),
-                    }
-                } else {
-                    self.default_draft.clone()
-                }
+                self.selected_thread.as_ref().map_or_else(
+                    || self.default_draft.clone(),
+                    |id| self.draft_for_thread(id),
+                )
             })
+    }
+    pub fn draft_for_thread(&self, id: &ThreadId) -> Draft {
+        self.drafts.get(id.as_str()).cloned().unwrap_or_else(|| {
+            if let Some(thread) = self.shell.as_ref().and_then(|shell| {
+                shell
+                    .threads
+                    .iter()
+                    .chain(&shell.archived_threads)
+                    .find(|s| &s.thread.id == id)
+            }) {
+                Draft {
+                    text: String::new(),
+                    instance_id: thread.thread.provider_instance_id.to_string(),
+                    model: thread.thread.model_selection.model.clone(),
+                    effort: thread
+                        .thread
+                        .model_selection
+                        .options
+                        .get("reasoningEffort")
+                        .and_then(|j| j.0.as_str())
+                        .map(str::to_owned),
+                    service_tier: thread
+                        .thread
+                        .model_selection
+                        .options
+                        .get("serviceTier")
+                        .and_then(|j| j.0.as_str())
+                        .map(str::to_owned),
+                    runtime_mode: thread.thread.runtime_mode.as_str().into(),
+                    interaction_mode: thread.thread.interaction_mode.as_str().into(),
+                }
+            } else {
+                self.default_draft.clone()
+            }
+        })
     }
     pub fn projection(&self) -> Option<&ThreadProjection> {
         self.selected_thread
@@ -321,13 +346,16 @@ pub enum Intent {
         before_thread_id: Option<String>,
     },
     EditDraft {
-        draft: Draft,
+        text: String,
         base_text: Option<String>,
     },
     Send {
         behavior: SendBehavior,
     },
     Stop,
+    DiscardPending {
+        command_id: String,
+    },
     Fork {
         source_thread_id: String,
         run_id: String,

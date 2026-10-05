@@ -39,10 +39,8 @@ extension BexAppViewModel {
 
     func editDraft(_ text: String) {
         composerText = text
-        var value = snapshot.draft()
-        value.text = text
         let edit = draftEdits.edit(text)
-        perform(.editDraft(draft: value, baseText: edit.base)) { [weak self] _ in
+        perform(.editDraft(text: text, baseText: edit.base)) { [weak self] _ in
             guard let self, draftEdits.pending == edit.revision else { return }
             _ = draftEdits.acknowledge(edit.revision)
             composerText = snapshot.draft().text

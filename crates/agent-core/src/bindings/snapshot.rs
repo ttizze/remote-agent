@@ -41,6 +41,9 @@ impl Snapshot {
     pub fn error(&self) -> Option<String> {
         self.error.clone()
     }
+    pub fn supersedes(&self, previous: Arc<Self>) -> bool {
+        self.accepts_after(&previous)
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -57,7 +60,14 @@ impl Snapshot {
         self.current_draft()
     }
     pub fn conversation(&self) -> ConversationView {
-        presentation::conversation(self)
+        let now = orchestration::Timestamp::from_millis(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+        )
+        .expect("current timestamp");
+        presentation::conversation(self, &now)
     }
     pub fn archived_threads(
         &self,
@@ -82,7 +92,7 @@ impl Snapshot {
         presentation::model_choices(self)
     }
     pub fn can_open_terminal(&self) -> bool {
-        self.connected && !self.cwd().is_empty()
+        self.terminal_available()
     }
     pub fn review_revision(&self) -> Option<String> {
         self.workspace

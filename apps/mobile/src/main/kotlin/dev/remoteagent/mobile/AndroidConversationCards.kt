@@ -42,6 +42,8 @@ import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import dev.remoteagent.core.MarkdownAlignment
 import dev.remoteagent.core.MarkdownBlock
 import dev.remoteagent.core.MarkdownRun
@@ -73,7 +75,10 @@ internal fun CopyButton(text: String) {
 
 @Composable
 internal fun ConversationBody(body: String) {
-    val blocks = remember(body) { markdownBlocks(body) }
+    var blocks by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<List<MarkdownBlock>>(emptyList()) }
+    androidx.compose.runtime.LaunchedEffect(body) {
+        blocks = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { markdownBlocks(body) }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         blocks.forEachIndexed { index, block ->
             when (block) {

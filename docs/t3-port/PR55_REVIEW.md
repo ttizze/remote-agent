@@ -127,3 +127,12 @@
 | H9, H10, H11 | explicit worktree の launch も project 登録を検証。launch の lock は command ごと。snapshot の frame size を送信前に検証し型付き failure を返す | explicit workspace、lock identity、oversized subscription |
 
 残る R2 指摘（Claude の echo/steer 所有権、transfer 再試行、連続 stream の差分化、core の下書き/送信/再開、desktop と mobile の更新・操作・保存回復）は引き続き修正中。最終検証と対応理由の全表は完了時に更新する。
+
+R2 core/client の追加対応（最終 native 検証は後段で実施）:
+
+- C1/C2/C3/C5/C7、D1/D4/D5/D8、M11: fork/merge の下書き保持、merge 対象 run の共通判定、成功後 rollback text の追記、plan/fork/merge の pending guard、queue buffer の除去、text-only 編集へ変更。core の成功/失敗/遅い receipt/二重操作回帰テストを追加。
+- C8/C9/C10/C11/C12/C13: mobile cold-start の hidden visit を防止、Unknown の Stop retrying、resume の HostStatus probe、background banner 抑止、snooze 共通判定、dictation の FIFO preparation とキャンセル後の transcript 抑止。
+- M1/M2/M3/M4/M5/M6/M7/M8/M9/M10: Store ID を含む snapshot 順序、pairing 時の task reset・既存 Host 保存の再読込、独立した保存 component 回復、request scroll、Markdown 成長時の bottom follow、file edit revision、browser user action の直列受付、Markdown/diff の background parse、delete の選択捕捉、canEdit。
+- D2/D3/D7/D9/D10/D11 と前回 D18/D20: terminal detach、Browser 保持、dictation cancellation、T3 shelf と hero、rename Enter/Cancel/Escape、revert copy、terminal admission、model display name、独立 preferences 回復、sidebar Wake/Snooze。
+
+この段階の Rust 検証: agent-core 74/74、desktop 18 passed/1 ignored。mobile build/lint と追加 regression は最終検証に含める。

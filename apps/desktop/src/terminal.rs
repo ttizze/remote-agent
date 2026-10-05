@@ -68,6 +68,15 @@ pub(crate) struct Terminal {
     mouse_pressed: bool,
     error: Option<String>,
 }
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        let store = self.store.clone();
+        let handle = self.handle.clone();
+        self.runtime.handle.spawn(async move {
+            let _ = store.dispatch(Intent::DetachTerminal { handle }).await;
+        });
+    }
+}
 impl Terminal {
     pub(crate) fn new(
         store: Arc<Store>,

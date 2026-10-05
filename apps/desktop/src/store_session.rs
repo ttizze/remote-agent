@@ -197,7 +197,7 @@ mod tests {
             draft.text = "last edit before close".into();
             store
                 .dispatch(Intent::EditDraft {
-                    draft,
+                    text: draft.text,
                     base_text: None,
                 })
                 .await
@@ -256,7 +256,7 @@ mod tests {
             draft.text = "recovered".into();
             store
                 .dispatch(Intent::EditDraft {
-                    draft,
+                    text: draft.text,
                     base_text: None,
                 })
                 .await

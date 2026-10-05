@@ -39,9 +39,13 @@ struct ThreadScreen: View {
                     .frame(maxWidth: 736).frame(maxWidth: .infinity)
                 }
                 .scrollPosition(id: $firstVisible, anchor: .top)
-                .onScrollGeometryChange(for: Bool.self) { geometry in
-                    geometry.contentSize.height - geometry.contentOffset.y - geometry.containerSize.height < 80
-                } action: { _, bottom in nearBottom = bottom }
+                .onScrollGeometryChange(for: ConversationScroll.self) { geometry in
+                    ConversationScroll(height: geometry.contentSize.height, nearBottom: geometry.contentSize.height - geometry.contentOffset.y - geometry.containerSize.height < 80)
+                } action: { old, next in
+                    if next.height != old.height && (nearBottom || initialScroll) {
+                        reader.scrollTo("conversation-bottom", anchor: .bottom)
+                    } else { nearBottom = next.nearBottom }
+                }
                 .onChange(of: conversation.rows) { old, next in
                     if old.first?.id != next.first?.id && old.last?.id == next.last?.id && next.count > old.count {
                         if let first = old.first?.id {
@@ -60,11 +64,14 @@ struct ThreadScreen: View {
                 ) }
                 .onAppear { reader.scrollTo("conversation-bottom", anchor: .bottom) }
             }
-            ForEach(conversation.requests, id: \.id) { request in
-                ConversationRequest(model: model, row: request).padding(
-                    .horizontal,
-                    20
-                )
+            if !conversation.requests.isEmpty {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        ForEach(conversation.requests, id: \.id) { request in
+                            ConversationRequest(model: model, row: request)
+                        }
+                    }.padding(.horizontal, 20)
+                }.frame(maxHeight: 280)
             }
             ConversationComposer(model: model, showQueue: { showingQueue = true })
         }
@@ -128,3 +135,5 @@ struct ThreadScreen: View {
         }
     }
 }
+
+private struct ConversationScroll: Equatable { let height: CGFloat; let nearBottom: Bool }

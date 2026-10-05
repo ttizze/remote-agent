@@ -35,7 +35,9 @@ struct FileEditorSheet: View {
                 if busy {
                     ProgressView().padding()
                 }
-                BufferedTextInput(value: $text) { TextEditor(text: $0) }.font(.body.monospaced())
+                BufferedTextInput(value: $text, edit: { value, acknowledged in
+                    perform(.editFile(path: entry.path, text: value)) { _, result in acknowledged((try? result.get()) != nil) }
+                }) { TextEditor(text: $0) }.id(entry.path).font(.body.monospaced())
                     .textInputAutocapitalization(.never).disableAutocorrection(true)
                     .accessibilityIdentifier("file.editor")
                     .disabled(revision.isEmpty)
@@ -98,21 +100,27 @@ struct BufferedTextInput<Content: View>: View {
     @Binding private var value: String
     @State private var text: String
     let content: (Binding<String>) -> Content
+    let edit: (String, @escaping (Bool) -> Void) -> Void
+    @State private var edits = DraftRevision()
 
-    init(value: Binding<String>, @ViewBuilder content: @escaping (Binding<String>) -> Content) {
+    init(value: Binding<String>, edit: @escaping (String, @escaping (Bool) -> Void) -> Void, @ViewBuilder content: @escaping (Binding<String>) -> Content) {
         _value = value
         _text = State(initialValue: value.wrappedValue)
         self.content = content
+        self.edit = edit
     }
 
     var body: some View {
         let input = Binding(get: { text }, set: {
             guard text != $0 else { return }
             text = $0
-            value = $0
+            let revision = edits.edit($0).revision
+            edit($0) { _ in
+                if edits.acknowledge(revision), text != value { text = value }
+            }
         })
         content(input).onChange(of: value) { _, _ in
-            if text != value {
+            if edits.pending == nil, text != value {
                 text = value
             }
         }

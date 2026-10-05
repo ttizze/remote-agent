@@ -186,6 +186,7 @@ pub struct QueueRow {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerView {
+    pub pending_deliveries: Vec<String>,
     pub draft: Draft,
     pub send_label: String,
     pub plan_follow_up: bool,
@@ -841,7 +842,7 @@ pub fn actionable_plan(
             && matches!(&p.body,PlanBody::ProposedPlan{markdown} if !markdown.trim().is_empty())
     })
 }
-pub fn conversation(snapshot: &Snapshot) -> ConversationView {
+pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
     let projection = snapshot.projection();
     let draft = snapshot.current_draft();
     let active = projection.and_then(|p| p.runs.iter().find(|r| r.status.is_blocking()));
@@ -905,8 +906,23 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
     let editing = snapshot.editing_run.is_some();
     let creating = snapshot.selected_thread.is_none() && snapshot.pending_launches.iter().any(|launch|matches!(&launch.create.body,CommandBody::ThreadCreate{project_id,..} if project_id.as_str()==snapshot.selected_project.as_deref().unwrap_or("bex:chats")));
     let composer = ComposerView {
+        pending_deliveries: snapshot
+            .uncertain_commands
+            .iter()
+            .filter(|id| {
+                snapshot.pending_commands.iter().any(|c| {
+                    &c.command_id == *id && Some(&c.thread_id) == snapshot.selected_thread.as_ref()
+                }) || snapshot.selected_thread.is_none()
+                    && snapshot
+                        .pending_launches
+                        .iter()
+                        .any(|l| &l.create.command_id == *id)
+            })
+            .map(ToString::to_string)
+            .collect(),
         draft: draft.clone(),
         plan_follow_up: snapshot.connected
+            && !snapshot.draft_pending()
             && !archived
             && !live_request
             && !draft.model.is_empty()
@@ -971,7 +987,15 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
         },
     };
     let (requests, rows) = projection
-        .map(timeline)
+        .map(|p| {
+            let mut rows = timeline(p);
+            if snapshot.context_pending(&p.thread.id) {
+                for row in &mut rows {
+                    row.fork_source_thread_id = None;
+                }
+            }
+            rows
+        })
         .unwrap_or_default()
         .into_iter()
         .partition(|row| matches!(row.kind, RowKind::Approval | RowKind::Question));
@@ -987,6 +1011,12 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
                     .projects
                     .iter()
                     .find(|p| p.id == t.project_id.as_str())
+            })
+            .or_else(|| {
+                snapshot
+                    .projects
+                    .iter()
+                    .find(|p| Some(&p.id) == snapshot.selected_project.as_ref())
             })
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "Chats".into()),
@@ -1006,13 +1036,21 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
         archived,
         pinned: thread.is_some_and(|t| t.pinned_at.is_some()),
         settled: thread.is_some_and(|t| t.settled_override == Some(SettledOverride::Settled)),
-        snoozed: thread.is_some_and(|t| t.snoozed_until.is_some()),
+        snoozed: snapshot
+            .shell
+            .as_ref()
+            .and_then(|shell| {
+                shell
+                    .threads
+                    .iter()
+                    .find(|s| Some(&s.thread.id) == snapshot.selected_thread.as_ref())
+            })
+            .is_some_and(|shell| snoozed(shell, now)),
         auto_settle: thread.is_none_or(|t| t.auto_settle_disabled_at.is_none()),
         can_merge_back: projection.is_some_and(|p| {
-            p.thread.lineage.relationship_to_parent == Some(Relationship::Fork)
-                && p.runs
-                    .iter()
-                    .any(|r| matches!(r.status, RunStatus::Completed | RunStatus::Waiting))
+            !snapshot.context_pending(&p.thread.id)
+                && p.thread.lineage.relationship_to_parent == Some(Relationship::Fork)
+                && orchestration::context::merge_back_run(&p.runs).is_some()
         }),
     }
 }
@@ -1094,7 +1132,7 @@ mod tests {
                 latest_local_turn_ordinal: None,
             },
         );
-        let view = conversation(&state);
+        let view = conversation(&state, &now());
         assert_eq!(view.requests.len(), 1);
         assert!(view.rows.is_empty());
         p.runtime_requests[0].status = RequestStatus::Resolved;
@@ -1109,7 +1147,7 @@ mod tests {
                 latest_local_turn_ordinal: None,
             },
         );
-        let view = conversation(&state);
+        let view = conversation(&state, &now());
         assert!(view.requests.is_empty());
         assert_eq!(view.rows[0].kind, RowKind::Work);
         assert_eq!(view.rows[0].work[0].detail, "Run tests?");
@@ -1409,6 +1447,16 @@ pub fn runtime_mode_choices() -> Vec<RuntimeModeChoice> {
         label: label.into(),
     })
     .collect()
+}
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn interaction_mode_choices() -> Vec<RuntimeModeChoice> {
+    [("default", "Chat"), ("plan", "Plan")]
+        .into_iter()
+        .map(|(id, label)| RuntimeModeChoice {
+            id: id.into(),
+            label: label.into(),
+        })
+        .collect()
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn question_answer_values(selected: Vec<String>, custom: String, multi: bool) -> Vec<String> {

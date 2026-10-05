@@ -168,7 +168,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun editDraft(text: String) {
         composerText = text
         val (revision, base) = draftEdits.edit(text)
-        perform(Intent.EditDraft(snapshot.draft().copy(text = text), base)) {
+        perform(Intent.EditDraft(text, base)) {
             if (draftEdits.acknowledge(revision)) {
                 composerText = snapshot.draft().text
                 draftEdits.base = composerText
@@ -299,7 +299,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 val identity =
                     withContext(Dispatchers.IO) { AndroidCredentialStore(context, id).loadOrCreate(::generateIdentity) }
                 val bytes =
-                    withContext(Dispatchers.IO) { applyModelPreferences(byteArrayOf(), repository.modelPreferences()) }
+                    withContext(Dispatchers.IO) { applyModelPreferences(repository.load(id), repository.modelPreferences()) }
                 val store =
                     try {
                         AgentStore.connect(
@@ -320,6 +320,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 initialization?.cancel()
                 observation?.cancel()
                 val old = owner
+                owner = null
+                publish(Snapshot.empty())
                 profiles = profiles.filterNot { it.id == id } + HostProfile(id, target.hostName, target.endpoint)
                 repository.saveProfiles(profiles)
                 repository.selected = id
@@ -396,7 +398,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun publish(next: Snapshot) {
-        if (owner != null && next.revision() < snapshot.revision()) return
+        if (!next.supersedes(snapshot)) return
         if (next === snapshot) return
 
         val name = next.hostName()
@@ -516,11 +518,12 @@ internal fun RemoteAgentApp(
                 confirmButton = {
                     TextButton(
                         onClick = {
+                            val wasOpen = model.snapshot.selectedThreadId() == id
                             model.perform(Intent.Thread(id, ThreadAction.Delete)) { result ->
                                 if (
                                     result.isSuccess &&
                                         model.screen == Screen.Conversation &&
-                                        model.snapshot.selectedThreadId() == null
+                                        wasOpen && (model.snapshot.selectedThreadId() == id || model.snapshot.selectedThreadId() == null)
                                 )
                                     model.showThreads()
                             }

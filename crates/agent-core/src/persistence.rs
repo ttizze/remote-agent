@@ -45,16 +45,53 @@ pub fn apply_model_preferences(
     persisted: &[u8],
     defaults: &[u8],
 ) -> Result<Vec<u8>, serde_json::Error> {
-    let mut state = decode(persisted)?;
-    if !defaults.is_empty() {
-        state.default_draft = serde_json::from_slice(defaults)?;
-    }
+    let mut state = recover(persisted, defaults);
+    // Recovery warnings are runtime state, not saved data.
+    state.error = None;
     encode(&state)
+}
+
+/// Decode independent device-owned components; a damaged file must not lock out a Host.
+pub fn recover(persisted: &[u8], defaults: &[u8]) -> Snapshot {
+    let mut state = decode(persisted).unwrap_or_else(|_| Snapshot {
+        error: Some("Saved device state could not be read. Device drafts were reset.".into()),
+        ..Default::default()
+    });
+    if !defaults.is_empty() {
+        match serde_json::from_slice(defaults) {
+            Ok(draft) => state.default_draft = draft,
+            Err(_) => {
+                state.error =
+                    Some("Saved model preferences could not be read. Choose a model again.".into())
+            }
+        }
+    }
+    state
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn damaged_components_do_not_discard_valid_device_work_or_block_startup() {
+        let mut state = Snapshot::default();
+        state.default_draft.model = "valid model".into();
+        state.drafts.insert(
+            "thread".into(),
+            Draft {
+                text: "keep me".into(),
+                ..Default::default()
+            },
+        );
+        let recovered = recover(&encode(&state).unwrap(), b"broken preferences");
+        assert_eq!(recovered.drafts["thread"].text, "keep me");
+        assert_eq!(recovered.default_draft.model, "valid model");
+        assert!(recovered.error.is_some());
+        let recovered = recover(b"broken state", &encode_model_preferences(&state).unwrap());
+        assert_eq!(recovered.default_draft.model, "valid model");
+        assert!(recovered.error.is_some());
+        assert!(decode(&apply_model_preferences(b"bad", b"bad").unwrap()).is_ok());
+    }
     #[test]
     fn device_drafts_and_pending_commands_roundtrip_without_host_cache() {
         let mut snapshot = Snapshot {

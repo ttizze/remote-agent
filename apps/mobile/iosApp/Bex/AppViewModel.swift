@@ -84,6 +84,8 @@ final class BexAppViewModel: ObservableObject {
     private func detachStore() -> AgentStore? {
         persist()
         draftEdits.reset()
+        presentation?.cancel()
+        presentation = nil
         connection?.cancel()
         observation?.cancel()
         cancelInitialization()
@@ -137,6 +139,7 @@ final class BexAppViewModel: ObservableObject {
         } catch {
             guard !Task.isCancelled, selectedProfileId == id else { return }
             initialization = nil
+            notice = error.localizedDescription
             let queued = pending
             pending.removeAll()
             for (_, complete) in queued {
@@ -181,8 +184,9 @@ final class BexAppViewModel: ObservableObject {
             connection?.cancel()
             connection = Task { [weak self] in
                 do {
+                    self?.persist()
                     await self?.persistenceWrite?.value
-                    let persisted = try SnapshotFiles.withModelPreferences(Data())
+                    let persisted = try await SnapshotFiles.load(id)
                     let owner = try await AgentStore.connect(connection: Connection(
                         ticket: invitation.endpoint,
                         identity: DeviceIdentity.loadOrGenerate(id),
@@ -194,6 +198,11 @@ final class BexAppViewModel: ObservableObject {
                     observation?.cancel()
                     cancelInitialization()
                     let old = store
+                    presentation?.cancel()
+                    presentation = nil
+                    store = nil
+                    publish(AgentCore.Snapshot.empty())
+                    draftEdits.reset()
                     profiles.removeAll { $0.id == id }
                     profiles.append(HostProfile(id: id, name: invitation.hostName, ticket: invitation.endpoint))
                     try HostProfile.save(profiles)
@@ -308,7 +317,7 @@ extension BexAppViewModel {
     }
 
     private func publish(_ next: AgentCore.Snapshot) {
-        if store != nil, next.revision() < snapshot.revision() {
+        if !next.supersedes(previous: snapshot) {
             return
         }
         if next === snapshot {

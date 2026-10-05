@@ -16,6 +16,15 @@ impl Desktop {
         h_flex()
             .id("t3-conversation")
             .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                if view.renaming
+                    && view.rename.read(cx).focus_handle(cx).is_focused(window)
+                    && event.keystroke.key == "escape"
+                {
+                    view.renaming = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
                 if !view.settings
                     && view.composer.read(cx).focus_handle(cx).is_focused(window)
                     && event.keystroke.key == "enter"
@@ -56,6 +65,11 @@ impl Desktop {
                                     .flex_1()
                                     .min_w_0()
                                     .h_full()
+                                    .when(
+                                        conversation.thread_id.is_none()
+                                            && conversation.rows.is_empty(),
+                                        |v| v.justify_center(),
+                                    )
                                     .child(self.timeline(&conversation, cx))
                                     .child(self.composer_view(&conversation, cx)),
                             )
@@ -117,29 +131,30 @@ impl Desktop {
                 }
                 let kind = shelf.kind;
                 let collapsed = self.collapsed_shelves.contains(&kind);
-                list = list.child(
-                    Button::new(SharedString::from(format!("shelf-{kind:?}")))
-                        .label(format!(
-                            "{} {} {}",
-                            if collapsed { "›" } else { "⌄" },
-                            shelf.title,
-                            shelf.total
-                        ))
-                        .small()
-                        .ghost()
-                        .h_8()
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            if !view.collapsed_shelves.remove(&kind) {
-                                view.collapsed_shelves.insert(kind);
-                            }
-                            cx.notify();
-                        })),
-                );
-                if collapsed {
-                    continue;
+                if !matches!(kind, ShelfKind::Pinned | ShelfKind::Active) {
+                    list = list.child(
+                        Button::new(SharedString::from(format!("shelf-{kind:?}")))
+                            .label(format!(
+                                "{} {} {}",
+                                if collapsed { "›" } else { "⌄" },
+                                shelf.title,
+                                shelf.total
+                            ))
+                            .small()
+                            .ghost()
+                            .h_8()
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if !view.collapsed_shelves.remove(&kind) {
+                                    view.collapsed_shelves.insert(kind);
+                                }
+                                cx.notify();
+                            })),
+                    );
                 }
                 for row in shelf.rows {
-                    list = list.child(self.thread_row(row, cx));
+                    if !collapsed || row.selected {
+                        list = list.child(self.thread_row(row, cx));
+                    }
                 }
                 if shelf.has_more {
                     list = list.child(
@@ -306,6 +321,7 @@ impl Desktop {
         let owner = cx.entity().downgrade();
         let pinned = row.pinned;
         let settled = row.settled;
+        let snoozed = row.snoozed;
         let archived = row.archived;
         let drag = PinnedDrag {
             id: id.clone(),
@@ -435,6 +451,21 @@ impl Desktop {
                             ThreadAction::Settle
                         },
                     ),
+                    (
+                        if snoozed { "Wake" } else { "Snooze for 1 hour" },
+                        if snoozed {
+                            ThreadAction::Unsnooze
+                        } else {
+                            ThreadAction::Snooze {
+                                until: orchestration::Timestamp::from_millis(
+                                    now().millis() + 3_600_000,
+                                )
+                                .expect("valid snooze time")
+                                .as_str()
+                                .into(),
+                            }
+                        },
+                    ),
                     ("Mark unread", ThreadAction::MarkUnread),
                     (
                         if archived { "Unarchive" } else { "Archive" },
@@ -506,18 +537,30 @@ impl Desktop {
             );
         }
         if self.renaming {
-            header = header.child(Input::new(&self.rename).flex_1()).child(
-                Button::new("save-title")
-                    .label("Save")
-                    .small()
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.thread_action(ThreadAction::Rename {
-                            title: view.rename.read(cx).value().to_string(),
-                        });
-                        view.renaming = false;
-                        cx.notify();
-                    })),
-            );
+            header = header
+                .child(Input::new(&self.rename).flex_1())
+                .child(
+                    Button::new("save-title")
+                        .label("Save")
+                        .small()
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.thread_action(ThreadAction::Rename {
+                                title: view.rename.read(cx).value().to_string(),
+                            });
+                            view.renaming = false;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("cancel-title")
+                        .label("Cancel")
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.renaming = false;
+                            cx.notify();
+                        })),
+                );
         } else {
             header = header.child(
                 h_flex()
@@ -614,7 +657,7 @@ impl Desktop {
                     let owner = owner.clone();
                     menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
                         let _ = owner.update(cx, |view, cx| {
-                            let title = conversation(&view.snapshot).title;
+                            let title = conversation(&view.snapshot, &now()).title;
                             view.rename
                                 .update(cx, |input, cx| input.set_value(title, window, cx));
                             view.renaming = true;
@@ -645,14 +688,14 @@ impl Desktop {
     fn timeline(&self, conversation: &ConversationView, cx: &Context<Self>) -> AnyElement {
         if conversation.thread_id.is_none() && conversation.rows.is_empty() {
             return v_flex()
-                .flex_1()
+                .py_6()
                 .justify_center()
                 .items_center()
                 .gap_2()
                 .child(
                     div()
                         .text_size(px(24.))
-                        .child("What would you like to build?"),
+                        .child(format!("What should we build in {}?", conversation.project)),
                 )
                 .child(
                     div()
@@ -732,8 +775,8 @@ impl Desktop {
                             .on_click(cx.listener(move |_, _, window, cx| {
                                 let answer = window.prompt(
                                     gpui::PromptLevel::Warning,
-                                    "Revert this thread?",
-                                    Some("The conversation after this message will be rewound."),
+                                    "Edit from here?",
+                                    Some("Rewind chat to before this message. Your prompt and attachments return to the composer."),
                                     &["Cancel", "Revert files too", "Revert and keep changes"],
                                     cx,
                                 );
@@ -1131,6 +1174,16 @@ impl Desktop {
             }
             content = content.child(queue);
         }
+        for id in &composer.pending_deliveries {
+            content = content.child(self.action(
+                "stop-retry",
+                "Delivery unconfirmed · Stop retrying",
+                Intent::DiscardPending {
+                    command_id: id.clone(),
+                },
+                cx,
+            ));
+        }
         if let Some(notice) = &composer.notice {
             content = content.child(
                 div()
@@ -1318,7 +1371,10 @@ impl Desktop {
             .label(if draft.model.is_empty() {
                 "Select model".into()
             } else {
-                draft.model.clone()
+                choices.iter().find(|choice| choice.selected).map_or_else(
+                    || draft.model.clone(),
+                    |choice| choice.model.display_name.clone(),
+                )
             })
             .small()
             .ghost()

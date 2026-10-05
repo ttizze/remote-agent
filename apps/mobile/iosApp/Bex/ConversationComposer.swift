@@ -33,6 +33,9 @@ struct ConversationComposer: View {
                     Button("Cancel") { model.perform(.queue(action: .cancelEdit)) }.font(T3Theme.font(12))
                 }
             }
+            ForEach(composer.pendingDeliveries, id: \.self) { id in
+                Button("Delivery unconfirmed · Stop retrying") { model.perform(.discardPending(commandId: id)) }
+            }
             if let notice = composer.notice {
                 Text(notice).font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
             }

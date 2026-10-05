@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
@@ -176,7 +177,11 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
             items(conversation.rows, key = { it.id }) { row -> TimelineCard(model, row) }
             item(key = "conversation-bottom") { Spacer(Modifier.height(1.dp)) }
         }
-        conversation.requests.forEach { request -> RequestCard(model, request) }
+        if (conversation.requests.isNotEmpty()) {
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 280.dp)) {
+                items(conversation.requests, key = { it.id }) { request -> RequestCard(model, request) }
+            }
+        }
         ThreadComposer(model) { queue = true }
     }
     if (queue) QueueSheet(model) { queue = false }
@@ -332,6 +337,7 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit) {
                 Text("Editing queued message", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = { model.perform(Intent.Queue(QueueAction.CancelEdit)) }) { Text("Cancel") }
             }
+        composer.pendingDeliveries.forEach { id -> TextButton(onClick = { model.perform(Intent.DiscardPending(id)) }) { Text("Delivery unconfirmed · Stop retrying") } }
         composer.notice?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = T3.color("textMuted")) }
         Surface(
             color = T3.color("mobileComposer").copy(alpha = .9f),
@@ -344,6 +350,7 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit) {
                     model::editDraft,
                     Modifier.fillMaxWidth(),
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = T3.color("text")),
+                    enabled = composer.canEdit,
                     minLines = 2,
                     maxLines = 8,
                     cursorBrush = androidx.compose.ui.graphics.SolidColor(T3.color("text")),
@@ -417,12 +424,12 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit) {
                                 )
                             }
                             HorizontalDivider()
-                            listOf("default", "plan").forEach { mode ->
+                            dev.remoteagent.core.interactionModeChoices().forEach { mode ->
                                 DropdownMenuItem(
-                                    text = { Text(if (mode == "default") "Chat" else "Plan") },
+                                    text = { Text(mode.label) },
                                     onClick = {
                                         modeMenu = false
-                                        model.perform(Intent.SetInteractionMode(mode))
+                                        model.perform(Intent.SetInteractionMode(mode.id))
                                     },
                                 )
                             }
