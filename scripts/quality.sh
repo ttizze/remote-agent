@@ -9,15 +9,15 @@ if [[ $language == apple || $language == rust ]]; then
     nix build .#agent-peer --no-link || failed=1
     cargo fmt --all --check || failed=1
     cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings || failed=1
-    just unit-tests || failed=1
-    native_tests=()
+    integration_targets=(
+        --test errors --test iroh --test iroh_host --test browser_bridge
+        --test management --test codex_accounts --test claude --test adapter_conformance
+        --test crate_boundaries --test build_cleanup --test diagnostics
+    )
     if [[ $(uname -s) == Darwin ]]; then
-        native_tests+=(--test chrome_cookie_webview)
+        integration_targets+=(--test chrome_cookie_webview)
     fi
-    cargo nextest run --locked --no-fail-fast --workspace --features agent-core/bindings \
-        --test errors --test iroh --test iroh_host --test browser_bridge \
-        --test management --test codex_accounts --test claude --test adapter_conformance \
-        --test crate_boundaries --test build_cleanup --test diagnostics "${native_tests[@]}" || failed=1
+    just unit-tests "${integration_targets[@]}" || failed=1
 fi
 if [[ $language == kotlin ]]; then
     ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt --continue --console=plain || failed=1

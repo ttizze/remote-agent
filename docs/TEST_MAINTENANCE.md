@@ -198,9 +198,11 @@ transfer server just to delete that check would reverse A14.
   assertions use six test processes within the Apple runner's memory budget.
   The oversized-history transfer case reserves all test slots while it runs,
   retaining its real request deadlines without competing with other Hosts for
-  CPU and memory. Mac's WebKit persistence harness supports headless test listing
-  and runs with the integration targets in the same nextest build, avoiding a
-  separate build with a different dependency feature graph.
+  CPU and memory. Mac's WebKit persistence harness supports headless test listing.
+  Mac CI adds its integration targets to `just unit-tests` so library, binary,
+  integration and WebKit assertions share one nextest build and dependency
+  feature graph. Without explicit targets, `just unit-tests` remains headless
+  and runs only the library and binary unit tests.
   Its local HTTP server handles each connection independently, with the same
   three-second read deadline, so closed or idle WebKit preconnections cannot
   terminate the server or block navigation. Native authentication and reopened
@@ -237,8 +239,17 @@ transfer server just to delete that check would reverse A14.
   The navigation case dismisses the Simulator's one-time Apple Intelligence
   notification when present before exercising the unchanged sheet-dismissal
   gesture and absence assertions; that banner can cover the gesture's origin.
+  Model-picker dismissal begins inside its native sheet rather than above its
+  accessibility frame. Text-copy gestures wait for the message frame to settle
+  after scrolling; native menus, clipboard contents and selected-text assertions
+  remain unchanged.
+  The shared connection fixture confirms that a previous client has terminated
+  before launching the next client, retaining the initial readiness deadline.
   Maestro 2.11.0 and Java 21 are
-  pinned through `nix run .#maestro`, with no hosted Maestro service. Reports
+  pinned through `nix run .#maestro`, with no hosted Maestro service. The bundled
+  XCTest source is patched to remove input-text logging, including SecureField
+  invitations. Its explicit workspace configuration includes the complete
+  hierarchy across modal transitions. Reports
   require the exact selected flow names, successful status and no skipped or
   failed cases. Compare UI durations after subtracting each pair's setup;
   the second run reuses build products and does not provide a cold-build comparison.

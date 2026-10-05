@@ -1,13 +1,28 @@
-{ lib, stdenvNoCC, fetchurl, unzip, makeWrapper, jdk21 }:
+{ lib, stdenvNoCC, fetchurl, unzip, zip, makeWrapper, jdk21 }:
 
+let version = "2.11.0";
+in
 stdenvNoCC.mkDerivation {
   pname = "maestro";
-  version = "2.11.0";
+  inherit version;
   src = fetchurl {
-    url = "https://github.com/mobile-dev-inc/Maestro/releases/download/cli-2.11.0/maestro.zip";
+    url = "https://github.com/mobile-dev-inc/Maestro/releases/download/cli-${version}/maestro.zip";
     hash = "sha256-U4RZPLTnoQZInnWoIdFX3UP05Djfa8MIty6CxoXhKDo=";
   };
-  nativeBuildInputs = [ unzip makeWrapper ];
+  nativeBuildInputs = [ unzip zip makeWrapper ];
+  # The CLI compiles its bundled XCTest sources. Upstream logs every input,
+  # including SecureField contents, into the device logs retained by CI.
+  prePatch = ''
+    unzip -q lib/maestro-cli-${version}.jar \
+      driver/ios/maestro-driver-iosUITests/Routes/Helpers/TextInputHelper.swift
+  '';
+  patches = [ ./no-input-logging.patch ];
+  postPatch = ''
+    touch -t 198001010000 driver/ios/maestro-driver-iosUITests/Routes/Helpers/TextInputHelper.swift
+    zip -Xq lib/maestro-cli-${version}.jar \
+      driver/ios/maestro-driver-iosUITests/Routes/Helpers/TextInputHelper.swift
+    rm -r driver
+  '';
   dontBuild = true;
   installPhase = ''
     runHook preInstall

@@ -226,6 +226,7 @@ extension BexLaunchUITests {
         let text = "Needle Alpha Bravo [success]"
         try startSimulatorConversation(app, promptText: text)
         XCTAssertTrue(prefixedElement(app, prefix: "item.fixture-final-").waitForExistence(timeout: 30))
+        waitForStableFrame(app.staticTexts[text])
         app.staticTexts[text].press(forDuration: 1.2)
         let fullCopy = app.buttons["コピー"]
         XCTAssertTrue(fullCopy.waitForExistence(timeout: 10)); fullCopy.tap()
@@ -239,6 +240,7 @@ extension BexLaunchUITests {
         wait(for: [fullText], timeout: 5)
         composer.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: text.count))
         XCTAssertEqual(composer.value as? String, composer.placeholderValue)
+        waitForStableFrame(app.staticTexts[text])
         app.staticTexts[text].press(forDuration: 1.2)
         let select = app.buttons["テキストを選択"]
         XCTAssertTrue(select.waitForExistence(timeout: 5)); select.tap()

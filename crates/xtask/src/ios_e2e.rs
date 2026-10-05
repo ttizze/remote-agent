@@ -523,7 +523,7 @@ async fn worker(
                 let driver_port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?
                     .local_addr()?
                     .port();
-                let mut arguments = args![vec; "nix", "run", ".#maestro", "--", "--device", simulator, "test", "--driver-host-port", driver_port.to_string(), "--format", "junit", "--output", &report, "--test-output-dir", &bundle, "--env", format!("BEX_PAIRING_URL={pairing_url}"), "--env", format!("BEX_IOS_DRIVER_URL=http://127.0.0.1:{driver_port}")];
+                let mut arguments = args![vec; "nix", "run", ".#maestro", "--", "--device", simulator, "test", "--driver-host-port", driver_port.to_string(), "--config", "apps/mobile/maestro/ios/config.yaml", "--format", "junit", "--output", &report, "--test-output-dir", &bundle, "--env", format!("BEX_PAIRING_URL={pairing_url}"), "--env", format!("BEX_IOS_DRIVER_URL=http://127.0.0.1:{driver_port}")];
                 arguments.extend(tests.iter().map(|test| cwd.join("apps/mobile/maestro/ios").join(test).with_extension("yaml").into_os_string()));
                 let setup_seconds = started.elapsed().as_secs_f64();
                 println!("{label}: Simulator and Host ready in {setup_seconds:.2}s");

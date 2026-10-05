@@ -13,6 +13,16 @@ final class BexLaunchUITests: XCTestCase {
         add(attachment)
     }
 
+    func waitForStableFrame(_ element: XCUIElement) {
+        var previous: CGRect?
+        let settled = expectation(for: NSPredicate { _, _ in
+            let frame = element.frame
+            defer { previous = frame }
+            return !frame.isEmpty && frame == previous
+        }, evaluatedWith: element)
+        wait(for: [settled], timeout: 10)
+    }
+
     func openFiles(_ app: XCUIApplication) {
         app.buttons["task.tools"].tap()
         let files = app.buttons["workbench.files"]
@@ -71,6 +81,10 @@ final class BexLaunchUITests: XCTestCase {
 
     func connectedSimulatorApp(expandProject: Bool = true) throws -> XCUIApplication {
         let app = XCUIApplication()
+        if app.state != .notRunning {
+            app.terminate()
+            XCTAssertTrue(app.wait(for: .notRunning, timeout: 10))
+        }
         app.launch()
         defer {
             if expandProject {

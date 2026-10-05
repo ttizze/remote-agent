@@ -239,8 +239,7 @@ extension BexLaunchUITests {
         } else {
             let picker = app.descendants(matching: .any)["model.picker"]
             XCTAssertTrue(picker.waitForExistence(timeout: 10))
-            let handle = picker.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0))
-                .withOffset(CGVector(dx: 0, dy: -12))
+            let handle = picker.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05))
             handle.press(
                 forDuration: 0.1,
                 thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98))
