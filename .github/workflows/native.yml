@@ -9,13 +9,69 @@ permissions:
   contents: read
 concurrency:
   group: native-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer main push waits, so every pushed change finishes verification.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_BUILD_JOBS: 4
   CARGO_INCREMENTAL: 0
   # Contract tests mostly await isolated processes and network replies.
   NEXTEST_TEST_THREADS: 16
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      android: ${{ steps.areas.outputs.android }}
+      iphone: ${{ steps.areas.outputs.iphone }}
+      mac: ${{ steps.areas.outputs.mac }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # A pull request checks out a merge commit whose first parent is its base.
+          fetch-depth: 2
+      - id: areas
+        name: Select client acceptance for files changed since the last verified main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          verify_all() {
+            printf '%s=true\n' android iphone mac >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) base=$(git rev-parse HEAD^1) ;;
+            push)
+              # Cancelled or failed runs leave their changes for the next push.
+              base=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow native.yml --branch main \
+                --status success --limit 1 --json headSha --jq '.[0].headSha // ""')
+              if [[ -z "$base" ]] || ! git fetch --no-tags --depth=1 origin "$base"; then verify_all; fi
+              ;;
+            *) verify_all ;;
+          esac
+          android=false iphone=false mac=false
+          while IFS= read -r path; do
+            # Unknown paths verify every client.
+            case "$path" in
+              docs/PRIVACY.md) area=all ;;
+              docs/* | AGENTS.md | CHANGELOG.md | CONTEXT.md | README.md | README.ja.md | SECURITY.md) area=docs ;;
+              apps/mobile/src/* | apps/mobile/build.gradle.kts | build.gradle.kts | settings.gradle.kts | \
+                gradle.properties | gradle/* | gradlew | gradlew.bat | detekt.yml | scripts/android-e2e.sh) area=android ;;
+              apps/mobile/iosApp/* | .swiftformat | .swiftlint.yml | scripts/ios-e2e.sh | \
+                scripts/build-agent-ios.sh | scripts/archive-ios.sh) area=iphone ;;
+              apps/desktop/*) area=desktop ;;
+              *) area=all ;;
+            esac
+            if [[ $area == all || $area == android ]]; then android=true; fi
+            if [[ $area == all || $area == iphone ]]; then iphone=true; fi
+            # Mac Rust checks also render the iPhone Markdown fixtures.
+            if [[ $area == all || $area == iphone || $area == desktop ]]; then mac=true; fi
+          done < <(git diff --name-only "$base" HEAD)
+          printf 'android=%s\niphone=%s\nmac=%s\n' "$android" "$iphone" "$mac" | tee -a "$GITHUB_OUTPUT"
   repository:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -82,6 +138,8 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: nix develop .#native --command cargo test --locked -p host-fixture --test iroh_host passive_client_can_approve_after_five_minutes_without_reconnecting -- --ignored
   android:
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -126,52 +184,83 @@ jobs:
           name: android-acceptance
           path: target/qa/android-*
           retention-days: 7
-  macos:
-    name: ${{ matrix.client }}
+  mac:
+    name: Mac
+    needs: changes
+    if: needs.changes.outputs.mac == 'true'
     concurrency:
       # Optional PRs share one Apple slot; main and manual clients stay parallel.
-      group: native-apple-${{ github.event_name == 'pull_request' && 'pr' || format('{0}-{1}', github.run_id, matrix.client) }}
+      group: native-apple-${{ github.event_name == 'pull_request' && 'pr' || format('{0}-{1}', github.run_id, github.job) }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 2
+      BEX_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      NEXTEST_TEST_THREADS: 6
+    steps:
+      - &apple-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - &apple-xcode
+        name: Use preinstalled Xcode 26.6
+        run: |
+          export DEVELOPER_DIR="$BEX_XCODE_DEVELOPER_DIR"
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun simctl list runtimes
+          df -h /
+      - &apple-nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cmd-format: nix develop . --command {0}
+          # Mac contracts also compile GPUI; keep that cache off iPhone runners.
+          key: macos-rust-xcode-26.6-${{ hashFiles('flake.lock') }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+          cache-on-failure: true
+      - name: Mac contracts and acceptance
+        run: |
+          set -o pipefail
+          mkdir -p target/qa
+          nix develop . --command just quality rust 2>&1 | tee target/qa/quality.log
+      - name: Retain Apple acceptance logs and result bundles
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: apple-macos-acceptance
+          path: |
+            target/qa/quality.log
+            target/qa/Bex-*
+          retention-days: 7
+  iphone:
+    name: iPhone ${{ matrix.number }}/4
+    needs: changes
+    if: needs.changes.outputs.iphone == 'true'
+    concurrency:
+      group: native-apple-${{ github.event_name == 'pull_request' && 'pr' || format('{0}-{1}-{2}', github.run_id, github.job, matrix.shard) }}
       cancel-in-progress: false
       queue: max
     strategy:
       fail-fast: false
       matrix:
         include:
-          - client: Mac
-            language: rust
-            shard: 0
-            shards: 1
-            artifact: apple-macos-acceptance
-          - client: iPhone 1/4
-            language: swift
-            shard: 0
-            shards: 4
-            artifact: apple-iphone-1-acceptance
-          - client: iPhone 2/4
-            language: swift
-            shard: 1
-            shards: 4
-            artifact: apple-iphone-2-acceptance
-          - client: iPhone 3/4
-            language: swift
-            shard: 2
-            shards: 4
-            artifact: apple-iphone-3-acceptance
-          - client: iPhone 4/4
-            language: swift
-            shard: 3
-            shards: 4
-            artifact: apple-iphone-4-acceptance
+          - { shard: 0, number: 1 }
+          - { shard: 1, number: 2 }
+          - { shard: 2, number: 3 }
+          - { shard: 3, number: 4 }
     runs-on: macos-26
     timeout-minutes: 120
     env:
       CARGO_BUILD_JOBS: 2
       BEX_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      NEXTEST_TEST_THREADS: 6
       # The iPhone runner has its own Host and one Simulator on a 7 GiB Mac.
       BEX_IOS_TEST_WORKERS: 1
       BEX_IOS_TEST_SHARD: ${{ matrix.shard }}
-      BEX_IOS_TEST_SHARDS: ${{ matrix.shards }}
-      NEXTEST_TEST_THREADS: 6
+      BEX_IOS_TEST_SHARDS: 4
       # The builders validate Swift content/toolchain hashes before reuse.
       BEX_IOS_SWIFT_CACHE_PATHS: |
         target/qa/ios-derived-data
@@ -182,42 +271,29 @@ jobs:
         target/aarch64-apple-ios-sim/release/AgentCore.swiftdoc
         target/aarch64-apple-ios-sim/release/agent-core-swift.sha256
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - name: Use preinstalled Xcode 26.6
-        run: |
-          export DEVELOPER_DIR="$BEX_XCODE_DEVELOPER_DIR"
-          test -d "$DEVELOPER_DIR"
-          xcodebuild -version
-          xcrun simctl list runtimes
-          df -h /
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - *apple-checkout
+      - *apple-xcode
+      - *apple-nix
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cmd-format: nix develop . --command {0}
-          # Mac contracts also compile GPUI; keep that cache off iPhone runners.
-          key: macos-${{ matrix.language }}-xcode-26.6-${{ hashFiles('flake.lock') }}
+          key: macos-swift-xcode-26.6-${{ hashFiles('flake.lock') }}
           save-if: ${{ github.event_name != 'pull_request' && matrix.shard == 0 }}
           cache-on-failure: true
       - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         id: ios-cache
-        if: matrix.language == 'swift'
         with:
           path: ${{ env.BEX_IOS_SWIFT_CACHE_PATHS }}
           key: ios-swift-xcode-26.6-${{ hashFiles('flake.lock', 'Cargo.lock', 'crates/agent-core/src/**', 'crates/agent-protocol/src/**', 'crates/xtask/src/ios_markdown.rs', 'scripts/build-agent*.sh', 'apps/mobile/iosApp/**') }}
           restore-keys: ios-swift-xcode-26.6-
-      - name: ${{ matrix.client }} contracts and acceptance
-        env:
-          BEX_QUALITY_LANGUAGE: ${{ matrix.language }}
+      - name: iPhone contracts and acceptance
         run: |
           set -o pipefail
           mkdir -p target/qa
-          if [[ "$BEX_QUALITY_LANGUAGE" == swift ]]; then
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version
-            export BEX_BROWSER_LOG="$PWD/target/qa/chrome.log"
-            export BEX_BROWSER_EXECUTABLE="$RUNNER_TEMP/bex-ci-chrome"
-            cat > "$BEX_BROWSER_EXECUTABLE" <<'CHROME'
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version
+          export BEX_BROWSER_LOG="$PWD/target/qa/chrome.log"
+          export BEX_BROWSER_EXECUTABLE="$RUNNER_TEMP/bex-ci-chrome"
+          cat > "$BEX_BROWSER_EXECUTABLE" <<'CHROME'
           #!/bin/bash
           printf 'Chrome start %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$BEX_BROWSER_LOG"
           chrome_pid=$$
@@ -236,11 +312,10 @@ jobs:
           ) </dev/null &
           exec "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "$@" 2>> "$BEX_BROWSER_LOG"
           CHROME
-            chmod +x "$BEX_BROWSER_EXECUTABLE"
-          fi
-          nix develop . --command just quality "$BEX_QUALITY_LANGUAGE" 2>&1 | tee target/qa/quality.log
+          chmod +x "$BEX_BROWSER_EXECUTABLE"
+          nix develop . --command just quality swift 2>&1 | tee target/qa/quality.log
       - name: Save iPhone Swift builds once for all shards
-        if: ${{ !cancelled() && github.event_name != 'pull_request' && matrix.language == 'swift' && matrix.shard == 0 && steps.ios-cache.outputs.cache-primary-key != '' && steps.ios-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && matrix.shard == 0 && steps.ios-cache.outputs.cache-primary-key != '' && steps.ios-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ env.BEX_IOS_SWIFT_CACHE_PATHS }}
@@ -249,7 +324,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: ${{ matrix.artifact }}
+          name: apple-iphone-${{ matrix.number }}-acceptance
           path: |
             target/qa/quality.log
             target/qa/chrome.log
