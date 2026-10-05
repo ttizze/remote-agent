@@ -699,22 +699,23 @@ async fn backs_off_briefly_when_a_due_deadline_loses_a_claim_race() {
     await_claims(&f.queue, 2).await;
 }
 
+// T3's "safely retries after replacement cleanup succeeds and start fails" and "settles
+// a delegated child once its restart continuation fails for good" test the effect
+// executor (session replacement, ContinueRestart delivery) and are ported with it. The
+// worker's part, attempt numbering and the last-attempt flag, is checked here.
+
 #[tokio::test]
-async fn safely_retries_after_replacement_cleanup_succeeds_and_start_fails() {
+async fn reruns_a_failed_process_bound_effect_with_its_next_attempt() {
     let db = db();
-    let id = thread("thread:effect-worker-restart");
-    db.enqueue(&id, vec![provider("effect:restart:replace")])
-        .await;
-    let events = Arc::new(Mutex::new(Vec::<String>::new()));
-    let fail_first_start = Arc::new(AtomicBool::new(true));
-    let record = events.clone();
-    let execute = run(move |_| {
-        let (events, fail_first_start) = (record.clone(), fail_first_start.clone());
+    let id = thread("thread:effect-worker-rerun");
+    db.enqueue(&id, vec![provider("effect:rerun")]).await;
+    let jobs = Arc::new(Mutex::new(Vec::<(u32, bool)>::new()));
+    let record = jobs.clone();
+    let execute = run(move |job| {
+        let jobs = record.clone();
         async move {
-            for step in ["interrupt:replacement", "detach", "start"] {
-                events.lock().unwrap().push(step.into());
-            }
-            if fail_first_start.swap(false, Ordering::SeqCst) {
+            jobs.lock().unwrap().push((job.attempt, job.will_retry));
+            if job.attempt == 1 {
                 return Err(EffectError::Retryable(
                     "simulated first start failure".into(),
                 ));
@@ -722,48 +723,31 @@ async fn safely_retries_after_replacement_cleanup_succeeds_and_start_fails() {
             Ok(None)
         }
     });
-    let worker = db.worker(handlers(execute), options("restart-worker"));
+    let worker = db.worker(handlers(execute), options("rerun-worker"));
 
     assert!(worker.run_once().await.unwrap());
-    assert_eq!(
-        db.row("effect:restart:replace").await.status,
-        EffectStatus::Pending
-    );
+    let row = db.row("effect:rerun").await;
+    assert_eq!(row.status, EffectStatus::Pending);
+    assert_eq!(row.available_at, db.now() + 100);
     db.clock.advance(100);
     assert!(worker.run_once().await.unwrap());
 
-    assert_eq!(
-        *events.lock().unwrap(),
-        [
-            "interrupt:replacement",
-            "detach",
-            "start",
-            "interrupt:replacement",
-            "detach",
-            "start"
-        ]
-    );
-    assert_eq!(
-        db.row("effect:restart:replace").await.status,
-        EffectStatus::Succeeded
-    );
+    assert_eq!(*jobs.lock().unwrap(), [(1, true), (2, true)]);
+    assert_eq!(db.row("effect:rerun").await.status, EffectStatus::Succeeded);
 }
 
 #[tokio::test]
-async fn settles_a_delegated_child_once_its_restart_continuation_fails_for_good() {
+async fn tells_the_handler_its_last_attempt_and_fails_the_row_after_it() {
     let db = db();
-    let id = thread("thread:effect-worker-restart");
+    let id = thread("thread:effect-worker-last-attempt");
     let effect_id = "effect:restart-continuation:run";
     db.enqueue(&id, vec![forward(effect_id)]).await;
-    let recovered = Arc::new(Mutex::new(Vec::<ThreadId>::new()));
-    let record = recovered.clone();
-    // A continuation that will never run still owes a delegated parent a result.
+    let jobs = Arc::new(Mutex::new(Vec::<(ThreadId, bool)>::new()));
+    let record = jobs.clone();
     let execute = run(move |job| {
-        let recovered = record.clone();
+        let jobs = record.clone();
         async move {
-            if !job.will_retry {
-                recovered.lock().unwrap().push(job.thread);
-            }
+            jobs.lock().unwrap().push((job.thread, job.will_retry));
             Err(EffectError::Retryable("provider instance removed".into()))
         }
     });
@@ -776,12 +760,14 @@ async fn settles_a_delegated_child_once_its_restart_continuation_fails_for_good(
     );
 
     assert!(worker.run_once().await.unwrap());
-    assert!(recovered.lock().unwrap().is_empty());
+    assert_eq!(db.row(effect_id).await.status, EffectStatus::Pending);
     db.clock.advance(100);
     assert!(worker.run_once().await.unwrap());
-    assert_eq!(*recovered.lock().unwrap(), [id]);
+
+    assert_eq!(*jobs.lock().unwrap(), [(id.clone(), true), (id, false)]);
     let row = db.row(effect_id).await;
     assert_eq!(row.status, EffectStatus::Failed);
+    assert_eq!(row.attempts, 2);
     assert_eq!(row.last_error.as_deref(), Some("provider instance removed"));
 }
 
