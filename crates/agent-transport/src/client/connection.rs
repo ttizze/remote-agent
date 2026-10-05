@@ -499,11 +499,25 @@ mod tests {
         .unwrap();
     }
 
+    async fn fixture_endpoints() -> (Endpoint, Endpoint) {
+        // Cold endpoint bootstrap precedes the bounded RPC pipeline below.
+        tokio::time::timeout(Duration::from_secs(45), async {
+            let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
+                .await
+                .unwrap();
+            let client = Endpoint::bind(Identity::generate(), Relays::Disabled)
+                .await
+                .unwrap();
+            (host, client)
+        })
+        .await
+        .expect("fixture endpoints must initialize")
+    }
+
     #[tokio::test]
     async fn early_reply_is_measured_before_adoption_without_exposing_its_payload() {
+        let (host, client) = fixture_endpoints().await;
         tokio::time::timeout(Duration::from_secs(5), async {
-            let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
-            let client = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
             let trust = Trust { allowed: [client.node_id()].into(), ..Default::default() };
             let ticket = host.ticket();
             let (session, incoming) = tokio::join!(client.connect(&ticket), host.accept());
@@ -537,13 +551,8 @@ mod tests {
 
     #[tokio::test]
     async fn pipelined_read_keeps_its_deadline_and_releases_its_request_slot() {
+        let (host, client) = fixture_endpoints().await;
         tokio::time::timeout(Duration::from_secs(5), async {
-            let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
-                .await
-                .unwrap();
-            let client = Endpoint::bind(Identity::generate(), Relays::Disabled)
-                .await
-                .unwrap();
             let trust = Trust {
                 allowed: [client.node_id()].into(),
                 ..Default::default()

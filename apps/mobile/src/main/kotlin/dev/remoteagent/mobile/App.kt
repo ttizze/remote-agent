@@ -469,7 +469,7 @@ internal fun RemoteAgentApp(
                             },
                             Modifier.weight(1f),
                         )
-                    model.screen == Screen.Settings -> ClientSettings(model.snapshot) { model.perform(it) }
+                    model.screen == Screen.Settings -> ClientSettings(model)
                     else -> ConversationPane(model)
                 }
             }

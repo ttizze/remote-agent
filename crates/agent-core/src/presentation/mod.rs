@@ -7,6 +7,8 @@ pub mod diff;
 pub mod error;
 pub mod model_settings;
 pub mod permissions;
+pub mod provider_settings;
+pub(crate) mod providers;
 pub mod theme;
 
 use crate::models::{

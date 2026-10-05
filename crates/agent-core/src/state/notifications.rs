@@ -45,6 +45,11 @@ pub(super) fn notification(
             };
             effects.extend(refresh_list(&next));
             if next.connected
+                && let Some(session) = &next.navigation.thread_id
+            {
+                effects.push(Effect::execute(op::ReadThread::new(session.clone())));
+            }
+            if next.connected
                 && next
                     .provider_settings
                     .as_ref()

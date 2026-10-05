@@ -1368,6 +1368,9 @@ enum ReceiptPolicy {
     Background,
 }
 impl Effect {
+    pub(crate) fn failed(reason: String) -> Self {
+        Self::execute(RejectedEffect(reason))
+    }
     /// Continue the dispatch receipt after this step is applied.
     pub(crate) fn continuation<O: op::Operation>(operation: O) -> Self {
         let mut effect = Self::execute(operation);
@@ -1388,6 +1391,22 @@ impl Effect {
                 ReceiptPolicy::First
             },
         }
+    }
+}
+#[derive(Debug)]
+struct RejectedEffect(String);
+impl op::Operation for RejectedEffect {
+    type Input = std::convert::Infallible;
+    type Output = ();
+    fn capture(&self, _: &Snapshot) -> Result<Self::Input, PeerError> {
+        Err(PeerError::InvalidMessage(self.0.clone()))
+    }
+    async fn run(
+        &self,
+        input: Self::Input,
+        _: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        match input {}
     }
 }
 trait Pending: Application {

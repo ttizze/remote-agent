@@ -203,28 +203,8 @@ struct ProviderSettings {
     pub revision: u64,
     pub instances: Vec<ConfiguredProvider>,
 }
-#[uniffi::remote(Enum)]
-enum ProviderMutation {
-    Create {
-        instance_id: ProviderInstanceId,
-        config: ProviderConfig,
-    },
-    Upsert {
-        instance_id: ProviderInstanceId,
-        config: ProviderConfig,
-    },
-    Remove {
-        instance_id: ProviderInstanceId,
-    },
-}
 #[uniffi::remote(Record)]
 struct ReadProviderSettings {}
-#[uniffi::remote(Record)]
-struct UpdateProviderInstance {
-    pub operation_id: uuid::Uuid,
-    pub revision: u64,
-    pub mutation: ProviderMutation,
-}
 #[uniffi::remote(Record)]
 struct SessionRef {
     pub id: String,

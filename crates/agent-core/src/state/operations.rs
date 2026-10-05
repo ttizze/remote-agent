@@ -40,7 +40,7 @@ macro_rules! rpc_operation {
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
     ReadProviderSettings(ReadProviderSettings),
-    UpdateProviderInstance(UpdateProviderInstance),
+    ApplyProviderEdit(ApplyProviderEdit),
     ReadPermissionSettings(ReadPermissionSettings),
     UpdatePermissionSettings(UpdatePermissionSettings),
     ListAccounts(ListAccounts),

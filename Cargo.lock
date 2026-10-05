@@ -4683,6 +4683,7 @@ dependencies = [
  "dunce",
  "futures-io",
  "futures-util",
+ "indexmap",
  "proptest",
  "reqwest",
  "ring",

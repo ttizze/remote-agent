@@ -100,6 +100,31 @@ pub struct EnvironmentVariable {
     pub sensitive: bool,
     pub value_redacted: bool,
 }
+pub fn validate_environment(variables: &[EnvironmentVariable]) -> Result<(), &'static str> {
+    let mut names = std::collections::HashSet::new();
+    for variable in variables {
+        let name = variable.name.as_bytes();
+        if name.is_empty()
+            || name.len() > 128
+            || !(name[0].is_ascii_alphabetic() || name[0] == b'_')
+            || !name
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            return Err("environment variable name is invalid");
+        }
+        if !names.insert(&variable.name) {
+            return Err("environment variable name is duplicated");
+        }
+        if variable.value.contains('\0') {
+            return Err("environment variable contains a null byte");
+        }
+        if variable.value_redacted && (!variable.sensitive || !variable.value.is_empty()) {
+            return Err("redacted environment variable must omit its value");
+        }
+    }
+    Ok(())
+}
 impl std::fmt::Debug for EnvironmentVariable {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -194,6 +219,80 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
+    fn environment_names_values_and_redacted_sentinels_are_validated_independently() {
+        let variable = EnvironmentVariable {
+            name: "A0_B".into(),
+            value: "example".into(),
+            sensitive: false,
+            value_redacted: false,
+        };
+        assert_eq!(validate_environment(&[]), Ok(()));
+        for name in ["_".to_owned(), "a".repeat(128)] {
+            assert_eq!(
+                validate_environment(&[EnvironmentVariable {
+                    name,
+                    ..variable.clone()
+                }]),
+                Ok(())
+            );
+        }
+        for name in [
+            "".to_owned(),
+            "a".repeat(129),
+            "1A".into(),
+            "A-B".into(),
+            "A B".into(),
+            "A\0".into(),
+            "é".into(),
+        ] {
+            assert_eq!(
+                validate_environment(&[EnvironmentVariable {
+                    name,
+                    ..variable.clone()
+                }]),
+                Err("environment variable name is invalid")
+            );
+        }
+        assert_eq!(
+            validate_environment(&[variable.clone(), variable.clone()]),
+            Err("environment variable name is duplicated")
+        );
+        assert_eq!(
+            validate_environment(&[
+                variable.clone(),
+                EnvironmentVariable {
+                    name: "a0_b".into(),
+                    ..variable.clone()
+                }
+            ]),
+            Ok(())
+        );
+        assert_eq!(
+            validate_environment(&[EnvironmentVariable {
+                value: "a\0b".into(),
+                ..variable.clone()
+            }]),
+            Err("environment variable contains a null byte")
+        );
+        for sensitive in [false, true] {
+            for value_redacted in [false, true] {
+                for value in ["", "example"] {
+                    let result = validate_environment(&[EnvironmentVariable {
+                        sensitive,
+                        value_redacted,
+                        value: value.into(),
+                        ..variable.clone()
+                    }]);
+                    assert_eq!(
+                        result.is_ok(),
+                        !value_redacted || (sensitive && value.is_empty())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn open_driver_names_and_distinct_instances_round_trip_without_a_builtin_registry() {
         let reference = ProviderRef {
             instance_id: "personal_2".parse().unwrap(),
@@ -272,6 +371,17 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn environment_names_preserve_ascii_case_and_accept_non_null_values(
+            name in "[A-Za-z_][A-Za-z0-9_]{0,127}",
+            value in "[^\u{0000}]{0,256}",
+            sensitive in any::<bool>(),
+        ) {
+            prop_assert_eq!(validate_environment(&[EnvironmentVariable {
+                name, value, sensitive, value_redacted: false,
+            }]), Ok(()));
+        }
+
         #[test]
         fn valid_open_names_keep_every_byte(value in "[A-Za-z][A-Za-z0-9_-]{0,63}") {
             let driver = value.parse::<ProviderDriver>().unwrap();

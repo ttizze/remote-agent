@@ -16,6 +16,31 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Mutex, time::Duration};
 use tokio::sync::mpsc;
 
+pub fn instances() -> Vec<agent_protocol::providers::ProviderInstance> {
+    use agent_protocol::providers::*;
+    [
+        ("codex", "codex", "Codex"),
+        ("claude", "claudeAgent", "Claude"),
+    ]
+    .into_iter()
+    .map(|(id, driver, name)| ProviderInstance {
+        reference: ProviderRef {
+            instance_id: id.parse().unwrap(),
+            driver: driver.parse().unwrap(),
+        },
+        display_name: name.into(),
+        availability: ProviderAvailability::Ready,
+        capabilities: agent_protocol::session::Capabilities {
+            active_steering: true,
+            fork: true,
+            rename: true,
+            model_change: true,
+        },
+        requires_account: true,
+    })
+    .collect()
+}
+
 pub struct Request {
     call: Call,
     fixture: Value,
@@ -239,8 +264,9 @@ impl Writer {
                     let subscription = uuid::Uuid::new_v4();
                     state.sessions.insert(target.clone(), subscription);
                     let mut response = response;
-                    response["thread"]["capabilities"] =
-                        json!({"activeSteering":true,"fork":true,"rename":true,"modelChange":true});
+                    if response["thread"]["capabilities"].is_null() {
+                        response["thread"]["capabilities"] = json!({"activeSteering":true,"fork":true,"rename":true,"modelChange":true});
+                    }
                     value["result"] =
                         json!({"session":target,"subscriptionId":subscription,"response":response});
                 }

@@ -112,7 +112,7 @@ impl HostRpcService {
                 .iter()
                 .map(|(id, instance)| instance.descriptor(id))
                 .collect();
-            let backends: BTreeMap<_, _> = instances
+            let backends: indexmap::IndexMap<_, _> = instances
                 .iter()
                 .map(|(id, instance)| (id.clone(), instance.backend.clone()))
                 .collect();
@@ -142,17 +142,20 @@ impl HostRpcService {
             provider_errors: None,
         };
         let mut next = BTreeMap::new();
-        for (id, cursor) in remaining {
-            let result = match backends.get(&id).expect("validated catalog instance") {
+        for (id, backend) in backends {
+            let Some(cursor) = remaining.get(&id) else {
+                continue;
+            };
+            let result = match backend {
                 Ok(agent) => {
                     agent
                         .models(&op::ListModels {
-                            cursor,
+                            cursor: cursor.clone(),
                             ..params.clone()
                         })
                         .await
                 }
-                Err(error) => Err(error.clone()),
+                Err(error) => Err(error),
             };
             match result {
                 Ok(result) => {
@@ -220,7 +223,7 @@ impl HostRpcService {
                 config: default_config("codex", Some(&codex), codex_home.as_deref())?,
             },
             ConfiguredProvider {
-                instance_id: "claude".parse()?,
+                instance_id: "claudeAgent".parse()?,
                 config: default_config("claudeAgent", Some(&claude), claude_home.as_deref())?,
             },
         ];
@@ -390,31 +393,27 @@ impl HostRpcService {
             .map_err(|error| Failure::new("provider_settings_unavailable", error))?;
         let mut retired = Vec::new();
         let mut starting = Vec::new();
+        let mut configuration_changed = false;
         {
             let mut instances = self
                 .inner
                 .instances
                 .write()
                 .unwrap_or_else(|error| error.into_inner());
-            let changed: Vec<_> = instances
-                .iter()
-                .filter(|(id, live)| {
-                    desired
-                        .instances
-                        .iter()
-                        .find(|saved| &saved.instance_id == *id)
-                        .is_none_or(|saved| saved.config != live.config)
-                })
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in changed {
-                if let Some(instance) = instances.remove(&id) {
-                    retired.push((id, instance));
-                }
-            }
+            let mut previous = std::mem::take(&mut *instances);
             for saved in &desired.instances {
-                if instances.contains_key(&saved.instance_id) {
-                    continue;
+                if let Some(mut live) = previous.shift_remove(&saved.instance_id) {
+                    configuration_changed |= live.config != saved.config;
+                    if live.config.driver == saved.config.driver
+                        && live.config.enabled == saved.config.enabled
+                        && live.config.environment == saved.config.environment
+                        && live.config.config == saved.config.config
+                    {
+                        live.config = saved.config.clone();
+                        instances.insert(saved.instance_id.clone(), live);
+                        continue;
+                    }
+                    retired.push((saved.instance_id.clone(), live));
                 }
                 instances.insert(
                     saved.instance_id.clone(),
@@ -429,8 +428,10 @@ impl HostRpcService {
                 );
                 starting.push(saved);
             }
+            retired.extend(previous);
         }
-        if retired.is_empty() && starting.is_empty() {
+        let resources_changed = !retired.is_empty() || !starting.is_empty();
+        if !configuration_changed && !resources_changed {
             return Ok(false);
         }
         self.inner.router.broadcast(
@@ -438,6 +439,9 @@ impl HostRpcService {
                 revision: desired.revision,
             },
         );
+        if !resources_changed {
+            return Ok(false);
+        }
         let mut stop_error = None;
         for (id, instance) in retired {
             if let Err(error) = self
@@ -727,6 +731,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn instance_resource_changes_replace_only_their_generation() {
+        for field in ["driver", "enabled", "environment", "config"] {
+            let root = tempfile::tempdir().unwrap();
+            let service =
+                HostRpcService::new(ProjectStore::new(root.path().join("projects.json"))).unwrap();
+            let config = default_config("FutureDriver", None, None).unwrap();
+            let work: ProviderInstanceId = "work".parse().unwrap();
+            let personal: ProviderInstanceId = "personal".parse().unwrap();
+            service
+                .inner
+                .conversations
+                .initialize_providers(
+                    [work.clone(), personal.clone()]
+                        .into_iter()
+                        .map(|instance_id| ConfiguredProvider {
+                            instance_id,
+                            config: config.clone(),
+                        })
+                        .collect(),
+                )
+                .unwrap();
+            assert!(service.reconcile_providers().await.unwrap());
+            let generations: BTreeMap<_, _> = service
+                .inner
+                .instances
+                .read()
+                .unwrap()
+                .iter()
+                .map(|(id, live)| (id.clone(), live.generation))
+                .collect();
+            let mut changed = config;
+            match field {
+                "driver" => changed.driver = "OtherDriver".parse().unwrap(),
+                "enabled" => changed.enabled = false,
+                "environment" => changed.environment.push(EnvironmentVariable {
+                    name: "MODE".into(),
+                    value: "test".into(),
+                    sensitive: false,
+                    value_redacted: false,
+                }),
+                "config" => changed.config = serde_json::json!({"binaryPath":"other-cli"}),
+                _ => unreachable!(),
+            }
+            service
+                .inner
+                .conversations
+                .update_provider(&UpdateProviderInstance {
+                    operation_id: uuid::Uuid::new_v4(),
+                    revision: 0,
+                    mutation: ProviderMutation::Upsert {
+                        instance_id: work.clone(),
+                        config: changed.clone(),
+                    },
+                })
+                .unwrap();
+            assert!(
+                service.reconcile_providers().await.unwrap(),
+                "{field} must replace native resources"
+            );
+            let instances = service.inner.instances.read().unwrap();
+            assert_ne!(instances[&work].generation, generations[&work], "{field}");
+            assert_eq!(
+                instances[&personal].generation, generations[&personal],
+                "{field}"
+            );
+            assert_eq!(instances[&work].config, changed, "{field}");
+        }
+    }
+
+    #[tokio::test]
     async fn changed_instances_retire_independently_and_unknown_configs_remain_visible() {
         let root = tempfile::tempdir().unwrap();
         let service =
@@ -770,6 +844,59 @@ mod tests {
                 original
             ));
         }
+        let personal: ProviderInstanceId = "personal".parse().unwrap();
+        let generation = service.inner.instances.read().unwrap()[&personal].generation;
+        let mut metadata = config.clone();
+        metadata.display_name = Some("Personal account".into());
+        metadata.accent_color = Some("#aa5500".into());
+        let mut listener = service.open_session();
+        service
+            .inner
+            .conversations
+            .update_provider(&UpdateProviderInstance {
+                operation_id: uuid::Uuid::new_v4(),
+                revision: 0,
+                mutation: ProviderMutation::Upsert {
+                    instance_id: personal.clone(),
+                    config: metadata,
+                },
+            })
+            .unwrap();
+        assert!(
+            !service.reconcile_providers().await.unwrap(),
+            "display metadata must not restart native resources or import history"
+        );
+        assert!(Arc::ptr_eq(
+            &service.agent(&personal).unwrap(),
+            &originals[0]
+        ));
+        assert_eq!(
+            service.inner.instances.read().unwrap()[&personal].generation,
+            generation
+        );
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(1), listener.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            agent_protocol::protocol::decode::<agent_protocol::protocol::Notification>(
+                &notification
+            )
+            .unwrap(),
+            agent_protocol::protocol::Notification::ProviderSettingsChanged { revision: 1 }
+        ));
+        assert_eq!(
+            service
+                .model_page(&op::ListModels {
+                    cursor: None,
+                    limit: 10
+                })
+                .await
+                .unwrap()
+                .instances[0]
+                .display_name,
+            "Personal account"
+        );
         let mut unknown = default_config("FutureDriver", None, None).unwrap();
         unknown.display_name = Some("Experimental".into());
         unknown.config = serde_json::json!([{"unknown":true}, "preserved"]);
@@ -778,7 +905,7 @@ mod tests {
             .conversations
             .update_provider(&UpdateProviderInstance {
                 operation_id: uuid::Uuid::new_v4(),
-                revision: 0,
+                revision: 1,
                 mutation: ProviderMutation::Upsert {
                     instance_id: "work".parse().unwrap(),
                     config: unknown.clone(),
@@ -844,7 +971,7 @@ mod tests {
             .conversations
             .update_provider(&UpdateProviderInstance {
                 operation_id: uuid::Uuid::new_v4(),
-                revision: 1,
+                revision: 2,
                 mutation: ProviderMutation::Remove {
                     instance_id: "work".parse().unwrap(),
                 },

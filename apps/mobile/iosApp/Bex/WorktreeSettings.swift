@@ -22,6 +22,11 @@ struct SettingsSheet: View {
                 }
                 Section {
                     NavigationLink {
+                        ProviderSettingsScreen(model: model).id(model.selectedProfileId)
+                    } label: { Label("Providers", systemImage: "cpu") }
+                        .accessibilityIdentifier("settings.providers")
+                        .disabled(!model.isConnected)
+                    NavigationLink {
                         ModelSettingsScreen(model: model, scope: .global, close: { dismiss() })
                     } label: { Label("モデル", systemImage: "slider.horizontal.3") }
                         .accessibilityIdentifier("settings.models")

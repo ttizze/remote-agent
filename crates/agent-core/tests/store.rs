@@ -311,7 +311,7 @@ async fn failed_list_refresh_releases_the_next_request_and_close_releases_its_wa
     writer
         .reply(
             &model_request,
-            json!({"result":{"instances":[],"data":[],"nextCursor":null}}),
+            json!({"result":{"instances":host_fixture::instances(),"data":[],"nextCursor":null}}),
         )
         .await
         .unwrap();
@@ -393,6 +393,11 @@ async fn connected(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, hos
 }
 async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fixture::Writer) {
     let (store, mut reader, writer) = connected(snapshot.clone()).await;
+    let models = if snapshot.models.is_empty() {
+        json!([{"id":"fixture-model","model":{"instanceId":"codex","id":"fixture-model"},"displayName":"Fixture model","defaultReasoningEffort":"","supportedReasoningEfforts":[],"isDefault":true}])
+    } else {
+        json!(snapshot.models)
+    };
     let selected = snapshot
         .navigation
         .thread_id
@@ -407,7 +412,7 @@ async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fi
             "host/session/list" => snapshot.threads.as_ref().map(|threads| json!(threads))
                 .unwrap_or_else(|| json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})),
             "host/account/list" => json!({"accounts":[],"selected":{}}),
-            "host/model/list" => json!({"data":snapshot.models,"nextCursor":null}),
+            "host/model/list" => json!({"instances":host_fixture::instances(),"data":models,"nextCursor":null}),
             "host/session/open" => json!({"thread": snapshot.conversations[snapshot.navigation.thread_id.as_ref().unwrap()]}),
             "host/workspace/review" => { assert_eq!(request["params"]["cwd"], cwd); review() },
             method => panic!("unexpected connection request: {method}"),
@@ -519,6 +524,76 @@ fn snapshot() -> Snapshot {
         )])),
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn provider_configuration_changes_refresh_open_thread_capabilities_without_discarding_input()
+{
+    let mut initial = snapshot();
+    let session = SessionRef {
+        id: "thread".into(),
+    };
+    Arc::make_mut(&mut initial.navigation).thread_id = Some(session.clone());
+    Arc::make_mut(
+        Arc::make_mut(&mut initial.conversations)
+            .get_mut(&session)
+            .unwrap(),
+    )
+    .capabilities = Some(agent_protocol::session::Capabilities {
+        fork: true,
+        model_change: true,
+        active_steering: true,
+        rename: true,
+    });
+    Arc::make_mut(&mut initial.drafts).insert(
+        DraftKey::from(&session),
+        Arc::new(Draft {
+            text: "unsent input".into(),
+            ..Default::default()
+        }),
+    );
+    let (store, mut reader, writer) = setup(initial).await;
+    let before = store.snapshot();
+    let mut changed = before.conversations[&session].as_ref().clone();
+    changed.capabilities = Some(agent_protocol::session::Capabilities {
+        rename: true,
+        ..Default::default()
+    });
+    writer
+        .notify(json!({"method":"host/provider/settings/changed","params":{"revision":2}}))
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        let request = read(&mut reader).await;
+        let result = match request["method"].as_str().unwrap() {
+            "host/model/list" => {
+                json!({"instances":host_fixture::instances(),"data":before.models,"nextCursor":null})
+            }
+            "host/account/list" => json!({"accounts":[],"selected":{}}),
+            "host/session/list" => json!(before.threads),
+            "host/session/open" => {
+                assert_eq!(request["params"]["session"], json!(session));
+                json!({"thread":changed})
+            }
+            method => panic!("unexpected provider refresh request: {method}"),
+        };
+        writer
+            .reply(&request, json!({"result":result}))
+            .await
+            .unwrap();
+    }
+    wait_for(&store, |snapshot| {
+        snapshot.conversations[&session]
+            .capabilities
+            .is_some_and(|caps| !caps.fork)
+    })
+    .await;
+    let after = store.snapshot();
+    assert_eq!(after.navigation, before.navigation);
+    assert_eq!(after.drafts, before.drafts);
+    assert_eq!(loaded_text(&after), loaded_text(&before));
+    assert!(after.conversations[&session].capabilities.unwrap().rename);
+    store.close().await.unwrap();
 }
 fn loaded_text(snapshot: &Snapshot) -> Option<&str> {
     item_text(
@@ -940,6 +1015,46 @@ async fn snapshot_notification_can_reenter_store_synchronously() {
     );
     publishing.join().unwrap();
     drop(changed);
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_model_rejects_submission_receipt_and_preserves_draft_without_provider_io() {
+    let (store, mut reader, mut writer) = setup(Snapshot::default()).await;
+    let loading = store.dispatch(Intent::LoadModels(op::LoadModels {}));
+    let request = read(&mut reader).await;
+    writer
+        .reply(
+            &request,
+            json!({"result":{"instances":host_fixture::instances(),"data":[]}}),
+        )
+        .await
+        .unwrap();
+    loading.await.unwrap();
+    new_chat(&store, &mut reader, &mut writer, "/fixture").await;
+    let key = store.snapshot().navigation.draft_key.clone();
+    store
+        .dispatch(Intent::SetDraftText {
+            thread_id: key.clone(),
+            text: "preserve this".into(),
+        })
+        .await
+        .unwrap();
+    let result = store
+        .dispatch(Intent::Submit {
+            thread_id: None,
+            client_user_message_id: "missing-model".into(),
+            alternate: false,
+        })
+        .await;
+    assert!(matches!(result, Err(PeerError::InvalidMessage(_))));
+    assert_eq!(store.snapshot().drafts[&key].text, "preserve this");
+    assert!(store.snapshot().pending_submissions.is_empty());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), reader.read_request())
+            .await
+            .is_err()
+    );
     store.close().await.unwrap();
 }
 
@@ -2579,7 +2694,7 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
             "host/account/list" => {
                 json!({"accounts":[{"instanceId":"codex","id":"a"},{"instanceId":"codex","id":"b"},{"instanceId":"claude","id":"claude:c"}],"selected":{"codex":"b","claude":"claude:c"},"error":null})
             }
-            "host/model/list" => json!({"instances":[],"data":[]}),
+            "host/model/list" => json!({"instances":host_fixture::instances(),"data":[]}),
             method => panic!("unexpected account refresh: {method}"),
         };
         writer
@@ -2771,7 +2886,7 @@ async fn initial_titles_overlap_scope_verification_without_publishing_unverified
                 }
                 let models = read(&mut reader).await;
                 assert_eq!(models["method"], "host/model/list");
-                writer.reply(&models, json!({"result":{"instances":[],"data":[],"nextCursor":null}})).await.unwrap();
+                writer.reply(&models, json!({"result":{"instances":host_fixture::instances(),"data":[],"nextCursor":null}})).await.unwrap();
                 let accounts = read(&mut reader).await;
                 assert_eq!(accounts["method"], "host/account/list");
                 writer.reply(&accounts, json!({"result":{"accounts":[],"selected":{}}})).await.unwrap();
@@ -2914,7 +3029,7 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                     let result = match request["method"].as_str().unwrap() {
                         "host/session/list" => json!({"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"replacement"},"name":"fresh"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
-                        "host/model/list" => json!({"instances":[],"data":[],"nextCursor":null}),
+                        "host/model/list" => json!({"instances":host_fixture::instances(),"data":[],"nextCursor":null}),
                         other => panic!("unexpected bootstrap: {other}"),
                     };
                     writer.reply(&request, json!({"result":result})).await.unwrap();
@@ -3292,7 +3407,7 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
     writer
         .reply(
             &pending["host/model/list"],
-            json!({"result":{"instances":[],"data":[]}}),
+            json!({"result":{"instances":host_fixture::instances(),"data":[]}}),
         )
         .await
         .unwrap();
@@ -3306,7 +3421,7 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
     for _ in 0..2 {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
-            "host/model/list" => json!({"instances":[],"data":[{
+            "host/model/list" => json!({"instances":host_fixture::instances(),"data":[{
                 "id":"fresh","model":{"instanceId": "codex", "id": "fresh"},"displayName":"Fresh model",
                 "isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]
             }]}),
@@ -3371,7 +3486,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
         ("host/account/list", json!({"accounts":[],"selected":{}})),
         (
             "host/model/list",
-            json!({"instances":[],"data":[{"id":"fresh","model":{"instanceId": "codex", "id": "fresh"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}),
+            json!({"instances":host_fixture::instances(),"data":[{"id":"fresh","model":{"instanceId": "codex", "id": "fresh"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}),
         ),
         (
             "host/session/list",
@@ -3443,7 +3558,7 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
                     let result = match request["method"].as_str().unwrap() {
                         "host/session/list" => json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
-                        "host/model/list" => json!({"instances":[],"data":[],"nextCursor":null}),
+                        "host/model/list" => json!({"instances":host_fixture::instances(),"data":[],"nextCursor":null}),
                         "host/session/open" => {
                             let a = request["params"]["session"]["id"] == "A";
                             json!({"session":request["params"]["session"],"subscriptionId":if a {subscription_a} else {subscription_b},"response":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":if a {"A"} else {"B"}},"turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":if a {json!({"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null}}}})} else {json!({"inline":{"body":{"assistantText":{"text":"B prefix","phase":"unknown"}}}})}}]}]}}})
@@ -3701,7 +3816,7 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
                         json!({"accounts":[{"instanceId":provider,"id":id}],"selected":{(provider):id},"error":null})
                     }
                     "host/model/list" => {
-                        json!({"instances":[],"data":[{"id":model_id,"model":{"instanceId":provider,"id":model_id},"displayName":model_id,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}]})
+                        json!({"instances":host_fixture::instances(),"data":[{"id":model_id,"model":{"instanceId":provider,"id":model_id},"displayName":model_id,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}]})
                     }
                     method => panic!("unexpected login effect: {method}"),
                 };
@@ -4015,7 +4130,10 @@ async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts
                 .await
                 .unwrap(),
             "host/model/list" => writer
-                .reply(&request, json!({"result":{"instances":[],"data":[]}}))
+                .reply(
+                    &request,
+                    json!({"result":{"instances":host_fixture::instances(),"data":[]}}),
+                )
                 .await
                 .unwrap(),
             "host/composer/catalog" => refreshed = Some(request),
@@ -4175,11 +4293,11 @@ async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries()
         .await
         .unwrap();
     let model = |provider: &str, id: &str, title: &str| json!({"id":id,"model":{"instanceId":provider,"id":"same-native-model"},"displayName":title,"defaultReasoningEffort":"","supportedReasoningEfforts":[],"isDefault":false});
-    writer.reply(&pending["host/model/list"],json!({"result":{"data":[model("codex","shared-entry","Original Codex"),model("claude","shared-entry","Claude")],"nextCursor":"next"}})).await.unwrap();
+    writer.reply(&pending["host/model/list"],json!({"result":{"instances":host_fixture::instances(),"data":[model("codex","shared-entry","Original Codex"),model("claude","shared-entry","Claude")],"nextCursor":"next"}})).await.unwrap();
     let next = read(&mut reader).await;
     assert_eq!(next["method"], "host/model/list");
     assert_eq!(next["params"]["cursor"], "next");
-    writer.reply(&next,json!({"result":{"data":[model("codex","shared-entry","Updated Codex"),model("codex","alias-entry","Codex alias")],"nextCursor":null}})).await.unwrap();
+    writer.reply(&next,json!({"result":{"instances":host_fixture::instances(),"data":[model("codex","shared-entry","Updated Codex"),model("codex","alias-entry","Codex alias")],"nextCursor":null}})).await.unwrap();
     wait_for(&store, |state| {
         state
             .models
@@ -4208,18 +4326,18 @@ async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries()
                 "Updated Codex"
             ),
             (
-                "claude"
-                    .parse::<agent_protocol::session::ProviderInstanceId>()
-                    .unwrap(),
-                "shared-entry",
-                "Claude"
-            ),
-            (
                 "codex"
                     .parse::<agent_protocol::session::ProviderInstanceId>()
                     .unwrap(),
                 "alias-entry",
                 "Codex alias"
+            ),
+            (
+                "claude"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
+                "shared-entry",
+                "Claude"
             ),
         ]
     );

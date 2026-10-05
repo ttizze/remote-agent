@@ -10,6 +10,7 @@ impl Desktop {
         }
         self.account_sign_out = None;
         self.refresh_accounts_and_models();
+        self.dispatch(Intent::ReadProviderSettings(op::ReadProviderSettings {}));
         self.worktree_removal = None;
         self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
         self.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
@@ -19,6 +20,7 @@ impl Desktop {
         let mut navigation = SidebarMenu::new().gap_1();
         for (label, icon, page) in [
             ("一般", IconName::Settings, SettingsPage::General),
+            ("Providers", IconName::Settings, SettingsPage::Providers),
             ("モデル", IconName::Settings, SettingsPage::Models),
             ("エージェント", IconName::User, SettingsPage::Agents),
             ("端末と接続", IconName::Network, SettingsPage::Connections),
@@ -84,6 +86,7 @@ impl Desktop {
                             .as_ref()
                             .map_or("Local", |host| host.name.as_str()),
                         self.busy > 0
+                            || self.provider_form.is_some()
                             || self.worktree_dirty
                             || self.worktree_saving
                             || self.snapshot.account.login.is_some(),
@@ -97,6 +100,10 @@ impl Desktop {
         };
         let (title, subtitle) = match self.settings_page {
             SettingsPage::General => ("一般", "この端末で使う入力動作を設定します。"),
+            SettingsPage::Providers => (
+                "Providers",
+                "選択した環境のproviderと実行設定を管理します。",
+            ),
             SettingsPage::Models => ("モデル", "新しい会話で使うモデルの初期値を設定します。"),
             SettingsPage::Agents => (
                 "エージェント",
@@ -143,6 +150,7 @@ impl Desktop {
         body =
             match self.settings_page {
                 SettingsPage::General => body.child(self.follow_up_settings(cx)),
+                SettingsPage::Providers => body.child(self.provider_settings(cx)),
                 SettingsPage::Models => body.child(self.default_model_settings(cx)),
                 SettingsPage::Agents => body.child(self.account_controls(true, cx)).child(
                     Button::new("import-history")
@@ -211,6 +219,7 @@ impl Desktop {
                 div()
                     .id(match self.settings_page {
                         SettingsPage::General => "settings-general-scroll",
+                        SettingsPage::Providers => "settings-providers-scroll",
                         SettingsPage::Models => "settings-models-scroll",
                         SettingsPage::Agents => "settings-agents-scroll",
                         SettingsPage::Connections => "settings-connections-scroll",
@@ -297,6 +306,80 @@ impl Desktop {
                 menu
             })
             .into_any_element()
+    }
+
+    fn provider_settings(&self, cx: &Context<Self>) -> AnyElement {
+        if let Some(form) = &self.provider_form {
+            return div().child(form.clone()).into_any_element();
+        }
+        let disabled = !self.snapshot.connected || self.snapshot.provider_settings.is_none();
+        let mut body = v_flex().gap_5();
+        if let Some(settings) = &self.snapshot.provider_settings {
+            for instance in &settings.instances {
+                let id = instance.instance_id.to_string();
+                let edit_id = id.clone();
+                body = body.child(
+                    h_flex()
+                        .gap_4()
+                        .items_center()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .gap_1()
+                                .child(
+                                    div().font_semibold().child(
+                                        instance
+                                            .config
+                                            .display_name
+                                            .clone()
+                                            .unwrap_or_else(|| id.clone()),
+                                    ),
+                                )
+                                .child(div().text_sm().text_color(rgb(0x949ca8)).child(format!(
+                                    "{id} · {}{}",
+                                    instance.config.driver,
+                                    if instance.config.enabled {
+                                        ""
+                                    } else {
+                                        " · 無効"
+                                    }
+                                ))),
+                        )
+                        .child(
+                            Button::new(format!("provider-edit-{id}"))
+                                .label("編集")
+                                .disabled(disabled)
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.edit_provider(
+                                        Some(edit_id.clone()),
+                                        String::new(),
+                                        window,
+                                        cx,
+                                    )
+                                })),
+                        ),
+                );
+            }
+        }
+        for (driver, label) in [("codex", "Codexを追加"), ("claudeAgent", "Claudeを追加")] {
+            body = body.child(
+                Button::new(format!("provider-add-{driver}"))
+                    .label(label)
+                    .disabled(disabled)
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.edit_provider(None, driver.into(), window, cx)
+                    })),
+            );
+        }
+        body.child(
+            Button::new("provider-reload")
+                .label("再読み込み")
+                .disabled(!self.snapshot.connected)
+                .on_click(cx.listener(|view, _, _, _| {
+                    view.dispatch(Intent::ReadProviderSettings(op::ReadProviderSettings {}))
+                })),
+        )
+        .into_any_element()
     }
 
     fn worktree_settings(&self, cx: &Context<Self>) -> AnyElement {

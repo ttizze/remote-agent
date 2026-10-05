@@ -582,8 +582,10 @@ impl Operation for LoadModels {
         context.client.models().await
     }
     fn apply(self, snapshot: &mut Snapshot, catalog: Self::Output) -> Vec<Effect> {
-        snapshot.provider_instances = Arc::new(catalog.instances);
-        snapshot.models = Arc::new(catalog.data);
+        let (instances, models) =
+            crate::presentation::providers::ordered_catalog(catalog.instances, catalog.data);
+        snapshot.provider_instances = Arc::new(instances);
+        snapshot.models = Arc::new(models);
         snapshot.model_errors = Arc::new(catalog.provider_errors.unwrap_or_default());
         let drafts = snapshot.drafts.clone();
         for key in drafts.keys() {

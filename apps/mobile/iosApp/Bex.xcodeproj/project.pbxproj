@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C0DE00000000000000000701 /* ProviderSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000702 /* ProviderSettings.swift */; };
 		B3E000000000000000000101 /* dm_sans_regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = B3E000000000000000000201; };
 		B3E000000000000000000102 /* dm_sans_medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = B3E000000000000000000202; };
 		B3E000000000000000000103 /* dm_sans_bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = B3E000000000000000000203; };
@@ -64,6 +65,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		C0DE00000000000000000702 /* ProviderSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderSettings.swift; sourceTree = "<group>"; };
 		B3E000000000000000000201 /* dm_sans_regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = dm_sans_regular.ttf; path = "../../resources/font/dm_sans_regular.ttf"; sourceTree = "<group>"; };
 		B3E000000000000000000202 /* dm_sans_medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = dm_sans_medium.ttf; path = "../../resources/font/dm_sans_medium.ttf"; sourceTree = "<group>"; };
 		B3E000000000000000000203 /* dm_sans_bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = dm_sans_bold.ttf; path = "../../resources/font/dm_sans_bold.ttf"; sourceTree = "<group>"; };
@@ -193,6 +195,7 @@
 				C0DE00000000000000000001 /* CodexModelSettings.swift */,
 				04926FF582DA33DFFF64E6C5 /* TaskList.swift */,
 				25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */,
+				C0DE00000000000000000702 /* ProviderSettings.swift */,
 				613A5AAB450EC067108110F3 /* ConversationScreen.swift */,
                 C30000000000000000000004 /* TerminalScreen.swift */,
                 F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */,
@@ -347,6 +350,7 @@
 				C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */,
 				D08EEED058A8C4FE92AA21E2 /* TaskList.swift in Sources */,
 				0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */,
+				C0DE00000000000000000701 /* ProviderSettings.swift in Sources */,
 				FD938C839188C56CFF5BE7A4 /* ConversationScreen.swift in Sources */,
                 C30000000000000000000003 /* TerminalScreen.swift in Sources */,
                 D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */,

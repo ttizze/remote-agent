@@ -91,7 +91,7 @@ struct PreparedInput {
 
 struct ServiceInner {
     browser: OnceLock<Arc<crate::browser::Browser>>,
-    instances: std::sync::RwLock<BTreeMap<ProviderInstanceId, Registered>>,
+    instances: std::sync::RwLock<indexmap::IndexMap<ProviderInstanceId, Registered>>,
     provider_access: tokio::sync::Mutex<()>,
     account_directory: OnceLock<std::path::PathBuf>,
     projects: ProjectStore,

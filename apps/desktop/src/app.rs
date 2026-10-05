@@ -3,6 +3,7 @@ mod clipboard;
 mod completions;
 mod dictation;
 mod hosts;
+mod providers;
 mod selection;
 mod view;
 
@@ -45,6 +46,7 @@ enum OperationCompletion {
     Editor(u64),
     Item { generation: u64, turn_id: TurnId },
     WorktreeSettings,
+    ProviderSettings,
     Request(RequestId),
     Dictation(uuid::Uuid),
     RemoveWorktree,
@@ -72,6 +74,7 @@ enum Tab {
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsPage {
     General,
+    Providers,
     Models,
     Agents,
     Connections,
@@ -222,6 +225,8 @@ pub(crate) struct Desktop {
     expanded_work: HashMap<String, ActivityExpansion>,
     tab: Tab,
     settings_page: SettingsPage,
+    provider_form: Option<Entity<providers::ProviderForm>>,
+    provider_form_subscription: Option<Subscription>,
     sidebar: bool,
     panel_open: bool,
     panel: Panel,
@@ -510,6 +515,8 @@ impl Desktop {
             expanded_work: HashMap::new(),
             tab: Tab::Chat,
             settings_page: SettingsPage::General,
+            provider_form: None,
+            provider_form_subscription: None,
             sidebar: true,
             panel_open: false,
             panel: Panel::Home,
@@ -542,6 +549,8 @@ impl Desktop {
         self.epoch += 1;
         self.connecting = true;
         self.busy = 0;
+        self.provider_form = None;
+        self.provider_form_subscription = None;
         self.worktree_removal = None;
         self.worktree_busy = false;
         self.account_busy = false;
@@ -689,6 +698,9 @@ impl Desktop {
                         }
                         self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
                         if self.tab == Tab::Settings {
+                            self.dispatch(Intent::ReadProviderSettings(
+                                op::ReadProviderSettings {},
+                            ));
                             self.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
                         }
                     }
@@ -781,6 +793,21 @@ impl Desktop {
                 if std::mem::take(&mut self.worktree_save_pending) {
                     self.save_worktree_settings(None, cx);
                 }
+                return;
+            }
+            OperationCompletion::ProviderSettings => {
+                match result {
+                    Ok(_) => {
+                        self.provider_form = None;
+                        self.provider_form_subscription = None;
+                    }
+                    Err(error) => {
+                        if let Some(form) = &self.provider_form {
+                            form.update(cx, |form, cx| form.failed(error, cx));
+                        }
+                    }
+                }
+                self.accept_snapshot(window, cx);
                 return;
             }
             OperationCompletion::Request(key) => {

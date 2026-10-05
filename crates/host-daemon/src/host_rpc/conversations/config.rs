@@ -7,31 +7,9 @@ fn merge_config(
     previous: Option<&ProviderConfig>,
     mut next: ProviderConfig,
 ) -> Result<ProviderConfig> {
-    let mut names = BTreeSet::new();
+    validate_environment(&next.environment).map_err(anyhow::Error::msg)?;
     for variable in &mut next.environment {
-        let name = variable.name.as_bytes();
-        ensure!(
-            !name.is_empty()
-                && name.len() <= 128
-                && (name[0].is_ascii_alphabetic() || name[0] == b'_')
-                && name
-                    .iter()
-                    .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_'),
-            "environment variable name is invalid"
-        );
-        ensure!(
-            names.insert(variable.name.clone()),
-            "environment variable name is duplicated"
-        );
-        ensure!(
-            !variable.value.contains('\0'),
-            "environment variable contains a null byte"
-        );
         if variable.value_redacted {
-            ensure!(
-                variable.sensitive && variable.value.is_empty(),
-                "redacted environment variable must omit its value"
-            );
             let saved = previous
                 .and_then(|config| {
                     config.environment.iter().find(|saved| {
@@ -64,7 +42,7 @@ impl Conversations {
     }
     pub(in crate::host_rpc) fn initialize_providers(
         &self,
-        mut instances: Vec<ConfiguredProvider>,
+        instances: Vec<ConfiguredProvider>,
     ) -> Result<ProviderSettings> {
         let mut connection = self.lock();
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -81,7 +59,6 @@ impl Conversations {
                 );
                 merge_config(None, instance.config.clone())?;
             }
-            instances.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
             tx.execute(
                 "INSERT INTO provider_settings(singleton, revision, body) VALUES(1, 0, ?1)",
                 [serde_json::to_string(&instances)?],
@@ -163,9 +140,6 @@ impl Conversations {
                     .retain(|entry| &entry.instance_id != instance_id);
             }
         }
-        settings
-            .instances
-            .sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
         if settings.instances != previous_instances {
             settings.revision = settings
                 .revision
@@ -211,6 +185,63 @@ fn read_settings(connection: &Connection) -> Result<ProviderSettings> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn configured_instance_order_survives_updates_and_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("ordered.sqlite");
+        let db = Conversations::open(&path).unwrap();
+        let original: Vec<ConfiguredProvider> = ["zulu", "alpha", "middle"]
+            .into_iter()
+            .map(|id| ConfiguredProvider {
+                instance_id: id.parse().unwrap(),
+                config: config(),
+            })
+            .collect();
+        db.initialize_providers(original.clone()).unwrap();
+        let mut renamed = original[1].config.clone();
+        renamed.display_name = Some("Renamed".into());
+        db.update_provider(&update(
+            0,
+            ProviderMutation::Upsert {
+                instance_id: "alpha".parse().unwrap(),
+                config: renamed,
+            },
+        ))
+        .unwrap();
+        db.update_provider(&update(
+            1,
+            ProviderMutation::Create {
+                instance_id: "before".parse().unwrap(),
+                config: config(),
+            },
+        ))
+        .unwrap();
+        db.update_provider(&update(
+            2,
+            ProviderMutation::Remove {
+                instance_id: "middle".parse().unwrap(),
+            },
+        ))
+        .unwrap();
+        drop(db);
+        let saved = Conversations::open(&path)
+            .unwrap()
+            .provider_settings()
+            .unwrap();
+        assert_eq!(
+            saved
+                .instances
+                .iter()
+                .map(|instance| instance.instance_id.as_str())
+                .collect::<Vec<_>>(),
+            ["zulu", "alpha", "before"]
+        );
+        assert_eq!(
+            saved.instances[1].config.display_name.as_deref(),
+            Some("Renamed")
+        );
+    }
 
     fn config() -> ProviderConfig {
         ProviderConfig {

@@ -429,7 +429,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     }
     let mut next = previous.clone();
     prepare_operations!(intent, previous, next, [
-        ReadProviderSettings, UpdateProviderInstance, ReadPermissionSettings, UpdatePermissionSettings,
+        ReadProviderSettings, ApplyProviderEdit, ReadPermissionSettings, UpdatePermissionSettings,
         ListAccounts, SelectAccount, SelectAccountForDraft, LogoutAccount, StartAccountLogin,
         ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkSession,
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
@@ -1102,8 +1102,9 @@ fn submission(
     if let DraftKey::Queued { session, id } = &draft_key {
         let Some(provider) = previous.session_provider(session) else {
             let mut next = previous.clone();
-            next.error = Some("conversation provider is missing".into());
-            return (next, Vec::new());
+            let reason = "conversation provider is missing".to_owned();
+            next.error = Some(reason.clone());
+            return (next, vec![Effect::failed(reason)]);
         };
         return prepare(
             previous,
@@ -1128,8 +1129,9 @@ fn submission(
     };
     if thread_id.is_none() && instance_id.is_none() {
         let mut next = previous.clone();
-        next.error = Some("利用できる接続とモデルを選んでください。".into());
-        return (next, Vec::new());
+        let reason = "利用できる接続とモデルを選んでください。".to_owned();
+        next.error = Some(reason.clone());
+        return (next, vec![Effect::failed(reason)]);
     }
     let mut next = previous.clone();
     next.error = None;
