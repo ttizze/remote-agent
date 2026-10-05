@@ -658,6 +658,41 @@ impl Decision {
                 RunStatus::Failed => (AttemptStatus::Failed, ItemStatus::Failed),
                 _ => (AttemptStatus::Cancelled, ItemStatus::Cancelled),
             };
+            if r.selection.driver == Driver::Codex {
+                let a = self
+                    .state
+                    .attempts
+                    .iter()
+                    .find(|a| &a.id == attempt)
+                    .unwrap();
+                let usage = complete_codex_usage(
+                    a.usage_accumulator.as_ref(),
+                    a.usage_observed,
+                    status == RunStatus::Completed,
+                    self.state.tasks.iter().any(|task| &task.attempt == attempt),
+                );
+                self.fact(FactBody::TurnUsageRecorded {
+                    attempt: attempt.clone(),
+                    usage,
+                });
+            }
+            if r.selection.driver == Driver::Claude
+                && self
+                    .state
+                    .attempts
+                    .iter()
+                    .find(|a| &a.id == attempt)
+                    .unwrap()
+                    .turn_usage
+                    .is_none()
+            {
+                self.fact(FactBody::TurnUsageRecorded {
+                    attempt: attempt.clone(),
+                    usage: TurnTokenUsage::unavailable(
+                        self.state.tasks.iter().any(|task| &task.attempt == attempt),
+                    ),
+                });
+            }
             self.fact(FactBody::AttemptFinished {
                 id: attempt.clone(),
                 status: a,
@@ -1390,11 +1425,7 @@ impl Decision {
                     return reject("request-not-ready");
                 };
                 match &r.body {
-                    RequestBody::Approval { options, .. }
-                        if decision.is_none()
-                            || decision
-                                .is_some_and(|d| !options.iter().any(|o| o.decision == d)) =>
-                    {
+                    RequestBody::Approval { .. } if decision.is_none() => {
                         return reject("invalid-approval-decision");
                     }
                     RequestBody::Questions { questions }
@@ -2139,6 +2170,7 @@ impl Decision {
             || matches!(
                 event,
                 ProviderEvent::SubagentStarted { .. }
+                    | ProviderEvent::UsageTotals { .. }
                     | ProviderEvent::SubagentNativeBound { .. }
                     | ProviderEvent::SubagentNamed { .. }
                     | ProviderEvent::SubagentProgress { .. }
@@ -2276,8 +2308,63 @@ impl Decision {
                     self.finish(&run.id, RunStatus::Interrupted, true);
                 }
             }
+            UsageTotals {
+                native_thread,
+                native_turn,
+                total,
+                last,
+            } => {
+                if !child
+                    && run.as_ref().is_some_and(|run| {
+                        self.state.native_sessions.get(&run.selection.instance)
+                            != Some(native_thread)
+                    })
+                {
+                    return Reply::Ignored;
+                }
+                let delta =
+                    codex_usage_delta(self.state.usage_baselines.get(native_thread), total, last);
+                self.fact(FactBody::UsageBaselineChanged {
+                    native_thread: native_thread.clone(),
+                    counters: total.clone(),
+                });
+                if child && self.state.native_child_turn.as_deref() == Some(native_turn.as_str()) {
+                    self.fact(FactBody::NativeUsageAdded {
+                        counters: delta.clone(),
+                    });
+                }
+                if let Some(a) = self.state.attempts.iter().find(|a| {
+                    &a.id == attempt
+                        && a.native_turn.as_deref() == Some(native_turn.as_str())
+                        && a.status == AttemptStatus::Running
+                }) {
+                    self.fact(FactBody::UsageAdded {
+                        attempt: a.id.clone(),
+                        counters: delta,
+                    });
+                }
+            }
+            TurnUsage(usage) => {
+                let mut usage = usage.clone();
+                if self.state.stopping.contains(attempt) && usage.status == UsageStatus::Complete {
+                    usage.status = UsageStatus::Partial;
+                }
+                usage.has_subagents = self.state.tasks.iter().any(|task| &task.attempt == attempt);
+                if child {
+                    self.fact(FactBody::NativeTurnUsageRecorded { usage });
+                } else {
+                    self.fact(FactBody::TurnUsageRecorded {
+                        attempt: attempt.clone(),
+                        usage,
+                    });
+                }
+            }
             ContextUsage(usage) => {
-                if !child {
+                if child {
+                    self.fact(FactBody::NativeContextUsageRecorded {
+                        usage: usage.clone(),
+                    });
+                } else {
                     self.fact(FactBody::ContextUsageRecorded {
                         attempt: attempt.clone(),
                         usage: usage.clone(),
@@ -2345,6 +2432,15 @@ impl Decision {
                     self.finish(&run.id, status, true);
                     self.wake_tasks();
                 } else {
+                    if self.state.thread.as_ref().unwrap().selection.driver == Driver::Codex {
+                        let usage = complete_codex_usage(
+                            self.state.native_usage_accumulator.as_ref(),
+                            self.state.native_usage_observed,
+                            *status == RunStatus::Completed,
+                            !self.state.tasks.is_empty(),
+                        );
+                        self.fact(FactBody::NativeTurnUsageRecorded { usage });
+                    }
                     self.close_attempt_items(
                         attempt,
                         match status {
@@ -2399,7 +2495,12 @@ impl Decision {
                 text,
                 status,
             } => {
-                let id = self.provider_item(attempt, run_id, key, kind);
+                let key = if key.is_empty() {
+                    self.key("provider-item", &self.facts.len().to_string())
+                } else {
+                    key.clone()
+                };
+                let id = self.provider_item(attempt, run_id, &key, kind);
                 if let Some(text) = text {
                     let current = &self.state.items.iter().find(|i| i.id == id).unwrap().text;
                     if text != current {

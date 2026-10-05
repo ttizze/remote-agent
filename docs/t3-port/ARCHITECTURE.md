@@ -119,3 +119,5 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-06: context handoff は役割・出典・status を持つ歴史項目の固定 snapshot とする。予算、画像/file の見積もり、項目を丸ごと省略する優先順位、取得用 coverage は T3 の ContextHandoffBudget/Delivery に従う。上限は T3 の 16k tokens/64k bytes と同じで、現在のユーザー入力は切り詰めない。
 - 2026-10-06: history delivery は provider effect より前に pending を記録する。Codex の injection 成功は turn/start の前に injected として fold し、明示的な -32601 だけ inline に切り替える。inline は入力の受け付け後に確定する。pending のまま失敗した native session には再送せず、Host から session reset を受けた後に再試行する。native RPC reply の事実を確定してから次の outbound を送る順序は段階 3 で守る。
 - 2026-10-06: handoff の設定値と既知の model window は明示的な HandoffPolicy 入力で受ける。context occupancy とターンの課金用 usage は別に扱い、Codex は last、Claude は assistant snapshot の cache read/write を含む値を context budget に使う。
+- 2026-10-06: ターンの main-agent 使用量は context snapshot と分けて事実にする。Codex の累積 total の差分・last fallback・遅延通知の baseline 更新は domain が所有し、Claude の result の complete/partial/unavailable と cache/thinking の正規化は純粋関数にする。native 子の使用量は子 actor に保存し、親の使用量には合算しない。
+- 2026-10-06: provider エラーに native item key がない場合、domain が入力 seed から項目を採番する。adapter の RPC カウンターを表示項目 ID に流用しない。MCP の表示名は UTF-16 長・空白処理、アイコンは HTTP(S) URL の規則を T3 と同じにする。

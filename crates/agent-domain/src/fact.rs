@@ -9,6 +9,27 @@ pub struct Fact {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FactBody {
+    NativeContextUsageRecorded {
+        usage: ContextUsage,
+    },
+    NativeTurnUsageRecorded {
+        usage: TurnTokenUsage,
+    },
+    NativeUsageAdded {
+        counters: UsageCounters,
+    },
+    UsageBaselineChanged {
+        native_thread: String,
+        counters: UsageCounters,
+    },
+    UsageAdded {
+        attempt: RunAttemptId,
+        counters: UsageCounters,
+    },
+    TurnUsageRecorded {
+        attempt: RunAttemptId,
+        usage: TurnTokenUsage,
+    },
     HandoffPolicyChanged {
         instance: String,
         model_window: Option<u64>,
@@ -402,6 +423,32 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
     let at = &fact.at;
     use FactBody::*;
     match &fact.body {
+        NativeContextUsageRecorded { usage } => state.native_context_usage = Some(usage.clone()),
+        NativeTurnUsageRecorded { usage } => state.native_turn_usage = Some(usage.clone()),
+        NativeUsageAdded { counters } => {
+            state.native_usage_observed |= counters.observed();
+            state.native_usage_accumulator =
+                Some(add_usage(state.native_usage_accumulator.as_ref(), counters));
+        }
+        UsageBaselineChanged {
+            native_thread,
+            counters,
+        } => {
+            state
+                .usage_baselines
+                .insert(native_thread.clone(), counters.clone());
+        }
+        UsageAdded { attempt, counters } => {
+            let attempt = find_mut(&mut state.attempts, "attempt", |a| &a.id == attempt)?;
+            attempt.usage_observed |= counters.observed();
+            attempt.usage_accumulator =
+                Some(add_usage(attempt.usage_accumulator.as_ref(), counters));
+        }
+        TurnUsageRecorded { attempt, usage } => {
+            find_mut(&mut state.attempts, "attempt", |a| &a.id == attempt)?.turn_usage =
+                Some(usage.clone());
+        }
+
         HandoffPolicyChanged {
             instance,
             model_window,
@@ -415,7 +462,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             }
         }
         NativeSessionCleared { instance } => {
-            state.native_sessions.remove(instance);
+            if let Some(native_thread) = state.native_sessions.remove(instance) {
+                state.usage_baselines.remove(&native_thread);
+            }
             state.native_heads.remove(instance);
         }
         ContextUsageRecorded { attempt, usage } => {
@@ -604,6 +653,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
         }
         NativeChildTurnBound { native_turn } => {
             state.native_child_turn = native_turn.clone();
+            state.native_usage_accumulator = None;
+            state.native_usage_observed = false;
+            state.native_turn_usage = None;
         }
         ThreadRenamed { title } => {
             state
@@ -847,6 +899,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 native_head: None,
                 usage: None,
                 context_usage: None,
+                turn_usage: None,
+                usage_accumulator: None,
+                usage_observed: false,
                 started_at: at.clone(),
                 completed_at: None,
             });

@@ -1102,3 +1102,8 @@ Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機�
 | `ContextHandoffBudget.test.ts` | `agent-domain/src/context.rs`。Unicode、JSON escaping、selected/omitted の桁境界、roles/order、画像 1〜100 件、model switch 時の occupancy、marker 圧縮、重複排除、omitted IDs、予算不足の期待値を保持。 |
 | `ContextHandoffDelivery.ts` の配送境界 | domain の pending/injected/inline と provider の RPC テスト。受け付け前の消費をやめ、曖昧な配送失敗では同じ native session に再送しない。DB/outbox の実行順序は段階 3。 |
 | `ClaudeAdapterV2.test.ts` の context usage | input 42,000 + cache creation 2,000 + cache read 5,000 + output 1,000 = 50,000、window 200,000 を翻訳イベントで検証。 |
+
+| 追加の T3 外部挙動テスト | 新設計の検証 |
+| --- | --- |
+| `provider/TurnTokenUsage.test.ts` | `agent-domain/src/usage.rs` と遅延 native usage の状態機械テスト。Codex 30/15/8、compaction 120/45/23、次ターン 4/1、Claude cached input 150 と thinking 20、ゼロの crash を unavailable とする期待値を維持。 |
+| `provider/CodexMcpElicitation.test.ts` | `agent-providers/src/elicitation.rs`。Safari の選択肢と wire response、nullable/boolean フォーム、未収集の required field と URL elicitation、実現できない persistence choices の全期待値を移植。 |

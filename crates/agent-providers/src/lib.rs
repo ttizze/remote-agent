@@ -3,12 +3,14 @@ mod attachments;
 mod claude;
 mod claude_control;
 mod codex;
+mod elicitation;
 mod stdio;
 use agent_domain::*;
 pub use attachments::*;
 pub use claude::*;
 pub use claude_control::*;
 pub use codex::*;
+pub use elicitation::*;
 use serde_json::Value;
 pub use stdio::*;
 

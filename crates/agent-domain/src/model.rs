@@ -177,6 +177,9 @@ pub struct Attempt {
     pub native_head: Option<String>,
     pub usage: Option<TokenUsage>,
     pub context_usage: Option<ContextUsage>,
+    pub turn_usage: Option<TurnTokenUsage>,
+    pub usage_accumulator: Option<UsageCounters>,
+    pub usage_observed: bool,
     pub started_at: Timestamp,
     pub completed_at: Option<Timestamp>,
 }
@@ -499,6 +502,10 @@ pub struct State {
     pub native_parent: Option<(ThreadId, NodeId)>,
     pub native_child_thread: Option<String>,
     pub native_child_turn: Option<String>,
+    pub native_context_usage: Option<ContextUsage>,
+    pub native_turn_usage: Option<TurnTokenUsage>,
+    pub native_usage_accumulator: Option<UsageCounters>,
+    pub native_usage_observed: bool,
     pub prompt_echo_mode: PromptEchoMode,
     pub pending_prompt: Option<PendingPrompt>,
     pub native_continuations: BTreeMap<RunId, Vec<ProviderEvent>>,
@@ -509,6 +516,7 @@ pub struct State {
     pub native_sessions: BTreeMap<String, String>,
     pub handoff_token_cap: Option<u64>,
     pub context_windows: BTreeMap<String, u64>,
+    pub usage_baselines: BTreeMap<String, UsageCounters>,
 }
 impl State {
     pub fn active_run(&self) -> Option<&Run> {
@@ -782,6 +790,13 @@ pub enum ProviderItem {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderEvent {
+    UsageTotals {
+        native_thread: String,
+        native_turn: String,
+        total: UsageCounters,
+        last: UsageCounters,
+    },
+    TurnUsage(TurnTokenUsage),
     ContextUsage(ContextUsage),
     ContextInjected,
     AssistantCursor {

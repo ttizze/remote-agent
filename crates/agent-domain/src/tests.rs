@@ -1587,3 +1587,64 @@ fn injected_context_is_durable_before_turn_start_and_budget_failure_preserves_in
         |item| matches!(&item.kind,ItemKind::Error {message,..} if message==HANDOFF_BUDGET_ERROR)
     ));
 }
+
+#[test]
+fn late_native_usage_moves_the_baseline_without_billing_the_live_turn() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let counter = |input, cached_input, output| UsageCounters {
+        input,
+        cached_input,
+        output,
+        cache_creation: None,
+        reasoning: 0,
+    };
+    provider(
+        &mut s,
+        "usage-first",
+        &a,
+        ProviderEvent::UsageTotals {
+            native_thread: "native-thread".into(),
+            native_turn: "first".into(),
+            total: counter(80, 8, 16),
+            last: counter(80, 8, 16),
+        },
+    );
+    finish(&mut s, &a);
+    let (_, b) = running(&mut s, "next");
+    provider(
+        &mut s,
+        "late",
+        &a,
+        ProviderEvent::UsageTotals {
+            native_thread: "native-thread".into(),
+            native_turn: "first".into(),
+            total: counter(100, 10, 20),
+            last: counter(20, 2, 4),
+        },
+    );
+    provider(
+        &mut s,
+        "next-turn",
+        &b,
+        ProviderEvent::TurnStarted {
+            native_turn: Some("next-turn".into()),
+        },
+    );
+    provider(
+        &mut s,
+        "usage-next",
+        &b,
+        ProviderEvent::UsageTotals {
+            native_thread: "native-thread".into(),
+            native_turn: "next-turn".into(),
+            total: counter(104, 12, 21),
+            last: counter(4, 2, 1),
+        },
+    );
+    finish(&mut s, &b);
+    let usage = s.attempts.last().unwrap().turn_usage.as_ref().unwrap();
+    assert_eq!(usage.status, UsageStatus::Complete);
+    assert_eq!(usage.input, Some(4));
+    assert_eq!(usage.output, Some(1));
+}

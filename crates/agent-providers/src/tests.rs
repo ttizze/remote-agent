@@ -317,3 +317,72 @@ fn assistant_context_usage_includes_cache_reads_and_creation_in_the_reference_wi
         })
     )));
 }
+
+#[test]
+fn mcp_metadata_trims_names_limits_utf16_and_accepts_only_web_icons() {
+    for (title, server, icon, expected_title, expected_icon) in [
+        (
+            "  Pull issue  ".to_string(),
+            " GitHub ".to_string(),
+            "https://example.com".to_string(),
+            Some("Pull issue"),
+            Some("https://example.com/"),
+        ),
+        (
+            "Tool".into(),
+            "Server".into(),
+            "file:///tmp/icon".into(),
+            Some("Tool"),
+            None,
+        ),
+        (
+            "x".repeat(161),
+            "Server".into(),
+            "https://example.com".into(),
+            None,
+            None,
+        ),
+        (
+            "🧪".repeat(81),
+            "Server".into(),
+            "https://example.com".into(),
+            None,
+            None,
+        ),
+        (
+            "Tool".into(),
+            " ".into(),
+            "https://example.com".into(),
+            Some("Tool"),
+            None,
+        ),
+    ] {
+        let mut protocol = ClaudeProtocol::default();
+        let output=protocol.receive(&json!({"type":"assistant","uuid":"assistant","tool_use_meta":[{"id":" tool ","display_name":title,"server_display_name":server,"icon_url":icon}],"message":{"id":"message","content":[{"type":"tool_use","id":"tool","name":"mcp__server__tool","input":{}}]}})).unwrap();
+        let events = match &output.events[0] {
+            ProviderEvent::NativeOutput { events, .. } => events,
+            _ => &output.events,
+        };
+        let presentation = events
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::ItemStarted {
+                    kind: ProviderItem::Tool { presentation, .. },
+                    ..
+                } => Some(presentation),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(presentation.title.as_deref(), expected_title);
+        assert_eq!(
+            presentation
+                .source
+                .as_ref()
+                .and_then(|source| source.0["icon"]["logoUrl"].as_str()),
+            expected_icon
+        );
+        if title.starts_with("  ") {
+            assert_eq!(presentation.source.as_ref().unwrap().0["name"], "GitHub");
+        }
+    }
+}

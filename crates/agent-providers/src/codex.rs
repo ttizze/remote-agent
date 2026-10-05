@@ -148,12 +148,34 @@ impl CodexProtocol {
                 native_key,
                 decision,
                 answers,
-                ..
+                input,
             } => {
                 let id: Value = serde_json::from_str(native_key)
                     .map_err(|_| ProtocolError::Invalid("invalid native request id".into()))?;
                 let result = if let Some(answers) = answers {
                     json!({"answers":answers.iter().map(|(k,v)| (k.clone(),json!({"answers":v.choices()}))).collect::<BTreeMap<_,_>>()})
+                } else if let Some(payload) = input
+                    .as_ref()
+                    .filter(|input| input.0.get("permissions").is_some())
+                {
+                    let decision = decision.unwrap_or(ApprovalDecision::Cancel);
+                    if matches!(
+                        decision,
+                        ApprovalDecision::Accept | ApprovalDecision::AcceptForSession
+                    ) {
+                        json!({"permissions":payload.0["permissions"],"scope":if decision==ApprovalDecision::AcceptForSession {"session"} else {"turn"}})
+                    } else {
+                        json!({"permissions":{},"scope":"turn"})
+                    }
+                } else if let Some(payload) = input.as_ref().filter(|input| {
+                    input.0.get("serverName").is_some()
+                        && (input.0.get("requestedSchema").is_some()
+                            || input.0.get("mode").is_some())
+                }) {
+                    mcp_elicitation_response(
+                        &payload.0,
+                        decision.unwrap_or(ApprovalDecision::Cancel),
+                    )
                 } else {
                     json!({"decision":match decision.unwrap_or(ApprovalDecision::Cancel) { ApprovalDecision::Accept=>"accept",ApprovalDecision::AcceptForSession|ApprovalDecision::AcceptAlways=>"acceptForSession",ApprovalDecision::Decline=>"decline",ApprovalDecision::Cancel=>"cancel" }})
                 };
@@ -407,20 +429,39 @@ impl CodexProtocol {
                     .collect(),
             }),
             "thread/tokenUsage/updated" => {
-                let usage = &p["tokenUsage"]["last"];
-                events.push(ProviderEvent::ContextUsage(ContextUsage {
-                    used_tokens: usage["totalTokens"].as_u64().unwrap_or(0),
-                    max_tokens: p["tokenUsage"]["modelContextWindow"].as_u64(),
-                    auto_compact_threshold: None,
-                }));
-                events.push(ProviderEvent::Usage(TokenUsage {
+                let counters = |usage: &Value| UsageCounters {
                     input: usage["inputTokens"].as_u64().unwrap_or(0),
                     cached_input: usage["cachedInputTokens"].as_u64().unwrap_or(0),
+                    cache_creation: usage["cacheWriteInputTokens"].as_u64(),
                     output: usage["outputTokens"].as_u64().unwrap_or(0),
-                    reasoning_output: usage["reasoningOutputTokens"].as_u64().unwrap_or(0),
-                    total: usage["totalTokens"].as_u64().unwrap_or(0),
-                    max: p["tokenUsage"]["modelContextWindow"].as_u64(),
-                }));
+                    reasoning: usage["reasoningOutputTokens"].as_u64().unwrap_or(0),
+                };
+                events.push(ProviderEvent::UsageTotals {
+                    native_thread: string(p, "threadId"),
+                    native_turn: string(p, "turnId"),
+                    total: counters(&p["tokenUsage"]["total"]),
+                    last: counters(&p["tokenUsage"]["last"]),
+                });
+                if !self
+                    .turns
+                    .get(&string(p, "threadId"))
+                    .is_some_and(|turn| turn != &string(p, "turnId"))
+                {
+                    let usage = &p["tokenUsage"]["last"];
+                    events.push(ProviderEvent::ContextUsage(ContextUsage {
+                        used_tokens: usage["totalTokens"].as_u64().unwrap_or(0),
+                        max_tokens: p["tokenUsage"]["modelContextWindow"].as_u64(),
+                        auto_compact_threshold: None,
+                    }));
+                    events.push(ProviderEvent::Usage(TokenUsage {
+                        input: usage["inputTokens"].as_u64().unwrap_or(0),
+                        cached_input: usage["cachedInputTokens"].as_u64().unwrap_or(0),
+                        output: usage["outputTokens"].as_u64().unwrap_or(0),
+                        reasoning_output: usage["reasoningOutputTokens"].as_u64().unwrap_or(0),
+                        total: usage["totalTokens"].as_u64().unwrap_or(0),
+                        max: p["tokenUsage"]["modelContextWindow"].as_u64(),
+                    }));
+                }
             }
             "item/started" | "item/completed" => {
                 let item = &p["item"];
@@ -570,57 +611,69 @@ impl CodexProtocol {
                 key: p["requestId"].to_string(),
             }),
             "item/commandExecution/requestApproval"
-            | "execCommandApproval"
             | "item/fileChange/requestApproval"
-            | "applyPatchApproval"
             | "item/permissions/requestApproval"
             | "mcpServer/elicitation/request" => {
-                let kind = if method.contains("fileChange") || method == "applyPatchApproval" {
+                if method == "mcpServer/elicitation/request"
+                    && (mcp_elicitation_response(p, ApprovalDecision::Accept)["action"] != "accept"
+                        || !p["turnId"]
+                            .as_str()
+                            .is_some_and(|turn| self.turns.values().any(|active| active == turn)))
+                {
+                    output
+                        .outbound
+                        .push(json!({"id":frame["id"],"result":{"action":"decline"}}));
+                    return Ok(output);
+                }
+                let kind = if method.contains("fileChange")
+                    || p["permissions"]["fileSystem"]["write"]
+                        .as_array()
+                        .is_some_and(|paths| !paths.is_empty())
+                {
                     "file-change"
-                } else if method.contains("permission") {
-                    "permission"
+                } else if p["permissions"]["fileSystem"]["read"]
+                    .as_array()
+                    .is_some_and(|paths| !paths.is_empty())
+                {
+                    "file-read"
                 } else if method.starts_with("mcp") {
                     "mcp-elicitation"
                 } else {
                     "command"
                 };
-                let decisions = p["availableDecisions"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| match v.as_str() {
-                                Some("accept") => Some(ApprovalDecision::Accept),
-                                Some("acceptForSession") => {
-                                    Some(ApprovalDecision::AcceptForSession)
-                                }
-                                Some("decline") => Some(ApprovalDecision::Decline),
-                                Some("cancel") => Some(ApprovalDecision::Cancel),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_else(|| {
+                let (title, options) = if method.starts_with("mcp") {
+                    describe_mcp_elicitation(p)
+                } else {
+                    (
+                        optional(p, "command").unwrap_or_else(|| kind.into()),
                         vec![
-                            ApprovalDecision::Accept,
-                            ApprovalDecision::AcceptForSession,
-                            ApprovalDecision::Decline,
-                            ApprovalDecision::Cancel,
-                        ]
-                    });
+                            ApprovalOption {
+                                decision: ApprovalDecision::Accept,
+                                label: "Approve".into(),
+                            },
+                            ApprovalOption {
+                                decision: ApprovalDecision::AcceptForSession,
+                                label: "Approve for session".into(),
+                            },
+                            ApprovalOption {
+                                decision: ApprovalDecision::Decline,
+                                label: "Decline".into(),
+                            },
+                            ApprovalOption {
+                                decision: ApprovalDecision::Cancel,
+                                label: "Cancel".into(),
+                            },
+                        ],
+                    )
+                };
                 events.push(ProviderEvent::RequestOpened {
                     owner_path: vec![],
                     key: frame["id"].to_string(),
                     body: RequestBody::Approval {
                         kind: kind.into(),
-                        title: optional(p, "command").unwrap_or_else(|| kind.into()),
+                        title,
                         detail: optional(p, "reason"),
-                        options: decisions
-                            .into_iter()
-                            .map(|decision| ApprovalOption {
-                                label: format!("{decision:?}"),
-                                decision,
-                            })
-                            .collect(),
+                        options,
                         input: Json(p.clone()),
                     },
                     capability: ResponseCapability::Live,
@@ -630,7 +683,7 @@ impl CodexProtocol {
                 let retrying = p["willRetry"].as_bool().unwrap_or(false);
                 let message = string(&p["error"], "message");
                 events.push(ProviderEvent::ItemFinished {
-                    key: format!("error:{}", self.next_id),
+                    key: String::new(),
                     kind: ProviderItem::Error {
                         message,
                         retrying,

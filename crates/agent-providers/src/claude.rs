@@ -484,10 +484,11 @@ impl ClaudeProtocol {
                                 .as_array()
                                 .into_iter()
                                 .flatten()
-                                .find(|meta| meta["id"] == key);
-                            if let Some(meta) = meta {
-                                let server = optional(meta, "server_display_name");
-                                self.presentations.insert(key.clone(), ToolPresentation { title: optional(meta, "display_name"), source: server.map(|server| Json(json!({"key":format!("mcp:{}", server.to_lowercase()),"name":server,"kind":"integration","icon":{"_tag":"themed-logo","logoUrl":meta["icon_url"]}}))) });
+                                .find(|meta| {
+                                    meta["id"].as_str().is_some_and(|id| id.trim() == key)
+                                });
+                            if let Some(presentation) = meta.and_then(claude_tool_presentation) {
+                                self.presentations.insert(key.clone(), presentation);
                             }
                             self.parents.insert(key.clone(), route.clone());
                             if name == "Agent" || name == "Task" {
@@ -690,9 +691,10 @@ impl ClaudeProtocol {
                         status: ItemStatus::Failed,
                     });
                 }
-                events.push(ProviderEvent::Usage(claude_usage(
-                    &frame["usage"],
-                    self.selected_context_window.unwrap_or(200_000),
+                events.push(ProviderEvent::TurnUsage(normalize_claude_turn_usage(
+                    &string(frame, "subtype"),
+                    frame.get("usage"),
+                    status,
                 )));
                 if aborted {
                     events.push(ProviderEvent::TurnAborted {
@@ -802,6 +804,27 @@ fn claude_terminal_status(frame: &Value, hint: Option<&str>) -> RunStatus {
     } else {
         RunStatus::Failed
     }
+}
+fn claude_tool_presentation(meta: &Value) -> Option<ToolPresentation> {
+    let bounded_text = |key, limit| {
+        let text = meta.get(key)?.as_str()?.trim();
+        (!text.is_empty() && text.encode_utf16().count() <= limit).then(|| text.to_owned())
+    };
+    bounded_text("id", 512)?;
+    let title = bounded_text("display_name", 160)?;
+    let source=bounded_text("server_display_name",160).map(|server| {
+        let mut source=json!({"key":format!("mcp:{}",server.to_lowercase()),"name":server,"kind":"integration"});
+        if let Some(raw)=meta["icon_url"].as_str().filter(|raw|raw.encode_utf16().count()<=4096)
+            && let Ok(url)=url::Url::parse(raw)
+            && matches!(url.scheme(),"http"|"https")
+            && url.as_str().encode_utf16().count()<=4096
+        { source["icon"]=json!({"_tag":"themed-logo","logoUrl":url.as_str()}); }
+        Json(source)
+    });
+    Some(ToolPresentation {
+        title: Some(title),
+        source,
+    })
 }
 fn claude_tool(
     name: &str,

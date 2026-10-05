@@ -120,6 +120,14 @@ impl ClaudeControl {
                                         decision: ApprovalDecision::Accept,
                                     },
                                     ApprovalOption {
+                                        label: "Allow for session".into(),
+                                        decision: ApprovalDecision::AcceptForSession,
+                                    },
+                                    ApprovalOption {
+                                        label: "Cancel".into(),
+                                        decision: ApprovalDecision::Cancel,
+                                    },
+                                    ApprovalOption {
                                         label: "Decline".into(),
                                         decision: ApprovalDecision::Decline,
                                     },
