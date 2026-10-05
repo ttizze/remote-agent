@@ -3066,8 +3066,7 @@ mod tests {
                 text: "waiting input".into(),
             }],
             model: None,
-            effort: None,
-            service_tier: None,
+            options: Vec::new(),
         };
         service
             .inner
@@ -3136,8 +3135,7 @@ mod tests {
                 text: "send once".into(),
             }],
             model: None,
-            effort: None,
-            service_tier: None,
+            options: Vec::new(),
         };
         let owner = service
             .inner
@@ -3229,8 +3227,7 @@ mod tests {
                 text: "preserve this input".into(),
             }],
             model: None,
-            effort: None,
-            service_tier: None,
+            options: Vec::new(),
         };
         service
             .inner
@@ -3331,8 +3328,7 @@ mod tests {
                 text: "save until the provider recovers".into(),
             }],
             model: None,
-            effort: None,
-            service_tier: None,
+            options: Vec::new(),
         };
         for _ in 0..2 {
             assert!(
@@ -3463,8 +3459,7 @@ mod tests {
                 text: "hello".into(),
             }],
             model: None,
-            effort: None,
-            service_tier: None,
+            options: Vec::new(),
         };
         let connection = service.open_session();
         let held = service
@@ -3596,8 +3591,7 @@ mod tests {
                 text: "once".into(),
             }],
             model: None,
-            effort: None,
-            service_tier: None,
+            options: Vec::new(),
         };
         service
             .inner

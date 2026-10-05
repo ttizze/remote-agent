@@ -51,7 +51,7 @@
 		B07533A831C4029B21F39F66 /* BexDeviceNavigationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C019CF42F8F9FA5A861FC9 /* BexDeviceNavigationUITests.swift */; };
 		0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */; };
 		316AE30ED1CAB6B32EF98FFE /* BexWorktreeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04889B95D12DED5A33B271D4 /* BexWorktreeUITests.swift */; };
-		C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000001 /* CodexModelSettings.swift */; };
+		C0DE00000000000000000101 /* ModelControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000001 /* ModelControls.swift */; };
 		C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000002 /* ModelSettingsSheet.swift */; };
 		C0DE00000000000000000202 /* AccountViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000203 /* AccountViews.swift */; };
 		C0DE00000000000000000103 /* AppViewActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000003 /* AppViewActions.swift */; };
@@ -111,7 +111,7 @@
 		62C019CF42F8F9FA5A861FC9 /* BexDeviceNavigationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexDeviceNavigationUITests.swift; sourceTree = "<group>"; };
 		25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorktreeSettings.swift; sourceTree = "<group>"; };
 		04889B95D12DED5A33B271D4 /* BexWorktreeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexWorktreeUITests.swift; sourceTree = "<group>"; };
-		C0DE00000000000000000001 /* CodexModelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexModelSettings.swift; sourceTree = "<group>"; };
+		C0DE00000000000000000001 /* ModelControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelControls.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000002 /* ModelSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelSettingsSheet.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000203 /* AccountViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountViews.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000003 /* AppViewActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewActions.swift; sourceTree = "<group>"; };
@@ -192,7 +192,7 @@
 				C0DE00000000000000000002 /* ModelSettingsSheet.swift */,
 				C0DE00000000000000000402 /* AgentSettings.swift */,
 				C0DE00000000000000000203 /* AccountViews.swift */,
-				C0DE00000000000000000001 /* CodexModelSettings.swift */,
+				C0DE00000000000000000001 /* ModelControls.swift */,
 				04926FF582DA33DFFF64E6C5 /* TaskList.swift */,
 				25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */,
 				C0DE00000000000000000702 /* ProviderSettings.swift */,
@@ -347,7 +347,7 @@
 				C0DE00000000000000000102 /* ModelSettingsSheet.swift in Sources */,
 				C0DE00000000000000000401 /* AgentSettings.swift in Sources */,
 				C0DE00000000000000000202 /* AccountViews.swift in Sources */,
-				C0DE00000000000000000101 /* CodexModelSettings.swift in Sources */,
+				C0DE00000000000000000101 /* ModelControls.swift in Sources */,
 				D08EEED058A8C4FE92AA21E2 /* TaskList.swift in Sources */,
 				0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */,
 				C0DE00000000000000000701 /* ProviderSettings.swift in Sources */,

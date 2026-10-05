@@ -11,7 +11,7 @@
         }
       ],
       "model": null,
-      "effort": null
+      "options": []
     },
     "current": {
       "text": "sent",
@@ -31,7 +31,7 @@
         "id": "new-model",
         "instanceId": "codex"
       },
-      "effort": null
+      "options": []
     },
     "expected": {
       "text": "sent",
@@ -51,7 +51,7 @@
         "id": "new-model",
         "instanceId": "codex"
       },
-      "effort": null
+      "options": []
     }
   },
   {
@@ -66,7 +66,7 @@
         }
       ],
       "model": null,
-      "effort": null
+      "options": []
     },
     "current": {
       "text": "newer",
@@ -78,7 +78,7 @@
         }
       ],
       "model": null,
-      "effort": null
+      "options": []
     },
     "expected": {
       "text": "newer",
@@ -90,7 +90,7 @@
         }
       ],
       "model": null,
-      "effort": null
+      "options": []
     }
   },
   {
@@ -105,7 +105,7 @@
         }
       ],
       "model": null,
-      "effort": null
+      "options": []
     },
     "current": {
       "text": "sent",
@@ -117,7 +117,7 @@
         }
       ],
       "model": null,
-      "effort": null
+      "options": []
     },
     "expected": {
       "text": "sent",
@@ -129,7 +129,7 @@
         }
       ],
       "model": null,
-      "effort": null
+      "options": []
     }
   }
 ]

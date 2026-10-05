@@ -25,6 +25,8 @@ import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.LoadModels
 import dev.remoteagent.core.ModelDefaultsScope
+import dev.remoteagent.core.ModelOptionControl
+import dev.remoteagent.core.ModelOptionValue
 import dev.remoteagent.core.ModelScopeChoice
 
 @Composable
@@ -45,7 +47,6 @@ internal fun ModelSettings(model: AndroidAppModel, close: () -> Unit) {
     val enabled = snapshot.connected() && !loading
     val defaults = snapshot.modelDefaults(scope)
     val current = snapshot.defaultModel(scope)
-    val controls = snapshot.defaultModelControls(scope)
     Column(
         Modifier.verticalScroll(rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -75,11 +76,8 @@ internal fun ModelSettings(model: AndroidAppModel, close: () -> Unit) {
         ) {
             model.perform(Intent.SelectDefaultModel(scope, it))
         }
-        DefaultEffortChoices(defaults.effort, controls.efforts, enabled) {
-            model.perform(Intent.SelectDefaultEffort(scope, it))
-        }
-        DefaultSpeedChoices(defaults.serviceTier, controls.fastServiceTier, controls.fast, enabled) {
-            model.perform(Intent.SelectDefaultServiceTier(scope, it))
+        ModelOptionChoices(snapshot.defaultModelOptionControls(scope), enabled, defaults = true) { id, value ->
+            model.perform(Intent.SelectDefaultModelOption(scope, id, value))
         }
         if (snapshot.hasModelDefaultsOverride(scope)) {
             TextButton(onClick = { model.perform(Intent.InheritModelDefaults(scope)) }, enabled = enabled) {
@@ -124,41 +122,25 @@ private fun ModelDefaultsScopes(
 }
 
 @Composable
-private fun DefaultEffortChoices(
-    selected: String?,
-    choices: List<String>,
+internal fun ModelOptionChoices(
+    controls: List<ModelOptionControl>,
     enabled: Boolean,
-    choose: (String?) -> Unit,
+    defaults: Boolean = false,
+    choose: (String, ModelOptionValue?) -> Unit,
 ) {
-    if (choices.isNotEmpty()) {
+    for (control in controls) {
+        val choices: List<Pair<String, ModelOptionValue?>> = control.choices.map { it.label to it.value }
+        val automatic = defaults && !control.isExplicit
         ModelChoiceMenu(
-            "思考の深さ: ${selected ?: "自動"}",
-            listOf("自動" to null) + choices.map { it to it },
-            selected,
+            "${control.label}: ${if (automatic) "自動" else control.valueLabel ?: "未設定"}",
+            (if (defaults) listOf("自動" to null) else emptyList()) + choices,
+            if (automatic) null else control.value,
             enabled,
-            Modifier.testTag("models.default.effort"),
-            choose,
-        )
-    }
-}
-
-@Composable
-private fun DefaultSpeedChoices(
-    selected: String?,
-    fastTier: String?,
-    fast: Boolean,
-    enabled: Boolean,
-    choose: (String?) -> Unit,
-) {
-    fastTier?.let { tier ->
-        ModelChoiceMenu(
-            "速度: ${if (selected == null) "自動" else if (fast) "高速" else "通常"}",
-            listOf("自動" to null, "通常" to "default", "高速" to tier),
-            selected,
-            enabled,
-            Modifier.testTag("models.default.speed"),
-            choose,
-        )
+            Modifier.testTag("model.option.${control.id}"),
+        ) {
+            choose(control.id, it)
+        }
+        control.description?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
     }
 }
 

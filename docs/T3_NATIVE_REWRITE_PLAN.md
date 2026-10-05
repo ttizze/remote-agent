@@ -237,7 +237,7 @@ irohとTLS WebSocketの隔離された比較ツールで測定を2回行い、[�
 
 ## 現在のprovider instance移行
 
-固定したdriver enumを廃止し、driver名とinstance IDを別のvalidated slugへ変更した。大文字小文字を含むIDを保持し、同じdriverの複数instanceと未知driverの設定を保存する。HostのSQLiteが設定revision・操作ID・送信結果を所有し、同じ操作IDの再送は確定済みの結果を返す。未知のconfig項目を落とさず、sensitiveと宣言した環境変数はclientへredacted sentinelで返す。clientの永続snapshotにはprovider設定を保存しない。現行ALPNは`remote-agent/streams/12`、会話DBはformat 3であり、旧形式の互換経路は追加していない。
+固定したdriver enumを廃止し、driver名とinstance IDを別のvalidated slugへ変更した。大文字小文字を含むIDを保持し、同じdriverの複数instanceと未知driverの設定を保存する。HostのSQLiteが設定revision・操作ID・送信結果を所有し、同じ操作IDの再送は確定済みの結果を返す。未知のconfig項目を落とさず、sensitiveと宣言した環境変数はclientへredacted sentinelで返す。clientの永続snapshotにはprovider設定を保存しない。この段階のALPNは`remote-agent/streams/12`、会話DBはformat 3であり、旧形式の互換経路は追加していない。
 
 設定変更では変更したresourceだけを停止・置換し、未変更のprocess・認証・native bindingを保持する。置換前のeventは新しいresourceへ適用しない。モデルcatalogのページと認証変更にもresource generationを照合し、異なる世代のモデルを混ぜない。取り込み済みの本文とHost所有の名前変更は、nativeの保存先を変更しても利用できる。native bindingが一致しない会話は、その保存先へ実行しない。
 
@@ -268,7 +268,7 @@ custom modelsの実行反映、managed setup、残りのdriver、各画面の外
 
 ### custom modelsとモデルcapability
 
-モデルの共通契約をT3のselect・boolean descriptorへ変更した。旧契約の推論強度・サービス階層のフィールドとFFI recordを削除し、既存のcore・desktop・native binding・fixtureを現行形式へ揃えた。Codexのnative RPCには従来のフィールドがあるため、変換はその境界だけが行う。capabilityは既存のJSON境界を通してバイナリRPCへ載せ、現行ALPNを`remote-agent/streams/13`とした。会話DBの保存形式はこの変更の対象ではなくformat 3を使う。
+モデルの共通契約をT3のselect・boolean descriptorへ変更した。旧契約の推論強度・サービス階層のフィールドとFFI recordを削除し、既存のcore・desktop・native binding・fixtureを現行形式へ揃えた。Codexのnative RPCには従来のフィールドがあるため、変換はその境界だけが行う。capabilityは既存のJSON境界を通してバイナリRPCへ載せ、この段階のALPNを`remote-agent/streams/13`とした。会話DBの保存形式はこの変更の対象ではなくformat 3だった。
 
 Hostのモデルcursorはinstanceのresource generationに加えて、前のページで確認したnative slugを保持する。最後のnativeページを確認してからcustom modelsを追加し、標準モデルの重複追加を防ぐ。Codexの名前だけのcustom modelは最初の標準モデルのcapabilityを使い、明示したcapabilityは空指定も含めて優先する。Claudeの名前だけのcustom modelへCodexのcapabilityは付けない。custom modelsがない場合のcursorに不要なslug一覧やcapabilityを入れず、Claudeにも不要なfallbackを保存しない。
 
@@ -281,3 +281,15 @@ Androidには共通coreのモデル初期値とscope・継承を使う設定画�
 最終の`scripts/dev-env.sh just unit-tests`は535件成功、既存skipは3件、Markdown回帰とstandalone CLIのassertionも成功した。Rust testの実行時間は117.691秒。全targetのClippyも成功した。macOSのHTTP client初期化が時間制限に達したため、隔離したfixture processのstackを計測した。システムプロキシを取得するCoreFoundationが約39万ファイルあるCargoのdepsディレクトリを走査していた。現在の実行ファイル・必要なlibrary・supervisorを一時ディレクトリへhard-linkし、nextestのmetadataで元のsource・選択条件を保持して実行するようにした。本番のプロキシ・TLS・環境変数と録音の初期化10秒・通信3秒を変更していない。対象9件は成功し、cold録音TLSは0.338秒だった。接続fixtureの初期化は45秒の枠へ分け、操作10秒・復帰500ms・終了30秒と既存assertionを保持した。SSDの容量不足でbuild前に失敗した試行は成功結果に含めない。現行のcapability契約からAndroidのarm64/x86_64 JNI・debug APK・test Kotlin・detekt・ktfmt、iOS core・app・UI test bundleのbuild-for-testingが成功した。native UIの実行と外観照合は未実行である。
 
 任意のdescriptorを編集する全クライアントのUI、generic option selectionの保存とdriverへの実行変換、managed setup、残りのdriverと各機能、全画面の外観照合、Nightly実配布は引き続き実装する。この段階は全機能移行の完了ではない。
+
+### 汎用モデルオプションの保存と native controls
+
+Draft・ModelDefaults・Submissionの固定effort/tierフィールドを削除し、T3と同じ`[{"id":"...","value":"..."}]`の配列へ変更した。valueはstringまたはbooleanだけを受け付け、明示的なfalseを未設定と区別する。読み取りは最初の同じIDを使い、編集はその位置を保持して重複だけを除く。未対応の選択肢を送信から除き、variantの未設定から明示的な上書きを作らない。prompt injected choiceのraw値はdriverで変換するまで保持する。通常テストのproptestでJSON・binaryの型と順序、編集前の値の保持を確認する。
+
+Coreが設定scope・継承・正規化に加えて、表示名と型付きのメニュー選択肢を返す。desktop・iOS・Androidのモデル設定にある固定effort/speed widgetと各clientのselect/boolean変換を削除した。native viewはcoreの結果を描画し、所有者へIDと選択値を返す。削除されたモデルの上書き値は別モデルの自動表示へ持ち越さず、保存した希望値自体は変更しない。入力済み文章・添付・キューの復元でも同じoption配列を使う。CLIは`--option ID=VALUE`を使い、旧effort flagは追加していない。
+
+共通の送信契約はoptions配列だけを持ち、Codex app-serverのeffort・serviceTierForTurnへの変換はnative RPCの境界が行う。Claudeのeffortもそのdriverだけがnative flagへ変換する。現行ALPNは`remote-agent/streams/14`、会話DBはformat 4。旧形式を読む互換経路は置いていない。初回のnative履歴取り込みは維持し、稼働中のHostや個人の保存先を更新しない。
+
+最終の`scripts/dev-env.sh just unit-tests`は539件成功、既存skipは3件、Rust testの実行時間は117.889秒だった。Markdown回帰とstandalone CLIのassertionも成功した。Store 66件・state 27件・model defaults 6件・operation corpus 1件・persistence 3件の計103件が成功した。実際のCodex app-server/Claude CLI fixtureを使う送信・履歴再開・process再利用などの選択した4件も成功した。今回の汎用optionと表示controlsのfocused mutation監査は42件中35件を検出し、7件はbuild不能、最終の未検出・timeoutは0件だった。全workspace targetのClippyもbindings有効・warnings禁止で成功した。SwiftLint/SwiftFormatとktfmt、Androidのarm64/x86_64 JNI・debug APK・test Kotlin・detekt、iOS core・Swift binding・app・UI test bundleのbuild-for-testingが成功した。native UIの実行と外観照合は未実行である。
+
+Claudeのcanonical manifest・alias・version profileとfast mode/thinking/context window/prompt effortの実行変換、managed setup、残りのdriverと全機能、全画面の外観照合、署名済みNightlyの実配布は引き続き移行する。mainへmerge・pushせず、変更はPR #51へまとめる。CIはユーザー指定で保留する。

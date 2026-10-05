@@ -278,8 +278,10 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
                             .unwrap(),
                         id: model.into(),
                     }),
-                    effort: Some(effort.into()),
-                    service_tier: None,
+                    options: vec![agent_protocol::models::ModelOptionSelection {
+                        id: "effort".into(),
+                        value: agent_protocol::models::ModelOptionValue::String(effort.into()),
+                    }],
                 })
                 .await
                 .unwrap();
@@ -324,7 +326,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                     store.dispatch(Intent::NewChat { cwd: if selected { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
                     let key = store.snapshot().navigation.draft_key.clone();
                     store.dispatch(Intent::SelectModel { thread_id: key.clone(), model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "default".into() } }).await.unwrap();
-                    store.dispatch(Intent::SelectEffort { thread_id: key, effort: "low".into() }).await.unwrap();
+                    store.dispatch(Intent::SelectModelOption { thread_id: key, id: "effort".into(), value: Some(agent_protocol::models::ModelOptionValue::String("low".into()))}).await.unwrap();
                     let mut previous_id = None;
                     let mut previous_cwd = None;
                     for number in 0..2 {
@@ -346,7 +348,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                         assert!(snapshot.pending_submissions.is_empty());
                         assert!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].text.is_empty() && snapshot.drafts[&agent_core::state::DraftKey::from(&id)].attachments.is_empty());
                         assert_eq!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].model.as_ref().map(|model| model.id.as_str()), Some("default"));
-                        assert_eq!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].effort.as_deref(), Some("low"));
+                        assert_eq!(agent_protocol::models::model_option_string(&snapshot.drafts[&agent_core::state::DraftKey::from(&id)].options, "effort"), Some("low"));
                         let cwd = snapshot.navigation.cwd.clone();
                         if let Some(previous) = &previous_cwd { assert_eq!(&cwd, previous); }
                         if selected && automatic {
@@ -808,8 +810,16 @@ async fn unconfigured_claude_keeps_codex_usable_without_model_errors() {
                         .unwrap(),
                     id: "sonnet".into(),
                 }),
-                effort: Some("high".into()),
-                service_tier: Some("default".into()),
+                options: vec![
+                    agent_protocol::models::ModelOptionSelection {
+                        id: "effort".into(),
+                        value: agent_protocol::models::ModelOptionValue::String("high".into()),
+                    },
+                    agent_protocol::models::ModelOptionSelection {
+                        id: "serviceTier".into(),
+                        value: agent_protocol::models::ModelOptionValue::String("default".into()),
+                    },
+                ],
                 text: "Keep the Claude draft".into(),
                 ..Default::default()
             };
@@ -1680,9 +1690,12 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
             .await
             .unwrap();
         store
-            .dispatch(Intent::SelectEffort {
+            .dispatch(Intent::SelectModelOption {
                 thread_id: store.snapshot().navigation.draft_key.clone(),
-                effort: "low".into(),
+                id: "effort".into(),
+                value: Some(agent_protocol::models::ModelOptionValue::String(
+                    "low".into(),
+                )),
             })
             .await
             .unwrap();
@@ -1804,9 +1817,12 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
         // A settings change replaces the retained CLI. The same native
         // conversation must resume after its background work was stopped.
         store
-            .dispatch(Intent::SelectEffort {
+            .dispatch(Intent::SelectModelOption {
                 thread_id: snapshot.navigation.draft_key.clone(),
-                effort: "high".into(),
+                id: "effort".into(),
+                value: Some(agent_protocol::models::ModelOptionValue::String(
+                    "high".into(),
+                )),
             })
             .await
             .unwrap();

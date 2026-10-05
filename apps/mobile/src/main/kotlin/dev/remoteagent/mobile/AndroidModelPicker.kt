@@ -24,7 +24,6 @@ import dev.remoteagent.core.Account
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.LoadModels
 import dev.remoteagent.core.Model
-import dev.remoteagent.core.ModelQuickControls
 import dev.remoteagent.core.ModelRef
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.SelectAccountForDraft
@@ -96,12 +95,9 @@ private fun ConversationModelChoices(
             execute(Intent.SelectModel(key, it))
         }
         if (draft.model?.instanceId == provider) {
-            ConversationModelOptions(
-                snapshot.modelQuickControls(key),
-                canChoose,
-                { execute(Intent.SelectEffort(key, it)) },
-                { execute(Intent.SelectServiceTier(key, it)) },
-            )
+            ModelOptionChoices(snapshot.modelOptionControls(key), canChoose) { id, value ->
+                execute(Intent.SelectModelOption(key, id, value))
+            }
         }
         provider?.let { id ->
             val accounts = snapshot.accounts()?.accounts.orEmpty().filter { it.instanceId == id }
@@ -150,30 +146,6 @@ private fun ConversationModelList(
             modifier = Modifier.testTag("model.choice.${model.model.id}"),
         ) {
             Text("${if (model.model == selected) "✓ " else ""}${model.displayName}")
-        }
-    }
-}
-
-@Composable
-private fun ConversationModelOptions(
-    controls: ModelQuickControls,
-    enabled: Boolean,
-    effort: (String) -> Unit,
-    speed: (String) -> Unit,
-) {
-    if (controls.efforts.isNotEmpty()) {
-        ModelChoiceMenu(
-            "思考の深さ: ${controls.effort}",
-            controls.efforts.map { it to it },
-            controls.effort,
-            enabled,
-            Modifier.testTag("model.effort"),
-            effort,
-        )
-    }
-    controls.toggleFastTo?.let { tier ->
-        TextButton(onClick = { speed(tier) }, enabled = enabled, modifier = Modifier.testTag("model.speed")) {
-            Text(if (controls.fast) "速度: 高速" else "速度: 通常")
         }
     }
 }

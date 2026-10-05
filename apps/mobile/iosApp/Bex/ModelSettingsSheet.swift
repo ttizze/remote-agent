@@ -102,7 +102,7 @@ struct ModelSettingsScreen: View {
                     }
                     Divider()
                     modelSection
-                    quickControls
+                    optionControls
                     if let scope, model.snapshot.hasModelDefaultsOverride(scope: scope) {
                         Divider()
                         Button("共通設定を使う") { model.perform(.inheritModelDefaults(scope: scope)) }
@@ -148,69 +148,20 @@ struct ModelSettingsScreen: View {
     }
 
     @ViewBuilder
-    private var quickControls: some View {
-        let controls = defaults ? model.snapshot.defaultModelControls(scope: scope ?? .global)
-            : model.snapshot.modelQuickControls(threadId: model.coreDraftKey)
+    private var optionControls: some View {
+        let controls = defaults ? model.snapshot.defaultModelOptionControls(scope: scope ?? .global)
+            : model.snapshot.modelOptionControls(key: model.coreDraftKey)
         let controlsProvider = defaults ? model.snapshot.defaultModel(scope: scope ?? .global)?.model.instanceId
             : selectedModel?.instanceId
-        if controlsProvider == provider, !controls.efforts.isEmpty || controls.toggleFastTo != nil {
+        if controlsProvider == provider, !controls.isEmpty {
             Divider()
-            HStack(spacing: 16) {
-                if !controls.efforts.isEmpty {
-                    let effort = defaults ? preferences.effort ?? "自動" : controls.effort
-                    Menu {
-                        Picker("思考の深さ", selection: Binding<String?>(get: {
-                            defaults ? preferences.effort : controls.effort
-                        }, set: { value in
-                            if let scope {
-                                model.perform(.selectDefaultEffort(scope: scope, effort: value))
-                            } else if let value {
-                                model.chooseEffort(value)
-                            }
-                        })) {
-                            if defaults {
-                                Text("自動").tag(String?.none)
-                            }
-                            ForEach(controls.efforts, id: \.self) { Text($0).tag(Optional($0)) }
-                        }
-                        .pickerStyle(.inline).labelsHidden()
-                    } label: {
-                        ModelControlLabel(value: effort, icon: ReasoningStrengthIcon(level: controls.effortLevel,
-                                                                                     count: controls.efforts.count))
-                    }
-                    .accessibilityLabel("思考の深さ")
-                    .accessibilityIdentifier("model.sheet.effort")
-                    .accessibilityValue(effort)
-                    .disabled(disabled)
-                }
-                if let tier = controls.fastServiceTier {
-                    let value = defaults && preferences.serviceTier == nil ? "自動" : controls.fast ? "高速" : "通常"
-                    Menu {
-                        Picker("速度", selection: Binding<String?>(get: {
-                            defaults ? preferences.serviceTier : controls.fast ? tier : "default"
-                        }, set: { value in
-                            if let scope {
-                                model.perform(.selectDefaultServiceTier(scope: scope, serviceTier: value))
-                            } else if let value {
-                                model.chooseServiceTier(value)
-                            }
-                        })) {
-                            if defaults {
-                                Text("自動").tag(String?.none)
-                            }
-                            Text("通常").tag(Optional("default"))
-                            Text("高速").tag(Optional(tier))
-                        }
-                        .pickerStyle(.inline).labelsHidden()
-                    } label: {
-                        ModelControlLabel(value: value, icon: Image(systemName: controls.fast ? "bolt.fill" : "bolt"))
-                    }
-                    .accessibilityLabel("速度")
-                    .accessibilityIdentifier(defaults ? "model.defaults.speed" : "model.sheet.fast")
-                    .accessibilityValue(value).disabled(disabled)
+            ModelOptionControls(controls: controls, defaults: defaults, disabled: disabled) { id, value in
+                if let scope {
+                    model.perform(.selectDefaultModelOption(scope: scope, id: id, value: value))
+                } else {
+                    model.perform(.selectModelOption(threadId: model.coreDraftKey, id: id, value: value))
                 }
             }
-            .buttonStyle(.plain)
             .padding(.horizontal, 12).padding(.top, 4)
         }
     }
@@ -337,17 +288,62 @@ private struct ModelChoiceRow: View {
     }
 }
 
-private struct ModelControlLabel<Icon: View>: View {
-    let value: String
-    let icon: Icon
+private struct ModelOptionControls: View {
+    let controls: [ModelOptionControl]
+    let defaults: Bool
+    let disabled: Bool
+    let select: (String, ModelOptionValue?) -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            icon
-            Text(value)
-            Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 8) {
+            ForEach(Array(controls.enumerated()), id: \.offset) { _, control in
+                VStack(alignment: .leading, spacing: 8) {
+                    let automatic = defaults && !control.isExplicit
+                    let selected = automatic ? nil : control.value
+                    Menu {
+                        if defaults {
+                            Button { select(control.id, nil) } label: {
+                                if automatic {
+                                    Label("自動", systemImage: "checkmark")
+                                } else {
+                                    Text("自動")
+                                }
+                            }
+                        }
+                        ForEach(Array(control.choices.enumerated()), id: \.offset) { _, option in
+                            choice(option.label, value: option.value, id: control.id, selected: selected)
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(control.label)
+                            Spacer(minLength: 8)
+                            Text(automatic ? "自動" : control.valueLabel ?? "未設定").foregroundStyle(.secondary)
+                            Image(systemName: "chevron.down").font(.caption).foregroundStyle(.secondary)
+                        }
+                        .frame(minHeight: 44).contentShape(Rectangle())
+                    }
+                    .disabled(disabled)
+                    .accessibilityLabel(control.label)
+                    .accessibilityValue(automatic ? "自動" : control.valueLabel ?? "未設定")
+                    .accessibilityIdentifier("model.option." + control.id)
+                    if let description = control.description {
+                        Text(description).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
         }
-        .frame(minHeight: 44).contentShape(Rectangle())
+        .buttonStyle(.plain)
+    }
+
+    private func choice(_ label: String, value: ModelOptionValue, id: String,
+                        selected: ModelOptionValue?) -> some View {
+        Button { select(id, value) } label: {
+            if selected == value {
+                Label(label, systemImage: "checkmark")
+            } else {
+                Text(label)
+            }
+        }
     }
 }
 

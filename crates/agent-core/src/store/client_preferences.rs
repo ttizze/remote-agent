@@ -93,9 +93,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updates.borrow().follow_up_behavior, FollowUpBehavior::Steer);
-        side.dispatch(Intent::SelectDefaultEffort {
+        side.dispatch(Intent::SelectDefaultModelOption {
             scope: ModelDefaultsScope::Global,
-            effort: Some("high".into()),
+            id: "reasoningEffort".into(),
+            value: Some(agent_protocol::models::ModelOptionValue::String(
+                "high".into(),
+            )),
         })
         .await
         .unwrap();
@@ -109,7 +112,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            main.snapshot().model_defaults.effort.as_deref(),
+            agent_protocol::models::model_option_string(
+                &main.snapshot().model_defaults.options,
+                "reasoningEffort"
+            ),
             Some("high")
         );
         assert_eq!(side.snapshot().follow_up_behavior, FollowUpBehavior::Steer);
@@ -121,7 +127,10 @@ mod tests {
             FollowUpBehavior::Steer
         );
         assert_eq!(
-            restored.snapshot().model_defaults.effort.as_deref(),
+            agent_protocol::models::model_option_string(
+                &restored.snapshot().model_defaults.options,
+                "reasoningEffort"
+            ),
             Some("high")
         );
         main.close().await.unwrap();
@@ -152,7 +161,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fresh.follow_up_behavior, FollowUpBehavior::Queue);
-        assert_eq!(fresh.model_defaults.effort.as_deref(), Some("high"));
+        assert_eq!(
+            agent_protocol::models::model_option_string(
+                &fresh.model_defaults.options,
+                "reasoningEffort"
+            ),
+            Some("high")
+        );
         assert!(fresh.drafts.is_empty());
     }
 }

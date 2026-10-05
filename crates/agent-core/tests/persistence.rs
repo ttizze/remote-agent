@@ -14,8 +14,16 @@ fn device_model_defaults_apply_across_hosts_without_replacing_their_user_work() 
                 .unwrap(),
             id: "sonnet".into(),
         }),
-        effort: Some("high".into()),
-        service_tier: Some("fast".into()),
+        options: vec![
+            agent_protocol::models::ModelOptionSelection {
+                id: "reasoningEffort".into(),
+                value: agent_protocol::models::ModelOptionValue::String("high".into()),
+            },
+            agent_protocol::models::ModelOptionSelection {
+                id: "serviceTier".into(),
+                value: agent_protocol::models::ModelOptionValue::String("fast".into()),
+            },
+        ],
     };
     let scoped = [(
         agent_core::state::ModelDefaultsScope::Environment { id: "first".into() },
@@ -37,7 +45,10 @@ fn device_model_defaults_apply_across_hosts_without_replacing_their_user_work() 
             "existing".into(),
             Arc::new(Draft {
                 text: format!("{host}'s draft"),
-                effort: Some("medium".into()),
+                options: vec![agent_protocol::models::ModelOptionSelection {
+                    id: "reasoningEffort".into(),
+                    value: agent_protocol::models::ModelOptionValue::String("medium".into()),
+                }],
                 ..Default::default()
             }),
         );

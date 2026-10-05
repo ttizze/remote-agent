@@ -555,9 +555,8 @@ pub struct Submission {
     pub client_user_message_id: crate::ids::ClientInputId,
     pub input: Vec<Input>,
     pub model: Option<crate::models::ModelRef>,
-    pub effort: Option<String>,
-    #[serde(rename = "serviceTierForTurn")]
-    pub service_tier: Option<String>,
+    #[serde(default)]
+    pub options: Vec<crate::models::ModelOptionSelection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

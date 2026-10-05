@@ -301,7 +301,13 @@ mod tests {
                 .unwrap(),
             id: "selected-model".into(),
         });
-        draft.effort = Some("high".into());
+        draft.options = agent_protocol::models::with_model_option(
+            &draft.options,
+            "reasoningEffort",
+            Some(agent_protocol::models::ModelOptionValue::String(
+                "high".into(),
+            )),
+        );
         let snapshot = reduce(
             &snapshot,
             Event::Intent(Intent::SetDraft {
@@ -328,7 +334,13 @@ mod tests {
                 id: "selected-model".into()
             })
         );
-        assert_eq!(snapshot.drafts[&key].effort.as_deref(), Some("high"));
+        assert_eq!(
+            agent_protocol::models::model_option_string(
+                &snapshot.drafts[&key].options,
+                "reasoningEffort"
+            ),
+            Some("high")
+        );
         assert_eq!(snapshot.drafts[&key].invocations, vec![skill()]);
     }
 

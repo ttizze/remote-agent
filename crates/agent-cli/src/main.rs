@@ -44,8 +44,9 @@ enum Command {
         client_message_id: String,
         #[arg(long)]
         model: Option<String>,
-        #[arg(long)]
-        effort: Option<String>,
+        /// Provider option as ID=VALUE; VALUE may be a JSON string or boolean.
+        #[arg(long = "option", value_parser = model_option)]
+        options: Vec<agent_protocol::models::ModelOptionSelection>,
     },
     Approve {
         /// Opaque request ID issued by the Host.
@@ -53,6 +54,14 @@ enum Command {
         #[arg(long)]
         decision: u32,
     },
+}
+
+fn model_option(raw: &str) -> Result<agent_protocol::models::ModelOptionSelection, String> {
+    let (id, raw_value) = raw.split_once('=').ok_or("model option must be ID=VALUE")?;
+    let value = serde_json::from_str::<serde_json::Value>(raw_value)
+        .unwrap_or_else(|_| serde_json::Value::String(raw_value.into()));
+    serde_json::from_value(serde_json::json!({"id": id, "value": value}))
+        .map_err(|error| error.to_string())
 }
 
 #[tokio::main]
@@ -146,7 +155,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
             text,
             client_message_id,
             model,
-            effort,
+            options,
         } => {
             store
                 .dispatch(Intent::SetDraft {
@@ -168,7 +177,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                                 })
                             })
                             .transpose()?,
-                        effort,
+                        options,
                         ..Default::default()
                     },
                 })

@@ -1,4 +1,6 @@
 use super::*;
+use agent_core::presentation::model_settings::ModelOptionControl;
+use agent_protocol::models::ModelOptionValue;
 use agent_protocol::session::ProviderInstanceId;
 use gpui_kit::Rgba;
 
@@ -109,84 +111,19 @@ impl Desktop {
                 }
                 menu
             });
-        let mut controls = h_flex().gap_2().child(model_picker);
-        let quick = self
+        let mut controls = h_flex().flex_wrap().gap_2().child(model_picker);
+        for (index, control) in self
             .snapshot
-            .default_model_controls(self.settings_model_scope.clone());
-        if !quick.efforts.is_empty() {
-            let efforts = quick.efforts.clone();
-            let entity = cx.entity().downgrade();
-            let effort = defaults.effort.clone();
-            let scope = self.settings_model_scope.clone();
-            controls = controls.child(
-                Button::new("default-model-effort")
-                    .disabled(self.session.is_none())
-                    .label(effort.clone().unwrap_or_else(|| "自動".into()))
-                    .accessibility_label("新しい会話の推論強度")
-                    .debug_selector(|| "default-model-effort".into())
-                    .ghost()
-                    .child(Icon::new(IconName::ChevronDown).size(px(14.)))
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for value in std::iter::once(None).chain(efforts.iter().cloned().map(Some))
-                        {
-                            let entity = entity.clone();
-                            let scope = scope.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(value.clone().unwrap_or_else(|| "自動".into()))
-                                    .checked(value == effort)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = entity.update(cx, |s, cx| {
-                                            s.dispatch(Intent::SelectDefaultEffort {
-                                                scope: scope.clone(),
-                                                effort: value.clone(),
-                                            });
-                                            cx.notify();
-                                        });
-                                    }),
-                            );
-                        }
-                        menu
-                    }),
-            );
-        }
-        if let Some(fast_tier) = quick.fast_service_tier {
-            let entity = cx.entity().downgrade();
-            let selected = defaults.service_tier.clone();
-            let scope = self.settings_model_scope.clone();
-            controls = controls.child(
-                Button::new("default-model-speed")
-                    .disabled(self.session.is_none())
-                    .label(if quick.fast { "高速" } else { "通常" })
-                    .icon(fast_icon(quick.fast))
-                    .accessibility_label("新しい会話の速度")
-                    .debug_selector(|| "default-model-speed".into())
-                    .ghost()
-                    .child(Icon::new(IconName::ChevronDown).size(px(14.)))
-                    .dropdown_menu(move |mut menu, _, _| {
-                        for (label, value) in [
-                            ("自動", None),
-                            ("通常", Some("default".to_owned())),
-                            ("高速", Some(fast_tier.clone())),
-                        ] {
-                            let entity = entity.clone();
-                            let scope = scope.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(label)
-                                    .checked(value == selected)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = entity.update(cx, |s, cx| {
-                                            s.dispatch(Intent::SelectDefaultServiceTier {
-                                                scope: scope.clone(),
-                                                service_tier: value.clone(),
-                                            });
-                                            cx.notify();
-                                        });
-                                    }),
-                            );
-                        }
-                        menu
-                    }),
-            );
+            .default_model_option_controls(self.settings_model_scope.clone())
+            .into_iter()
+            .enumerate()
+        {
+            controls = controls.child(self.model_option_control(
+                control,
+                index,
+                Some(self.settings_model_scope.clone()),
+                cx,
+            ));
         }
         v_flex()
             .gap_4()
@@ -1039,8 +976,15 @@ impl Desktop {
                             .gap_3()
                             .border_t_1()
                             .border_color(rgb(0x282828))
-                            .child(self.effort_control("model-picker-effort", true, cx))
-                            .child(self.fast_control("model-picker-speed", true, cx)),
+                            .children(
+                                self.snapshot
+                                    .model_option_controls(self.draft_key().clone())
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, control)| {
+                                        self.model_option_control(control, index, None, cx)
+                                    }),
+                            ),
                     )
                 },
             );
@@ -1053,6 +997,79 @@ impl Desktop {
             .into_any_element()
     }
 
+    fn model_option_control(
+        &self,
+        control: ModelOptionControl,
+        index: usize,
+        scope: Option<agent_core::state::ModelDefaultsScope>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let automatic = scope.is_some() && !control.is_explicit;
+        let selected = if automatic { None } else { control.value };
+        let mut choices: Vec<_> = control
+            .choices
+            .into_iter()
+            .map(|choice| (choice.label, Some(choice.value)))
+            .collect();
+        if scope.is_some() {
+            choices.insert(0, ("自動".into(), None));
+        }
+        let label = format!(
+            "{}: {}",
+            control.label,
+            if automatic {
+                "自動"
+            } else {
+                control.value_label.as_deref().unwrap_or("未設定")
+            }
+        );
+        let option_id = control.id;
+        let entity = cx.entity().downgrade();
+        Button::new(format!("model-option-{index}"))
+            .debug_selector(move || format!("model-option-{index}"))
+            .disabled(!self.snapshot.connected || self.account_busy || self.busy > 0)
+            .label(label.clone())
+            .accessibility_label(label)
+            .ghost()
+            .when_some(control.description, |button, description| {
+                button.tooltip(description)
+            })
+            .child(Icon::new(IconName::ChevronDown).size(px(14.)))
+            .dropdown_menu(move |mut menu, _, _| {
+                for (label, value) in &choices {
+                    let entity = entity.clone();
+                    let option_id = option_id.clone();
+                    let scope = scope.clone();
+                    let value = value.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(label.clone())
+                            .checked(value == selected)
+                            .on_click(move |_, _, cx| {
+                                let _ = entity.update(cx, |owner, cx| {
+                                    let intent = if let Some(scope) = &scope {
+                                        Intent::SelectDefaultModelOption {
+                                            scope: scope.clone(),
+                                            id: option_id.clone(),
+                                            value: value.clone(),
+                                        }
+                                    } else {
+                                        Intent::SelectModelOption {
+                                            thread_id: owner.draft_key().clone(),
+                                            id: option_id.clone(),
+                                            value: value.clone(),
+                                        }
+                                    };
+                                    owner.dispatch(intent);
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
+            .into_any_element()
+    }
+
     pub(super) fn fast_control(
         &self,
         id: &'static str,
@@ -1060,7 +1077,8 @@ impl Desktop {
         cx: &Context<Self>,
     ) -> AnyElement {
         let controls = self.snapshot.model_quick_controls(self.draft_key().clone());
-        let (Some(next), Some(tier)) = (controls.toggle_fast_to, controls.fast_service_tier) else {
+        let (Some(next), Some(option_id)) = (controls.toggle_fast_to, controls.fast_option_id)
+        else {
             return div().into_any_element();
         };
         let fast = controls.fast;
@@ -1084,22 +1102,36 @@ impl Desktop {
                     || self.snapshot.account.login.is_some(),
             );
         if expanded {
+            let Some(control) = self
+                .snapshot
+                .model_option_controls(self.draft_key().clone())
+                .into_iter()
+                .find(|control| control.id == option_id)
+            else {
+                return div().into_any_element();
+            };
+            let choices = control.choices;
+            let selected = control.value;
             let entity = cx.entity().downgrade();
             button
                 .label(if fast { "高速" } else { "通常" })
                 .child(Icon::new(IconName::ChevronDown).size(px(14.)))
                 .dropdown_menu_with_anchor(Anchor::BottomRight, move |mut menu, _, _| {
-                    for (value, label) in [("default".to_owned(), "通常"), (tier.clone(), "高速")]
-                    {
+                    for choice in &choices {
+                        let label = &choice.label;
+                        let value = &choice.value;
                         let entity = entity.clone();
+                        let value = value.clone();
+                        let option_id = option_id.clone();
                         menu = menu.item(
-                            PopupMenuItem::new(label)
-                                .checked((value != "default") == fast)
+                            PopupMenuItem::new(label.clone())
+                                .checked(Some(&value) == selected.as_ref())
                                 .on_click(move |_, _, cx| {
                                     let _ = entity.update(cx, |s, cx| {
-                                        s.dispatch(Intent::SelectServiceTier {
+                                        s.dispatch(Intent::SelectModelOption {
                                             thread_id: s.draft_key().clone(),
-                                            service_tier: value.clone(),
+                                            id: option_id.clone(),
+                                            value: Some(value.clone()),
                                         });
                                         cx.notify();
                                     });
@@ -1113,9 +1145,10 @@ impl Desktop {
             button
                 .w(px(40.))
                 .on_click(cx.listener(move |s, _, _, _| {
-                    s.dispatch(Intent::SelectServiceTier {
+                    s.dispatch(Intent::SelectModelOption {
                         thread_id: s.draft_key().clone(),
-                        service_tier: next.clone(),
+                        id: option_id.clone(),
+                        value: Some(next.clone()),
                     });
                 }))
                 .into_any_element()
@@ -1129,6 +1162,9 @@ impl Desktop {
         cx: &Context<Self>,
     ) -> AnyElement {
         let controls = self.snapshot.model_quick_controls(self.draft_key().clone());
+        let Some(option_id) = controls.effort_option_id.clone() else {
+            return div().into_any_element();
+        };
         if controls.efforts.is_empty() {
             return div().into_any_element();
         }
@@ -1173,14 +1209,16 @@ impl Desktop {
                 for effort in &controls.efforts {
                     let value = effort.clone();
                     let entity = entity.clone();
+                    let option_id = option_id.clone();
                     menu = menu.item(
                         PopupMenuItem::new(effort.clone())
                             .checked(*effort == controls.effort)
                             .on_click(move |_, _, cx| {
                                 let _ = entity.update(cx, |s, cx| {
-                                    s.dispatch(Intent::SelectEffort {
+                                    s.dispatch(Intent::SelectModelOption {
                                         thread_id: s.draft_key().clone(),
-                                        effort: value.clone(),
+                                        id: option_id.clone(),
+                                        value: Some(ModelOptionValue::String(value.clone())),
                                     });
                                     cx.notify();
                                 });
@@ -1334,8 +1372,8 @@ mod tests {
         );
         assert!(window.debug_bounds("model-choice-gpt").is_some());
         let model = window.debug_bounds("model-choice-gpt").unwrap();
-        let effort = window.debug_bounds("model-picker-effort").unwrap();
-        let speed = window.debug_bounds("model-picker-speed").unwrap();
+        let effort = window.debug_bounds("model-option-0").unwrap();
+        let speed = window.debug_bounds("model-option-1").unwrap();
         assert!(model.bottom() <= effort.top());
         assert_eq!(effort.top(), speed.top());
         assert!(effort.right() <= speed.left());
@@ -1354,12 +1392,12 @@ mod tests {
         window.run_until_parked();
         assert!(window.debug_bounds("model-choice-claude:sonnet").is_some());
         assert!(window.debug_bounds("model-choice-gpt").is_none());
-        assert!(window.debug_bounds("model-picker-effort").is_none());
-        assert!(window.debug_bounds("model-picker-speed").is_none());
+        assert!(window.debug_bounds("model-option-0").is_none());
+        assert!(window.debug_bounds("model-option-1").is_none());
         window.simulate_click(codex.center(), Modifiers::default());
         window.run_until_parked();
         assert!(window.debug_bounds("model-choice-gpt").is_some());
-        assert!(window.debug_bounds("model-picker-effort").is_some());
+        assert!(window.debug_bounds("model-option-0").is_some());
         window.simulate_click(summary.center(), Modifiers::default());
         window.run_until_parked();
         assert!(window.debug_bounds("account-choice-0").is_some());
@@ -1473,8 +1511,8 @@ mod tests {
             window.simulate_resize(gpui_kit::size(px(width), px(720.)));
             window.run_until_parked();
             let model = window.debug_bounds("default-model").unwrap();
-            let effort = window.debug_bounds("default-model-effort").unwrap();
-            let speed = window.debug_bounds("default-model-speed").unwrap();
+            let effort = window.debug_bounds("model-option-0").unwrap();
+            let speed = window.debug_bounds("model-option-1").unwrap();
             assert!(model.right() <= effort.left());
             assert!(effort.right() <= speed.left());
             assert_eq!(model.top(), speed.top());

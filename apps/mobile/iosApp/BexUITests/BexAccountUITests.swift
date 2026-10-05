@@ -314,10 +314,10 @@ extension BexLaunchUITests {
         let choice = app.buttons["model.choice.fixture-model"]
         XCTAssertTrue(choice.waitForExistence(timeout: 15)); choice.tap()
         XCTAssertFalse(app.descendants(matching: .any)["model.error"].exists)
-        let effort = app.buttons["model.sheet.effort"]
+        let effort = app.buttons["model.option.reasoningEffort"]
         XCTAssertTrue(effort.waitForExistence(timeout: 10)); effort.tap()
         app.buttons["high"].tap()
-        let speed = app.buttons["model.defaults.speed"]
+        let speed = app.buttons["model.option.serviceTier"]
         XCTAssertTrue(speed.exists); speed.tap()
         app.buttons["高速"].tap()
         captureScreen(app, named: "Default model effort and speed for new conversations")
@@ -340,8 +340,8 @@ extension BexLaunchUITests {
         app.buttons["tasks.settings"].tap()
         app.buttons["settings.models"].tap()
         XCTAssertEqual(app.buttons["model.choice.fixture-model"].value as? String, "選択中")
-        XCTAssertEqual(app.buttons["model.sheet.effort"].value as? String, "high")
-        XCTAssertEqual(app.buttons["model.defaults.speed"].value as? String, "高速")
+        XCTAssertEqual(app.buttons["model.option.reasoningEffort"].value as? String, "high")
+        XCTAssertEqual(app.buttons["model.option.serviceTier"].value as? String, "高速")
         app.buttons["model.choice.automatic"].tap()
         XCTAssertEqual(app.buttons["model.choice.automatic"].value as? String, "選択中")
     }

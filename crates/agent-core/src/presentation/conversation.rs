@@ -894,8 +894,7 @@ mod tests {
                     },
                 ],
                 model: None,
-                effort: None,
-                service_tier: None,
+                options: Vec::new(),
             },
             delivery,
         })

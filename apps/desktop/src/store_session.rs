@@ -192,9 +192,12 @@ mod tests {
                 .await
                 .unwrap();
             store
-                .dispatch(Intent::SelectDefaultEffort {
+                .dispatch(Intent::SelectDefaultModelOption {
                     scope: agent_core::state::ModelDefaultsScope::Environment { id: "vm".into() },
-                    effort: Some("high".into()),
+                    id: "reasoningEffort".into(),
+                    value: Some(agent_protocol::models::ModelOptionValue::String(
+                        "high".into(),
+                    )),
                 })
                 .await
                 .unwrap();

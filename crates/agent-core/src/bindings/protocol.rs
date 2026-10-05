@@ -34,8 +34,7 @@ struct Submission {
     client_user_message_id: agent_protocol::ids::ClientInputId,
     input: Vec<Input>,
     model: Option<ModelRef>,
-    effort: Option<String>,
-    service_tier: Option<String>,
+    options: Vec<ModelOptionSelection>,
 }
 #[uniffi::remote(Record)]
 struct QueueControl {
@@ -103,6 +102,16 @@ struct ModelOptionChoice {
     pub label: String,
     pub description: Option<String>,
     pub is_default: bool,
+}
+#[uniffi::remote(Enum)]
+enum ModelOptionValue {
+    String(String),
+    Boolean(bool),
+}
+#[uniffi::remote(Record)]
+struct ModelOptionSelection {
+    pub id: String,
+    pub value: ModelOptionValue,
 }
 #[uniffi::remote(Enum)]
 enum ModelOptionKind {

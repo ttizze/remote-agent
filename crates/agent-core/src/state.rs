@@ -22,17 +22,16 @@ pub struct Draft {
     #[serde(default)]
     pub invocations: Vec<agent_protocol::composer::Invocation>,
     pub model: Option<crate::models::ModelRef>,
-    pub effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<String>,
+    #[serde(default)]
+    pub options: Vec<crate::models::ModelOptionSelection>,
 }
 /// Device preferences applied only when creating a new conversation draft.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ModelDefaults {
     pub model: Option<crate::models::ModelRef>,
-    pub effort: Option<String>,
-    pub service_tier: Option<String>,
+    #[serde(default)]
+    pub options: Vec<crate::models::ModelOptionSelection>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -418,8 +417,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         | Intent::EditComposer { thread_id, .. }
         | Intent::InsertInvocation { thread_id, .. }
         | Intent::SelectModel { thread_id, .. }
-        | Intent::SelectEffort { thread_id, .. }
-        | Intent::SelectServiceTier { thread_id, .. } => Some(thread_id),
+        | Intent::SelectModelOption { thread_id, .. } => Some(thread_id),
         _ => None,
     };
     if draft_key.is_some_and(|key| {
@@ -578,17 +576,16 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 let defaults = previous.model_defaults_for_cwd(&cwd);
                 let mut draft = Draft {
                     model: defaults.model,
-                    effort: defaults.effort,
-                    service_tier: defaults.service_tier,
+                    options: defaults.options,
                     ..Default::default()
                 };
                 if !previous.models.is_empty() {
-                    let (model, effort, tier) = supported_settings(
-                        draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(),
+                    let (model, options) = supported_settings(
+                        draft.model.as_ref(), &draft.options,
                         None, &previous.models, !previous.model_errors.is_empty(),
                     );
-                    let settings = (model.cloned(), effort.map(str::to_owned), tier.map(str::to_owned));
-                    (draft.model, draft.effort, draft.service_tier) = settings;
+                    let settings = (model.cloned(), options);
+                    (draft.model, draft.options) = settings;
                 }
                 Arc::make_mut(&mut next.drafts).insert(key.clone(), Arc::new(draft));
             }
@@ -634,14 +631,9 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             }
             set_model_defaults(&mut next, scope, defaults);
         }
-        Intent::SelectDefaultEffort { scope, effort } => {
+        Intent::SelectDefaultModelOption { scope, id, value } => {
             let mut defaults = previous.model_defaults(scope.clone());
-            defaults.effort = effort;
-            set_model_defaults(&mut next, scope, defaults);
-        }
-        Intent::SelectDefaultServiceTier { scope, service_tier } => {
-            let mut defaults = previous.model_defaults(scope.clone());
-            defaults.service_tier = service_tier;
+            defaults.options = crate::models::with_model_option(&defaults.options, &id, value);
             set_model_defaults(&mut next, scope, defaults);
         }
         Intent::InheritModelDefaults { scope } => {
@@ -677,12 +669,10 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         }
         Intent::SetDraftText { thread_id, text } => set_draft_text(&mut next, thread_id, text),
         intent @ (Intent::SelectModel { .. }
-        | Intent::SelectEffort { .. }
-        | Intent::SelectServiceTier { .. }) => {
+        | Intent::SelectModelOption { .. }) => {
             let thread_id = match &intent {
                 Intent::SelectModel { thread_id, .. }
-                | Intent::SelectEffort { thread_id, .. }
-                | Intent::SelectServiceTier { thread_id, .. } => thread_id,
+                | Intent::SelectModelOption { thread_id, .. } => thread_id,
                 _ => unreachable!(),
             };
             let mut draft = previous
@@ -693,33 +683,21 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             let thread_id = match intent {
                 Intent::SelectModel { thread_id, model } => {
                     if draft.model.as_ref() != Some(&model) {
-                        draft.effort = None;
-                        draft.service_tier = None;
+                        draft.options.clear();
                     }
                     draft.model = Some(model);
                     thread_id
                 }
-                Intent::SelectEffort { thread_id, effort } => {
-                    draft.effort = Some(effort);
-                    thread_id
-                }
-                Intent::SelectServiceTier {
-                    thread_id,
-                    service_tier,
-                } => {
-                    draft.service_tier = Some(service_tier);
+                Intent::SelectModelOption { thread_id, id, value } => {
+                    draft.options = crate::models::with_model_option(&draft.options, &id, value);
                     thread_id
                 }
                 _ => unreachable!(),
             };
             if !previous.models.is_empty() {
-                let (model, effort, tier) = supported_settings(draft.model.as_ref(), draft.effort.as_deref(), draft.service_tier.as_deref(), None, &previous.models, !previous.model_errors.is_empty());
-                let settings = (
-                    model.cloned(),
-                    effort.map(str::to_owned),
-                    tier.map(str::to_owned),
-                );
-                (draft.model, draft.effort, draft.service_tier) = settings;
+                let (model, options) = supported_settings(draft.model.as_ref(), &draft.options, None, &previous.models, !previous.model_errors.is_empty());
+                let settings = (model.cloned(), options);
+                (draft.model, draft.options) = settings;
             }
             if previous
                 .drafts
@@ -978,15 +956,13 @@ fn clear_session_status(thread: &mut Thread) {
 
 pub(crate) fn supported_settings<'a>(
     selected_model: Option<&'a crate::models::ModelRef>,
-    selected_effort: Option<&'a str>,
-    selected_tier: Option<&'a str>,
+    selected_options: &[crate::models::ModelOptionSelection],
     default_provider: Option<&crate::session::ProviderInstanceId>,
     models: &'a [Model],
     catalog_incomplete: bool,
 ) -> (
     Option<&'a crate::models::ModelRef>,
-    Option<&'a str>,
-    Option<&'a str>,
+    Vec<crate::models::ModelOptionSelection>,
 ) {
     // Absence in an incomplete catalog is not evidence that a saved choice was removed.
     if catalog_incomplete
@@ -995,7 +971,7 @@ pub(crate) fn supported_settings<'a>(
             .iter()
             .any(|model| Some(&model.model) == selected_model)
     {
-        return (selected_model, selected_effort, selected_tier);
+        return (selected_model, selected_options.to_vec());
     }
     let provider = default_provider.or_else(|| {
         selected_model
@@ -1016,23 +992,17 @@ pub(crate) fn supported_settings<'a>(
         .or_else(|| available.next());
     let Some(model) = model else {
         return if models.is_empty() {
-            (selected_model, None, None)
+            (selected_model, Vec::new())
         } else {
             // The other provider's catalog cannot validate this draft's options.
-            (selected_model, selected_effort, selected_tier)
+            (selected_model, selected_options.to_vec())
         };
     };
     let changed = selected_model.is_some() && selected_model != Some(&model.model);
-    let effort = model
+    let options = model
         .capabilities
-        .select(&["reasoningEffort", "effort"])
-        .and_then(|descriptor| descriptor.selected(selected_effort.filter(|_| !changed)));
-    let tier = model
-        .capabilities
-        .select(&["serviceTier"])
-        .and_then(|descriptor| descriptor.selected(selected_tier.filter(|_| !changed)))
-        .unwrap_or("default");
-    (Some(&model.model), effort, Some(tier))
+        .normalize_options(if changed { &[] } else { selected_options }, true);
+    (Some(&model.model), options)
 }
 
 fn shared_mut<'a, K: Ord + Clone + std::borrow::Borrow<Q>, Q: Ord + ?Sized, T: Clone>(

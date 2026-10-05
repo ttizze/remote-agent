@@ -1086,8 +1086,7 @@ impl Desktop {
             text: String::new(),
             attachments: Vec::new(),
             model: None,
-            effort: None,
-            service_tier: None,
+            options: Vec::new(),
         };
         self.snapshot
             .drafts

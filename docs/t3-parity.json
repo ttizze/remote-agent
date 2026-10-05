@@ -2764,7 +2764,7 @@
       "macos_android_environment": "pinned Nix SDK, JDK, cargo-ndk and Rust Android targets; Cargo/Rustc explicitly selected for Gradle"
     },
     "remaining": [
-      "remaining provider drivers, managed setup, generic option editing and handoff",
+      "remaining provider drivers, managed setup, Claude option execution and handoff",
       "complete T3 feature parity",
       "all native views and interactions matched to T3",
       "signed Nightly artifacts, updates and publication"
@@ -2801,7 +2801,7 @@
       "ci": "deferred by user"
     },
     "remaining": [
-      "generic model option editing and execution",
+      "Claude canonical model manifest and complete runtime option execution",
       "managed Codex installation and maintenance",
       "other six runtime drivers and portable handoff",
       "all native interaction and visual acceptance"
@@ -2839,9 +2839,44 @@
       "ci": "deferred by user"
     },
     "remaining": [
-      "canonical generic option selections in drafts, preferences, submissions and all native controls",
       "Claude canonical model manifest, aliases, version profiles, thinking and fast mode",
       "Android account login, logout and maintenance UI",
+      "all native interaction and visual acceptance"
+    ]
+  },
+  "generic_model_options": {
+    "state": "implemented",
+    "scope": [
+      "canonical string/boolean option selections in drafts, scoped defaults, submissions and queued edits",
+      "pure option edits preserve first position and unrelated selections while removing duplicates",
+      "core-owned descriptor normalization, labels and typed menu choices",
+      "generic desktop, iOS and Android option controls with inherited defaults",
+      "Codex native effort/serviceTierForTurn and Claude native effort conversion at driver boundaries",
+      "CLI --option ID=VALUE and current ALPN streams/14, conversation database format 4 without compatibility paths"
+    ],
+    "owners": [
+      "crates/agent-protocol/src/models.rs",
+      "crates/agent-core/src/presentation/model_settings.rs",
+      "crates/agent-core/src/state/operations.rs",
+      "apps/desktop/src/app/view/model_settings.rs",
+      "apps/mobile/iosApp/Bex/ModelControls.swift",
+      "apps/mobile/iosApp/Bex/ModelSettingsSheet.swift",
+      "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidModelSettings.kt"
+    ],
+    "verification": {
+      "unit_tests": "539 passed, 3 existing skips; Markdown regressions and standalone CLI assertions passed; Rust execution 117.889 seconds",
+      "core_integration": "103 passed: Store 66, state 27, model defaults 6, operations 1 and persistence 3",
+      "selected_native_rpc": "4 passed: Codex custom paging/actual turn options/generation fencing; Claude effort, input preservation, restart and process reuse",
+      "focused_mutations": "42 unique mutants: 35 caught and 7 unviable; no final survivors or timeouts",
+      "android": "arm64-v8a and x86_64 JNI, debug APK and test Kotlin compiled; detekt and ktfmt passed",
+      "ios": "core and Swift bindings built; app and UI test bundle build-for-testing passed; SwiftLint and SwiftFormat passed",
+      "native_acceptance_and_visual_comparison": "pending",
+      "ci": "deferred by user",
+      "rust_clippy": "all workspace targets passed with bindings and warnings denied"
+    },
+    "remaining": [
+      "Claude canonical manifest, aliases, version profiles and runtime fast/thinking/context/prompt compilation",
+      "T3 prompt-controlled traits and complete composer appearance",
       "all native interaction and visual acceptance"
     ]
   }

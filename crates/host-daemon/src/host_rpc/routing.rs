@@ -1014,8 +1014,7 @@ mod tests {
             client_user_message_id: "send".into(),
             input: Vec::new(),
             model: None,
-            effort: None,
-            service_tier: None,
+            options: Vec::new(),
         };
         store.admit(&input, SubmissionDelivery::Sending).unwrap();
         let router = SessionRouter::with_conversations(store.clone());

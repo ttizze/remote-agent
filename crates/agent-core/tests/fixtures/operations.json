@@ -870,13 +870,13 @@
         "clientUserMessageId": "client-1"
       },
       "model": null,
-      "effort": null,
       "snapshot": {
         "cwd": "/workspace",
         "status": "idle",
         "turns": []
       },
-      "listed": null
+      "listed": null,
+      "options": []
     },
     "exchanges": [
       {
@@ -893,7 +893,8 @@
                 "text_elements": []
               }
             }
-          ]
+          ],
+          "options": []
         },
         "response": {
           "result": {
@@ -920,13 +921,18 @@
         "id": "model-b",
         "instanceId": "codex"
       },
-      "effort": "high",
       "snapshot": {
         "cwd": "/workspace",
         "status": "idle",
         "turns": []
       },
-      "listed": null
+      "listed": null,
+      "options": [
+        {
+          "id": "reasoningEffort",
+          "value": "high"
+        }
+      ]
     },
     "exchanges": [
       {
@@ -948,7 +954,12 @@
             "id": "model-b",
             "instanceId": "codex"
           },
-          "effort": "high"
+          "options": [
+            {
+              "id": "reasoningEffort",
+              "value": "high"
+            }
+          ]
         },
         "response": {
           "result": {
@@ -972,13 +983,13 @@
         "clientUserMessageId": "client-1"
       },
       "model": null,
-      "effort": null,
       "snapshot": {
         "cwd": "/first",
         "status": "unknown",
         "turns": []
       },
-      "listed": null
+      "listed": null,
+      "options": []
     },
     "exchanges": [
       {
@@ -995,7 +1006,8 @@
                 "text_elements": []
               }
             }
-          ]
+          ],
+          "options": []
         },
         "response": {
           "result": {
@@ -1019,13 +1031,13 @@
         "clientUserMessageId": "client-1"
       },
       "model": null,
-      "effort": null,
       "snapshot": {
         "cwd": "/workspace",
         "status": "unknown",
         "turns": []
       },
-      "listed": null
+      "listed": null,
+      "options": []
     },
     "exchanges": [
       {
@@ -1041,7 +1053,8 @@
               }
             }
           ],
-          "clientUserMessageId": "client-1"
+          "clientUserMessageId": "client-1",
+          "options": []
         },
         "response": {
           "error": {
@@ -1083,7 +1096,7 @@
       },
       "listed": null,
       "model": null,
-      "effort": null
+      "options": []
     },
     "exchanges": [
       {
@@ -1100,7 +1113,8 @@
                 "text_elements": []
               }
             }
-          ]
+          ],
+          "options": []
         },
         "response": {
           "result": {
@@ -1128,7 +1142,7 @@
       },
       "listed": null,
       "model": null,
-      "effort": null
+      "options": []
     },
     "exchanges": [
       {
@@ -1145,7 +1159,8 @@
                 "text_elements": []
               }
             }
-          ]
+          ],
+          "options": []
         },
         "response": {
           "result": {
@@ -1180,13 +1195,13 @@
         "clientUserMessageId": "client-1"
       },
       "model": null,
-      "effort": null,
       "snapshot": {
         "cwd": "/workspace",
         "status": "idle",
         "turns": []
       },
-      "listed": null
+      "listed": null,
+      "options": []
     },
     "exchanges": [
       {
@@ -1208,7 +1223,8 @@
               }
             }
           ],
-          "clientUserMessageId": "client-1"
+          "clientUserMessageId": "client-1",
+          "options": []
         },
         "response": {
           "result": {
@@ -1252,7 +1268,7 @@
       },
       "listed": null,
       "model": null,
-      "effort": null
+      "options": []
     },
     "exchanges": [
       {
@@ -1274,7 +1290,8 @@
               }
             }
           ],
-          "clientUserMessageId": "client-1"
+          "clientUserMessageId": "client-1",
+          "options": []
         },
         "response": {
           "result": {
@@ -1313,7 +1330,7 @@
       },
       "listed": null,
       "model": null,
-      "effort": null
+      "options": []
     },
     "exchanges": [
       {
@@ -1335,7 +1352,8 @@
               }
             }
           ],
-          "clientUserMessageId": "client-1"
+          "clientUserMessageId": "client-1",
+          "options": []
         },
         "response": {
           "result": {
@@ -1417,7 +1435,8 @@
                 }
               }
             ],
-            "nextCursor": "page-2"
+            "nextCursor": "page-2",
+            "instances": []
           }
         }
       },
@@ -1492,7 +1511,8 @@
                   ]
                 }
               }
-            ]
+            ],
+            "instances": []
           }
         }
       }
@@ -1608,7 +1628,8 @@
                 }
               }
             ],
-            "nextCursor": "loop"
+            "nextCursor": "loop",
+            "instances": []
           }
         }
       },
@@ -1653,7 +1674,8 @@
                 }
               }
             ],
-            "nextCursor": "loop"
+            "nextCursor": "loop",
+            "instances": []
           }
         }
       }

@@ -152,23 +152,17 @@ impl Operation for SelectAccountForDraft {
                 {
                     if previous_provider.as_ref() != Some(&provider) {
                         draft.model = None;
-                        draft.effort = None;
-                        draft.service_tier = None;
+                        draft.options.clear();
                     }
-                    let (model, effort, tier) = supported_settings(
+                    let (model, options) = supported_settings(
                         draft.model.as_ref(),
-                        draft.effort.as_deref(),
-                        draft.service_tier.as_deref(),
+                        &draft.options,
                         Some(&provider),
                         &snapshot.models,
                         false,
                     );
-                    let settings = (
-                        model.cloned(),
-                        effort.map(str::to_owned),
-                        tier.map(str::to_owned),
-                    );
-                    (draft.model, draft.effort, draft.service_tier) = settings;
+                    let settings = (model.cloned(), options);
+                    (draft.model, draft.options) = settings;
                     Arc::make_mut(&mut snapshot.drafts).insert(self.thread_id, Arc::new(draft));
                 }
             }
@@ -388,8 +382,16 @@ mod account_model_tests {
                         .unwrap(),
                     id: "gpt".into(),
                 }),
-                effort: Some("medium".into()),
-                service_tier: Some("fast".into()),
+                options: vec![
+                    agent_protocol::models::ModelOptionSelection {
+                        id: "reasoningEffort".into(),
+                        value: agent_protocol::models::ModelOptionValue::String("medium".into()),
+                    },
+                    agent_protocol::models::ModelOptionSelection {
+                        id: "serviceTier".into(),
+                        value: agent_protocol::models::ModelOptionValue::String("fast".into()),
+                    },
+                ],
                 ..Default::default()
             }),
         );
@@ -439,15 +441,17 @@ mod account_model_tests {
             })
         );
         assert_eq!(
-            snapshot.drafts[&crate::state::DraftKey::from("draft")]
-                .effort
-                .as_deref(),
+            agent_protocol::models::model_option_string(
+                &snapshot.drafts[&crate::state::DraftKey::from("draft")].options,
+                "reasoningEffort"
+            ),
             Some("medium")
         );
         assert_eq!(
-            snapshot.drafts[&crate::state::DraftKey::from("draft")]
-                .service_tier
-                .as_deref(),
+            agent_protocol::models::model_option_string(
+                &snapshot.drafts[&crate::state::DraftKey::from("draft")].options,
+                "serviceTier"
+            ),
             Some("fast")
         );
         select(
@@ -468,8 +472,14 @@ mod account_model_tests {
                 id: "sonnet".into()
             })
         );
-        assert_eq!(draft.effort.as_deref(), Some("high"));
-        assert_eq!(draft.service_tier.as_deref(), Some("default"));
+        assert_eq!(
+            agent_protocol::models::model_option_string(&draft.options, "reasoningEffort"),
+            Some("high")
+        );
+        assert_eq!(
+            agent_protocol::models::model_option_string(&draft.options, "serviceTier"),
+            None
+        );
         assert_eq!(
             snapshot
                 .account
@@ -550,16 +560,18 @@ mod account_model_tests {
             vec![restricted]
         );
         assert_eq!(
-            snapshot.drafts[&crate::state::DraftKey::from("draft")]
-                .effort
-                .as_deref(),
+            agent_protocol::models::model_option_string(
+                &snapshot.drafts[&crate::state::DraftKey::from("draft")].options,
+                "reasoningEffort"
+            ),
             Some("medium")
         );
         assert_eq!(
-            snapshot.drafts[&crate::state::DraftKey::from("draft")]
-                .service_tier
-                .as_deref(),
-            Some("default")
+            agent_protocol::models::model_option_string(
+                &snapshot.drafts[&crate::state::DraftKey::from("draft")].options,
+                "serviceTier"
+            ),
+            None
         );
     }
 }

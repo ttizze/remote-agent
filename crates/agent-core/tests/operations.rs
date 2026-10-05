@@ -91,8 +91,7 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
                     client_user_message_id: text(input, "clientUserMessageId").into(),
                     input: items,
                     model: serde_json::from_value(command["model"].clone()).unwrap(),
-                    effort: optional(command, "effort").map(str::to_owned),
-                    service_tier: optional(command, "serviceTierForTurn").map(str::to_owned),
+                    options: serde_json::from_value(command["options"].clone()).unwrap(),
                 })
                 .await?
                 .turn_id;

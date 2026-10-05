@@ -43,8 +43,7 @@ impl Draft {
             client_user_message_id,
             input,
             model: self.model.clone(),
-            effort: self.effort.clone(),
-            service_tier: self.service_tier.clone(),
+            options: self.options.clone(),
         }
     }
 }
@@ -55,8 +54,7 @@ fn draft_from_submission(
 ) -> Draft {
     let mut draft = Draft {
         model: input.model.clone(),
-        effort: input.effort.clone(),
-        service_tier: input.service_tier.clone(),
+        options: input.options.clone(),
         ..Default::default()
     };
     let mut texts = Vec::new();
@@ -342,8 +340,16 @@ mod tests {
                     .unwrap(),
                 id: "queue-model".into(),
             }),
-            effort: Some("high".into()),
-            service_tier: Some("fast".into()),
+            options: vec![
+                agent_protocol::models::ModelOptionSelection {
+                    id: "reasoningEffort".into(),
+                    value: agent_protocol::models::ModelOptionValue::String("high".into()),
+                },
+                agent_protocol::models::ModelOptionSelection {
+                    id: "serviceTier".into(),
+                    value: agent_protocol::models::ModelOptionValue::String("fast".into()),
+                },
+            ],
         };
         let mut snapshot = Snapshot {
             navigation: Arc::new(Navigation {
@@ -440,8 +446,14 @@ mod tests {
         assert_eq!(draft.attachments.len(), 2);
         assert_eq!(draft.invocations.len(), 2);
         assert_eq!(draft.model.as_ref().unwrap().id, "queue-model");
-        assert_eq!(draft.effort.as_deref(), Some("high"));
-        assert_eq!(draft.service_tier.as_deref(), Some("fast"));
+        assert_eq!(
+            agent_protocol::models::model_option_string(&draft.options, "reasoningEffort"),
+            Some("high")
+        );
+        assert_eq!(
+            agent_protocol::models::model_option_string(&draft.options, "serviceTier"),
+            Some("fast")
+        );
         assert_eq!(
             draft.submission(
                 session.clone(),
@@ -482,7 +494,13 @@ mod tests {
             name: "new.png".into(),
             is_image: true,
         }];
-        draft.effort = Some("low".into());
+        draft.options = agent_protocol::models::with_model_option(
+            &draft.options,
+            "reasoningEffort",
+            Some(agent_protocol::models::ModelOptionValue::String(
+                "low".into(),
+            )),
+        );
         let input = draft.submission(
             session.clone(),
             "codex"
@@ -568,7 +586,13 @@ mod tests {
     fn remote_removal_never_replaces_existing_attachments_or_model_defaults() {
         let (mut snapshot, session) = state("");
         let normal = shared_mut(&mut snapshot.drafts, &DraftKey::from(&session)).unwrap();
-        normal.effort = Some("ordinary-effort".into());
+        normal.options = agent_protocol::models::with_model_option(
+            &normal.options,
+            "reasoningEffort",
+            Some(agent_protocol::models::ModelOptionValue::String(
+                "ordinary-effort".into(),
+            )),
+        );
         normal.attachments = vec![Attachment {
             path: "/isolated/ordinary.png".into(),
             name: "ordinary.png".into(),
@@ -595,14 +619,17 @@ mod tests {
         };
         let edited = Draft {
             text: "new".into(),
-            effort: Some("queue-effort".into()),
+            options: vec![agent_protocol::models::ModelOptionSelection {
+                id: "reasoningEffort".into(),
+                value: agent_protocol::models::ModelOptionValue::String("queue-effort".into()),
+            }],
             ..Default::default()
         };
         assert_eq!(
-            recovered(&original, &edited, &empty)
-                .unwrap()
-                .effort
-                .as_deref(),
+            agent_protocol::models::model_option_string(
+                &recovered(&original, &edited, &empty).unwrap().options,
+                "reasoningEffort"
+            ),
             Some("ordinary-effort")
         );
     }
@@ -753,7 +780,10 @@ mod tests {
                 .unwrap(),
         );
         let ordinary = Draft {
-            effort: Some("ordinary-effort".into()),
+            options: vec![agent_protocol::models::ModelOptionSelection {
+                id: "reasoningEffort".into(),
+                value: agent_protocol::models::ModelOptionValue::String("ordinary-effort".into()),
+            }],
             ..Default::default()
         };
         let mut edited = original.clone();
@@ -762,7 +792,7 @@ mod tests {
         assert_eq!(recovered.text, edited.text);
         assert_eq!(recovered.attachments, edited.attachments);
         assert_eq!(recovered.invocations, edited.invocations);
-        assert_eq!(recovered.effort, ordinary.effort);
+        assert_eq!(recovered.options, ordinary.options);
         edited = original.clone();
         edited.invocations.remove(0);
         let restored = super::recovered(&original, &edited, &ordinary).unwrap();

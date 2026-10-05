@@ -618,8 +618,8 @@ async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
         let previous = Snapshot {
             models: Arc::new(serde_json::from_value(json!([{"id":"model", "model":{"instanceId": "codex", "id": "model"}, "displayName":"Model", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"medium","label":"medium","isDefault":true},{"id":"max","label":"max","isDefault":false}],"currentValue":"medium"},{"id":"serviceTier","label":"Service Tier","type":"select","options":[{"id":"default","label":"Standard","isDefault":false},{"id":"priority","label":"priority","isDefault":true}],"currentValue":"priority"}]}}])).unwrap()),
             drafts: Arc::new(BTreeMap::from([(SessionRef { id: "thread".into()}.into(), Arc::new(Draft {
-                text: "old".into(), model: Some(agent_protocol::models::ModelRef { instance_id: "codex".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "model".into() }), effort: Some("medium".into()),
-                service_tier: Some("priority".into()), ..Default::default()
+                text: "old".into(), model: Some(agent_protocol::models::ModelRef { instance_id: "codex".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "model".into() }),
+                options: vec![agent_protocol::models::ModelOptionSelection { id: "reasoningEffort".into(), value: agent_protocol::models::ModelOptionValue::String("medium".into()) }, agent_protocol::models::ModelOptionSelection { id: "serviceTier".into(), value: agent_protocol::models::ModelOptionValue::String("priority".into()) }], ..Default::default()
             }))])),
             ..Default::default()
         };
@@ -651,21 +651,27 @@ async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
             drop(store.dispatch(intent));
         }
         drop(
-            store.dispatch(Intent::SelectEffort {
+            store.dispatch(Intent::SelectModelOption {
                 thread_id: SessionRef {
                     id: "thread".into(),
                 }
                 .into(),
-                effort: "max".into(),
+                id: "reasoningEffort".into(),
+                value: Some(agent_protocol::models::ModelOptionValue::String(
+                    "max".into(),
+                )),
             }),
         );
         store
-            .dispatch(Intent::SelectServiceTier {
+            .dispatch(Intent::SelectModelOption {
                 thread_id: SessionRef {
                     id: "thread".into(),
                 }
                 .into(),
-                service_tier: "default".into(),
+                id: "serviceTier".into(),
+                value: Some(agent_protocol::models::ModelOptionValue::String(
+                    "default".into(),
+                )),
             })
             .await
             .unwrap();
@@ -684,8 +690,14 @@ async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
                 id: "model".into()
             })
         );
-        assert_eq!(draft.effort.as_deref(), Some("max"));
-        assert_eq!(draft.service_tier.as_deref(), Some("default"));
+        assert_eq!(
+            agent_protocol::models::model_option_string(&draft.options, "reasoningEffort"),
+            Some("max")
+        );
+        assert_eq!(
+            agent_protocol::models::model_option_string(&draft.options, "serviceTier"),
+            Some("default")
+        );
         assert_eq!(
             previous.drafts[&DraftKey::from(SessionRef {
                 id: "thread".into()
@@ -701,40 +713,50 @@ async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
                 .is_empty()
         );
         store
-            .dispatch(Intent::SelectEffort {
+            .dispatch(Intent::SelectModelOption {
                 thread_id: SessionRef {
                     id: "thread".into(),
                 }
                 .into(),
-                effort: "invalid".into(),
+                id: "reasoningEffort".into(),
+                value: Some(agent_protocol::models::ModelOptionValue::String(
+                    "invalid".into(),
+                )),
             })
             .await
             .unwrap();
         store
-            .dispatch(Intent::SelectServiceTier {
+            .dispatch(Intent::SelectModelOption {
                 thread_id: SessionRef {
                     id: "thread".into(),
                 }
                 .into(),
-                service_tier: "invalid".into(),
+                id: "serviceTier".into(),
+                value: Some(agent_protocol::models::ModelOptionValue::String(
+                    "invalid".into(),
+                )),
             })
             .await
             .unwrap();
         let current = store.snapshot();
         assert_eq!(
-            current.drafts[&DraftKey::from(SessionRef {
-                id: "thread".into()
-            })]
-                .effort
-                .as_deref(),
+            agent_protocol::models::model_option_string(
+                &current.drafts[&DraftKey::from(SessionRef {
+                    id: "thread".into()
+                })]
+                    .options,
+                "reasoningEffort"
+            ),
             Some("medium")
         );
         assert_eq!(
-            current.drafts[&DraftKey::from(SessionRef {
-                id: "thread".into()
-            })]
-                .service_tier
-                .as_deref(),
+            agent_protocol::models::model_option_string(
+                &current.drafts[&DraftKey::from(SessionRef {
+                    id: "thread".into()
+                })]
+                    .options,
+                "serviceTier"
+            ),
             Some("priority")
         );
         assert_eq!(
@@ -1120,7 +1142,13 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
         serde_json::from_str(include_str!("fixtures/submission-drafts.json")).unwrap();
     for case in cases {
         let mut sent: Draft = serde_json::from_value(case["sent"].clone()).unwrap();
-        sent.service_tier = Some("priority".into());
+        sent.options = agent_protocol::models::with_model_option(
+            &sent.options,
+            "serviceTier",
+            Some(agent_protocol::models::ModelOptionValue::String(
+                "priority".into(),
+            )),
+        );
         let initial = Snapshot {
             conversations: Arc::new(BTreeMap::from([(
                 SessionRef { id: "thread".into() },
@@ -1154,7 +1182,12 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
         let request = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(request["method"], "host/session/submit");
         assert_eq!(request["params"]["input"][0]["text"]["text"], "sent");
-        assert_eq!(request["params"]["serviceTierForTurn"], "priority");
+        assert_eq!(
+            request["params"]["options"],
+            json!([
+                {"id":"serviceTier","value":"priority"}
+            ])
+        );
         assert!(
             store.snapshot().drafts[&DraftKey::from(SessionRef {
                 id: "thread".into()

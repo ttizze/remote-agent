@@ -845,8 +845,13 @@ impl Agent for Codex {
                     .map_err(Failure::before_submission)?;
                 }
                 params["model"] = serde_json::json!(input.model.as_ref().map(|model| &model.id));
-                params["effort"] = serde_json::json!(input.effort);
-                params["serviceTierForTurn"] = serde_json::json!(input.service_tier);
+                params["effort"] = serde_json::json!(agent_protocol::models::model_option_string(
+                    &input.options,
+                    "reasoningEffort"
+                ));
+                params["serviceTierForTurn"] = serde_json::json!(
+                    agent_protocol::models::model_option_string(&input.options, "serviceTier")
+                );
                 let reply: Value = self.request("turn/start", &params).await?;
                 Some(native_turn_id(reply["turn"]["id"].as_str())?)
             }

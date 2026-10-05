@@ -171,7 +171,7 @@ async fn configured_launcher_pagination_and_inflight_models_remain_owned_by_the_
         let receipt: agent_protocol::operations::SubmissionReceipt = call(&service, Call::Submit(agent_protocol::operations::Submission {
             thread_id: session, client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
             input: vec![agent_protocol::operations::Input::Text {text:"Custom model fixture".into()}],
-            model: Some(selected), effort: Some("max".into()), service_tier: Some("default".into()),
+            model: Some(selected), options: vec![agent_protocol::models::ModelOptionSelection { id: "reasoningEffort".into(), value: agent_protocol::models::ModelOptionValue::String("max".into()) }, agent_protocol::models::ModelOptionSelection { id: "serviceTier".into(), value: agent_protocol::models::ModelOptionValue::String("default".into()) }],
         })).await.unwrap();
         assert!(receipt.turn_id.is_some());
         let trace = std::fs::read_to_string(bin.join("rpc-trace.jsonl")).unwrap();

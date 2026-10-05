@@ -2784,8 +2784,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
             client_user_message_id: "after-removal".into(),
             input: vec![rpc::Input::Text { text: "[success] continue after removal".into() }],
             model: None,
-            effort: None,
-            service_tier: None,
+            options: Vec::new(),
         }).await.unwrap();
         assert!(receipt.turn_id.is_some());
         assert!(Path::new(&path).is_dir(), "sending must recreate the checkout");
@@ -2899,8 +2898,7 @@ async fn merged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() {
                     text: "[request] keep running until interrupted".into(),
                 }],
                 model: None,
-                effort: None,
-                service_tier: None,
+                options: Vec::new(),
             })
             .await
             .unwrap();
@@ -3724,8 +3722,7 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
                 text: "[delayed-input] wait for another client".into(),
             }],
             model: None,
-            effort: None,
-            service_tier: None,
+            options: Vec::new(),
         };
         let (started, duplicate) = tokio::join!(first.peer.call(&input), first.peer.call(&input));
         let started = started.unwrap();

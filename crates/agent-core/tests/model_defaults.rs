@@ -50,12 +50,12 @@ proptest::proptest! {
         let environment = ModelDefaultsScope::Environment { id: "vm".into() };
         let project = ModelDefaultsScope::Project { environment: "vm".into(), project: "outer".into() };
         let inner = ModelDefaultsScope::Project { environment: "vm".into(), project: "inner".into() };
-        let mut snapshot = apply(&scoped_fixture(), Intent::SelectDefaultEffort { scope: ModelDefaultsScope::Global, effort: Some("medium".into()) });
-        snapshot = apply(&snapshot, Intent::SelectDefaultServiceTier { scope: environment.clone(), service_tier: Some("priority".into()) });
+        let mut snapshot = apply(&scoped_fixture(), Intent::SelectDefaultModelOption { scope: ModelDefaultsScope::Global, id: "reasoningEffort".into(), value: Some(agent_protocol::models::ModelOptionValue::String("medium".into()))});
+        snapshot = apply(&snapshot, Intent::SelectDefaultModelOption { scope: environment.clone(), id: "serviceTier".into(), value: Some(agent_protocol::models::ModelOptionValue::String("priority".into()))});
         let effort = if project_high { "high" } else { "medium" };
-        snapshot = apply(&snapshot, Intent::SelectDefaultEffort { scope: project.clone(), effort: Some(effort.into()) });
+        snapshot = apply(&snapshot, Intent::SelectDefaultModelOption { scope: project.clone(), id: "reasoningEffort".into(), value: Some(agent_protocol::models::ModelOptionValue::String(effort.into()))});
         proptest::prop_assert!(snapshot.has_model_defaults_override(project.clone()));
-        snapshot = apply(&snapshot, Intent::SelectDefaultServiceTier { scope: inner.clone(), service_tier: Some("default".into()) });
+        snapshot = apply(&snapshot, Intent::SelectDefaultModelOption { scope: inner.clone(), id: "serviceTier".into(), value: Some(agent_protocol::models::ModelOptionValue::String("default".into()))});
         for (cwd, expected_effort, tier) in [
             (format!("/repo/{suffix}"), effort, "priority"),
             (format!("/repo/nested/{suffix}"), "medium", "default"),
@@ -64,8 +64,8 @@ proptest::proptest! {
         ] {
             snapshot = apply(&snapshot, Intent::NewChat { cwd: cwd.clone() });
             let draft = &snapshot.drafts[&DraftKey::from(format!("new:{cwd}"))];
-            proptest::prop_assert_eq!(draft.effort.as_deref(), Some(expected_effort));
-            proptest::prop_assert_eq!(draft.service_tier.as_deref(), Some(tier));
+            proptest::prop_assert_eq!(agent_protocol::models::model_option_string(&draft.options, "reasoningEffort"), Some(expected_effort));
+            proptest::prop_assert_eq!(agent_protocol::models::model_option_string(&draft.options, "serviceTier"), Some(tier));
         }
         let existing = snapshot.drafts.clone();
         let preferences = persistence::encode_client_preferences(&snapshot).unwrap();
@@ -74,7 +74,8 @@ proptest::proptest! {
         snapshot.threads = scoped_fixture().threads;
         snapshot.storage_scope = "vm:changed-session-namespace".into();
         proptest::prop_assert_eq!(&snapshot.drafts, &existing);
-        proptest::prop_assert_eq!(snapshot.model_defaults(project.clone()).effort, Some(effort.into()));
+        let project_defaults = snapshot.model_defaults(project.clone());
+        proptest::prop_assert_eq!(agent_protocol::models::model_option_string(&project_defaults.options, "reasoningEffort"), Some(effort));
         snapshot = apply(&snapshot, Intent::InheritModelDefaults { scope: project.clone() });
         proptest::prop_assert_eq!(&snapshot.drafts, &existing);
         proptest::prop_assert!(!snapshot.has_model_defaults_override(project.clone()));
@@ -84,9 +85,10 @@ proptest::proptest! {
         let cwd = format!("/repo/other-{suffix}");
         snapshot = apply(&snapshot, Intent::NewChat { cwd: cwd.clone() });
         let draft = &snapshot.drafts[&DraftKey::from(format!("new:{cwd}"))];
-        proptest::prop_assert_eq!(draft.effort.as_deref(), Some("medium"));
-        proptest::prop_assert_eq!(draft.service_tier.as_deref(), Some("default"));
-        proptest::prop_assert_eq!(snapshot.model_defaults(inner).service_tier, Some("default".into()));
+        proptest::prop_assert_eq!(agent_protocol::models::model_option_string(&draft.options, "reasoningEffort"), Some("medium"));
+        proptest::prop_assert_eq!(agent_protocol::models::model_option_string(&draft.options, "serviceTier"), Some("default"));
+        let inner_defaults = snapshot.model_defaults(inner);
+        proptest::prop_assert_eq!(agent_protocol::models::model_option_string(&inner_defaults.options, "serviceTier"), Some("default"));
     }
 }
 
@@ -138,8 +140,8 @@ proptest::proptest! {
         let snapshot = apply(&snapshot, Intent::NewChat { cwd: "/old".into() });
         let old = snapshot.drafts[&DraftKey::from("new:/old")].clone();
         let snapshot = apply(&snapshot, Intent::SelectDefaultModel { scope: ModelDefaultsScope::Global, model: Some(model.clone()) });
-        let snapshot = apply(&snapshot, Intent::SelectDefaultEffort { scope: ModelDefaultsScope::Global, effort: Some(effort.into()) });
-        let snapshot = apply(&snapshot, Intent::SelectDefaultServiceTier { scope: ModelDefaultsScope::Global, service_tier: Some(tier.into()) });
+        let snapshot = apply(&snapshot, Intent::SelectDefaultModelOption { scope: ModelDefaultsScope::Global, id: "reasoningEffort".into(), value: Some(agent_protocol::models::ModelOptionValue::String(effort.into()))});
+        let snapshot = apply(&snapshot, Intent::SelectDefaultModelOption { scope: ModelDefaultsScope::Global, id: "serviceTier".into(), value: Some(agent_protocol::models::ModelOptionValue::String(tier.into()))});
         // Restore through the actual device-storage boundary (catalogs are ephemeral).
         let mut snapshot = persistence::decode(&persistence::encode(&snapshot).unwrap()).unwrap();
         let restored_defaults = snapshot.model_defaults.clone();
@@ -150,14 +152,14 @@ proptest::proptest! {
         }
         let new = &snapshot.drafts[&DraftKey::from("new:/new")];
         proptest::prop_assert_eq!(new.model.as_ref(), Some(&model));
-        proptest::prop_assert_eq!(new.effort.as_deref(), Some(effort));
-        proptest::prop_assert_eq!(new.service_tier.as_deref(), Some(tier));
+        proptest::prop_assert_eq!(agent_protocol::models::model_option_string(&new.options, "reasoningEffort"), Some(effort));
+        proptest::prop_assert_eq!(agent_protocol::models::model_option_string(&new.options, "serviceTier"), Some(tier));
         proptest::prop_assert_eq!(&snapshot.model_defaults, &restored_defaults);
         proptest::prop_assert_eq!(&snapshot.drafts[&DraftKey::from("new:/old")], &old);
         // Reopening an existing unsent draft must preserve its own choices.
-        let snapshot = apply(&snapshot, Intent::SelectDefaultEffort { scope: ModelDefaultsScope::Global, effort: Some("medium".into()) });
+        let snapshot = apply(&snapshot, Intent::SelectDefaultModelOption { scope: ModelDefaultsScope::Global, id: "reasoningEffort".into(), value: Some(agent_protocol::models::ModelOptionValue::String("medium".into()))});
         let snapshot = apply(&snapshot, Intent::NewChat { cwd: "/new".into() });
-        proptest::prop_assert_eq!(snapshot.drafts[&DraftKey::from("new:/new")].effort.as_deref(), Some(effort));
+        proptest::prop_assert_eq!(agent_protocol::models::model_option_string(&snapshot.drafts[&DraftKey::from("new:/new")].options, "reasoningEffort"), Some(effort));
     }
 }
 
@@ -169,16 +171,22 @@ fn model_changes_reset_options_and_automatic_model_accepts_supported_options() {
     };
     let snapshot = apply(
         &snapshot,
-        Intent::SelectDefaultEffort {
+        Intent::SelectDefaultModelOption {
             scope: ModelDefaultsScope::Global,
-            effort: Some("high".into()),
+            id: "reasoningEffort".into(),
+            value: Some(agent_protocol::models::ModelOptionValue::String(
+                "high".into(),
+            )),
         },
     );
     let snapshot = apply(
         &snapshot,
-        Intent::SelectDefaultServiceTier {
+        Intent::SelectDefaultModelOption {
             scope: ModelDefaultsScope::Global,
-            service_tier: Some("priority".into()),
+            id: "serviceTier".into(),
+            value: Some(agent_protocol::models::ModelOptionValue::String(
+                "priority".into(),
+            )),
         },
     );
     let unchanged = apply(
@@ -189,9 +197,27 @@ fn model_changes_reset_options_and_automatic_model_accepts_supported_options() {
         },
     );
     assert_eq!(unchanged.model_defaults, snapshot.model_defaults);
-    let controls = snapshot.default_model_controls(ModelDefaultsScope::Global);
-    assert_eq!(controls.effort, "high");
-    assert!(controls.fast);
+    let controls = snapshot.default_model_option_controls(ModelDefaultsScope::Global);
+    assert_eq!(
+        controls
+            .iter()
+            .find(|control| control.id == "reasoningEffort")
+            .unwrap()
+            .value,
+        Some(agent_protocol::models::ModelOptionValue::String(
+            "high".into()
+        ))
+    );
+    assert_eq!(
+        controls
+            .iter()
+            .find(|control| control.id == "serviceTier")
+            .unwrap()
+            .value,
+        Some(agent_protocol::models::ModelOptionValue::String(
+            "priority".into()
+        ))
+    );
     let snapshot = apply(
         &snapshot,
         Intent::NewChat {
@@ -199,8 +225,14 @@ fn model_changes_reset_options_and_automatic_model_accepts_supported_options() {
         },
     );
     let draft = &snapshot.drafts[&DraftKey::from("new:/auto")];
-    assert_eq!(draft.effort.as_deref(), Some("high"));
-    assert_eq!(draft.service_tier.as_deref(), Some("priority"));
+    assert_eq!(
+        agent_protocol::models::model_option_string(&draft.options, "reasoningEffort"),
+        Some("high")
+    );
+    assert_eq!(
+        agent_protocol::models::model_option_string(&draft.options, "serviceTier"),
+        Some("priority")
+    );
     let model = ModelRef {
         instance_id: "claude"
             .parse::<agent_protocol::session::ProviderInstanceId>()
@@ -242,8 +274,16 @@ fn new_drafts_normalize_unsupported_options_without_overwriting_preferences() {
                     .unwrap(),
                 id: "retired".into(),
             }),
-            effort: Some("invalid".into()),
-            service_tier: Some("priority".into()),
+            options: vec![
+                agent_protocol::models::ModelOptionSelection {
+                    id: "reasoningEffort".into(),
+                    value: agent_protocol::models::ModelOptionValue::String("invalid".into()),
+                },
+                agent_protocol::models::ModelOptionSelection {
+                    id: "serviceTier".into(),
+                    value: agent_protocol::models::ModelOptionValue::String("priority".into()),
+                },
+            ],
         },
         ..Default::default()
     };
@@ -263,8 +303,14 @@ fn new_drafts_normalize_unsupported_options_without_overwriting_preferences() {
             id: "shared".into()
         }
     );
-    assert_eq!(draft.effort.as_deref(), Some("medium"));
-    assert_eq!(draft.service_tier.as_deref(), Some("default"));
+    assert_eq!(
+        agent_protocol::models::model_option_string(&draft.options, "reasoningEffort"),
+        Some("medium")
+    );
+    assert_eq!(
+        agent_protocol::models::model_option_string(&draft.options, "serviceTier"),
+        Some("default")
+    );
     assert_eq!(next.model_defaults, snapshot.model_defaults);
 }
 
@@ -273,30 +319,40 @@ async fn preference_changes_publish_while_offline() {
     let store = Store::offline(Snapshot::default());
     let mut updates = store.subscribe();
     store
-        .dispatch(Intent::SelectDefaultEffort {
+        .dispatch(Intent::SelectDefaultModelOption {
             scope: ModelDefaultsScope::Global,
-            effort: Some("high".into()),
+            id: "reasoningEffort".into(),
+            value: Some(agent_protocol::models::ModelOptionValue::String(
+                "high".into(),
+            )),
         })
         .await
         .unwrap();
     assert!(updates.has_changed().unwrap());
     assert_eq!(
-        updates.borrow_and_update().model_defaults.effort.as_deref(),
+        agent_protocol::models::model_option_string(
+            &updates.borrow_and_update().model_defaults.options,
+            "reasoningEffort"
+        ),
         Some("high")
     );
     let scope = ModelDefaultsScope::Environment { id: "vm".into() };
     store
-        .dispatch(Intent::SelectDefaultEffort {
+        .dispatch(Intent::SelectDefaultModelOption {
             scope: scope.clone(),
-            effort: Some("medium".into()),
+            id: "reasoningEffort".into(),
+            value: Some(agent_protocol::models::ModelOptionValue::String(
+                "medium".into(),
+            )),
         })
         .await
         .unwrap();
     assert!(updates.has_changed().unwrap());
     assert_eq!(
-        updates.borrow_and_update().scoped_model_defaults[&scope]
-            .effort
-            .as_deref(),
+        agent_protocol::models::model_option_string(
+            &updates.borrow_and_update().scoped_model_defaults[&scope].options,
+            "reasoningEffort"
+        ),
         Some("medium")
     );
     store.close().await.unwrap();

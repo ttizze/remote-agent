@@ -156,51 +156,15 @@ extension ThreadScreen {
                         .accessibilityLabel("キューに追加")
                         .accessibilityIdentifier("queue.add")
                     }
-                    let controls = model.snapshot.modelQuickControls(threadId: model.coreDraftKey)
-                    if let next = controls.toggleFastTo {
-                        Button { model.chooseServiceTier(next) } label: {
-                            Image(systemName: controls.fast ? "bolt.fill" : "bolt")
-                                .foregroundStyle(controls.fast ? Color.accentColor : .secondary)
-                                .frame(width: 44, height: 44)
+                    ModelComposerControls(
+                        controls: model.snapshot.modelQuickControls(threadId: model.coreDraftKey),
+                        modelName: model.currentModel?.displayName ?? "モデル",
+                        disabled: !model.isConnected || model.sending,
+                        open: { composerFocused = false; showingModelSettings = true },
+                        select: { id, value in
+                            model.perform(.selectModelOption(threadId: model.coreDraftKey, id: id, value: value))
                         }
-                        .accessibilityLabel("Fast")
-                        .accessibilityValue(controls.fast ? "オン" : "オフ")
-                        .accessibilityIdentifier("model.fast")
-                        .disabled(!model.isConnected || model.sending)
-                    }
-                    let modelName = model.currentModel?.displayName ?? "モデル"
-                    Button { composerFocused = false; showingModelSettings = true } label: {
-                        Text(modelName)
-                            .foregroundStyle(.primary)
-                            .font(.subheadline).lineLimit(1).truncationMode(.middle)
-                            .frame(minWidth: 44, minHeight: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .layoutPriority(1)
-                    .accessibilityLabel("モデル設定")
-                    .accessibilityValue(modelName)
-                    .accessibilityIdentifier("model.settings")
-                    if !controls.efforts.isEmpty {
-                        Menu {
-                            ForEach(controls.efforts, id: \.self) { effort in
-                                Button { model.chooseEffort(effort) } label: {
-                                    if effort == controls.effort {
-                                        Label(effort, systemImage: "checkmark")
-                                    } else {
-                                        Text(effort)
-                                    }
-                                }
-                                .accessibilityIdentifier("model.effort." + effort)
-                            }
-                        } label: {
-                            ReasoningStrengthIcon(level: controls.effortLevel, count: controls.efforts.count)
-                                .frame(width: 44, height: 44)
-                        }
-                        .accessibilityLabel("推論の強度")
-                        .accessibilityValue(controls.effort)
-                        .accessibilityIdentifier("model.effort")
-                        .disabled(!model.isConnected || model.sending)
-                    }
+                    )
                     Button {
                         if dictation.isRecording {
                             dictation.finish()

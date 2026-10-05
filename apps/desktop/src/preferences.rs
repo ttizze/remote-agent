@@ -61,9 +61,12 @@ mod tests {
         .unwrap();
         device.save().await.unwrap();
         main.close().await.unwrap();
-        side.dispatch(Intent::SelectDefaultEffort {
+        side.dispatch(Intent::SelectDefaultModelOption {
             scope: ModelDefaultsScope::Global,
-            effort: Some("high".into()),
+            id: "reasoningEffort".into(),
+            value: Some(agent_protocol::models::ModelOptionValue::String(
+                "high".into(),
+            )),
         })
         .await
         .unwrap();
@@ -74,6 +77,12 @@ mod tests {
         let mut snapshot = Snapshot::default();
         restarted.owner.capture().apply(&mut snapshot);
         assert_eq!(snapshot.follow_up_behavior, FollowUpBehavior::Steer);
-        assert_eq!(snapshot.model_defaults.effort.as_deref(), Some("high"));
+        assert_eq!(
+            agent_protocol::models::model_option_string(
+                &snapshot.model_defaults.options,
+                "reasoningEffort"
+            ),
+            Some("high")
+        );
     }
 }

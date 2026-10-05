@@ -1,6 +1,9 @@
 //! Model-picker and quick-control decisions shared by native clients.
 use crate::{
-    models::{Model, ModelRef, provider_models},
+    models::{
+        Model, ModelOptionKind, ModelOptionSelection, ModelOptionValue, ModelRef,
+        model_option_value, provider_models,
+    },
     session::ProviderInstanceId,
     state::{DraftKey, ModelDefaults, ModelDefaultsScope, Snapshot},
 };
@@ -44,12 +47,30 @@ impl Snapshot {
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ModelQuickControls {
+    pub effort_option_id: Option<String>,
     pub efforts: Vec<String>,
     pub effort: String,
     pub effort_level: u32,
     pub fast: bool,
-    pub toggle_fast_to: Option<String>,
-    pub fast_service_tier: Option<String>,
+    pub fast_option_id: Option<String>,
+    pub toggle_fast_to: Option<ModelOptionValue>,
+}
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ModelOptionControl {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub choices: Vec<ModelOptionControlChoice>,
+    pub value: Option<ModelOptionValue>,
+    pub value_label: Option<String>,
+    pub is_explicit: bool,
+}
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ModelOptionControlChoice {
+    pub label: String,
+    pub value: ModelOptionValue,
 }
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -144,10 +165,9 @@ impl Snapshot {
 
     pub fn default_model(&self, scope: ModelDefaultsScope) -> Option<Model> {
         let defaults = self.model_defaults(scope);
-        let (model, _, _) = crate::state::supported_settings(
+        let (model, _) = crate::state::supported_settings(
             defaults.model.as_ref(),
-            defaults.effort.as_deref(),
-            defaults.service_tier.as_deref(),
+            &defaults.options,
             None,
             &self.models,
             !self.model_errors.is_empty(),
@@ -158,22 +178,41 @@ impl Snapshot {
             .cloned()
     }
 
-    pub fn default_model_controls(&self, scope: ModelDefaultsScope) -> ModelQuickControls {
-        let defaults = self.model_defaults(scope);
-        let (model, effort, tier) = crate::state::supported_settings(
-            defaults.model.as_ref(),
-            defaults.effort.as_deref(),
-            defaults.service_tier.as_deref(),
-            None,
-            &self.models,
-            !self.model_errors.is_empty(),
-        );
-        quick_controls(
+    pub fn default_model_option_controls(
+        &self,
+        scope: ModelDefaultsScope,
+    ) -> Vec<ModelOptionControl> {
+        let defaults = self.model_defaults(scope.clone());
+        let model = self.default_model(scope);
+        let options = model
+            .as_ref()
+            .map(|model| {
+                model.capabilities.normalize_options(
+                    if defaults
+                        .model
+                        .as_ref()
+                        .is_some_and(|saved| saved != &model.model)
+                    {
+                        &[]
+                    } else {
+                        &defaults.options
+                    },
+                    false,
+                )
+            })
+            .unwrap_or(defaults.options);
+        option_controls(model.as_ref(), &options)
+    }
+
+    pub fn model_option_controls(&self, key: DraftKey) -> Vec<ModelOptionControl> {
+        let Some(draft) = self.drafts.get(&key) else {
+            return Vec::new();
+        };
+        option_controls(
             self.models
                 .iter()
-                .find(|choice| Some(&choice.model) == model),
-            effort,
-            tier,
+                .find(|model| Some(&model.model) == draft.model.as_ref()),
+            &draft.options,
         )
     }
 
@@ -310,17 +349,12 @@ impl Snapshot {
             self.models
                 .iter()
                 .find(|model| Some(&model.model) == draft.model.as_ref()),
-            draft.effort.as_deref(),
-            draft.service_tier.as_deref(),
+            &draft.options,
         )
     }
 }
 
-fn quick_controls(
-    model: Option<&Model>,
-    effort: Option<&str>,
-    service_tier: Option<&str>,
-) -> ModelQuickControls {
+fn quick_controls(model: Option<&Model>, options: &[ModelOptionSelection]) -> ModelQuickControls {
     let Some(model) = model else {
         return ModelQuickControls::default();
     };
@@ -331,42 +365,215 @@ fn quick_controls(
         .map(|choice| choice.id.clone())
         .collect();
     let effort = reasoning
-        .and_then(|descriptor| descriptor.selected(effort))
-        .unwrap_or_default()
-        .to_owned();
+        .and_then(|descriptor| descriptor.value(options))
+        .and_then(|value| match value {
+            ModelOptionValue::String(value) => Some(value),
+            _ => None,
+        })
+        .unwrap_or_default();
     let effort_level = efforts
         .iter()
         .position(|value| *value == effort)
         .map_or(0, |index| index as u32 + 1);
     let service = model.capabilities.select(&["serviceTier"]);
-    let tier = service
-        .and_then(|descriptor| descriptor.selected(service_tier))
-        .unwrap_or("default");
-    let fast_tier = service
+    let tier = service.and_then(|descriptor| descriptor.value(options));
+    let mut fast_tiers = service
         .into_iter()
         .flat_map(|descriptor| descriptor.choices())
-        .find(|tier| matches!(tier.id.as_str(), "priority" | "fast"));
-    let fast = fast_tier.is_some_and(|fast| fast.id == tier);
+        .filter(|tier| {
+            matches!(tier.id.as_str(), "priority" | "fast" | "ultrafast")
+                || matches!(tier.label.as_str(), "Fast" | "Ultrafast")
+        });
+    let fast_tier = fast_tiers.clone().next();
+    let boolean_fast = model
+        .capabilities
+        .option_descriptors
+        .iter()
+        .find(|descriptor| {
+            descriptor.id == "fastMode"
+                && matches!(descriptor.kind, ModelOptionKind::Boolean { .. })
+        });
+    let fast = if fast_tier.is_some() {
+        fast_tiers.any(|fast| tier.as_ref() == Some(&ModelOptionValue::String(fast.id.clone())))
+    } else {
+        boolean_fast.and_then(|descriptor| descriptor.value(options))
+            == Some(ModelOptionValue::Boolean(true))
+    };
+    let (fast_option_id, toggle_fast_to) = if let Some(tier) = fast_tier {
+        (
+            service.map(|descriptor| descriptor.id.clone()),
+            if fast {
+                service
+                    .and_then(|descriptor| {
+                        descriptor
+                            .choices()
+                            .iter()
+                            .find(|choice| choice.id == "default")
+                    })
+                    .map(|choice| ModelOptionValue::String(choice.id.clone()))
+            } else {
+                Some(ModelOptionValue::String(tier.id.clone()))
+            },
+        )
+    } else if let Some(descriptor) = boolean_fast {
+        (
+            Some(descriptor.id.clone()),
+            Some(ModelOptionValue::Boolean(!fast)),
+        )
+    } else {
+        (None, None)
+    };
     ModelQuickControls {
+        effort_option_id: reasoning.map(|descriptor| descriptor.id.clone()),
         efforts,
         effort,
         effort_level,
         fast,
-        fast_service_tier: fast_tier.map(|tier| tier.id.clone()),
-        toggle_fast_to: fast_tier.map(|tier| {
-            if fast {
-                "default".into()
-            } else {
-                tier.id.clone()
-            }
-        }),
+        fast_option_id,
+        toggle_fast_to,
     }
+}
+
+fn option_controls(
+    model: Option<&Model>,
+    selections: &[ModelOptionSelection],
+) -> Vec<ModelOptionControl> {
+    model
+        .into_iter()
+        .flat_map(|model| &model.capabilities.option_descriptors)
+        .map(|descriptor| {
+            let is_explicit = model_option_value(selections, &descriptor.id).is_some();
+            let value = if descriptor.id == "variant" && !is_explicit {
+                None
+            } else {
+                descriptor.value(selections)
+            };
+            let value_label = value.as_ref().map(|value| match value {
+                ModelOptionValue::String(value) => descriptor
+                    .choices()
+                    .iter()
+                    .find(|choice| &choice.id == value)
+                    .map(|choice| choice.label.clone())
+                    .unwrap_or_else(|| value.clone()),
+                ModelOptionValue::Boolean(value) => {
+                    if *value {
+                        "On".into()
+                    } else {
+                        "Off".into()
+                    }
+                }
+            });
+            ModelOptionControl {
+                id: descriptor.id.clone(),
+                label: descriptor.label.clone(),
+                description: descriptor.description.clone(),
+                choices: match &descriptor.kind {
+                    ModelOptionKind::Select { options, .. } => options
+                        .iter()
+                        .map(|choice| ModelOptionControlChoice {
+                            label: choice.label.clone(),
+                            value: ModelOptionValue::String(choice.id.clone()),
+                        })
+                        .collect(),
+                    ModelOptionKind::Boolean { .. } => [false, true]
+                        .into_iter()
+                        .map(|value| ModelOptionControlChoice {
+                            label: if value { "On" } else { "Off" }.into(),
+                            value: ModelOptionValue::Boolean(value),
+                        })
+                        .collect(),
+                },
+                value,
+                value_label,
+                is_explicit,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::Draft;
+
+    #[test]
+    fn generic_controls_keep_false_and_explicitness_and_drop_overrides_for_a_removed_model() {
+        let model: Model = serde_json::from_value(serde_json::json!({
+            "id":"custom", "model":{"instanceId":"claude","id":"custom"}, "displayName":"Custom",
+            "capabilities":{"optionDescriptors":[
+                {"id":"fastMode","label":"Fast","type":"boolean","currentValue":true},
+                {"id":"variant","label":"Variant","type":"select","options":[{"id":"standard","label":"Standard","isDefault":true}]}
+            ]}
+        })).unwrap();
+        let mut snapshot = Snapshot {
+            models: Arc::new(vec![model.clone()]),
+            model_defaults: ModelDefaults {
+                model: Some(model.model.clone()),
+                options: vec![ModelOptionSelection {
+                    id: "fastMode".into(),
+                    value: ModelOptionValue::Boolean(false),
+                }],
+            },
+            ..Default::default()
+        };
+        let controls = snapshot.default_model_option_controls(ModelDefaultsScope::Global);
+        assert_eq!(controls[0].value, Some(ModelOptionValue::Boolean(false)));
+        assert_eq!(controls[0].value_label.as_deref(), Some("Off"));
+        assert_eq!(
+            controls[0]
+                .choices
+                .iter()
+                .map(|choice| &choice.value)
+                .collect::<Vec<_>>(),
+            [
+                &ModelOptionValue::Boolean(false),
+                &ModelOptionValue::Boolean(true)
+            ]
+        );
+        assert!(controls[0].is_explicit);
+        assert_eq!(controls[1].value, None);
+        assert!(!controls[1].is_explicit);
+        assert_eq!(controls[1].choices[0].label, "Standard");
+        assert_eq!(
+            controls[1].choices[0].value,
+            ModelOptionValue::String("standard".into())
+        );
+        let quick = quick_controls(Some(&model), &snapshot.model_defaults.options);
+        assert!(!quick.fast);
+        assert_eq!(quick.fast_option_id.as_deref(), Some("fastMode"));
+        assert_eq!(quick.toggle_fast_to, Some(ModelOptionValue::Boolean(true)));
+        snapshot.model_defaults.model.as_mut().unwrap().id = "removed".into();
+        let controls = snapshot.default_model_option_controls(ModelDefaultsScope::Global);
+        assert_eq!(controls[0].value, Some(ModelOptionValue::Boolean(true)));
+        assert_eq!(controls[0].value_label.as_deref(), Some("On"));
+        assert!(!controls[0].is_explicit);
+        assert_eq!(
+            snapshot.model_defaults.options[0].value,
+            ModelOptionValue::Boolean(false)
+        );
+        Arc::make_mut(&mut snapshot.drafts).insert(
+            "active".into(),
+            Arc::new(Draft {
+                model: Some(model.model),
+                options: crate::models::with_model_option(
+                    &snapshot.model_defaults.options,
+                    "variant",
+                    Some(ModelOptionValue::String("standard".into())),
+                ),
+                ..Default::default()
+            }),
+        );
+        let controls = snapshot.model_option_controls("active".into());
+        assert_eq!(controls[0].value, Some(ModelOptionValue::Boolean(false)));
+        assert!(controls[0].is_explicit);
+        assert_eq!(
+            controls[1].value,
+            Some(ModelOptionValue::String("standard".into()))
+        );
+        assert_eq!(controls[1].value_label.as_deref(), Some("Standard"));
+        assert!(controls[1].is_explicit);
+        assert!(snapshot.model_option_controls("missing".into()).is_empty());
+    }
     use std::sync::Arc;
 
     proptest::proptest! {
@@ -447,19 +654,22 @@ mod tests {
         );
         let controls = snapshot.model_quick_controls("draft".into());
         assert_eq!(controls.effort_level, 2);
-        assert_eq!(controls.toggle_fast_to.as_deref(), Some("priority"));
+        assert_eq!(
+            controls.toggle_fast_to,
+            Some(ModelOptionValue::String("priority".into()))
+        );
         Arc::make_mut(
             Arc::make_mut(&mut snapshot.drafts)
                 .get_mut(&crate::state::DraftKey::from("draft"))
                 .unwrap(),
         )
-        .service_tier = Some("priority".into());
+        .options = vec![ModelOptionSelection {
+            id: "serviceTier".into(),
+            value: ModelOptionValue::String("priority".into()),
+        }];
         assert_eq!(
-            snapshot
-                .model_quick_controls("draft".into())
-                .toggle_fast_to
-                .as_deref(),
-            Some("default")
+            snapshot.model_quick_controls("draft".into()).toggle_fast_to,
+            Some(ModelOptionValue::String("default".into()))
         );
         Arc::make_mut(
             Arc::make_mut(&mut snapshot.drafts)

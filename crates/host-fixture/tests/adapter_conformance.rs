@@ -52,8 +52,7 @@ fn submission(session: &SessionRef, text: &str) -> op::Submission {
         client_user_message_id: ClientInputId::from(format!("{}:{text}", session.id)),
         input: vec![op::Input::Text { text: text.into() }],
         model: None,
-        effort: None,
-        service_tier: None,
+        options: Vec::new(),
     }
 }
 fn prompt<'a>(provider: &ProviderInstanceId, scenario: &'a str) -> &'a str {

@@ -17,7 +17,7 @@ mod config;
 #[cfg(test)]
 mod tests;
 
-const DATABASE_FORMAT: u32 = 3;
+const DATABASE_FORMAT: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(super) struct NativeIdentity {

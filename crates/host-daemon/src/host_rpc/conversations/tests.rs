@@ -227,8 +227,7 @@ fn input(target: &SessionRef) -> agent_protocol::operations::Submission {
         client_user_message_id: "input".into(),
         input: Vec::new(),
         model: None,
-        effort: None,
-        service_tier: None,
+        options: Vec::new(),
     }
 }
 
@@ -948,7 +947,13 @@ fn changes_and_command_receipts_survive_restart_and_payload_reuse_is_rejected() 
         Some(accepted)
     );
     let mut changed = input.clone();
-    changed.effort = Some("high".into());
+    changed.options = agent_protocol::models::with_model_option(
+        &changed.options,
+        "reasoningEffort",
+        Some(agent_protocol::models::ModelOptionValue::String(
+            "high".into(),
+        )),
+    );
     assert!(store.admit(&changed, SubmissionDelivery::Sending).is_err());
     let thread = store.open_thread(&target, 5, true).unwrap().thread;
     assert_eq!(thread.name.as_deref(), Some("New title"));
@@ -1658,8 +1663,20 @@ fn queue_edit_replaces_attachments_context_and_settings_without_changing_its_rec
             .unwrap(),
         id: "another-model".into(),
     });
-    edited.effort = Some("high".into());
-    edited.service_tier = Some("fast".into());
+    edited.options = agent_protocol::models::with_model_option(
+        &edited.options,
+        "reasoningEffort",
+        Some(agent_protocol::models::ModelOptionValue::String(
+            "high".into(),
+        )),
+    );
+    edited.options = agent_protocol::models::with_model_option(
+        &edited.options,
+        "serviceTier",
+        Some(agent_protocol::models::ModelOptionValue::String(
+            "fast".into(),
+        )),
+    );
     store
         .queue_control(
             &target,

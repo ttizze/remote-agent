@@ -405,23 +405,15 @@ fn normalize_draft_settings(snapshot: &mut Snapshot, key: &DraftKey, catalog_rec
     if catalog_received || !snapshot.models.is_empty() {
         let settings = supported_settings(
             previous.model.as_ref(),
-            previous.effort.as_deref(),
-            previous.service_tier.as_deref(),
+            &previous.options,
             provider.as_ref(),
             &snapshot.models,
             !snapshot.model_errors.is_empty(),
         );
-        if settings
-            != (
-                previous.model.as_ref(),
-                previous.effort.as_deref(),
-                previous.service_tier.as_deref(),
-            )
-        {
+        if settings != (previous.model.as_ref(), previous.options.clone()) {
             let draft = Arc::make_mut(&mut draft);
             draft.model = settings.0.cloned();
-            draft.effort = settings.1.map(str::to_owned);
-            draft.service_tier = settings.2.map(str::to_owned);
+            draft.options = settings.1;
         }
     }
     if !snapshot.drafts.contains_key(key) || !Arc::ptr_eq(&draft, &previous) {
@@ -637,8 +629,16 @@ mod tests {
                     .unwrap(),
                 id: "selected".into(),
             }),
-            effort: Some("max".into()),
-            service_tier: Some("priority".into()),
+            options: vec![
+                agent_protocol::models::ModelOptionSelection {
+                    id: "reasoningEffort".into(),
+                    value: agent_protocol::models::ModelOptionValue::String("max".into()),
+                },
+                agent_protocol::models::ModelOptionSelection {
+                    id: "serviceTier".into(),
+                    value: agent_protocol::models::ModelOptionValue::String("priority".into()),
+                },
+            ],
             ..Default::default()
         });
         for failed in [false, true] {
@@ -666,8 +666,14 @@ mod tests {
             let draft = &snapshot.drafts[&key];
             assert_eq!(draft.text, original.text);
             assert_eq!(draft.model, original.model);
-            assert_eq!(draft.effort.as_deref(), failed.then_some("max"));
-            assert_eq!(draft.service_tier.as_deref(), failed.then_some("priority"));
+            assert_eq!(
+                agent_protocol::models::model_option_string(&draft.options, "reasoningEffort"),
+                failed.then_some("max")
+            );
+            assert_eq!(
+                agent_protocol::models::model_option_string(&draft.options, "serviceTier"),
+                failed.then_some("priority")
+            );
         }
     }
 
@@ -709,7 +715,13 @@ mod tests {
                         instance_id: provider.clone(),
                         id: "saved".into(),
                     }),
-                    effort: saved_choice.then(|| "low".into()),
+                    options: agent_protocol::models::with_model_option(
+                        &[],
+                        "reasoningEffort",
+                        saved_choice.then(|| {
+                            agent_protocol::models::ModelOptionValue::String("low".into())
+                        }),
+                    ),
                     ..Default::default()
                 }),
             );
@@ -759,8 +771,14 @@ mod tests {
             "high"
         };
         // The composer and the next submission must use the same settings.
-        assert_eq!(draft.effort.as_deref(), Some(effort));
-        assert_eq!(draft.service_tier.as_deref(), Some("default"));
+        assert_eq!(
+            agent_protocol::models::model_option_string(&draft.options, "reasoningEffort"),
+            Some(effort)
+        );
+        assert_eq!(
+            agent_protocol::models::model_option_string(&draft.options, "serviceTier"),
+            None
+        );
         assert_eq!(snapshot.model_quick_controls(key).effort, effort);
     }
 }

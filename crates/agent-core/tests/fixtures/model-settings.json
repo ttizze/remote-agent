@@ -8,8 +8,16 @@
         "id": "model-a",
         "instanceId": "codex"
       },
-      "effort": "max",
-      "service_tier": "default"
+      "options": [
+        {
+          "id": "reasoningEffort",
+          "value": "max"
+        },
+        {
+          "id": "serviceTier",
+          "value": "default"
+        }
+      ]
     },
     "models": [
       {
@@ -68,8 +76,16 @@
         "id": "model-a",
         "instanceId": "codex"
       },
-      "effort": "max",
-      "service_tier": "default"
+      "options": [
+        {
+          "id": "reasoningEffort",
+          "value": "max"
+        },
+        {
+          "id": "serviceTier",
+          "value": "default"
+        }
+      ]
     }
   },
   {
@@ -81,8 +97,16 @@
         "id": "model-a",
         "instanceId": "codex"
       },
-      "effort": "max",
-      "service_tier": "priority"
+      "options": [
+        {
+          "id": "reasoningEffort",
+          "value": "max"
+        },
+        {
+          "id": "serviceTier",
+          "value": "priority"
+        }
+      ]
     },
     "models": [
       {
@@ -118,8 +142,12 @@
         "id": "model-a",
         "instanceId": "codex"
       },
-      "effort": "medium",
-      "service_tier": "default"
+      "options": [
+        {
+          "id": "reasoningEffort",
+          "value": "medium"
+        }
+      ]
     }
   },
   {
@@ -131,8 +159,7 @@
         "id": "model-a",
         "instanceId": "codex"
       },
-      "effort": null,
-      "service_tier": null
+      "options": []
     },
     "models": [
       {
@@ -191,8 +218,16 @@
         "id": "model-a",
         "instanceId": "codex"
       },
-      "effort": "medium",
-      "service_tier": "priority"
+      "options": [
+        {
+          "id": "reasoningEffort",
+          "value": "medium"
+        },
+        {
+          "id": "serviceTier",
+          "value": "priority"
+        }
+      ]
     }
   },
   {
@@ -204,8 +239,16 @@
         "id": "model-a",
         "instanceId": "codex"
       },
-      "effort": "max",
-      "service_tier": "priority"
+      "options": [
+        {
+          "id": "reasoningEffort",
+          "value": "max"
+        },
+        {
+          "id": "serviceTier",
+          "value": "priority"
+        }
+      ]
     },
     "models": [],
     "expected": {
@@ -215,7 +258,7 @@
         "id": "model-a",
         "instanceId": "codex"
       },
-      "effort": null
+      "options": []
     }
   },
   {
@@ -227,8 +270,16 @@
         "id": "model-a",
         "instanceId": "codex"
       },
-      "effort": "max",
-      "service_tier": "default"
+      "options": [
+        {
+          "id": "reasoningEffort",
+          "value": "max"
+        },
+        {
+          "id": "serviceTier",
+          "value": "default"
+        }
+      ]
     },
     "models": [
       {
@@ -335,8 +386,16 @@
         "id": "model-b",
         "instanceId": "codex"
       },
-      "effort": "medium",
-      "service_tier": "priority"
+      "options": [
+        {
+          "id": "reasoningEffort",
+          "value": "medium"
+        },
+        {
+          "id": "serviceTier",
+          "value": "priority"
+        }
+      ]
     },
     "select": {
       "id": "model-b",
@@ -352,8 +411,16 @@
         "id": "removed",
         "instanceId": "codex"
       },
-      "effort": "max",
-      "service_tier": "default"
+      "options": [
+        {
+          "id": "reasoningEffort",
+          "value": "max"
+        },
+        {
+          "id": "serviceTier",
+          "value": "default"
+        }
+      ]
     },
     "models": [
       {
@@ -461,8 +528,16 @@
         "id": "model-b",
         "instanceId": "codex"
       },
-      "effort": "medium",
-      "service_tier": "priority"
+      "options": [
+        {
+          "id": "reasoningEffort",
+          "value": "medium"
+        },
+        {
+          "id": "serviceTier",
+          "value": "priority"
+        }
+      ]
     }
   }
 ]

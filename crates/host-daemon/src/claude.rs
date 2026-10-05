@@ -628,16 +628,7 @@ impl Claude {
             .map(|model| model.id.as_str())
             .unwrap_or(&state.model)
             .to_owned();
-        let effort = params.effort.as_deref();
-        // Core's "default" means the backend's normal service. Claude has no
-        // equivalent of Codex's explicit priority/flex tiers.
-        if params
-            .service_tier
-            .as_deref()
-            .is_some_and(|tier| tier != "default")
-        {
-            return Err("ClaudeではCodexのサービス階層を指定できません。".into());
-        }
+        let effort = agent_protocol::models::model_option_string(&params.options, "effort");
         let session = state.session_id.to_string();
         let cwd = state.cwd.clone();
         let (auth_home, auth_revision) = {
@@ -2020,8 +2011,7 @@ mod execution_tests {
                 },
             ],
             model: None,
-            effort: None,
-            service_tier: None,
+            options: Vec::new(),
         };
         assert_eq!(
             claude

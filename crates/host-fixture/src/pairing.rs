@@ -239,8 +239,7 @@ fn route(
                         text: "[external-reply] Latest reply from another client".into(),
                     }],
                     model: None,
-                    effort: None,
-                    service_tier: None,
+                    options: Vec::new(),
                 },
             )?;
         }

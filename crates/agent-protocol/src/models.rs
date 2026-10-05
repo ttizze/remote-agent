@@ -257,6 +257,90 @@ pub struct ModelOptionChoice {
     #[serde(default)]
     pub is_default: bool,
 }
+
+/// Canonical selections retain their authored order and distinguish false from absence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ModelOptionValue {
+    String(#[serde(deserialize_with = "option_string")] String),
+    Boolean(bool),
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelOptionSelection {
+    #[serde(deserialize_with = "option_string")]
+    pub id: String,
+    #[serde(with = "crate::protocol::json")]
+    pub value: ModelOptionValue,
+}
+fn option_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    let value = value.trim();
+    if value.is_empty() {
+        Err(serde::de::Error::custom("model option must not be empty"))
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+pub fn model_option_value<'a>(
+    options: &'a [ModelOptionSelection],
+    id: &str,
+) -> Option<&'a ModelOptionValue> {
+    options
+        .iter()
+        .find(|option| option.id == id)
+        .map(|option| &option.value)
+}
+pub fn model_option_string<'a>(options: &'a [ModelOptionSelection], id: &str) -> Option<&'a str> {
+    match model_option_value(options, id) {
+        Some(ModelOptionValue::String(value)) => Some(value),
+        _ => None,
+    }
+}
+pub fn model_option_boolean(options: &[ModelOptionSelection], id: &str) -> Option<bool> {
+    match model_option_value(options, id) {
+        Some(ModelOptionValue::Boolean(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+/// Editing preserves the first position and removes duplicates for this ID.
+pub fn with_model_option(
+    options: &[ModelOptionSelection],
+    id: &str,
+    value: Option<ModelOptionValue>,
+) -> Vec<ModelOptionSelection> {
+    let id = id.trim();
+    if id.is_empty() {
+        return options.to_vec();
+    }
+    let value = match value {
+        Some(ModelOptionValue::String(value)) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| ModelOptionValue::String(value.to_owned()))
+        }
+        value => value,
+    };
+    let mut replacement = value.map(|value| ModelOptionSelection {
+        id: id.into(),
+        value,
+    });
+    let mut next = Vec::with_capacity(options.len());
+    for option in options {
+        if option.id == id {
+            if let Some(replacement) = replacement.take() {
+                next.push(replacement);
+            }
+        } else {
+            next.push(option.clone());
+        }
+    }
+    if let Some(replacement) = replacement {
+        next.push(replacement);
+    }
+    next
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ModelOptionKind {
@@ -318,9 +402,64 @@ impl ModelCapabilities {
                 && matches!(descriptor.kind, ModelOptionKind::Select { .. })
         })
     }
+
+    /// Store supported raw choices, including prompt-injected choices, until the driver compiles them.
+    pub fn normalize_options(
+        &self,
+        selections: &[ModelOptionSelection],
+        include_defaults: bool,
+    ) -> Vec<ModelOptionSelection> {
+        self.option_descriptors
+            .iter()
+            .filter_map(|descriptor| {
+                let raw = model_option_value(selections, &descriptor.id);
+                if raw.is_none() && (!include_defaults || descriptor.id == "variant") {
+                    return None;
+                }
+                let value = match &descriptor.kind {
+                    ModelOptionKind::Select { options, .. } => {
+                        let saved = match raw {
+                            Some(ModelOptionValue::String(value)) => {
+                                Some(value.trim()).filter(|value| !value.is_empty())
+                            }
+                            _ => None,
+                        };
+                        saved
+                            .filter(|value| {
+                                options.is_empty()
+                                    || options.iter().any(|choice| choice.id == *value)
+                            })
+                            .or_else(|| descriptor.selected(None))
+                            .map(|value| ModelOptionValue::String(value.into()))
+                    }
+                    ModelOptionKind::Boolean { current_value } => match raw {
+                        Some(ModelOptionValue::Boolean(value)) => Some(*value),
+                        _ => *current_value,
+                    }
+                    .map(ModelOptionValue::Boolean),
+                }?;
+                Some(ModelOptionSelection {
+                    id: descriptor.id.clone(),
+                    value,
+                })
+            })
+            .collect()
+    }
 }
 
 impl ModelOptionDescriptor {
+    pub fn value(&self, selections: &[ModelOptionSelection]) -> Option<ModelOptionValue> {
+        match &self.kind {
+            ModelOptionKind::Select { .. } => self
+                .selected(model_option_string(selections, &self.id))
+                .map(|value| ModelOptionValue::String(value.into())),
+            ModelOptionKind::Boolean { current_value } => {
+                model_option_boolean(selections, &self.id)
+                    .or(*current_value)
+                    .map(ModelOptionValue::Boolean)
+            }
+        }
+    }
     pub fn choices(&self) -> &[ModelOptionChoice] {
         match &self.kind {
             ModelOptionKind::Select { options, .. } => options,
@@ -532,6 +671,135 @@ pub struct ChangedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    proptest::proptest! {
+        #[test]
+        fn canonical_options_preserve_types_order_and_false_across_json_and_binary(
+            id in "[a-z]{1,16}", text in "[a-z]{1,32}", flag in proptest::bool::ANY,
+        ) {
+            let options = vec![
+                ModelOptionSelection { id: id.clone(), value: ModelOptionValue::Boolean(flag) },
+                ModelOptionSelection { id: id.clone(), value: ModelOptionValue::String(text.clone()) },
+            ];
+            let json = serde_json::to_value(&options).unwrap();
+            proptest::prop_assert_eq!(&json, &serde_json::json!([
+                {"id":id,"value":flag}, {"id":id,"value":text}
+            ]));
+            let from_json: Vec<ModelOptionSelection> = serde_json::from_value(json).unwrap();
+            proptest::prop_assert_eq!(&from_json, &options);
+            let binary = crate::protocol::encode(&options).unwrap();
+            let from_binary: Vec<ModelOptionSelection> = crate::protocol::decode(&binary).unwrap();
+            proptest::prop_assert_eq!(&from_binary, &options);
+            proptest::prop_assert_eq!(model_option_boolean(&options, &id), Some(flag));
+            proptest::prop_assert_eq!(model_option_string(&options, &id), None);
+            proptest::prop_assert_eq!(model_option_boolean(&options[1..], &id), None);
+            proptest::prop_assert_eq!(model_option_string(&options[1..], &id), Some(text.as_str()));
+            let changed = with_model_option(&options, &id, Some(ModelOptionValue::Boolean(!flag)));
+            proptest::prop_assert_eq!(changed, vec![ModelOptionSelection { id: id.clone(), value: ModelOptionValue::Boolean(!flag) }]);
+            proptest::prop_assert_eq!(options.len(), 2);
+            proptest::prop_assert!(with_model_option(&options, &id, None).is_empty());
+            let other = ModelOptionSelection {id: format!("{id}_other"), value: ModelOptionValue::Boolean(false)};
+            let authored = vec![options[0].clone(),other.clone(),options[1].clone()];
+            let edited = with_model_option(&authored, &id, Some(ModelOptionValue::String(format!(" {text} "))));
+            proptest::prop_assert_eq!(edited, vec![options[1].clone(),other.clone()]);
+            proptest::prop_assert_eq!(with_model_option(std::slice::from_ref(&other), &id, Some(ModelOptionValue::String(text.clone()))),
+                vec![other.clone(),options[1].clone()]);
+            proptest::prop_assert_eq!(with_model_option(std::slice::from_ref(&other), &id, None), vec![other]);
+        }
+    }
+
+    #[test]
+    fn authored_option_values_are_trimmed_and_only_canonical_scalar_arrays_are_accepted() {
+        let options: Vec<ModelOptionSelection> = serde_json::from_value(serde_json::json!([
+            {"id":" effort ","value":" high "}, {"id":"fastMode","value":false}
+        ]))
+        .unwrap();
+        assert_eq!(model_option_string(&options, "effort"), Some("high"));
+        assert_eq!(model_option_boolean(&options, "fastMode"), Some(false));
+        for invalid in [
+            serde_json::json!({"effort":"high"}),
+            serde_json::json!([{"id":" ","value":false}]),
+            serde_json::json!([{"id":"effort","value":" "}]),
+            serde_json::json!([{"id":"effort","value":null}]),
+            serde_json::json!([{"id":"effort","value":42}]),
+            serde_json::json!([{"id":"effort","value":{}}]),
+        ] {
+            assert!(serde_json::from_value::<Vec<ModelOptionSelection>>(invalid).is_err());
+        }
+        assert_eq!(
+            with_model_option(&options, " ", Some(ModelOptionValue::Boolean(true))),
+            options
+        );
+        assert_eq!(
+            with_model_option(
+                &options,
+                " effort ",
+                Some(ModelOptionValue::String("  ".into()))
+            ),
+            vec![options[1].clone()]
+        );
+    }
+
+    #[test]
+    fn option_normalization_retains_prompt_choices_and_false_without_inventing_variant_overrides() {
+        let caps: ModelCapabilities = serde_json::from_value(serde_json::json!({"optionDescriptors":[
+            {"id":"effort","label":"Reasoning","type":"select","options":[{"id":"high","label":"High","isDefault":true},{"id":"ultrathink","label":"Ultra"}],"promptInjectedValues":["ultrathink"]},
+            {"id":"fastMode","label":"Fast","type":"boolean","currentValue":true},
+            {"id":"variant","label":"Variant","type":"select","options":[{"id":"default","label":"Default","isDefault":true}]},
+            {"id":"opaque","label":"Opaque","type":"select","options":[]}
+        ]})).unwrap();
+        let saved: Vec<ModelOptionSelection> = serde_json::from_value(serde_json::json!([
+            {"id":"effort","value":"ultrathink"},{"id":"fastMode","value":false},
+            {"id":"opaque","value":" custom "},{"id":"unknown","value":true}
+        ]))
+        .unwrap();
+        let original = saved.clone();
+        let normalized = caps.normalize_options(&saved, true);
+        assert_eq!(
+            model_option_string(&normalized, "effort"),
+            Some("ultrathink")
+        );
+        assert_eq!(
+            caps.option_descriptors[0].value(&normalized),
+            Some(ModelOptionValue::String("high".into()))
+        );
+        assert_eq!(model_option_boolean(&normalized, "fastMode"), Some(false));
+        assert_eq!(model_option_string(&normalized, "opaque"), Some("custom"));
+        assert!(model_option_value(&normalized, "unknown").is_none());
+        assert!(model_option_value(&normalized, "variant").is_none());
+        assert_eq!(caps.normalize_options(&normalized, true), normalized);
+        assert_eq!(saved, original);
+        assert!(caps.normalize_options(&[], false).is_empty());
+        let defaults = caps.normalize_options(&[], true);
+        assert_eq!(model_option_string(&defaults, "effort"), Some("high"));
+        assert_eq!(model_option_boolean(&defaults, "fastMode"), Some(true));
+        assert!(model_option_value(&defaults, "opaque").is_none());
+        assert!(model_option_value(&defaults, "variant").is_none());
+        let invalid = vec![
+            ModelOptionSelection {
+                id: "effort".into(),
+                value: ModelOptionValue::String("unsupported".into()),
+            },
+            ModelOptionSelection {
+                id: "fastMode".into(),
+                value: ModelOptionValue::String("false".into()),
+            },
+            ModelOptionSelection {
+                id: "variant".into(),
+                value: ModelOptionValue::Boolean(false),
+            },
+            ModelOptionSelection {
+                id: "opaque".into(),
+                value: ModelOptionValue::String("  ".into()),
+            },
+        ];
+        let corrected = caps.normalize_options(&invalid, false);
+        assert_eq!(model_option_string(&corrected, "effort"), Some("high"));
+        assert_eq!(model_option_boolean(&corrected, "fastMode"), Some(true));
+        assert_eq!(model_option_string(&corrected, "variant"), Some("default"));
+        assert!(model_option_value(&corrected, "opaque").is_none());
+        assert_eq!(caps.normalize_options(&corrected, false), corrected);
+    }
 
     #[test]
     fn custom_model_rows_keep_first_authored_identity_and_drop_only_bad_capabilities() {

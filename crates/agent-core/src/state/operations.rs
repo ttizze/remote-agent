@@ -125,13 +125,10 @@ pub enum Intent {
         scope: super::ModelDefaultsScope,
         model: Option<crate::models::ModelRef>,
     },
-    SelectDefaultEffort {
+    SelectDefaultModelOption {
         scope: super::ModelDefaultsScope,
-        effort: Option<String>,
-    },
-    SelectDefaultServiceTier {
-        scope: super::ModelDefaultsScope,
-        service_tier: Option<String>,
+        id: String,
+        value: Option<crate::models::ModelOptionValue>,
     },
     InheritModelDefaults {
         scope: super::ModelDefaultsScope,
@@ -158,13 +155,10 @@ pub enum Intent {
         thread_id: DraftKey,
         model: crate::models::ModelRef,
     },
-    SelectEffort {
+    SelectModelOption {
         thread_id: DraftKey,
-        effort: String,
-    },
-    SelectServiceTier {
-        thread_id: DraftKey,
-        service_tier: String,
+        id: String,
+        value: Option<crate::models::ModelOptionValue>,
     },
     Submit {
         thread_id: Option<crate::session::SessionRef>,

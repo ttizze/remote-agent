@@ -504,8 +504,14 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
                 id: "model".into()
             })
         );
-        assert_eq!(draft.effort.as_deref(), Some("high"));
-        assert_eq!(draft.service_tier.as_deref(), Some("priority"));
+        assert_eq!(
+            agent_protocol::models::model_option_string(&draft.options, "reasoningEffort"),
+            Some("high")
+        );
+        assert_eq!(
+            agent_protocol::models::model_option_string(&draft.options, "serviceTier"),
+            Some("priority")
+        );
         let (edited, _) = reduce(
             &current,
             Event::Intent(Intent::SetDraftText {
@@ -816,8 +822,16 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
                     .unwrap(),
                 id: "codex-model".into(),
             }),
-            effort: Some("high".into()),
-            service_tier: Some("priority".into()),
+            options: vec![
+                agent_protocol::models::ModelOptionSelection {
+                    id: "reasoningEffort".into(),
+                    value: agent_protocol::models::ModelOptionValue::String("high".into()),
+                },
+                agent_protocol::models::ModelOptionSelection {
+                    id: "serviceTier".into(),
+                    value: agent_protocol::models::ModelOptionValue::String("priority".into()),
+                },
+            ],
             text: "keep this input".into(),
             ..Default::default()
         };
@@ -865,9 +879,12 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         );
         state = reduce(
             &state,
-            Event::Intent(Intent::SelectEffort {
+            Event::Intent(Intent::SelectModelOption {
                 thread_id: "saved".into(),
-                effort: "high".into(),
+                id: "reasoningEffort".into(),
+                value: Some(agent_protocol::models::ModelOptionValue::String(
+                    "high".into(),
+                )),
             }),
         )
         .0;
