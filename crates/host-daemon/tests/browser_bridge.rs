@@ -80,7 +80,8 @@ async fn installed_codex_exposes_the_same_browser_as_the_phone() {
     let browser = host_daemon::browser::Browser::start(root.path().join("profile"))
         .await
         .unwrap();
-    let mut mcp = browser.provider_config(&session.to_string()).unwrap();
+    let session = orchestration::ThreadId::new("browser-test").unwrap();
+    let mut mcp = browser.provider_config(session.as_str()).unwrap();
     mcp["command"] = env!("CARGO_BIN_EXE_host-daemon").into();
     std::fs::create_dir_all(root.path().join("codex")).unwrap();
     let server = codex_app_server::CodexAppServer::spawn(codex_app_server::AppServerConfig {
@@ -102,7 +103,6 @@ async fn installed_codex_exposes_the_same_browser_as_the_phone() {
         .outcome
         .unwrap();
     let thread = started["thread"]["id"].as_str().unwrap();
-    let session = orchestration::ThreadId::new("browser-test").unwrap();
     let mut found = false;
     for _ in 0..20 {
         let status = server

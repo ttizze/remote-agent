@@ -449,18 +449,17 @@ impl HostRpcService {
                         .ensure_restore_isolated(&projection.thread, &scope.cwd)
                         .await?;
                 }
-                if let CommandBody::ThreadCreate { project_id, .. } = &command.body {
-                    if !self
+                if let CommandBody::ThreadCreate { project_id, .. } = &command.body
+                    && !self
                         .projects()
                         .await?
                         .iter()
                         .any(|project| project.id == project_id.as_str())
-                    {
-                        return Err(Failure::new(
-                            "project_unavailable",
-                            "project is not registered",
-                        ));
-                    }
+                {
+                    return Err(Failure::new(
+                        "project_unavailable",
+                        "project is not registered",
+                    ));
                 }
                 self.dispatch_command(command)?.into()
             }
@@ -885,24 +884,13 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("workspace_preparation_failed", error))?
                 .map(|path| path.to_string_lossy().into_owned());
         }
-        if !matches!(params.create.body, CommandBody::ThreadCreate { .. }) {
-            return Err(Failure::new(
-                "invalid_launch",
-                "launch requires thread.create",
-            ));
-        }
         self.dispatch_command(&create)?;
-        self.dispatch_command(&Command {
-            command_id: CommandId::new(format!("{}:input", params.create.command_id))
-                .expect("derived id"),
-            thread_id: params.create.thread_id.clone(),
-            body: CommandBody::MessageDispatch(params.input.clone()),
-        })
-        .map_err(|mut failure| {
-            failure.delivery = agent_protocol::error::Delivery::Unknown;
-            failure
-        })
-        .map(Into::into)
+        self.dispatch_command(&input_command)
+            .map_err(|mut failure| {
+                failure.delivery = agent_protocol::error::Delivery::Unknown;
+                failure
+            })
+            .map(Into::into)
     }
     async fn projects(&self) -> Result<Vec<agent_protocol::models::Project>, Failure> {
         let mut projects = self
@@ -1926,6 +1914,243 @@ impl ProviderAdapter for HostResources {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn input(text: &str) -> MessageDispatch {
+        MessageDispatch {
+            source_plan_ref: None,
+            created_by: CreatedBy::User,
+            creation_source: CreationSource::Desktop,
+            message_id: MessageId::new("input").unwrap(),
+            text: text.into(),
+            context: None,
+            attachments: vec![],
+            model_selection: None,
+            delivery_intent: None,
+            dispatch_mode: DispatchMode::StartImmediately,
+        }
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deleting_threads_keeps_shared_cwd_terminal_until_the_last_thread() {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let directory = tempfile::tempdir().unwrap();
+            let projects = ProjectStore::new(directory.path().join("bex-worktrees.json"));
+            let cwd = projects.chat_directory();
+            tokio::fs::create_dir(&cwd).await.unwrap();
+            let service =
+                HostRpcService::new(Err("fixture provider unavailable".into()), projects).unwrap();
+            let first = create();
+            let mut second = first.clone();
+            second.command_id = CommandId::new("create-second").unwrap();
+            second.thread_id = ThreadId::new("second").unwrap();
+            service.dispatch_command(&first).unwrap();
+            service.dispatch_command(&second).unwrap();
+            let session = service
+                .inner
+                .connections
+                .open_authenticated_session(Some("fixture-device".into()));
+            service
+                .inner
+                .resources
+                .terminals
+                .start(
+                    service.inner.connections.clone(),
+                    session.id(),
+                    agent_protocol::operations::terminal_handle(&cwd.to_string_lossy()),
+                    cwd.to_string_lossy().into_owned(),
+                    agent_protocol::operations::TerminalSize { cols: 80, rows: 24 },
+                )
+                .await
+                .unwrap();
+            for (index, thread) in [first.thread_id, second.thread_id].into_iter().enumerate() {
+                service
+                    .dispatch_command(&Command {
+                        command_id: CommandId::new(format!("delete-{index}")).unwrap(),
+                        thread_id: thread.clone(),
+                        body: CommandBody::ThreadDelete,
+                    })
+                    .unwrap();
+                let projection = service.inner.store.projection(&thread).unwrap();
+                service
+                    .inner
+                    .resources
+                    .execute(
+                        &Effect {
+                            id: format!("cleanup-{index}"),
+                            thread_id: thread,
+                            body: EffectBody::TerminalCleanup,
+                        },
+                        projection,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    service
+                        .inner
+                        .resources
+                        .terminals
+                        .in_use(&dunce::canonicalize(&cwd).unwrap()),
+                    index == 0
+                );
+            }
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn stop_and_steer_bypass_unavailable_workspace_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let projects = ProjectStore::new(directory.path().join("bex-worktrees.json"));
+        let service =
+            HostRpcService::new(Err("fixture provider unavailable".into()), projects.clone())
+                .unwrap();
+        service.dispatch_command(&create()).unwrap();
+        service
+            .dispatch_command(&Command {
+                command_id: CommandId::new("send").unwrap(),
+                thread_id: create().thread_id,
+                body: CommandBody::MessageDispatch(input("start")),
+            })
+            .unwrap();
+        let mut projection = service.inner.store.projection(&create().thread_id).unwrap();
+        projection.thread.project_id = ProjectId::new("missing-project").unwrap();
+        tokio::fs::write(
+            projects.path().with_file_name("bex-projects.json"),
+            "invalid JSON",
+        )
+        .await
+        .unwrap();
+        let run = &projection.runs[0];
+        for body in [
+            EffectBody::Interrupt {
+                run_id: run.id.clone(),
+                provider_turn_id: ProviderTurnId::new("turn").unwrap(),
+            },
+            EffectBody::Steer {
+                run_id: run.id.clone(),
+                provider_turn_id: ProviderTurnId::new("turn").unwrap(),
+                message_id: run.user_message_id.clone(),
+            },
+        ] {
+            let result = service
+                .inner
+                .resources
+                .execute(
+                    &Effect {
+                        id: "control".into(),
+                        thread_id: projection.thread.id.clone(),
+                        body,
+                    },
+                    projection.clone(),
+                )
+                .await;
+            assert_eq!(result.unwrap_err().message, "Codex unavailable");
+        }
+    }
+    #[tokio::test]
+    async fn launch_survives_delivery_cancellation_and_resends_share_one_worktree() {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("repository");
+            std::fs::create_dir(&root).unwrap();
+            crate::git::text(&root, &["init"]).unwrap();
+            crate::git::text(
+                &root,
+                &[
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "fixture",
+                ],
+            )
+            .unwrap();
+            let projects = ProjectStore::new(directory.path().join("bex-worktrees.json"));
+            let project = projects.register(&root).await.unwrap();
+            let service =
+                HostRpcService::new(Err("fixture provider unavailable".into()), projects).unwrap();
+            service
+                .inner
+                .resources
+                .worktrees
+                .settings(Some(agent_protocol::models::WorktreeSettings {
+                    create_on_new_session: true,
+                    ..Default::default()
+                }))
+                .await
+                .unwrap();
+            let mut command = create();
+            if let CommandBody::ThreadCreate { project_id, .. } = &mut command.body {
+                *project_id = ProjectId::new(project).unwrap();
+            }
+            let mut launch = agent_protocol::orchestration::LaunchThread {
+                create: command,
+                input: input(" "),
+            };
+            assert!(service.launch_thread(&launch).await.is_err());
+            assert!(
+                service
+                    .inner
+                    .resources
+                    .worktrees
+                    .list()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            launch.input.text = "start".into();
+            let guard = service.inner.launches.lock().await;
+            let session = service.inner.connections.open_session();
+            let delivery_service = service.clone();
+            let call = Call::LaunchThread(Box::new(launch.clone()));
+            let delivery =
+                tokio::spawn(async move { delivery_service.dispatch(session.id(), &call).await });
+            while Arc::strong_count(&service.inner) < 3 {
+                tokio::task::yield_now().await;
+            }
+            delivery.abort();
+            let _ = delivery.await;
+            drop(guard);
+            while service
+                .inner
+                .store
+                .projection(&launch.create.thread_id)
+                .is_err()
+            {
+                tokio::task::yield_now().await;
+            }
+            let (first, second) = tokio::join!(
+                service.launch_thread(&launch),
+                service.launch_thread(&launch)
+            );
+            assert!(first.is_ok() && second.is_ok());
+            assert_eq!(
+                service
+                    .inner
+                    .resources
+                    .worktrees
+                    .list()
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                service
+                    .inner
+                    .store
+                    .projection(&launch.create.thread_id)
+                    .unwrap()
+                    .runs
+                    .len(),
+                1
+            );
+        })
+        .await
+        .unwrap();
+    }
     fn create() -> Command {
         Command {
             command_id: CommandId::new("create").unwrap(),
