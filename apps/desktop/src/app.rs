@@ -489,10 +489,16 @@ impl Desktop {
                     .update(cx, |input, cx| input.set_value(text.clone(), window, cx));
             }
         }
-        if let Some(review) = &self.snapshot.workspace.review {
-            self.diff
-                .update(cx, |view, cx| view.set_source(&review.diff, cx));
-        }
+        self.diff.update(cx, |view, cx| {
+            view.set_source(
+                self.snapshot
+                    .workspace
+                    .review
+                    .as_ref()
+                    .map_or("", |review| &review.diff),
+                cx,
+            )
+        });
         cx.notify();
     }
     fn action(

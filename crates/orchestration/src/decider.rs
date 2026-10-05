@@ -800,6 +800,12 @@ pub fn decide(
             emit(&mut decision, command, now, payload);
         }
     }
+    let capture = crate::checkpoint::await_capture(
+        std::mem::take(&mut decision.events),
+        &projection.checkpoint_scopes,
+    );
+    decision.events = capture.events;
+    decision.effects.extend(capture.effects);
     require(!decision.events.is_empty(), "command must produce an event")?;
     Ok(decision)
 }

@@ -16,6 +16,16 @@ and holds queued runs. A held queue requires explicit resume. Normal send queues
 behind an active run; an idle thread starts immediately. Steer, restart, stop
 and queue edit/reorder/cancel are distinct commands.
 
+Root checkpoints use a private Git index and fsynced dedicated refs. HEAD and
+the user's index remain unchanged. A baseline is recorded before provider start;
+successful completion waits for a durable capture effect before advancing the
+queue. Capture records, the run/node and a checkpoint timeline item commit
+together. Stopped runs retain their status; recovery retains capture effects
+and holds the queue. Redelivery does not rewrite a saved checkpoint. Non-Git
+workspaces record missing checkpoints; Git failures record errors without
+blocking conversation. Cone sparse checkout is supported; non-cone rebuilding
+records an error. Rollback is not yet implemented.
+
 Subscriptions register under the commit lock and deliver snapshot or bounded
 replay, synchronized, then live events. Replay retains 128 events and 1 MiB;
 projections retain 200 messages; shells retain 1,000 threads and 8 MiB. Missing

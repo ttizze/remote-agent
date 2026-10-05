@@ -565,6 +565,14 @@ fn detail(item: &TurnItem) -> (String, String) {
             "Context compacted".into(),
             summary.clone().unwrap_or_default(),
         ),
+        TurnItemBody::Checkpoint { files, .. } => (
+            format!("{} changed files", files.len()),
+            files
+                .iter()
+                .map(|file| format!("{}  +{} −{}", file.path, file.additions, file.deletions))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
         TurnItemBody::Notification {
             summary, detail, ..
         } => (summary.clone(), detail.clone().unwrap_or_default()),

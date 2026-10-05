@@ -324,30 +324,69 @@ private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
 @Composable
 private fun WorkspaceDiff(model: AndroidAppModel, modifier: Modifier) {
     val cwd = model.snapshot.currentDirectory()
-    LaunchedEffect(cwd) { if (cwd.isNotBlank()) model.perform(Intent.ReviewWorkspace(cwd)) }
+    val thread = model.snapshot.selectedThreadId()
+    var expanded by remember(thread) { mutableStateOf(false) }
+    var selection by remember(thread) { mutableStateOf<TurnDiffOption?>(null) }
+    fun refresh() {
+        val range = selection
+        if (range != null) model.perform(Intent.ReadTurnDiff(range.fromTurnCount, range.toTurnCount, false))
+        else if (cwd.isNotBlank()) model.perform(Intent.ReviewWorkspace(cwd))
+    }
+    LaunchedEffect(cwd, thread, selection) { refresh() }
     val review = model.snapshot.review()
     val files = remember(review) { review?.diffFiles().orEmpty() }
-    LazyColumn(modifier, contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (review == null) item { CircularProgressIndicator() } else if (files.isEmpty()) item { Text("No changes") }
-        items(files, key = { it.path }) { file ->
-            Column {
-                Text(file.path, style = MaterialTheme.typography.labelLarge)
-                androidx.compose.foundation.text.selection.SelectionContainer {
-                    Column {
-                        file.rows.forEach { row ->
-                            Text(
-                                row.text,
-                                fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodySmall,
-                                color =
-                                    T3.color(
-                                        when (row.kind) {
-                                            "+" -> "successForeground"
-                                            "-" -> "errorForeground"
-                                            else -> "text"
-                                        }
-                                    ),
-                            )
+    Column(modifier) {
+        Row {
+            Box(Modifier.weight(1f)) {
+                TextButton(onClick = { expanded = true }) { Text(selection?.label ?: "Workspace changes") }
+                DropdownMenu(expanded, { expanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Workspace changes") },
+                        onClick = {
+                            selection = null
+                            expanded = false
+                        },
+                    )
+                    model.snapshot.turnDiffOptions().forEach { option ->
+                        DropdownMenuItem(
+                            text = { Text(option.label) },
+                            onClick = {
+                                selection = option
+                                expanded = false
+                            },
+                        )
+                    }
+                }
+            }
+            TextButton(onClick = { refresh() }) { Text("Refresh") }
+        }
+        LazyColumn(
+            Modifier.weight(1f),
+            contentPadding = PaddingValues(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (review == null) item { CircularProgressIndicator() }
+            else if (files.isEmpty()) item { Text("No changes") }
+            items(files, key = { it.path }) { file ->
+                Column {
+                    Text(file.path, style = MaterialTheme.typography.labelLarge)
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Column {
+                            file.rows.forEach { row ->
+                                Text(
+                                    row.text,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color =
+                                        T3.color(
+                                            when (row.kind) {
+                                                "+" -> "successForeground"
+                                                "-" -> "errorForeground"
+                                                else -> "text"
+                                            }
+                                        ),
+                                )
+                            }
                         }
                     }
                 }

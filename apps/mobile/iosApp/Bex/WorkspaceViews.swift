@@ -66,6 +66,7 @@ struct WorkspaceScreen: View {
     let root: String
     @Binding var showingDiff: Bool
     let close: () -> Void
+    @State private var diffSelection: TurnDiffOption?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -76,8 +77,22 @@ struct WorkspaceScreen: View {
             .pickerStyle(.segmented).padding(.horizontal).padding(.bottom)
             Divider()
             if showingDiff {
+                HStack {
+                    Menu(diffSelection?.label ?? "Workspace changes") {
+                        Button("Workspace changes") { diffSelection = nil }
+                        ForEach(model.snapshot.turnDiffOptions(), id: \.label) { option in
+                            Button(option.label) { diffSelection = option }
+                        }
+                    }
+                    Spacer()
+                }.padding()
                 WorkspaceDiffScreen { complete in
-                    request(.reviewWorkspace(cwd: root)) { snapshot, result in
+                    let intent = diffSelection.map { Intent.readTurnDiff(
+                        fromTurnCount: $0.fromTurnCount,
+                        toTurnCount: $0.toTurnCount,
+                        ignoreWhitespace: false
+                    ) } ?? .reviewWorkspace(cwd: root)
+                    request(intent) { snapshot, result in
                         if case let .failure(failure) = result {
                             complete(.failure(failure))
                         } else if let review = snapshot.review() {
@@ -93,6 +108,7 @@ struct WorkspaceScreen: View {
                         }
                     }
                 }
+                .id(diffSelection.map { "\($0.fromTurnCount):\($0.toTurnCount)" } ?? "workspace")
             } else {
                 WorkspaceNavigation(root: root) { directory, openDirectory in
                     WorkspaceDirectoryScreen(snapshot: model.snapshot, directory: directory,
@@ -104,7 +120,6 @@ struct WorkspaceScreen: View {
             }
         }
         .background(T3.color("canvas"))
-        .onDisappear { model.perform(.reviewWorkspace(cwd: root)) }
     }
 
     private func request(_ intent: Intent, completion: @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) {

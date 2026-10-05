@@ -81,6 +81,7 @@ macro_rules! results {
     }
 }
 results! {
+    TurnDiff(crate::orchestration::TurnDiff),
     Dispatched(crate::orchestration::DispatchReceipt),
     ShellStream(::orchestration::ShellStreamItem), ThreadStream(::orchestration::ThreadStreamItem),
     Projection(::orchestration::ThreadProjection), TurnItem(Option<::orchestration::TurnItem>),

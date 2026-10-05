@@ -1352,20 +1352,78 @@ impl Desktop {
                 }
             }
             Some(Panel::Diff) => {
+                let owner = cx.entity().downgrade();
+                let cwd = self.snapshot.cwd();
+                let options = self.snapshot.turn_diff_options();
+                let refresh = self.snapshot.workspace.diff_request.as_ref().map_or_else(
+                    || Intent::ReviewWorkspace { cwd: cwd.clone() },
+                    |request| Intent::ReadTurnDiff {
+                        from_turn_count: request.from_turn_count,
+                        to_turn_count: request.to_turn_count,
+                        ignore_whitespace: request.ignore_whitespace,
+                    },
+                );
+                let label = self
+                    .snapshot
+                    .workspace
+                    .review
+                    .as_ref()
+                    .map_or("Changes".to_owned(), |review| review.branch.clone());
                 body = body
                     .child(
                         h_flex()
                             .h_10()
                             .px_3()
-                            .child(div().flex_1().child("Workspace changes"))
-                            .child(self.action(
-                                "refresh-diff",
-                                "Refresh",
-                                Intent::ReviewWorkspace {
-                                    cwd: self.snapshot.cwd(),
-                                },
-                                cx,
-                            )),
+                            .child(
+                                Button::new("diff-range")
+                                    .label(label)
+                                    .small()
+                                    .ghost()
+                                    .dropdown_caret(true)
+                                    .dropdown_menu(move |mut menu, _, _| {
+                                        let workspace_owner = owner.clone();
+                                        let cwd = cwd.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new("Workspace changes").on_click(
+                                                move |_, _, cx| {
+                                                    let _ =
+                                                        workspace_owner.update(cx, |view, _| {
+                                                            view.perform(
+                                                                Intent::ReviewWorkspace {
+                                                                    cwd: cwd.clone(),
+                                                                },
+                                                                None,
+                                                            )
+                                                        });
+                                                },
+                                            ),
+                                        );
+                                        for option in &options {
+                                            let owner = owner.clone();
+                                            let from = option.from_turn_count;
+                                            let to = option.to_turn_count;
+                                            menu = menu.item(
+                                                PopupMenuItem::new(option.label.clone()).on_click(
+                                                    move |_, _, cx| {
+                                                        let _ = owner.update(cx, |view, _| {
+                                                            view.perform(
+                                                                Intent::ReadTurnDiff {
+                                                                    from_turn_count: from,
+                                                                    to_turn_count: to,
+                                                                    ignore_whitespace: false,
+                                                                },
+                                                                None,
+                                                            )
+                                                        });
+                                                    },
+                                                ),
+                                            );
+                                        }
+                                        menu
+                                    }),
+                            )
+                            .child(div().flex_1())
+                            .child(self.action("refresh-diff", "Refresh", refresh, cx)),
                     )
                     .child(self.diff.clone());
             }

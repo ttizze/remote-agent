@@ -1201,6 +1201,8 @@ pub struct Effect {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectBody {
+    #[serde(rename = "checkpoint.capture")]
+    CaptureCheckpoint { run_id: RunId },
     #[serde(rename = "provider-turn.start")]
     Start { run_id: RunId },
     #[serde(rename = "provider-turn.interrupt")]
@@ -1251,6 +1253,7 @@ impl EffectBody {
     pub fn run_id(&self) -> Option<&RunId> {
         match self {
             Self::Start { run_id }
+            | Self::CaptureCheckpoint { run_id }
             | Self::Interrupt { run_id, .. }
             | Self::Steer { run_id, .. }
             | Self::Restart { run_id, .. } => Some(run_id),

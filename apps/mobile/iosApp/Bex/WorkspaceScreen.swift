@@ -55,7 +55,7 @@ private struct WorkspaceToolsScreen: View {
                     TerminalScreen(model: model, cwd: model.cwd).id(model.cwd)
                 } else {
                     WorkspaceScreen(model: model, root: model.cwd, showingDiff: $showingDiff, close: close)
-                        .id(model.cwd)
+                        .id("\(model.cwd):\(model.snapshot.selectedThreadId() ?? "new")")
                 }
             }
         }.background(T3.color("canvas")).navigationTitle(tab.label).navigationBarTitleDisplayMode(.inline)

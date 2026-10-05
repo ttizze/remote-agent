@@ -168,7 +168,7 @@ fn parse_git_status(output: &[u8]) -> Vec<WorkspaceFileChange> {
     files
 }
 
-fn parse_numstat(
+pub(crate) fn parse_numstat(
     output: &[u8],
     mut file: impl FnMut(&[u8], Option<u64>, Option<u64>),
 ) -> (u64, u64) {

@@ -49,3 +49,20 @@ pub struct SearchThreads {
     pub query: String,
     pub limit: u32,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetTurnDiff {
+    pub thread_id: ThreadId,
+    pub from_turn_count: u64,
+    pub to_turn_count: u64,
+    pub ignore_whitespace: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnDiff {
+    pub thread_id: ThreadId,
+    pub from_turn_count: u64,
+    pub to_turn_count: u64,
+    pub diff: String,
+}

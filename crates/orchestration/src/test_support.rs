@@ -107,3 +107,36 @@ pub fn running() -> ThreadProjection {
     });
     projection
 }
+
+pub fn checkpoint_scope(run: &Run) -> CheckpointScope {
+    CheckpointScope {
+        id: CheckpointScopeId::new("root-scope").unwrap(),
+        thread_id: run.thread_id.clone(),
+        run_id: Some(run.id.clone()),
+        node_id: run.root_node_id.clone().unwrap(),
+        parent_scope_id: None,
+        provider_thread_id: run.provider_thread_id.clone(),
+        kind: ScopeKind::RootRun,
+        ordinal_within_parent: 0,
+        advances_app_run_count: true,
+        cwd: "/workspace".into(),
+        created_at: now(),
+    }
+}
+pub fn checkpoint(run: &Run, status: CheckpointStatus) -> Checkpoint {
+    let scope = checkpoint_scope(run);
+    Checkpoint {
+        id: CheckpointId::new(format!("checkpoint:{}", run.id)).unwrap(),
+        thread_id: run.thread_id.clone(),
+        scope_id: scope.id,
+        run_id: Some(run.id.clone()),
+        node_id: scope.node_id,
+        parent_checkpoint_id: None,
+        ordinal_within_scope: run.ordinal,
+        app_run_ordinal: Some(run.ordinal),
+        reference: CheckpointRef::new(format!("refs/t3/test/{}", run.id)).unwrap(),
+        status,
+        files: vec![],
+        captured_at: now(),
+    }
+}

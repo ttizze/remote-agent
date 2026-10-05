@@ -44,6 +44,7 @@ contracts! {
     SubscribeThread, "orchestration/subscribeThread" => (crate::orchestration::SubscribeThread, ::orchestration::ThreadStreamItem),
     GetThreadProjection, "orchestration/getThreadProjection" => (crate::orchestration::GetThreadProjection, ::orchestration::ThreadProjection) [clone],
     GetTurnItem, "orchestration/getTurnItem" => (crate::orchestration::GetTurnItem, Option<::orchestration::TurnItem>) [clone],
+    GetTurnDiff, "orchestration/getTurnDiff" => (crate::orchestration::GetTurnDiff, crate::orchestration::TurnDiff) [clone],
     ReadThreadHistory, "orchestration/readThreadHistory" => (crate::orchestration::ReadThreadHistory, ::orchestration::ThreadHistoryPage) [clone],
     SearchThreads, "orchestration/searchThreads" => (crate::orchestration::SearchThreads, Vec<::orchestration::SearchMatch>) [clone],
     ListProjects, "host/project/list" => (m::Empty, Vec<m::Project>),

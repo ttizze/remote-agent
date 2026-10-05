@@ -1,5 +1,6 @@
 mod account_usage;
 pub mod browser;
+mod checkpoints;
 mod claude;
 mod codex_accounts;
 mod dictation;

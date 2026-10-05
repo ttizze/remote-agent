@@ -96,6 +96,7 @@ enum Reply {
     Files(m::FileList),
     File(m::FileContent),
     Review(m::WorkspaceReview),
+    TurnDiff(rpc::TurnDiff),
     WorktreeSettings(m::WorktreeSettings),
     Worktrees(Vec<m::Worktree>),
     Accounts(op::Accounts),
@@ -759,6 +760,8 @@ impl Owner {
             Intent::LeaveThread => {
                 self.state.selected_thread = None;
                 self.state.editing_run = None;
+                self.state.workspace.review = None;
+                self.state.workspace.diff_request = None;
                 self.subscribe_thread();
                 None
             }
@@ -863,6 +866,8 @@ impl Owner {
                 let id = ThreadId::new(thread_id).map_err(invalid)?;
                 self.state.selected_thread = Some(id.clone());
                 self.state.editing_run = None;
+                self.state.workspace.review = None;
+                self.state.workspace.diff_request = None;
                 self.subscribe_thread();
                 target = Some(id);
                 body = Some(CommandBody::ThreadVisit {
@@ -874,6 +879,8 @@ impl Owner {
                 self.state.selected_thread = None;
                 self.state.selected_project = project_id;
                 self.state.editing_run = None;
+                self.state.workspace.review = None;
+                self.state.workspace.diff_request = None;
                 self.subscribe_thread();
                 None
             }
@@ -1213,7 +1220,24 @@ impl Owner {
                 }))
             }
             Intent::ReviewWorkspace { cwd } => {
+                self.state.workspace.diff_request = None;
+                self.state.workspace.review = None;
                 Some(Call::ReviewWorkspace(op::ReviewWorkspace { cwd }))
+            }
+            Intent::ReadTurnDiff {
+                from_turn_count,
+                to_turn_count,
+                ignore_whitespace,
+            } => {
+                let request = rpc::GetTurnDiff {
+                    thread_id: target.clone().ok_or_else(|| invalid("Select a thread"))?,
+                    from_turn_count,
+                    to_turn_count,
+                    ignore_whitespace,
+                };
+                self.state.workspace.review = None;
+                self.state.workspace.diff_request = Some(request.clone());
+                Some(Call::GetTurnDiff(request))
             }
             Intent::LoadWorktreeSettings => Some(Call::ReadWorktreeSettings(m::Empty {})),
             Intent::SaveWorktreeSettings { settings } => {
@@ -1492,7 +1516,26 @@ impl Owner {
                         }
                         self.state.workspace.file = Some(file);
                     }
-                    Reply::Review(review) => self.state.workspace.review = Some(review),
+                    Reply::Review(review) => {
+                        if let Call::ReviewWorkspace(request) = &call
+                            && request.cwd == self.state.cwd()
+                            && self.state.workspace.diff_request.is_none()
+                        {
+                            self.state.workspace.review = Some(review);
+                        }
+                    }
+                    Reply::TurnDiff(diff) => {
+                        if let Call::GetTurnDiff(request) = &call
+                            && self.state.workspace.diff_request.as_ref() == Some(request)
+                            && self.state.selected_thread.as_ref() == Some(&diff.thread_id)
+                            && request.thread_id == diff.thread_id
+                            && request.from_turn_count == diff.from_turn_count
+                            && request.to_turn_count == diff.to_turn_count
+                        {
+                            self.state.workspace.review =
+                                Some(crate::presentation::diff::turn_review(diff));
+                        }
+                    }
                     Reply::WorktreeSettings(settings) => {
                         self.state.workspace.worktree_settings = Some(settings)
                     }
@@ -1652,6 +1695,7 @@ async fn execute(peer: &Client, call: &Call) -> Result<Reply, PeerError> {
         Call::ListFiles(_) => Reply::Files(peer.request(call).await?),
         Call::ReadFile(_) | Call::WriteFile(_) => Reply::File(peer.request(call).await?),
         Call::ReviewWorkspace(_) => Reply::Review(peer.request(call).await?),
+        Call::GetTurnDiff(_) => Reply::TurnDiff(peer.request(call).await?),
         Call::ReadWorktreeSettings(_) | Call::UpdateWorktreeSettings(_) => {
             Reply::WorktreeSettings(peer.request(call).await?)
         }
@@ -1796,6 +1840,45 @@ mod tests {
             epoch: 0,
             source: CreationSource::Desktop,
         }
+    }
+    #[test]
+    fn late_turn_diff_receipts_cannot_replace_another_range_or_thread() {
+        let mut owner = owner(Snapshot {
+            selected_thread: Some(ThreadId::new("thread").unwrap()),
+            ..Default::default()
+        });
+        let intent = |from, to| Intent::ReadTurnDiff {
+            from_turn_count: from,
+            to_turn_count: to,
+            ignore_whitespace: false,
+        };
+        let first = owner.prepare(intent(0, 1)).unwrap().0.unwrap();
+        let second = owner.prepare(intent(1, 2)).unwrap().0.unwrap();
+        let finish = |call, from, to| JobResult {
+            call,
+            result: Ok(Reply::TurnDiff(rpc::TurnDiff {
+                thread_id: ThreadId::new("thread").unwrap(),
+                from_turn_count: from,
+                to_turn_count: to,
+                diff: String::new(),
+            })),
+            complete: None,
+            sent: None,
+            launched: None,
+        };
+        owner.finished(finish(first, 0, 1));
+        assert!(owner.state.workspace.review.is_none());
+        owner.finished(finish(second.clone(), 1, 2));
+        assert_eq!(
+            owner.state.workspace.review.as_ref().unwrap().branch,
+            "Turns 1–2"
+        );
+        owner
+            .prepare(Intent::NewThread { project_id: None })
+            .unwrap();
+        owner.finished(finish(second, 1, 2));
+        assert!(owner.state.workspace.review.is_none());
+        assert!(owner.state.workspace.diff_request.is_none());
     }
     #[test]
     fn file_reload_and_save_receipts_preserve_edits_and_their_base_revision() {

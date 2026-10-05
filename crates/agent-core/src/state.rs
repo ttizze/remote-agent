@@ -171,12 +171,30 @@ impl Snapshot {
     }
 }
 
+#[cfg_attr(feature = "bindings", uniffi::export)]
+impl Snapshot {
+    pub fn turn_diff_options(&self) -> Vec<crate::presentation::diff::TurnDiffOption> {
+        let Some(projection) = self.projection() else {
+            return vec![];
+        };
+        let Some(scope) = projection
+            .checkpoint_scopes
+            .iter()
+            .find(|scope| scope.kind == ScopeKind::RootRun)
+        else {
+            return vec![];
+        };
+        crate::presentation::diff::turn_diff_options(&projection.checkpoints, &scope.id)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Workspace {
     pub directory: Option<crate::models::FileList>,
     pub file: Option<crate::models::FileContent>,
     pub file_drafts: BTreeMap<String, FileDraft>,
     pub review: Option<crate::models::WorkspaceReview>,
+    pub diff_request: Option<agent_protocol::orchestration::GetTurnDiff>,
     pub worktree_settings: Option<crate::models::WorktreeSettings>,
     pub worktrees: Vec<crate::models::Worktree>,
 }
@@ -350,6 +368,11 @@ pub enum Intent {
     },
     ReviewWorkspace {
         cwd: String,
+    },
+    ReadTurnDiff {
+        from_turn_count: u64,
+        to_turn_count: u64,
+        ignore_whitespace: bool,
     },
     LoadWorktreeSettings,
     SaveWorktreeSettings {

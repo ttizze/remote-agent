@@ -181,8 +181,31 @@ impl Store {
         expected_run: Option<(&RunId, Option<&RunAttemptId>)>,
         now: &Timestamp,
     ) -> Result<Commit> {
+        self.ingest_events(events, expected_run, now, false)
+    }
+    pub fn ingest_checkpoint(
+        &self,
+        events: Vec<DomainEvent>,
+        expected_run: Option<(&RunId, Option<&RunAttemptId>)>,
+        now: &Timestamp,
+    ) -> Result<Commit> {
+        self.ingest_events(events, expected_run, now, true)
+    }
+    fn ingest_events(
+        &self,
+        mut events: Vec<DomainEvent>,
+        expected_run: Option<(&RunId, Option<&RunAttemptId>)>,
+        now: &Timestamp,
+        checkpoint_capture: bool,
+    ) -> Result<Commit> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
+        let mut effects = vec![];
+        if checkpoint_capture && expected_run.is_none() {
+            return Err(StoreError::InvalidEvent(
+                "checkpoint capture requires a run guard".into(),
+            ));
+        }
         if let Some((run_id, attempt_id)) = expected_run {
             let thread_id = events
                 .first()
@@ -193,7 +216,15 @@ impl Store {
                 load_projection(&transaction, &thread_id)?.ok_or(StoreError::ThreadNotFound)?;
             if !projection.runs.iter().any(|run| {
                 run.id == *run_id
-                    && run.status.is_blocking()
+                    && (run.status.is_blocking() && !checkpoint_capture
+                        || checkpoint_capture
+                            && matches!(
+                                run.status,
+                                RunStatus::Waiting
+                                    | RunStatus::Completed
+                                    | RunStatus::Interrupted
+                                    | RunStatus::Cancelled
+                            ))
                     && run.active_attempt_id.as_ref() == attempt_id
             }) {
                 return Ok(Commit {
@@ -201,6 +232,41 @@ impl Store {
                     events: vec![],
                     replayed: false,
                 });
+            }
+            if checkpoint_capture {
+                let run = projection
+                    .runs
+                    .iter()
+                    .find(|run| run.id == *run_id)
+                    .expect("guarded run");
+                if events.iter().any(|event| !matches!(&event.payload,
+                    EventPayload::CheckpointCaptured(checkpoint)
+                        if checkpoint.run_id.as_ref() == Some(run_id)
+                            && run.root_node_id.as_ref() == Some(&checkpoint.node_id)
+                            && checkpoint.app_run_ordinal == Some(run.ordinal)
+                            && projection.checkpoint_scopes.iter().any(|scope|
+                                scope.id == checkpoint.scope_id && scope.kind == ScopeKind::RootRun)
+                )) {
+                    return Err(StoreError::InvalidEvent("checkpoint capture does not match its run".into()));
+                }
+                if run.checkpoint_id.is_some() {
+                    return Ok(Commit {
+                        sequence: latest_sequence(&transaction, None)?,
+                        events: vec![],
+                        replayed: false,
+                    });
+                }
+                events.extend(crate::checkpoint::capture_finalization(
+                    &events,
+                    &projection.runs,
+                    &projection.nodes,
+                    now,
+                ));
+            } else {
+                let decision =
+                    crate::checkpoint::await_capture(events, &projection.checkpoint_scopes);
+                events = decision.events;
+                effects = decision.effects;
             }
             if events.iter().any(|event| event.thread_id != thread_id) {
                 return Err(StoreError::InvalidEvent(
@@ -212,6 +278,7 @@ impl Store {
             &transaction,
             Decision {
                 events,
+                effects,
                 ..Decision::default()
             },
             None,
@@ -793,7 +860,7 @@ fn commit_decision(
     }
     for effect in decision.effects {
         let kind = kind_name(&effect.body)?;
-        connection.execute("INSERT INTO orchestration_v2_effect_outbox(effect_id,command_id,thread_id,effect_type,payload_json,status,attempt_count,available_at,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'pending',0,0,?6,?6)", params![effect.id, command.map(CommandId::as_str), effect.thread_id.as_str(), kind, serde_json::to_string(&effect)?, now.as_str()])?;
+        connection.execute("INSERT INTO orchestration_v2_effect_outbox(effect_id,command_id,thread_id,effect_type,payload_json,status,attempt_count,available_at,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'pending',0,0,?6,?6) ON CONFLICT(effect_id) DO NOTHING", params![effect.id, command.map(CommandId::as_str), effect.thread_id.as_str(), kind, serde_json::to_string(&effect)?, now.as_str()])?;
     }
     Ok(committed)
 }
@@ -1164,5 +1231,219 @@ mod tests {
             store.projection(&projection.thread.id).unwrap().runs[1].status,
             RunStatus::Starting
         );
+    }
+    #[test]
+    fn stopping_a_waiting_run_keeps_one_capture_and_holds_the_queue() {
+        let store = setup();
+        dispatch(&store, &send("one", DispatchMode::StartImmediately));
+        dispatch(&store, &send("two", DispatchMode::QueueAfterActive));
+        let run = store.projection(&create().thread_id).unwrap().runs[0].clone();
+        let event = |id: &str, payload| DomainEvent {
+            id: EventId::new(id).unwrap(),
+            thread_id: run.thread_id.clone(),
+            occurred_at: now(),
+            payload,
+        };
+        store
+            .ingest(
+                vec![event(
+                    "scope",
+                    EventPayload::CheckpointScopeCreated(checkpoint_scope(&run)),
+                )],
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        let mut finished = run.clone();
+        finished.status = RunStatus::Completed;
+        store
+            .ingest(
+                vec![event("finish", EventPayload::RunUpdated(finished))],
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        dispatch(
+            &store,
+            &command(
+                "stop",
+                CommandBody::RunInterrupt {
+                    run_id: run.id.clone(),
+                    reason: None,
+                    hold_queue: true,
+                },
+            ),
+        );
+        let effects = read_effects(&store.lock().unwrap()).unwrap();
+        assert_eq!(
+            effects
+                .iter()
+                .filter(|effect| matches!(effect.body, EffectBody::CaptureCheckpoint { .. }))
+                .count(),
+            1
+        );
+        store
+            .ingest_checkpoint(
+                vec![event(
+                    "capture",
+                    EventPayload::CheckpointCaptured(checkpoint(&run, CheckpointStatus::Ready)),
+                )],
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        let projection = store.projection(&run.thread_id).unwrap();
+        assert_eq!(projection.runs[0].status, RunStatus::Interrupted);
+        assert!(projection.runs[1].queue_held);
+        assert_eq!(projection.runs[1].status, RunStatus::Queued);
+    }
+    #[test]
+    fn checkpoint_commit_completes_run_and_promotes_queue_exactly_once() {
+        let store = setup();
+        dispatch(&store, &send("one", DispatchMode::StartImmediately));
+        dispatch(&store, &send("two", DispatchMode::QueueAfterActive));
+        let projection = store.projection(&create().thread_id).unwrap();
+        let run = projection.runs[0].clone();
+        let event = |id: &str, payload| DomainEvent {
+            id: EventId::new(id).unwrap(),
+            thread_id: run.thread_id.clone(),
+            occurred_at: now(),
+            payload,
+        };
+        store
+            .ingest(
+                vec![event(
+                    "scope",
+                    EventPayload::CheckpointScopeCreated(checkpoint_scope(&run)),
+                )],
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        let mut finished = run.clone();
+        finished.status = RunStatus::Completed;
+        store
+            .ingest(
+                vec![event("finish", EventPayload::RunUpdated(finished))],
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        let projection = store.projection(&run.thread_id).unwrap();
+        assert_eq!(projection.runs[0].status, RunStatus::Waiting);
+        assert_eq!(projection.runs[1].status, RunStatus::Queued);
+        let captured = event(
+            "capture",
+            EventPayload::CheckpointCaptured(checkpoint(&run, CheckpointStatus::Ready)),
+        );
+        let wrong = RunAttemptId::new("stale-attempt").unwrap();
+        assert!(
+            store
+                .ingest_checkpoint(
+                    vec![captured.clone()],
+                    Some((&run.id, Some(&wrong))),
+                    &now()
+                )
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        let commit = store
+            .ingest_checkpoint(
+                vec![captured.clone()],
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        assert_eq!(commit.events.len(), 5);
+        let projection = store.projection(&run.thread_id).unwrap();
+        assert_eq!(projection.runs[0].status, RunStatus::Completed);
+        assert!(projection.runs[0].checkpoint_id.is_some());
+        assert_eq!(projection.runs[1].status, RunStatus::Starting);
+        assert!(
+            store
+                .ingest_checkpoint(
+                    vec![captured],
+                    Some((&run.id, run.active_attempt_id.as_ref())),
+                    &now()
+                )
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        assert_eq!(store.sequence().unwrap(), commit.sequence);
+    }
+    #[test]
+    fn process_loss_retains_capture_without_resuming_queued_work() {
+        let store = setup();
+        dispatch(&store, &send("one", DispatchMode::StartImmediately));
+        dispatch(&store, &send("two", DispatchMode::QueueAfterActive));
+        let run = store.projection(&create().thread_id).unwrap().runs[0].clone();
+        let mut finished = run.clone();
+        finished.status = RunStatus::Completed;
+        store
+            .ingest(
+                vec![DomainEvent {
+                    id: EventId::new("scope").unwrap(),
+                    thread_id: run.thread_id.clone(),
+                    occurred_at: now(),
+                    payload: EventPayload::CheckpointScopeCreated(checkpoint_scope(&run)),
+                }],
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        store
+            .ingest(
+                vec![DomainEvent {
+                    id: EventId::new("finish").unwrap(),
+                    thread_id: run.thread_id.clone(),
+                    occurred_at: now(),
+                    payload: EventPayload::RunUpdated(finished),
+                }],
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        store.recover(&now()).unwrap();
+        let effect = store.claim_effect("recovered", 100_000).unwrap().unwrap();
+        assert!(matches!(
+            effect.effect.body,
+            EffectBody::CaptureCheckpoint { .. }
+        ));
+        store
+            .ingest_checkpoint(
+                vec![DomainEvent {
+                    id: EventId::new("capture").unwrap(),
+                    thread_id: run.thread_id.clone(),
+                    occurred_at: now(),
+                    payload: EventPayload::CheckpointCaptured(checkpoint(
+                        &run,
+                        CheckpointStatus::Ready,
+                    )),
+                }],
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        let projection = store.projection(&run.thread_id).unwrap();
+        assert_eq!(projection.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(projection.runs[1].status, RunStatus::Queued);
+        assert!(projection.runs[1].queue_held);
+        let mut invalid = checkpoint(&run, CheckpointStatus::Ready);
+        invalid.node_id = NodeId::new("different-root").unwrap();
+        assert!(matches!(
+            store.ingest_checkpoint(
+                vec![DomainEvent {
+                    id: EventId::new("invalid").unwrap(),
+                    thread_id: run.thread_id,
+                    occurred_at: now(),
+                    payload: EventPayload::CheckpointCaptured(invalid)
+                }],
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now()
+            ),
+            Err(StoreError::InvalidEvent(_))
+        ));
     }
 }

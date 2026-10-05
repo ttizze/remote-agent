@@ -7,7 +7,8 @@ table is `agent-protocol/src/protocol/requests.rs`.
 
 Conversation operations are dispatchCommand, launchThread, subscribeShell,
 subscribeThread, getThreadProjection, getTurnItem, readThreadHistory and
-searchThreads. App-thread IDs are independent of native session and turn IDs.
+searchThreads and getTurnDiff. Turn differences select persisted root checkpoint
+ordinals and optionally ignore whitespace. App-thread IDs are independent of native session and turn IDs.
 Shell/thread streams return a typed initial Response followed by typed stream
 items. Cursors select bounded replay or snapshot fallback; synchronized marks
 the boundary before live delivery. Dropping a subscription drops its stream.

@@ -91,8 +91,19 @@ async fn execute(
         Timestamp::from_millis(now_ms()).map_err(|e| StoreError::InvalidEvent(e.to_string()))?;
     match result {
         Ok(events) => {
+            match store.renew_effect(&claim, now_ms()) {
+                Ok(()) => {}
+                Err(StoreError::LeaseLost) => return Ok(()),
+                Err(error) => return Err(error),
+            }
             if !events.is_empty() {
-                store.ingest(
+                let ingest = if matches!(claim.effect.body, EffectBody::CaptureCheckpoint { .. }) {
+                    Store::ingest_checkpoint
+                } else {
+                    Store::ingest
+                };
+                ingest(
+                    &store,
                     events,
                     expected
                         .as_ref()

@@ -98,6 +98,7 @@ struct HostResources {
     startup_errors: std::sync::RwLock<HashMap<ProviderKind, Failure>>,
     browser: OnceLock<Arc<crate::browser::Browser>>,
     projects: ProjectStore,
+    checkpoints: crate::checkpoints::Checkpoints,
     files: crate::workspace_files::WorkspaceFiles,
     worktrees: crate::worktrees::Worktrees,
     worktree_access: tokio::sync::RwLock<()>,
@@ -143,6 +144,7 @@ impl HostRpcService {
             ),
             worktrees: crate::worktrees::Worktrees::new(projects.path()),
             projects,
+            checkpoints: Default::default(),
             worktree_access: Default::default(),
             permission_settings_access: Default::default(),
             terminals: Default::default(),
@@ -482,6 +484,54 @@ impl HostRpcService {
                 .turn_item(&params.thread_id, &params.item_id)
                 .map_err(store_failure)?
                 .into(),
+            Call::GetTurnDiff(params) => {
+                if params.from_turn_count > params.to_turn_count {
+                    return Err(Failure::new("invalid_query", "turn range is reversed"));
+                }
+                let projection = self
+                    .inner
+                    .store
+                    .projection(&params.thread_id)
+                    .map_err(store_failure)?;
+                let scope = projection
+                    .checkpoint_scopes
+                    .iter()
+                    .find(|scope| scope.kind == ScopeKind::RootRun)
+                    .ok_or_else(|| {
+                        Failure::new("checkpoint_unavailable", "root checkpoint scope missing")
+                    })?;
+                let checkpoint = |ordinal| {
+                    projection
+                        .checkpoints
+                        .iter()
+                        .find(|checkpoint| {
+                            checkpoint.scope_id == scope.id
+                                && checkpoint.app_run_ordinal == Some(ordinal)
+                        })
+                        .ok_or_else(|| {
+                            Failure::new("checkpoint_unavailable", "turn checkpoint missing")
+                        })
+                };
+                let diff = self
+                    .inner
+                    .resources
+                    .checkpoints
+                    .diff(
+                        &scope.cwd,
+                        checkpoint(params.from_turn_count)?,
+                        checkpoint(params.to_turn_count)?,
+                        params.ignore_whitespace,
+                    )
+                    .await
+                    .map_err(|error| Failure::new("checkpoint_unavailable", error))?;
+                agent_protocol::orchestration::TurnDiff {
+                    thread_id: params.thread_id.clone(),
+                    from_turn_count: params.from_turn_count,
+                    to_turn_count: params.to_turn_count,
+                    diff,
+                }
+                .into()
+            }
             Call::ReadThreadHistory(params) => self
                 .inner
                 .store
@@ -1071,6 +1121,35 @@ impl ProviderAdapter for HostResources {
         effect: &Effect,
         projection: ThreadProjection,
     ) -> Result<Vec<DomainEvent>, AdapterError> {
+        if let EffectBody::CaptureCheckpoint { run_id } = &effect.body {
+            let run = projection
+                .runs
+                .iter()
+                .find(|run| run.id == *run_id)
+                .ok_or_else(|| adapter_error("run missing"))?;
+            if run.status == RunStatus::RolledBack || run.checkpoint_id.is_some() {
+                return Ok(vec![]);
+            }
+            let node_id = run
+                .root_node_id
+                .as_ref()
+                .ok_or_else(|| adapter_error("checkpoint root missing"))?;
+            let scope = projection
+                .checkpoint_scopes
+                .iter()
+                .find(|scope| scope.kind == ScopeKind::RootRun)
+                .ok_or_else(|| adapter_error("checkpoint scope missing"))?;
+            let checkpoint = self
+                .checkpoints
+                .capture(scope, run_id, node_id, run.ordinal, &now())
+                .await;
+            return Ok(checkpoint_events(
+                &effect.thread_id,
+                &effect.id,
+                vec![EventPayload::CheckpointCaptured(checkpoint)],
+                &now(),
+            ));
+        }
         if matches!(effect.body, EffectBody::TerminalCleanup) {
             self.terminals
                 .cleanup_handle(&format!("terminal:{}", effect.thread_id))
@@ -1179,6 +1258,73 @@ impl ProviderAdapter for HostResources {
             .map(|browser| browser.provider_config(effect.thread_id.as_str()))
             .transpose()
             .map_err(adapter_error)?;
+        if let EffectBody::Start { run_id } | EffectBody::Restart { run_id, .. } = &effect.body {
+            let run = projection
+                .runs
+                .iter()
+                .find(|run| run.id == *run_id)
+                .ok_or_else(|| adapter_error("run missing"))?;
+            let root = run
+                .root_node_id
+                .as_ref()
+                .ok_or_else(|| adapter_error("checkpoint root missing"))?;
+            let scope = CheckpointScope {
+                id: CheckpointScopeId::new(format!("scope:{}:root", effect.thread_id))
+                    .expect("derived id"),
+                thread_id: effect.thread_id.clone(),
+                run_id: Some(run_id.clone()),
+                node_id: root.clone(),
+                parent_scope_id: None,
+                provider_thread_id: run.provider_thread_id.clone(),
+                kind: ScopeKind::RootRun,
+                ordinal_within_parent: 0,
+                advances_app_run_count: true,
+                cwd: cwd.to_string_lossy().into(),
+                created_at: now(),
+            };
+            let timestamp = now();
+            let baseline_recorded =
+                projection.checkpoint_scopes.iter().any(|existing| {
+                    existing.id == scope.id
+                        && existing.run_id == scope.run_id
+                        && existing.node_id == scope.node_id
+                }) && [0, run.ordinal.saturating_sub(1)].iter().all(|ordinal| {
+                    projection.checkpoints.iter().any(|checkpoint| {
+                        checkpoint.scope_id == scope.id
+                            && checkpoint.app_run_ordinal == Some(*ordinal)
+                    })
+                });
+            if !baseline_recorded {
+                let mut payloads = self
+                    .checkpoints
+                    .baseline(&scope, run.ordinal.saturating_sub(1), &timestamp)
+                    .await;
+                payloads.retain(|payload| !matches!(payload, EventPayload::CheckpointCaptured(checkpoint) if projection.checkpoints.iter().any(|existing| existing.id == checkpoint.id && existing.status == CheckpointStatus::Ready)));
+                let (receipt, completed) = tokio::sync::oneshot::channel();
+                self.provider_output
+                    .send(provider_adapters::ProviderBatch {
+                        thread_id: effect.thread_id.clone(),
+                        run_id: run_id.clone(),
+                        attempt_id: run
+                            .active_attempt_id
+                            .clone()
+                            .ok_or_else(|| adapter_error("attempt missing"))?,
+                        events: checkpoint_events(
+                            &effect.thread_id,
+                            &format!("{}:baseline", effect.id),
+                            payloads,
+                            &timestamp,
+                        ),
+                        occurred_at: timestamp,
+                        acknowledged: Some(receipt),
+                    })
+                    .await
+                    .map_err(adapter_error)?;
+                if !completed.await.map_err(adapter_error)? {
+                    return Err(adapter_error("checkpoint baseline superseded"));
+                }
+            }
+        }
         match driver {
             Driver::Codex => {
                 self.codex.availability().map_err(adapter_error)?;
@@ -1202,6 +1348,24 @@ impl ProviderAdapter for HostResources {
         }
         Ok(vec![])
     }
+}
+
+fn checkpoint_events(
+    thread_id: &ThreadId,
+    effect_id: &str,
+    payloads: Vec<EventPayload>,
+    now: &Timestamp,
+) -> Vec<DomainEvent> {
+    payloads
+        .into_iter()
+        .enumerate()
+        .map(|(index, payload)| DomainEvent {
+            id: EventId::new(format!("event:{effect_id}:{index}")).expect("derived id"),
+            thread_id: thread_id.clone(),
+            occurred_at: now.clone(),
+            payload,
+        })
+        .collect()
 }
 
 #[cfg(test)]
