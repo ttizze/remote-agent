@@ -80,7 +80,6 @@ final class BexAppViewModel: ObservableObject {
         } catch { notice = error.localizedDescription }
     }
 
-    /// Save and stop the current Host's work; the caller shuts down the returned store.
     private func detachStore() -> AgentStore? {
         persist()
         draftEdits.reset()
@@ -107,7 +106,6 @@ final class BexAppViewModel: ObservableObject {
 
     private func initialize(_ id: String, previous old: AgentStore?) async {
         let preparationStarted = ProcessInfo.processInfo.systemUptime
-        // Draining the previous Host's transport must not delay opening this Host.
         async let previousClosed: Void? = try? old?.shutdown()
         do {
             let bytes = try await SnapshotFiles.load(id)
@@ -307,7 +305,6 @@ extension BexAppViewModel {
                     let latest = owner.snapshot()
                     publish(latest)
                     if previous.connected(), !latest.connected(), !isConnecting {
-                        // Retry a lost connection once, then wait for the next foreground activation.
                         connect()
                     }
                     previous = latest
@@ -384,7 +381,6 @@ extension BexAppViewModel {
         guard let id = selectedProfileId, let owner = store else { return }
         let current = owner.snapshot()
         let previous = persistenceWrite
-        // Serialize immutable snapshots off MainActor and commit writes in order.
         persistenceWrite = Task { [weak self] in
             await previous?.value
             do {

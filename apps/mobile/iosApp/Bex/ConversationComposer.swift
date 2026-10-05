@@ -81,7 +81,7 @@ struct ConversationComposer: View {
                         }
                     } label: {
                         HStack(spacing: 4) {
-                            Image(selectedModel?.model.provider == .claude ? "claude" : "openai").resizable()
+                            Image(composer.providerKind == .claude ? "claude" : "openai").resizable()
                                 .scaledToFit().frame(
                                     width: 13,
                                     height: 13
@@ -98,8 +98,9 @@ struct ConversationComposer: View {
                             ) }
                         }
                         Divider()
-                        Button("Chat") { model.perform(.setInteractionMode(mode: "default")) }
-                        Button("Plan") { model.perform(.setInteractionMode(mode: "plan")) }
+                        ForEach(interactionModeChoices(), id: \.id) { mode in
+                            Button(mode.label) { model.perform(.setInteractionMode(mode: mode.id)) }
+                        }
                     } label: {
                         Image(systemName: draft
                             .interactionMode == "plan" ? "list.bullet.clipboard" : "slider.horizontal.3")

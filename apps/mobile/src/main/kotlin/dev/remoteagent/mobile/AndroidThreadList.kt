@@ -172,7 +172,7 @@ private fun ThreadCard(model: AndroidAppModel, row: ThreadRow, settled: Boolean)
                     .heightIn(min = if (row.slim) 20.dp else 58.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                ProviderIcon(row.provider, Modifier.size(16.dp))
+                ProviderIcon(row.providerKind, Modifier.size(16.dp))
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
                         row.title,

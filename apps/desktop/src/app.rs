@@ -42,6 +42,10 @@ enum BufferRevision {
 enum Update {
     Connected(Result<(StoreSession, PathBuf), String>),
     Snapshot(Arc<Snapshot>),
+    Presentation {
+        revision: u64,
+        view: Box<ConversationView>,
+    },
     Completed(Option<BufferRevision>, Result<Outcome, String>),
     Folder(Option<PathBuf>),
     PersistenceError(String),
@@ -58,6 +62,8 @@ pub(crate) struct Desktop {
     session: Option<StoreSession>,
     snapshot: Arc<Snapshot>,
     conversation: Arc<ConversationView>,
+    presentation_running: bool,
+    presented_revision: u64,
     runtime: Runtime,
     updates: async_channel::Sender<(u64, Update)>,
     epoch: u64,
@@ -283,6 +289,8 @@ impl Desktop {
             session: None,
             snapshot: Arc::default(),
             conversation: Arc::new(conversation(&Snapshot::default(), &now())),
+            presentation_running: false,
+            presented_revision: 0,
             runtime,
             updates,
             epoch: 0,
@@ -329,6 +337,8 @@ impl Desktop {
     fn connect(&mut self, remote: Option<RemoteHost>) {
         self.cancel_recording();
         self.epoch += 1;
+        self.presentation_running = false;
+        self.presented_revision = 0;
         self.connecting = true;
         self.remote = remote;
         self.pending_draft = None;
@@ -429,10 +439,7 @@ impl Desktop {
             cx.notify();
             return;
         }
-        let before = self.conversation.clone();
-        let follow = self.timeline.max_offset_for_scrollbar().y
-            + self.timeline.scroll_px_offset_for_scrollbar().y
-            <= px(80.);
+        let mut prepared = None;
         match update {
             Update::Connected(Ok((mut session, path))) => {
                 let (tx, rx) = async_channel::bounded(4);
@@ -504,6 +511,16 @@ impl Desktop {
                     self.error = error;
                 }
             }
+            Update::Presentation { revision, view } => {
+                self.presentation_running = false;
+                if revision >= self.presented_revision
+                    && view.thread_id.as_deref()
+                        == self.snapshot.selected_thread.as_ref().map(|id| id.as_str())
+                {
+                    self.presented_revision = revision;
+                    prepared = Some(*view);
+                }
+            }
             Update::Tick => {}
         }
         let key = self.snapshot.draft_key();
@@ -519,7 +536,81 @@ impl Desktop {
                     .update(cx, |input, cx| input.set_value(text, window, cx));
             }
         }
-        let conversation = conversation(&self.snapshot, &now());
+        if let Some(view) = prepared {
+            self.set_conversation(view, window, cx);
+        } else if self.conversation.thread_id.as_deref()
+            != self.snapshot.selected_thread.as_ref().map(|id| id.as_str())
+            || self.conversation.cwd != self.snapshot.cwd()
+        {
+            self.presented_revision = self.snapshot.revision;
+            self.set_conversation(conversation(&self.snapshot, &now()), window, cx);
+        }
+        self.schedule_presentation();
+        if let Some(file) = &self.snapshot.workspace.file {
+            let text = self
+                .snapshot
+                .workspace
+                .file_drafts
+                .get(&file.path)
+                .map(|draft| &draft.text)
+                .unwrap_or(&file.text);
+            if self.editor_path.as_ref() != Some(&file.path)
+                || (self.pending_editor.is_none() && self.editor_value != *text)
+            {
+                self.editor_path = Some(file.path.clone());
+                self.editor_value = text.clone();
+                self.editor
+                    .update(cx, |input, cx| input.set_value(text.clone(), window, cx));
+            }
+        }
+        self.diff.update(cx, |view, cx| {
+            view.set_source(
+                self.snapshot
+                    .workspace
+                    .review
+                    .as_ref()
+                    .map_or("", |review| &review.diff),
+                cx,
+            )
+        });
+        cx.notify();
+    }
+    fn schedule_presentation(&mut self) {
+        if self.presentation_running || self.presented_revision >= self.snapshot.revision {
+            return;
+        }
+        self.presentation_running = true;
+        let snapshot = self.snapshot.clone();
+        let epoch = self.epoch;
+        let updates = self.updates.clone();
+        self.runtime.handle.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+            let revision = snapshot.revision;
+            if let Ok(view) =
+                tokio::task::spawn_blocking(move || conversation(&snapshot, &now())).await
+            {
+                let _ = updates
+                    .send((
+                        epoch,
+                        Update::Presentation {
+                            revision,
+                            view: Box::new(view),
+                        },
+                    ))
+                    .await;
+            }
+        });
+    }
+    fn set_conversation(
+        &mut self,
+        conversation: ConversationView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.conversation.clone();
+        let follow = self.timeline.max_offset_for_scrollbar().y
+            + self.timeline.scroll_px_offset_for_scrollbar().y
+            <= px(80.);
         let switched = before.thread_id != conversation.thread_id || before.cwd != conversation.cwd;
         if switched {
             self.renaming = false;
@@ -587,34 +678,6 @@ impl Desktop {
             }
         }
         self.questions.retain(|key, _| live.contains(key));
-        if let Some(file) = &self.snapshot.workspace.file {
-            let text = self
-                .snapshot
-                .workspace
-                .file_drafts
-                .get(&file.path)
-                .map(|draft| &draft.text)
-                .unwrap_or(&file.text);
-            if self.editor_path.as_ref() != Some(&file.path)
-                || (self.pending_editor.is_none() && self.editor_value != *text)
-            {
-                self.editor_path = Some(file.path.clone());
-                self.editor_value = text.clone();
-                self.editor
-                    .update(cx, |input, cx| input.set_value(text.clone(), window, cx));
-            }
-        }
-        self.diff.update(cx, |view, cx| {
-            view.set_source(
-                self.snapshot
-                    .workspace
-                    .review
-                    .as_ref()
-                    .map_or("", |review| &review.diff),
-                cx,
-            )
-        });
-        cx.notify();
     }
     fn action(
         &self,

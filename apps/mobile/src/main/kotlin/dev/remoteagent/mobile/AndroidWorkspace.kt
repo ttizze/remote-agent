@@ -1,4 +1,3 @@
-import kotlinx.coroutines.sync.withLock
 @file:Suppress("TooGenericExceptionCaught")
 
 package dev.remoteagent.mobile
@@ -68,6 +67,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 private const val BROWSER_REFRESH_MILLIS = 500L

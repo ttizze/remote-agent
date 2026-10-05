@@ -1495,19 +1495,25 @@ impl Desktop {
         let current = self.snapshot.current_draft().interaction_mode;
         let owner = cx.entity().downgrade();
         Button::new("interaction-mode")
-            .label(if current == "plan" { "Plan" } else { "Default" })
+            .label(
+                agent_core::presentation::interaction_mode_choices()
+                    .iter()
+                    .find(|mode| mode.id == current)
+                    .map_or("Chat", |mode| mode.label.as_str()),
+            )
             .small()
             .ghost()
             .dropdown_menu(move |mut menu, _, _| {
-                for mode in ["default", "plan"] {
+                for choice in agent_core::presentation::interaction_mode_choices() {
+                    let mode = choice.id;
                     let owner = owner.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(if mode == "plan" { "Plan" } else { "Default" })
+                        PopupMenuItem::new(choice.label)
                             .checked(current == mode)
                             .on_click(move |_, _, cx| {
                                 let _ = owner.update(cx, |view, _| {
                                     view.perform(
-                                        Intent::SetInteractionMode { mode: mode.into() },
+                                        Intent::SetInteractionMode { mode: mode.clone() },
                                         None,
                                     )
                                 });

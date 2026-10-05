@@ -299,7 +299,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 val identity =
                     withContext(Dispatchers.IO) { AndroidCredentialStore(context, id).loadOrCreate(::generateIdentity) }
                 val bytes =
-                    withContext(Dispatchers.IO) { applyModelPreferences(repository.load(id), repository.modelPreferences()) }
+                    withContext(Dispatchers.IO) {
+                        applyModelPreferences(repository.load(id), repository.modelPreferences())
+                    }
                 val store =
                     try {
                         AgentStore.connect(
@@ -520,12 +522,11 @@ internal fun RemoteAgentApp(
                         onClick = {
                             val wasOpen = model.snapshot.selectedThreadId() == id
                             model.perform(Intent.Thread(id, ThreadAction.Delete)) { result ->
-                                if (
-                                    result.isSuccess &&
-                                        model.screen == Screen.Conversation &&
-                                        wasOpen && (model.snapshot.selectedThreadId() == id || model.snapshot.selectedThreadId() == null)
-                                )
-                                    model.showThreads()
+                                val selected = model.snapshot.selectedThreadId()
+                                val stillOnDeletedThread = selected == id || selected == null
+                                if (result.isSuccess && wasOpen) {
+                                    if (model.screen == Screen.Conversation && stillOnDeletedThread) model.showThreads()
+                                }
                             }
                             model.deleteThreadId = null
                         }

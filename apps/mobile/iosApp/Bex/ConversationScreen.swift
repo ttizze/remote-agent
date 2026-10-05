@@ -40,11 +40,22 @@ struct ThreadScreen: View {
                 }
                 .scrollPosition(id: $firstVisible, anchor: .top)
                 .onScrollGeometryChange(for: ConversationScroll.self) { geometry in
-                    ConversationScroll(height: geometry.contentSize.height, nearBottom: geometry.contentSize.height - geometry.contentOffset.y - geometry.containerSize.height < 80)
+                    ConversationScroll(
+                        height: geometry.contentSize.height,
+                        nearBottom: geometry.contentSize.height - geometry.contentOffset.y - geometry.containerSize
+                            .height < 80
+                    )
                 } action: { old, next in
-                    if next.height != old.height && (nearBottom || initialScroll) {
+                    if followStreamResize(
+                        wasFollowing: nearBottom,
+                        initial: initialScroll,
+                        previousHeight: old.height,
+                        nextHeight: next.height
+                    ) {
                         reader.scrollTo("conversation-bottom", anchor: .bottom)
-                    } else { nearBottom = next.nearBottom }
+                    } else {
+                        nearBottom = next.nearBottom
+                    }
                 }
                 .onChange(of: conversation.rows) { old, next in
                     if old.first?.id != next.first?.id && old.last?.id == next.last?.id && next.count > old.count {

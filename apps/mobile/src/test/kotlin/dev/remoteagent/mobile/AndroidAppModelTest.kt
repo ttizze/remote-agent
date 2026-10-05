@@ -1,6 +1,7 @@
 package dev.remoteagent.mobile
 
 import androidx.lifecycle.ViewModelStore
+import dev.remoteagent.core.Snapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -9,7 +10,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
-import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -22,7 +23,7 @@ import org.robolectric.annotation.Config
 @Config(manifest = Config.NONE, sdk = [35])
 class AndroidAppModelTest {
     @Test
-    fun failedStartupDoesNotOverwriteSavedStateOrSharedModelPreferences() = runTest {
+    fun damagedStateRecoversWithoutRemovingTheHost() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         val context = RuntimeEnvironment.getApplication()
         val repository = AndroidMobileRepository(context)
@@ -35,20 +36,26 @@ class AndroidAppModelTest {
         val model = AndroidAppModel(context)
         val viewModels = ViewModelStore().apply { put("fixture", model) }
         try {
-            // Cold-start/background persistence while no Store exists.
             model.persist()
             for (attempt in 0 until 200) {
                 runCurrent()
                 if (model.notice != null) break
                 Thread.sleep(10)
             }
-            assertNotNull("the fixture must fail startup", model.notice)
+            assertNotNull("connection errors remain visible", model.notice)
+            model.editDraft("recovered draft")
+            for (attempt in 0 until 200) {
+                runCurrent()
+                if (model.snapshot.draft().text == "recovered draft") break
+                Thread.sleep(10)
+            }
+            assertEquals("recovered draft", model.snapshot.draft().text)
             model.persist()
             advanceTimeBy(300)
             runCurrent()
-            Thread.sleep(100) // Allow the real I/O writer to consume any wrongly queued save.
-            assertArrayEquals(saved, repository.load("fixture"))
-            assertArrayEquals(preferences, repository.modelPreferences())
+            Thread.sleep(100)
+            assertEquals("recovered draft", Snapshot.restore(repository.load("fixture")).draft().text)
+            assertEquals("fixture", repository.selected)
         } finally {
             viewModels.clear()
             runCurrent()

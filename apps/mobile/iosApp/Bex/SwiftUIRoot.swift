@@ -22,7 +22,8 @@ struct BexSwiftUIRoot: View {
                     if let id = model.deleteThreadId {
                         let wasOpen = model.selectedThreadId == id
                         model.perform(.thread(threadId: id, action: .delete)) { result in
-                            if case .success = result, model.screen == .thread, wasOpen, model.selectedThreadId == id || model.selectedThreadId == nil {
+                            if case .success = result, model.screen == .thread, wasOpen,
+                               model.selectedThreadId == id || model.selectedThreadId == nil {
                                 model.showThreadList()
                             }
                         }

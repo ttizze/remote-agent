@@ -23,7 +23,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -42,8 +44,6 @@ import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import dev.remoteagent.core.MarkdownAlignment
 import dev.remoteagent.core.MarkdownBlock
 import dev.remoteagent.core.MarkdownRun
@@ -51,10 +51,12 @@ import dev.remoteagent.core.markdownBlocks
 import dev.remoteagent.core.safeMarkdownUrl
 
 @Composable
-internal fun ProviderIcon(provider: String, modifier: Modifier = Modifier) {
+internal fun ProviderIcon(provider: dev.remoteagent.core.ProviderKind, modifier: Modifier = Modifier) {
     Icon(
-        painterResource(if (provider == "claude") R.drawable.ic_claude else R.drawable.ic_openai),
-        provider,
+        painterResource(
+            if (provider == dev.remoteagent.core.ProviderKind.CLAUDE) R.drawable.ic_claude else R.drawable.ic_openai
+        ),
+        provider.name,
         modifier,
         tint = T3.color("textMuted"),
     )
@@ -75,7 +77,8 @@ internal fun CopyButton(text: String) {
 
 @Composable
 internal fun ConversationBody(body: String) {
-    var blocks by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<List<MarkdownBlock>>(emptyList()) }
+    var blocks by
+        androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<List<MarkdownBlock>>(emptyList()) }
     androidx.compose.runtime.LaunchedEffect(body) {
         blocks = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { markdownBlocks(body) }
     }
