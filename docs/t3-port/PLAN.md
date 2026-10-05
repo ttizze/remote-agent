@@ -142,3 +142,4 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 - 2026-10-05: checkpoint は private Git index と fsync 付き専用 ref に保存する。provider 開始前に baseline、完了後に durable outbox で capture を行う。run 完了・node・timeline item・次のキュー開始を同じ SQLite transaction に含める。停止の terminal status と再起動後の queue hold は保持する。再送で保存済み ref を書き換えず、古い attempt と未実行の queued run の capture は受理しない。
 - 2026-10-05: Git の通常 index・HEAD・cwd 外の変更は checkpoint 作成で変更しない。cone sparse checkout と unborn HEAD を扱う。非 cone の private index 再構築は false deletion を避けて error checkpoint とし、会話は継続する。この制限と rollback 等の未実装は実装状況と PR に明記する。
 - 2026-10-05: getTurnDiff と ready root checkpoint の範囲選択を共通 core へ追加し、GPUI・SwiftUI・Compose の Diff 画面で表示する。空白差分無視は RPC/core で扱う。範囲・thread が変わった後の遅い応答は owner が捨てる。M2 の残りと M3 は未実装として記録する。
+- 2026-10-05: PR 前に main を一度だけ取り込んだ。更新された旧会話 fixture・UI test・Maestro runner とその専用依存／設定は削除を維持する。削除済み fixture だけが使う Host cleanup interval の引数も残さない。WebKit の独立テストの改善、Dependabot のスケジュール、unit-tests の追加 target 引数は維持する。main 自体と他 worktree は変更しない。

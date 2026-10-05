@@ -13,6 +13,8 @@ concurrency:
 env:
   CARGO_BUILD_JOBS: 4
   CARGO_INCREMENTAL: 0
+  # Contract tests mostly await isolated processes and network replies.
+  NEXTEST_TEST_THREADS: 16
 jobs:
   repository:
     runs-on: ubuntu-24.04
@@ -51,8 +53,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Free space for Nix and Cargo builds
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+      - &free-space
+        name: Free space for pinned Nix tools and Cargo builds
+        run: |
+          df -h /
+          # These jobs use Nix tools, not the image's Android or .NET SDK.
+          # Large binaries provide the space; unlinking every small file is slow.
+          for sdk in /usr/local/lib/android /usr/share/dotnet; do
+            if [[ -d "$sdk" ]]; then
+              sudo find "$sdk" -type f -size +10M -delete
+            fi
+          done
+          df -h /
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -73,8 +85,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Free space for the pinned Nix SDK
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+      - *free-space
       - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:

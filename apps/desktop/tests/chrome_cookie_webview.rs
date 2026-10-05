@@ -12,6 +12,13 @@ fn main() {
 #[cfg(target_os = "macos")]
 fn main() {
     let args: Vec<_> = std::env::args().collect();
+    // Listing must never initialize WebKit or create the test's native windows.
+    if args.iter().any(|arg| arg == "--list") {
+        if !args.iter().any(|arg| arg == "--ignored") {
+            println!("chrome_cookie_webview: test");
+        }
+        return;
+    }
     if args.get(1).is_some_and(|s| s == "--phase") {
         native_phase(&args[2], &args[3], &args[4], &args[5]);
         return;
@@ -52,40 +59,52 @@ fn main() {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let mut stream = stream.unwrap();
-            stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
-                .unwrap();
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 2048];
-            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                let size = stream.read(&mut buffer).unwrap();
-                if size == 0 {
-                    break;
+            let recorded = recorded.clone();
+            // WebKit can close or leave speculative connections idle. An
+            // unused socket must not stop the server or block actual requests.
+            std::thread::spawn(move || {
+                if stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                    .is_err()
+                {
+                    return;
                 }
-                request.extend_from_slice(&buffer[..size]);
-                assert!(request.len() < 16384);
-            }
-            let request = String::from_utf8(request).unwrap();
-            let authenticated = request.lines().any(|line| {
-                line.to_ascii_lowercase().starts_with("cookie:")
-                    && line
-                        .split_once(':')
-                        .unwrap()
-                        .1
-                        .split(';')
-                        .any(|cookie| cookie.trim() == "login=fixture-login")
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 2048];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let Ok(size) = stream.read(&mut buffer) else {
+                        return;
+                    };
+                    if size == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buffer[..size]);
+                    assert!(request.len() < 16384);
+                }
+                let request = String::from_utf8(request).unwrap();
+                let authenticated = request.lines().any(|line| {
+                    line.to_ascii_lowercase().starts_with("cookie:")
+                        && line
+                            .split_once(':')
+                            .unwrap()
+                            .1
+                            .split(';')
+                            .any(|cookie| cookie.trim() == "login=fixture-login")
+                });
+                recorded.lock().unwrap().push(authenticated);
+                let body = if authenticated {
+                    "<!doctype html><h1>Logged in</h1>"
+                } else {
+                    "<!doctype html><h1>Logged out</h1>"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                // A cancelled navigation may close its connection before the
+                // response; the native page assertions still require delivery.
+                let _ = stream.write_all(response.as_bytes());
             });
-            recorded.lock().unwrap().push(authenticated);
-            let body = if authenticated {
-                "<!doctype html><h1>Logged in</h1>"
-            } else {
-                "<!doctype html><h1>Logged out</h1>"
-            };
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).unwrap();
         }
     });
     let store = uuid::Uuid::new_v4().to_string();
