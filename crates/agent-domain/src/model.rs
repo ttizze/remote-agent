@@ -307,6 +307,7 @@ pub enum ApprovalDecision {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Question {
+    pub required: bool,
     pub id: String,
     pub header: String,
     pub question: String,
@@ -318,7 +319,26 @@ pub struct QuestionOption {
     pub label: String,
     pub description: Option<String>,
 }
-pub type Answers = BTreeMap<String, Vec<String>>;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Answer {
+    Text(String),
+    Choices(Vec<String>),
+}
+impl Answer {
+    pub fn text(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Choices(choices) => choices.join(", "),
+        }
+    }
+    pub fn choices(&self) -> Vec<String> {
+        match self {
+            Self::Text(text) => vec![text.clone()],
+            Self::Choices(choices) => choices.clone(),
+        }
+    }
+}
+pub type Answers = BTreeMap<String, Answer>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResponseCapability {
     Live,
@@ -989,6 +1009,7 @@ pub enum EffectResult {
         message: String,
     },
     RollbackFinished {
+        bindings: Vec<NativeBinding>,
         command: CommandId,
     },
     RollbackFailed {

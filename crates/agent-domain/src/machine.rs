@@ -228,23 +228,9 @@ impl Decision {
             .clone();
         let native_thread = self
             .state
-            .attempts
-            .iter()
-            .rev()
-            .filter(|a| a.id != attempt)
-            .find_map(|a| {
-                self.state
-                    .runs
-                    .iter()
-                    .find(|r| r.id == a.run && r.selection.instance == run.selection.instance)
-                    .and(a.native_thread.clone())
-            })
-            .or_else(|| {
-                self.state
-                    .native_sessions
-                    .get(&run.selection.instance)
-                    .cloned()
-            });
+            .native_sessions
+            .get(&run.selection.instance)
+            .cloned();
         let context = self
             .state
             .transfers
@@ -605,17 +591,16 @@ impl Decision {
                 });
                 let t = self.state.thread.as_ref().unwrap();
                 let command = ProviderCommand::Start {
-                    selection: target.selection,
+                    selection: target.selection.clone(),
                     runtime_mode: t.runtime_mode,
                     interaction_mode: t.interaction_mode,
                     text: message.text.clone(),
                     attachments: message.attachments.clone(),
                     native_thread: self
                         .state
-                        .attempts
-                        .iter()
-                        .find(|a| a.run == *run)
-                        .and_then(|a| a.native_thread.clone()),
+                        .native_sessions
+                        .get(&target.selection.instance)
+                        .cloned(),
                     resume_at: None,
                     context: String::new(),
                 };
@@ -1223,7 +1208,8 @@ impl Decision {
                     RequestBody::Questions { questions }
                         if answers.is_none()
                             || questions.iter().any(|q| {
-                                answers.as_ref().is_none_or(|a| !a.contains_key(&q.id))
+                                q.required
+                                    && answers.as_ref().is_none_or(|a| !a.contains_key(&q.id))
                             }) =>
                     {
                         return reject("missing-question-answer");
@@ -1233,14 +1219,35 @@ impl Decision {
                 if r.capability == ResponseCapability::NotResumable {
                     return reject("request-not-resumable");
                 }
-                let mut provider_answers = answers.clone();
-                if let Some(a) = &mut provider_answers {
-                    for (key, files) in attachments {
-                        a.entry(key.clone())
-                            .or_default()
-                            .extend(files.iter().map(|f| f.path.clone()));
+                let provider_answers = match answers {
+                    Some(answers) => match append_answer_attachments(answers, attachments) {
+                        Ok(answers) => Some(answers),
+                        Err(reason) => return reject(reason),
+                    },
+                    None => None,
+                };
+                let async_text = if r.capability == ResponseCapability::Message {
+                    let RequestBody::Questions { questions } = &r.body else {
+                        return reject("question-not-found");
+                    };
+                    let mut replies = vec![];
+                    for question in questions {
+                        let answer = answers.as_ref().and_then(|a| a.get(&question.id));
+                        match answer {
+                            Some(Answer::Text(text)) if !text.trim().is_empty() => {
+                                replies.push(format!("{}\n{}", question.question, text.trim()));
+                            }
+                            _ if !question.required => {}
+                            _ => return reject("missing-question-answer"),
+                        }
                     }
-                }
+                    if replies.is_empty() {
+                        return reject("missing-question-answer");
+                    }
+                    Some(replies.join("\n\n"))
+                } else {
+                    None
+                };
                 self.fact(FactBody::RequestResolved {
                     id: request.clone(),
                     status: RequestStatus::Resolved,
@@ -1256,28 +1263,15 @@ impl Decision {
                     });
                 }
                 if r.capability == ResponseCapability::Message {
-                    let RequestBody::Questions { questions } = &r.body else {
-                        return reject("question-not-found");
-                    };
-                    let text = questions
-                        .iter()
-                        .filter_map(|q| {
-                            provider_answers
-                                .as_ref()
-                                .and_then(|a| a.get(&q.id))
-                                .map(|a| format!("{}\n{}", q.question, a.join(", ")))
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
                     let message = SendMessage {
                         created_by: MessageAuthor::User,
-                        creation_source: "client".into(),
+                        creation_source: "server".into(),
                         id: MessageId::new(format!("async-answer:{request}")).unwrap(),
-                        text,
-                        attachments: attachments.values().flatten().cloned().collect(),
+                        text: async_text.unwrap(),
+                        attachments: vec![],
                         selection: None,
                         mode: DispatchMode::QueueAfterActive,
-                        intent: None,
+                        intent: Some(DeliveryIntent::Auto),
                         source_plan: None,
                     };
                     return self.create_run(&message);
@@ -1337,23 +1331,14 @@ impl Decision {
                     checkpoint: checkpoint.clone(),
                     restore_files: *restore_files,
                 });
-                for (instance, head) in &cp.native_heads {
-                    let native_thread = self.state.attempts.iter().rev().find_map(|a| {
-                        self.state
-                            .runs
-                            .iter()
-                            .find(|r| r.id == a.run && &r.selection.instance == instance)
-                            .and(a.native_thread.clone())
-                    });
-                    if let Some(native_thread) = native_thread {
-                        self.effect(
-                            None,
-                            EffectBody::Provider(ProviderCommand::Rollback {
-                                native_thread,
-                                absolute_head: head.clone(),
-                            }),
-                        );
-                    }
+                for (instance, native_thread) in self.state.native_sessions.clone() {
+                    self.effect(
+                        None,
+                        EffectBody::Provider(ProviderCommand::Rollback {
+                            native_thread,
+                            absolute_head: cp.native_heads.get(&instance).cloned().flatten(),
+                        }),
+                    );
                 }
                 if *restore_files {
                     self.effect(
@@ -1490,7 +1475,7 @@ impl Decision {
                     history: history.clone(),
                 });
                 if let Some(native) = native {
-                    self.fact(FactBody::NativeSessionInherited {
+                    self.fact(FactBody::NativeSessionBound {
                         instance: native.instance.clone(),
                         native_thread: native.thread.clone(),
                         head: native.head.clone(),
@@ -3061,7 +3046,7 @@ impl Decision {
                     return Reply::Ignored;
                 }
             }
-            EffectResult::RollbackFinished { command } => {
+            EffectResult::RollbackFinished { command, bindings } => {
                 let Some(pending) = self
                     .state
                     .rollback
@@ -3075,6 +3060,13 @@ impl Decision {
                     command: command.clone(),
                     checkpoint: pending.checkpoint,
                 });
+                for binding in bindings {
+                    self.fact(FactBody::NativeSessionBound {
+                        instance: binding.instance.clone(),
+                        native_thread: binding.thread.clone(),
+                        head: binding.head.clone(),
+                    });
+                }
             }
             EffectResult::RollbackFailed { command, message } => {
                 if self

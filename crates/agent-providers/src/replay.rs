@@ -369,12 +369,14 @@ impl Replay {
                         .map(|(key, value)| {
                             (
                                 key.clone(),
-                                value["answers"]
-                                    .as_array()
-                                    .unwrap()
-                                    .iter()
-                                    .map(|v| v.as_str().unwrap().into())
-                                    .collect(),
+                                Answer::Choices(
+                                    value["answers"]
+                                        .as_array()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|v| v.as_str().unwrap().into())
+                                        .collect(),
+                                ),
                             )
                         })
                         .collect()

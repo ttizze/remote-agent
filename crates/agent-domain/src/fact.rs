@@ -23,7 +23,7 @@ pub enum FactBody {
     ForkResolved {
         command: CommandId,
     },
-    NativeSessionInherited {
+    NativeSessionBound {
         instance: String,
         native_thread: String,
         head: Option<String>,
@@ -412,7 +412,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
         ForkResolved { command } => {
             state.pending_forks.remove(command);
         }
-        NativeSessionInherited {
+        NativeSessionBound {
             instance,
             native_thread,
             head,
@@ -825,8 +825,16 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             attempt,
             native_thread,
         } => {
-            find_mut(&mut state.attempts, "attempt", |a| &a.id == attempt)?.native_thread =
-                Some(native_thread.clone())
+            let a = find_mut(&mut state.attempts, "attempt", |a| &a.id == attempt)?;
+            a.native_thread = Some(native_thread.clone());
+            let run = a.run.clone();
+            let instance = find_mut(&mut state.runs, "run", |r| r.id == run)?
+                .selection
+                .instance
+                .clone();
+            state
+                .native_sessions
+                .insert(instance, native_thread.clone());
         }
         TurnBound {
             attempt,

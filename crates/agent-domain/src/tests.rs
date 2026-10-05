@@ -491,6 +491,7 @@ fn rollback_is_absolute_blocks_run_operations_and_preserves_new_metadata() {
         &mut s,
         "done",
         EffectResult::RollbackFinished {
+            bindings: vec![],
             command: CommandId::new("rollback").unwrap(),
         },
     );
@@ -767,6 +768,7 @@ fn approvals_resolve_once_and_questions_keep_attachment_answers() {
             key: "question".into(),
             body: RequestBody::Questions {
                 questions: vec![Question {
+                    required: true,
                     id: "choice".into(),
                     header: "Choose".into(),
                     question: "Which?".into(),
@@ -786,7 +788,7 @@ fn approvals_resolve_once_and_questions_keep_attachment_answers() {
             decision: None,
             answers: Some(BTreeMap::from([(
                 "choice".into(),
-                vec!["One".into(), "Two".into()],
+                Answer::Choices(vec!["One".into(), "Two".into()]),
             )])),
             attachments: BTreeMap::new(),
         },
@@ -1294,4 +1296,98 @@ fn native_text_and_plan_streams_append_without_entity_replacements() {
             .iter()
             .any(|i| matches!(i.kind, ItemKind::TodoList { .. }))
     );
+}
+
+#[test]
+fn rollback_resets_post_boundary_sessions_and_uses_replacement_native_identity() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp = checkpoint(&mut s, &first, &a, "cp-first");
+    s.native_sessions
+        .insert("later-provider".into(), "native-later".into());
+    let step = command(
+        &mut s,
+        "rollback",
+        Command::Rollback {
+            checkpoint: cp,
+            restore_files: false,
+        },
+    );
+    assert!(step.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Rollback {native_thread,absolute_head:None}) if native_thread == "native-later")));
+    let binding = NativeBinding {
+        instance: "codex".into(),
+        thread: "native-replacement".into(),
+        head: None,
+    };
+    assert_eq!(
+        result(
+            &mut s,
+            "stale",
+            EffectResult::RollbackFinished {
+                command: CommandId::new("stale").unwrap(),
+                bindings: vec![binding.clone()]
+            }
+        )
+        .reply,
+        Reply::Ignored
+    );
+    result(
+        &mut s,
+        "restored",
+        EffectResult::RollbackFinished {
+            command: CommandId::new("rollback").unwrap(),
+            bindings: vec![binding],
+        },
+    );
+    let step = command(
+        &mut s,
+        "continue",
+        send_message("continue", DispatchMode::StartImmediately),
+    );
+    assert!(step.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start {native_thread:Some(thread),..}) if thread == "native-replacement")));
+}
+
+#[test]
+fn async_question_answer_steers_the_current_turn_and_rejects_blank_answers_atomically() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    provider(
+        &mut s,
+        "question",
+        &a,
+        ProviderEvent::RequestOpened {
+            owner_path: vec![],
+            key: "question".into(),
+            body: RequestBody::Questions {
+                questions: vec![Question {
+                    required: true,
+                    id: "q".into(),
+                    header: "Choice".into(),
+                    question: "Which?".into(),
+                    multiple: false,
+                    options: vec![],
+                }],
+            },
+            capability: ResponseCapability::Message,
+        },
+    );
+    let request = s.requests[0].id.clone();
+    let respond = |text: &str| Command::Respond {
+        request: request.clone(),
+        decision: None,
+        answers: Some(Answers::from([("q".into(), Answer::Text(text.into()))])),
+        attachments: BTreeMap::new(),
+    };
+    let original = s.clone();
+    assert!(matches!(
+        command(&mut s, "blank", respond(" ")).reply,
+        Reply::Rejected { .. }
+    ));
+    assert_eq!(s, original);
+    let step = command(&mut s, "answer", respond("  Option One  "));
+    assert_eq!(s.runs.len(), 1);
+    assert_eq!(s.requests[0].status, RequestStatus::Resolved);
+    assert!(step.effects.iter().any(|effect| matches!(&effect.body,EffectBody::Provider(ProviderCommand::Steer {text,..}) if text == "Which?\nOption One")));
+    assert_eq!(s.messages.last().unwrap().creation_source, "server");
 }

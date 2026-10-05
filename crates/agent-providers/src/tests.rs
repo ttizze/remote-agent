@@ -31,7 +31,10 @@ fn resume_dialog_control_has_the_original_question_choices_and_result() {
             "Don't ask again"
         ]
     );
-    let answers = Answers::from([(questions[0].id.clone(), vec!["Compact and continue".into()])]);
+    let answers = Answers::from([(
+        questions[0].id.clone(),
+        Answer::Choices(vec!["Compact and continue".into()]),
+    )]);
     assert_eq!(
         control
             .respond("dialog-resume-1", None, Some(&answers))

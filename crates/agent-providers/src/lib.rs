@@ -126,6 +126,7 @@ fn questions(value: &Value) -> Vec<Question> {
         .into_iter()
         .flatten()
         .map(|q| Question {
+            required: q.get("required").and_then(Value::as_bool).unwrap_or(true),
             id: optional(q, "id").unwrap_or_else(|| string(q, "question")),
             header: string(q, "header"),
             question: string(q, "question"),

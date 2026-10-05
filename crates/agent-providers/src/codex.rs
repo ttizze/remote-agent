@@ -150,7 +150,7 @@ impl CodexProtocol {
                 let id: Value = serde_json::from_str(native_key)
                     .map_err(|_| ProtocolError::Invalid("invalid native request id".into()))?;
                 let result = if let Some(answers) = answers {
-                    json!({"answers":answers.iter().map(|(k,v)| (k.clone(),json!({"answers":v}))).collect::<BTreeMap<_,_>>()})
+                    json!({"answers":answers.iter().map(|(k,v)| (k.clone(),json!({"answers":v.choices()}))).collect::<BTreeMap<_,_>>()})
                 } else {
                     json!({"decision":match decision.unwrap_or(ApprovalDecision::Cancel) { ApprovalDecision::Accept=>"accept",ApprovalDecision::AcceptForSession|ApprovalDecision::AcceptAlways=>"acceptForSession",ApprovalDecision::Decline=>"decline",ApprovalDecision::Cancel=>"cancel" }})
                 };

@@ -178,7 +178,7 @@ impl ClaudeControl {
                                 owner_path: vec![],
                                 key,
                                 body: RequestBody::Questions {
-                                    questions: vec![Question { id:question.clone(),header:"Resume session".into(),question,multiple:false,options:vec![QuestionOption { label:"Compact and continue".into(),description:Some("Resume with a summary and use fewer tokens.".into()) },QuestionOption { label:"Keep full history".into(),description:Some("Resume without changing the conversation.".into()) },QuestionOption { label:"Don't ask again".into(),description:Some("Keep full history and skip future resume prompts.".into()) }] },],
+                                    questions: vec![Question { required:true,id:question.clone(),header:"Resume session".into(),question,multiple:false,options:vec![QuestionOption { label:"Compact and continue".into(),description:Some("Resume with a summary and use fewer tokens.".into()) },QuestionOption { label:"Keep full history".into(),description:Some("Resume without changing the conversation.".into()) },QuestionOption { label:"Don't ask again".into(),description:Some("Keep full history and skip future resume prompts.".into()) }] },],
                                 },
                                 capability: ResponseCapability::Live,
                             }],
@@ -213,8 +213,8 @@ impl ClaudeControl {
         let tool = string(&request, "tool_name");
         if request["subtype"] == "request_user_dialog" {
             let response = if let Some(answers) = answers {
-                let answer = answers.values().flatten().next().map(String::as_str);
-                json!({"behavior":"completed","result":match answer {Some("Compact and continue")=>"compact",Some("Don't ask again")=>"never",_=>"continue"}})
+                let answer = answers.values().next().map(Answer::text);
+                json!({"behavior":"completed","result":match answer.as_deref() {Some("Compact and continue")=>"compact",Some("Don't ask again")=>"never",_=>"continue"}})
             } else {
                 json!({"behavior":"cancelled"})
             };
@@ -226,7 +226,7 @@ impl ClaudeControl {
             input["answers"] = json!(
                 answers
                     .iter()
-                    .map(|(q, a)| (q.clone(), a.join(", ")))
+                    .map(|(q, a)| (q.clone(), a.text()))
                     .collect::<BTreeMap<_, _>>()
             );
             json!({"behavior":"allow","updatedInput":input,"toolUseID":request["tool_use_id"]})

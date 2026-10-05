@@ -1094,3 +1094,5 @@ Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機�
 | `claude_background_wake_before_queued_prompt` / `_no_echo` | UUID echo の有無による原本の返信の帰属、混在する停止通知の summary/source。 |
 | `claude_idle_resume` / `multi_turn_restart` | 原本の 2 つの完了返信と native session の継続。実プロセスの休眠／再起動は段階 3 の session 管理で検証する。 |
 | `Notification.test.ts` の background report | 空、単独、混在、件数表示、command の exit code、monitor の更新文言を pure function で確認。delegated completion の表示は core の接続し直しでも使用する。 |
+
+`provider/userInputAttachments.test.ts` の choices 保持、引用付き path、入力非変更、特殊キーの期待値は `agent-domain/src/answers.rs` に移植した。結合後の添付上限も command 前に検証する。実ファイルの存在・読み取り確認は段階 3 の attachment effect に属する。

@@ -114,3 +114,5 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-05: Claude の task ID と tool-use ID の対応を保持し、SendMessage で tool-use ID が変わっても同じ子を再開する。再開の run/attempt/prompt と startedAt を更新し、古い progress を消す。子の snapshot にある実際の model は子の selection と親の task に反映し、孫は所有する子の model を引き継ぐ。
 - 2026-10-05: Claude の foreground な子の Bash は root の background roster と wake に含めない。native local_bash の background 報告は native session の root に帰属し、TaskStop で subagent と command が終了した場合も T3 と同じ通知にまとめる。
 - 2026-10-05: 正規化された native TextDelta と plan の追記も、既存項目がある場合は scratch projection を複製せず offset 付きの事実だけを返す。別 provider instance の終了済み attempt の root 出力は、現在の run を更新しない。
+- 2026-10-05: 質問の回答は text と choices を区別し、添付の引用付き参照を T3 と同じ形で追加する。ファイルの可用性確認は段階 3 の effect executor の責務とし、domain には確認済みの path を渡す。message 型の質問回答は server 作成の通常発言として Auto の配送規則に従う。
+- 2026-10-05: native session の現在の ID は instance ごとに fold が所有する。rollback 成功結果には作り直した native binding を含め、後続ターンはその ID を使う。checkpoint に head がない後発 instance も絶対先頭へ rollback する。
