@@ -181,6 +181,9 @@ transfer server just to delete that check would reverse A14.
   Main and manual runs may use all five Apple slots. Optional PR Apple jobs share
   one repository-wide concurrency queue, retaining up to 100 pending checks
   without cancellation so several PRs cannot occupy every Apple slot together.
+  Dependabot checks one ecosystem per day from Monday through Saturday at
+  04:00 Japan time, with one open version-update PR per ecosystem, rather than
+  opening every ecosystem's updates together during working hours.
   It selects the image's preinstalled Xcode directly.
   The Mac runner uses `nix develop . --command just quality rust` for Rust
   contracts and Mac Browser E2E. Four iPhone runners use
@@ -190,8 +193,19 @@ transfer server just to delete that check would reverse A14.
   together; documentation examples remain a separate Cargo check. Their
   executable builds use the same native-bindings features as the tests so
   Cargo does not rebuild the common crates under a second feature set.
-  Mac integration assertions also use nextest with two test processes to
-  stay within the runner's memory budget. Linux, Windows and Android use four
+  Independent contract tests use sixteen test processes on Linux and Windows
+  to overlap waits for their isolated Hosts and network replies. Mac integration
+  assertions use six test processes within the Apple runner's memory budget.
+  The stalled item-transfer regression advances the Store's production deadline
+  with virtual time while its real QUIC connection runs on a separate clock;
+  an interrupt still completes while the transfer is blocked. The merged
+  worktree regression runs the real Host cleanup every 100 ms with real Git,
+  agents and PTYs. Production Host cleanup retains its 60-second interval.
+  The conversation-creation case selects immediate fixture completion because
+  it checks completed output; scenarios that inspect running turns retain their
+  artificial streaming delay. Browser input waits for the preceding Host click
+  to finish before opening its keyboard. Acceptance deadlines stay unchanged.
+  Linux, Windows and Android use four
   Cargo build jobs; Apple runners retain two.
   They partition the same maintained test list with `BEX_IOS_TEST_SHARDS=4`
   and zero-based `BEX_IOS_TEST_SHARD` values 0 through 3. Each runs one isolated
@@ -203,6 +217,14 @@ transfer server just to delete that check would reverse A14.
   The Simulator app, package dependencies and UI test runner build only arm64,
   matching the supported Apple Silicon test host rather than also compiling
   unused x86_64 test products.
+  The manual `iPhone driver comparison` workflow measures the maintained native
+  navigation/pairing XCTest case and its Maestro flow on separate fresh
+  Simulator/Host pairs. `just ios-maestro` selects only that comparison flow;
+  normal acceptance retains all 33 XCTest cases. Maestro 2.11.0 and Java 21 are
+  pinned through `nix run .#maestro`, with no hosted Maestro service. Reports
+  require the exact selected flow names, successful status and no skipped or
+  failed cases. Compare UI durations after subtracting each pair's setup;
+  the second run reuses build products and does not provide a cold-build comparison.
   Each runner has separate processes,
   memory and logs. iPhone acceptance uses the Host's normal preinstalled Google
   Chrome with unchanged launch arguments, retaining its startup time and stderr

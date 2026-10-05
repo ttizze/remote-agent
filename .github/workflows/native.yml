@@ -13,6 +13,8 @@ concurrency:
 env:
   CARGO_BUILD_JOBS: 4
   CARGO_INCREMENTAL: 0
+  # Contract tests mostly await isolated processes and network replies.
+  NEXTEST_TEST_THREADS: 16
 jobs:
   repository:
     runs-on: ubuntu-24.04
@@ -160,7 +162,7 @@ jobs:
       BEX_IOS_TEST_WORKERS: 1
       BEX_IOS_TEST_SHARD: ${{ matrix.shard }}
       BEX_IOS_TEST_SHARDS: ${{ matrix.shards }}
-      NEXTEST_TEST_THREADS: 2
+      NEXTEST_TEST_THREADS: 6
       # The builders validate Swift content/toolchain hashes before reuse.
       BEX_IOS_SWIFT_CACHE_PATHS: |
         target/qa/ios-derived-data

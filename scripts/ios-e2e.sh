@@ -6,6 +6,10 @@ cd "$(dirname "$0")/.."
     echo 'iOS E2E requires an Apple Silicon Mac with Xcode' >&2; exit 2
 }
 options=()
+if [[ ${1:-} == --maestro ]]; then
+    options+=(--maestro)
+    shift
+fi
 if [[ ${1:-} == --without-codex ]]; then
     options+=(--without-codex)
     shift

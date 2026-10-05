@@ -49,6 +49,10 @@ dev: build-desktop-macos
 ios-e2e *tests:
     scripts/ios-e2e.sh "$@"
 
+# Compare native navigation assertions through the pinned Maestro iOS driver.
+ios-maestro:
+    scripts/ios-e2e.sh --maestro testSimulatorUsesNativeHostNavigationAndPairingDismissal
+
 # Archive iOS with the pinned package plugins trusted from the first build.
 ios-archive archive-path derived-data-path *args:
     scripts/archive-ios.sh "$@"

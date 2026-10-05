@@ -5,9 +5,9 @@ updates:
     schedule:
       interval: weekly
       day: monday
-      time: "09:00"
+      time: "04:00"
       timezone: Asia/Tokyo
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 1
     cooldown:
       default-days: 7
     groups:
@@ -18,10 +18,10 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
-      day: monday
-      time: "09:00"
+      day: tuesday
+      time: "04:00"
       timezone: Asia/Tokyo
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 1
     cooldown:
       default-days: 7
     groups:
@@ -32,10 +32,10 @@ updates:
     directory: "/apps/mobile/iosApp"
     schedule:
       interval: weekly
-      day: monday
-      time: "09:00"
+      day: wednesday
+      time: "04:00"
       timezone: Asia/Tokyo
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 1
     cooldown:
       default-days: 7
     groups:
@@ -46,10 +46,10 @@ updates:
     directory: "/crates/host-daemon/src/visualize"
     schedule:
       interval: weekly
-      day: monday
-      time: "09:00"
+      day: thursday
+      time: "04:00"
       timezone: Asia/Tokyo
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 1
     cooldown:
       default-days: 7
     groups:
@@ -60,10 +60,10 @@ updates:
     directories: ["/", "/tools/agent-peer"]
     schedule:
       interval: weekly
-      day: monday
-      time: "09:00"
+      day: friday
+      time: "04:00"
       timezone: Asia/Tokyo
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 1
     cooldown:
       default-days: 7
     groups:
@@ -73,10 +73,10 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
-      day: monday
-      time: "09:00"
+      day: saturday
+      time: "04:00"
       timezone: Asia/Tokyo
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 1
     cooldown:
       default-days: 7
     groups:

@@ -108,7 +108,9 @@ impl HostFixture {
             .await,
         );
         let stop = CancellationToken::new();
-        let running = tokio::spawn(runtime.run(stop.clone()));
+        // Exercise the real periodic cleanup with real Git, PTYs and agents,
+        // without spending a production minute between each test phase.
+        let running = tokio::spawn(runtime.run(stop.clone(), Duration::from_millis(100)));
         Ok(Self {
             server: server.ok(),
             credentials,

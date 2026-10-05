@@ -201,9 +201,11 @@ extension BexLaunchUITests {
         XCTAssertTrue(canvas.waitForExistence(timeout: 10))
         canvas.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: canvas.frame.width * 100 / 1024, dy: canvas.frame.width * 40 / 1024)).tap()
-        app.buttons["文字入力"].tap()
+        let keyboard = app.buttons["文字入力"]
+        let clickCompleted = expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: keyboard)
+        wait(for: [clickCompleted], timeout: 10); keyboard.tap()
         let input = app.secureTextFields["browser.text"]
-        input.tap(); input.typeText("Remote phone input")
+        XCTAssertTrue(input.waitForExistence(timeout: 5)); input.tap(); input.typeText("Remote phone input")
         app.buttons["browser.type"].tap()
         XCTAssertTrue(app.staticTexts["Remote phone input"].waitForExistence(timeout: 10))
         captureScreen(app, named: "Shared Host browser with direct input")

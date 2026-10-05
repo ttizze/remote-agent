@@ -2056,7 +2056,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
         );
         lease.publish(&runtime.ticket()).unwrap();
         let stop = CancellationToken::new();
-        let running = tokio::spawn(runtime.clone().run(stop.clone()));
+        let running = tokio::spawn(runtime.clone().run(stop.clone(), Duration::from_secs(60)));
 
         // Fresh desktop state must discover the mobile Host and read *its* keys,
         // without provisioning a second identity in the desktop directory.

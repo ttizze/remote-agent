@@ -23,6 +23,7 @@
       packages = forEachSystem (pkgs: {
         agent-peer = pkgs.callPackage ./tools/agent-peer/package.nix { };
         kani = pkgs.callPackage ./tools/kani/package.nix { };
+        maestro = pkgs.callPackage ./tools/maestro/package.nix { };
       });
       devShells = forEachSystem (pkgs:
         let

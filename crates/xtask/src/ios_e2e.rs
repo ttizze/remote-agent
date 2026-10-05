@@ -3,6 +3,42 @@ use crate::Result;
 use plist::Value as Plist;
 use serde_json::Value;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TestDriver {
+    XCTest,
+    Maestro,
+}
+
+fn check_maestro_report(report: &str, tests: &[String]) -> Result<()> {
+    let document = roxmltree::Document::parse(report)?;
+    let cases = document
+        .descendants()
+        .filter(|node| node.has_tag_name("testcase"))
+        .collect::<Vec<_>>();
+    let names = cases
+        .iter()
+        .filter_map(|node| node.attribute("name"))
+        .collect::<std::collections::BTreeSet<_>>();
+    if !document.root_element().has_tag_name("testsuites")
+        || cases.len() != tests.len()
+        || names != tests.iter().map(String::as_str).collect()
+        || cases
+            .iter()
+            .any(|node| node.attribute("status") != Some("SUCCESS"))
+        || document.descendants().any(|node| {
+            node.has_tag_name("failure")
+                || node.has_tag_name("error")
+                || node.has_tag_name("skipped")
+                || (node.has_tag_name("testsuite") && node.attribute("failures") != Some("0"))
+        })
+    {
+        return Err(
+            "Maestro must complete every selected flow successfully, without skipped flows".into(),
+        );
+    }
+    Ok(())
+}
+
 fn configure_run(configuration: Plist, pairing_url: &str, probe: &str) -> Result<Plist> {
     fn configure(value: Plist, url: &str, probe: &str) -> Result<(Plist, usize)> {
         match value {
@@ -381,6 +417,10 @@ async fn template(
     result
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep each isolated worker's resource and driver inputs explicit"
+)]
 async fn worker(
     tests: Vec<String>,
     target: PathBuf,
@@ -388,6 +428,7 @@ async fn worker(
     simulator_source: SimulatorSource,
     prefix: PathBuf,
     without_codex: bool,
+    driver: TestDriver,
     cancel: watch::Receiver<bool>,
 ) -> Result<WorkerResult> {
     let started = Instant::now();
@@ -396,7 +437,11 @@ async fn worker(
         .file_name()
         .ok_or("missing worker label")?
         .to_string_lossy();
-    let bundle = prefix.with_extension("xcresult");
+    let bundle = prefix.with_extension(if driver == TestDriver::Maestro {
+        "maestro"
+    } else {
+        "xcresult"
+    });
     let name = format!(
         "Bex isolated E2E {}-{label}",
         records.file_name().unwrap().to_string_lossy()
@@ -470,6 +515,18 @@ async fn worker(
                 fs::write(documents.join("attachment-fixture.txt"), "Isolated attachment upload fixture.\n")?;
             }
             let pairing_url = format!("http://127.0.0.1:{}/pairing", fs::read_to_string(root.join("pairing.port"))?.trim());
+            if driver == TestDriver::Maestro {
+                fs::create_dir(&bundle)?;
+                let report = bundle.join("report.xml");
+                let mut arguments = args![vec; "nix", "run", ".#maestro", "--", "--device", simulator, "test", "--format", "junit", "--output", &report, "--test-output-dir", &bundle, "--env", format!("BEX_PAIRING_URL={pairing_url}")];
+                arguments.extend(tests.iter().map(|test| cwd.join("apps/mobile/maestro/ios").join(test).with_extension("yaml").into_os_string()));
+                let setup_seconds = started.elapsed().as_secs_f64();
+                println!("{label}: Simulator and Host ready in {setup_seconds:.2}s");
+                supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, BUILD_TIMEOUT).await?;
+                check_maestro_report(&fs::read_to_string(&report)?, &tests)?;
+                println!("{label}: {} Maestro flows passed; records: {}", tests.len(), bundle.display());
+                return Ok(WorkerResult { tests, seconds: started.elapsed().as_secs_f64(), setup_seconds, bundle });
+            }
             let probe = std::env::current_exe()?;
             configure_run(Plist::from_file(&source)?, &pairing_url, probe.to_str().ok_or("non-UTF-8 terminal probe path")?)?.to_file_xml(&run)?;
             let mut arguments = args![vec; "xcodebuild", "-xctestrun", &run, "-destination", format!("platform=iOS Simulator,id={simulator}"), "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "on-failure", "-resultBundlePath", &bundle];
@@ -525,7 +582,7 @@ async fn worker(
     Ok(result)
 }
 
-pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
+pub async fn run(tests: Vec<String>, without_codex: bool, driver: TestDriver) -> Result<()> {
     if std::env::consts::OS != "macos" || std::env::consts::ARCH != "aarch64" {
         return Err("iOS E2E requires an Apple Silicon Mac with Xcode".into());
     }
@@ -549,6 +606,20 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
         return Err("BEX_IOS_TEST_WORKERS must be between 1 and 10".into());
     }
     let workers = workers.min(tests.len());
+    if driver == TestDriver::Maestro {
+        if workers != 1 {
+            return Err("The Maestro comparison runs one isolated pair per runner".into());
+        }
+        for test in &tests {
+            if !Path::new("apps/mobile/maestro/ios")
+                .join(test)
+                .with_extension("yaml")
+                .is_file()
+            {
+                return Err(format!("No maintained Maestro flow for {test}").into());
+            }
+        }
+    }
     let groups = (0..workers)
         .map(|index| partition_tests(&tests, index, workers))
         .collect::<Result<Vec<_>>>()?;
@@ -611,6 +682,16 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
     }
     let log = File::create(records.join("build.log"))?;
     let build_started = Instant::now();
+    if driver == TestDriver::Maestro {
+        supervision::run(
+            &args!["nix", "run", ".#maestro", "--", "--version"],
+            &cwd,
+            Io::Log(&log),
+            &cancel,
+            BUILD_TIMEOUT,
+        )
+        .await?;
+    }
     println!("Building iOS bindings and isolated Host fixtures");
     for arguments in [
         args![vec; "scripts/build-agent-ios.sh", "simulator"],
@@ -737,6 +818,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
             simulator_source.clone(),
             records.join(format!("worker-{}", index + 1)),
             without_codex,
+            driver,
             cancel.clone(),
         ));
     }
@@ -778,6 +860,28 @@ mod tests {
     use serde_json::json;
 
     proptest! {
+        #[test]
+        fn maestro_requires_the_selected_successful_flows(
+            count in 2usize..16,
+            status in prop::sample::select(vec!["PENDING", "PREPARING", "INSTALLING", "RUNNING", "ERROR", "CANCELED", "STOPPED", "WARNING"]),
+        ) {
+            let tests: Vec<_> = (0..count).map(|index| format!("testSimulator{index}")).collect();
+            let cases = tests.iter().rev().map(|name| format!("<testcase name=\"{name}\" status=\"SUCCESS\"/>")).collect::<String>();
+            let report = format!("<testsuites><testsuite tests=\"{count}\" failures=\"0\">{cases}</testsuite></testsuites>");
+            prop_assert!(check_maestro_report(&report, &tests).is_ok());
+            let incomplete = report.replacen("status=\"SUCCESS\"", &format!("status=\"{status}\""), 1);
+            prop_assert!(check_maestro_report(&incomplete, &tests).is_err());
+            prop_assert!(check_maestro_report(&report.replace("name=\"testSimulator0\"", "name=\"other\""), &tests).is_err());
+            prop_assert!(check_maestro_report(&report.replace("name=\"testSimulator0\"", "name=\"testSimulator1\""), &tests).is_err());
+            prop_assert!(check_maestro_report(&report.replace("<testcase name=\"testSimulator0\" status=\"SUCCESS\"/>", ""), &tests).is_err());
+            prop_assert!(check_maestro_report(&report.replace("</testsuite>", "<failure/></testsuite>"), &tests).is_err());
+            prop_assert!(check_maestro_report(&report.replace("</testsuite>", "<error/></testsuite>"), &tests).is_err());
+            prop_assert!(check_maestro_report(&report.replace("</testsuite>", "<skipped/></testsuite>"), &tests).is_err());
+            prop_assert!(check_maestro_report(&report.replace("failures=\"0\"", "failures=\"1\""), &tests).is_err());
+            prop_assert!(check_maestro_report(&report.replace("testsuites", "other"), &tests).is_err());
+            prop_assert!(check_maestro_report("not xml", &tests).is_err());
+        }
+
         #[test]
         fn diagnostic_sampling_stays_with_its_simulator(pid in 1u32..100_000, simulator in "[A-F0-9-]{36}") {
             let processes = format!(

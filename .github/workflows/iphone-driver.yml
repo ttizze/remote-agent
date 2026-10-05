@@ -1,0 +1,60 @@
+name: iPhone driver comparison
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: iphone-driver-comparison
+  cancel-in-progress: true
+jobs:
+  compare:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      BEX_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      BEX_IOS_TEST_WORKERS: 1
+      MAESTRO_CLI_NO_ANALYTICS: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Use the pinned preinstalled Xcode
+        run: |
+          export DEVELOPER_DIR="$BEX_XCODE_DEVELOPER_DIR"
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cmd-format: nix develop . --command {0}
+          add-job-id-key: false
+          shared-key: macos-swift-xcode-26.6-${{ hashFiles('flake.lock') }}-macos
+          save-if: false
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            target/qa/ios-derived-data
+            target/qa/ios-markdown
+            target/agent-bindings
+            target/aarch64-apple-ios-sim/release/libAgentCore.a
+            target/aarch64-apple-ios-sim/release/AgentCore.swiftmodule
+            target/aarch64-apple-ios-sim/release/AgentCore.swiftdoc
+            target/aarch64-apple-ios-sim/release/agent-core-swift.sha256
+          key: ios-swift-xcode-26.6-${{ hashFiles('flake.lock', 'Cargo.lock', 'crates/agent-core/src/**', 'crates/agent-protocol/src/**', 'crates/xtask/src/ios_markdown.rs', 'scripts/build-agent*.sh', 'apps/mobile/iosApp/**') }}
+          restore-keys: ios-swift-xcode-26.6-
+      - name: Prepare the pinned Maestro CLI and validate the flow
+        run: nix run .#maestro -- check-syntax apps/mobile/maestro/ios/testSimulatorUsesNativeHostNavigationAndPairingDismissal.yaml
+      - name: Measure the maintained XCTest navigation and pairing case
+        run: nix develop . --command bash scripts/ios-e2e.sh testSimulatorUsesNativeHostNavigationAndPairingDismissal
+      - name: Measure the equivalent Maestro flow on a fresh Simulator and Host
+        if: ${{ !cancelled() }}
+        run: nix develop . --command just ios-maestro
+      - name: Retain timings, commands, screenshots and test reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: iphone-driver-comparison
+          path: target/qa/Bex-*
+          retention-days: 7

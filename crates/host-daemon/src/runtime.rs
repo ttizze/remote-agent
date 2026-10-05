@@ -111,7 +111,9 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     .context("cannot publish Host ticket")?;
     let shutdown = CancellationToken::new();
     let result = {
-        let run = runtime.clone().run(shutdown.clone());
+        let run = runtime
+            .clone()
+            .run(shutdown.clone(), std::time::Duration::from_secs(60));
         tokio::pin!(run);
         tokio::select! {
             result = &mut run => result,

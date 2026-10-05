@@ -46,12 +46,16 @@ impl HostRuntime {
     pub fn ticket(&self) -> Ticket {
         self.endpoint.ticket()
     }
-    pub async fn run(self: Arc<Self>, shutdown: CancellationToken) -> Result<()> {
+    pub async fn run(
+        self: Arc<Self>,
+        shutdown: CancellationToken,
+        worktree_cleanup_interval: Duration,
+    ) -> Result<()> {
         self.service.start();
         let service = self.service.clone();
         let maintenance_stop = shutdown.clone();
         let maintenance = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            let mut interval = tokio::time::interval(worktree_cleanup_interval);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {

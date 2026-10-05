@@ -3450,14 +3450,37 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
     use agent_transport::transport::Relays;
     use agent_transport::transport::Trust;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // QUIC uses real network time; keep its timers separate from the Store's
+    // virtual transfer deadline so advancing that deadline cannot expire QUIC.
+    let network = scopeguard::guard(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap(),
+        tokio::runtime::Runtime::shutdown_background,
+    );
     tokio::time::timeout(Duration::from_secs(180), async {
-        let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
-        let client = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+        let (host, client) = network.spawn(async {
+            let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+            let client = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
+            (host, client)
+        }).await.unwrap();
         let trust = Trust { allowed: [client.node_id()].into(), ..Default::default() };
         let ticket = host.ticket();
-        let (store, incoming) = tokio::join!(Store::connect(&client, &ticket, Snapshot::default(), None), scoped_incoming(&host, &trust));
-        let store = store.unwrap();
-        let (session, mut reader, writer) = incoming;
+        let store = Arc::new(Store::offline(Snapshot::default()));
+        let connecting = network.spawn({
+            let store = store.clone();
+            let client = client.clone();
+            async move { store.reconnect(&client, &ticket, None).await }
+        });
+        let accepting = network.spawn({
+            let host = host.clone();
+            async move { scoped_incoming(&host, &trust).await }
+        });
+        let (connected, incoming) = tokio::join!(connecting, accepting);
+        connected.unwrap().unwrap();
+        let (session, mut reader, writer) = incoming.unwrap();
         let output = Arc::new(tokio::sync::Mutex::new(writer));
         let (send, mut requests) = tokio::sync::mpsc::channel(16);
         let subscription_a = uuid::Uuid::new_v4();
@@ -3551,23 +3574,22 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
             let mut token = [0; 32];
             transfer.read_exact(&mut token).await.unwrap();
             if failure == "timeout" {
-                // Exercise the production deadline against a stalled real stream.
-                // Keep using the independent control connection throughout it.
-                loop {
-                    tokio::select! {
-                        result = &mut failed_read => {
-                            assert!(matches!(result, Err(PeerError::RequestTimeout { .. })), "{result:?}");
-                            break;
-                        }
-                        _ = tokio::time::sleep(Duration::from_secs(10)) => {
-                            let interrupt = store.dispatch(Intent::Interrupt(op::Interrupt {thread_id:SessionRef { provider: ProviderKind::Codex, id: "A".into() },turn_id:"turn".into()}));
-                            let request = requests.recv().await.unwrap();
-                            assert_eq!(request["method"], "host/session/interrupt");
-                            output.lock().await.reply(&request, json!({"result":{}})).await.unwrap();
-                            interrupt.await.unwrap();
-                        }
-                    }
-                }
+                // The real stream has delivered its token and remains stalled.
+                // Advance the production deadline without waiting two minutes.
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(60)).await;
+                assert!(futures_util::poll!(&mut failed_read).is_pending());
+                tokio::time::resume();
+                let interrupt = store.dispatch(Intent::Interrupt(op::Interrupt {thread_id:SessionRef { provider: ProviderKind::Codex, id: "A".into() },turn_id:"turn".into()}));
+                let request = requests.recv().await.unwrap();
+                assert_eq!(request["method"], "host/session/interrupt");
+                output.lock().await.reply(&request, json!({"result":{}})).await.unwrap();
+                interrupt.await.unwrap();
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(60)).await;
+                tokio::time::resume();
+                let result = failed_read.await;
+                assert!(matches!(result, Err(PeerError::RequestTimeout { .. })), "{result:?}");
             } else {
                 transfer.write_all(&invalid).await.unwrap();
                 transfer.shutdown().await.unwrap();

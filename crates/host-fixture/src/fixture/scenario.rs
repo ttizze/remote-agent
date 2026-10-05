@@ -163,7 +163,9 @@ pub(super) async fn run(
         }
         _ => (),
     }
-    if interrupted(&stop, context.config.delay()).await {
+    // Completion-only UI assertions do not need the artificial window used
+    // to interact with running turns. Preserve that window for live scenarios.
+    if !prompt.contains("[immediate]") && interrupted(&stop, context.config.delay()).await {
         return context.finish(&thread, &turn, "interrupted", None);
     }
     {

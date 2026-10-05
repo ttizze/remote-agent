@@ -18,7 +18,7 @@ extension BexLaunchUITests {
         captureScreen(app, named: "New conversation opens the existing empty chat")
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks.list"].waitForExistence(timeout: 10))
-        try startSimulatorConversation(app, promptText: "[success] Start the simulator conversation")
+        try startSimulatorConversation(app, promptText: "[success] [immediate] Start the simulator conversation")
 
         let finalAnswer = prefixedElement(app, prefix: "item.fixture-final-")
         XCTAssertTrue(finalAnswer.waitForExistence(timeout: 15), "Final answer did not stream into the conversation")

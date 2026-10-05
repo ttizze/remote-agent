@@ -1,0 +1,123 @@
+appId: com.ttizze.b-codex
+name: testSimulatorUsesNativeHostNavigationAndPairingDismissal
+---
+- runFlow: connect.yaml
+- extendedWaitUntil:
+    visible: 検証 Host、.*
+    timeout: 10000
+- tapOn:
+    id: tasks.hosts
+- tapOn:
+    id: profiles.add
+- extendedWaitUntil:
+    visible:
+      id: pairing.cancel
+    timeout: 10000
+- swipe:
+    start: 50%,13%
+    end: 50%,90%
+    duration: 500
+- extendedWaitUntil:
+    visible:
+      id: profiles.add
+    timeout: 10000
+- runScript:
+    file: assert-absent.js
+    env:
+      ABSENT_ID: ^pairing.cancel$
+- tapOn:
+    id: profiles.add
+- tapOn:
+    id: pairing.cancel
+- assertVisible:
+    id: profiles\.(?!add$).+
+    text: .*検証 Host.*
+- tapOn:
+    id: profiles\.(?!add$).+
+- extendedWaitUntil:
+    visible:
+      id: tasks.list
+    timeout: 15000
+- tapOn:
+    id: tasks.hosts
+- tapOn:
+    id: profiles.add
+- tapOn:
+    id: pairing.manual
+- tapOn:
+    id: pairing.contents
+- inputText: invalid invitation
+- tapOn:
+    id: pairing.submit
+- extendedWaitUntil:
+    visible:
+      id: notice
+    timeout: 5000
+- runScript:
+    file: assert-absent.js
+    env:
+      # XCUIElementTypeKeyboard from Xcode's public XCUIElementTypes.h.
+      ABSENT_ELEMENT_TYPE: "19"
+- tapOn:
+    id: pairing.contents
+- runScript:
+    file: input-pairing.js
+    env:
+      REFRESH_PAIRING: "true"
+- tapOn:
+    id: pairing.submit
+- extendedWaitUntil:
+    visible:
+      id: pairing.change
+    timeout: 10000
+- tapOn:
+    id: pairing.change
+- tapOn:
+    id: pairing.manual
+- tapOn:
+    id: pairing.contents
+- runScript:
+    file: input-pairing.js
+    env:
+      REFRESH_PAIRING: "false"
+- tapOn:
+    id: pairing.submit
+- extendedWaitUntil:
+    visible:
+      id: pairing.host
+      text: 検証 Host
+    timeout: 10000
+- assertVisible:
+    id: pairing.recipients
+- copyTextFrom:
+    id: pairing.recipients
+- assertTrue: ${maestro.copiedText.length > 0}
+- runScript:
+    file: assert-absent.js
+    env:
+      ABSENT_ID: ^(pairing.scan|tasks.list)$
+- tapOn:
+    id: pairing.confirm
+- pressKey: Home
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible:
+      id: tasks.list
+    timeout: 30000
+- runScript:
+    file: assert-absent.js
+    env:
+      ABSENT_ID: ^pairing.cancel$
+- extendedWaitUntil:
+    visible: 検証 Host、.*
+    timeout: 10000
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: tasks.list
+    timeout: 30000
+- extendedWaitUntil:
+    visible: 検証 Host、.*
+    timeout: 10000
