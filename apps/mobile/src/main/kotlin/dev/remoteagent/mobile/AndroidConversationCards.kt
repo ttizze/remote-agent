@@ -1,147 +1,98 @@
 package dev.remoteagent.mobile
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
+import android.content.ClipData
+import android.content.ClipboardManager
+import androidx.compose.foundation.*
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material3.Card
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.LinkAnnotation
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.withLink
-import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.*
+import androidx.compose.ui.text.font.*
+import androidx.compose.ui.text.style.*
 import androidx.compose.ui.unit.dp
-import dev.remoteagent.core.Intent
-import dev.remoteagent.core.MarkdownAlignment
-import dev.remoteagent.core.MarkdownBlock
-import dev.remoteagent.core.MarkdownRun
-import dev.remoteagent.core.Outcome
-import dev.remoteagent.core.RenderedItem
-import dev.remoteagent.core.markdownBlocks
+import androidx.compose.ui.unit.sp
+import dev.remoteagent.core.*
 
 @Composable
-internal fun ThreadMessageCard(
-    item: RenderedItem,
-    isUser: Boolean,
-    cwd: String,
-    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-) {
-    val content = remember(item) { item.presentation() }
-    val imageFrame = Modifier.widthIn(max = 320.dp).fillMaxWidth().height(320.dp)
-    Column(
-        Modifier.fillMaxWidth(),
-        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+internal fun ProviderIcon(provider: String, modifier: Modifier = Modifier) {
+    Icon(
+        painterResource(if (provider == "claude") R.drawable.ic_claude else R.drawable.ic_openai),
+        provider,
+        modifier,
+        tint = T3.color("textMuted"),
+    )
+}
+
+@Composable
+internal fun CopyButton(text: String) {
+    val context = LocalContext.current
+    TextButton(
+        onClick = {
+            context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("", text))
+        },
+        contentPadding = PaddingValues(),
     ) {
-        if (content.imagePlaceholder) {
-            ImageSkeleton(imageFrame, "画像を生成中", "image.generation.skeleton")
-        }
-        if (isUser && content.imageSources.isNotEmpty()) {
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                content.imageSources.forEach { source ->
-                    AttachmentThumbnail(source, "添付画像", perform, Modifier.size(80.dp))
-                }
-            }
-        }
-        if (!isUser) {
-            content.imageSources.forEach { source ->
-                AttachmentThumbnail(source, "生成画像", perform, imageFrame)
-            }
-        }
-        content.body?.takeIf { it.isNotEmpty() }?.let { body ->
-            Card {
-                Column(Modifier.padding(12.dp)) {
-                    if (isUser) Text(body) else ConversationBody(body, cwd, perform)
-                }
-            }
-        }
-        if (isUser && content.nativeId == null) {
-            content.title?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-        }
+        Text("Copy", style = MaterialTheme.typography.labelSmall)
     }
 }
 
 @Composable
-internal fun ThreadActivityCard(item: RenderedItem, loadDetails: (String) -> Unit) {
-    val content = remember(item) { item.presentation() }
-    var expanded by remember(content.id) { mutableStateOf(false) }
-    val detail = remember(item, expanded) { if (expanded) item.expandedBody() else null }
-    Card(
-        Modifier.fillMaxWidth()
-            .then(
-                if (content.collapsible)
-                    Modifier.clickable {
-                        expanded = !expanded
-                        if (expanded && content.deferred) {
-                            loadDetails(content.nativeId ?: content.id)
-                        }
-                    }
-                else Modifier
-            )
-    ) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            content.title?.let { title ->
-                Text(
-                    (if (content.collapsible) if (expanded) "⌄ " else "› " else "") + title,
-                    style = MaterialTheme.typography.labelLarge,
-                )
-            }
-            (if (expanded) detail else content.body)?.let { Text(it, maxLines = if (expanded) Int.MAX_VALUE else 1) }
-        }
-    }
-}
-
-@Composable
-internal fun ConversationBody(
-    body: String,
-    cwd: String = "",
-    perform: ((Intent, (Result<Outcome>) -> Unit) -> Unit)? = null,
-) {
+internal fun ConversationBody(body: String) {
     val blocks = remember(body) { markdownBlocks(body) }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         blocks.forEachIndexed { index, block ->
             when (block) {
-                is MarkdownBlock.Paragraph ->
-                    Text(
-                        markdownText(block.runs, header = block.style.header != null, marker = block.style.marker),
-                        style =
-                            when (block.style.header?.toInt()) {
-                                1 -> MaterialTheme.typography.headlineSmall
-                                null -> MaterialTheme.typography.bodyLarge
-                                else -> MaterialTheme.typography.titleLarge
-                            },
-                        fontFamily = if (block.style.code) FontFamily.Monospace else FontFamily.Default,
-                        modifier = Modifier.padding(start = if (block.style.quoted) 12.dp else 0.dp),
-                    )
-                is MarkdownBlock.Visualization -> ConversationVisualization(block.path, cwd, perform)
+                is MarkdownBlock.Paragraph -> {
+                    if (block.style.code)
+                        Surface(
+                            color = T3.color("codeBackground"),
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, T3.color("border")),
+                        ) {
+                            Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                                CopyButton(block.runs.joinToString("") { it.text })
+                                SelectionContainer {
+                                    Text(
+                                        block.runs.joinToString("") { it.text },
+                                        Modifier.horizontalScroll(rememberScrollState()),
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 13.sp,
+                                        lineHeight = 19.sp,
+                                    )
+                                }
+                            }
+                        }
+                    else
+                        SelectionContainer {
+                            Text(
+                                markdownText(
+                                    block.runs,
+                                    header = block.style.header != null,
+                                    marker = block.style.marker,
+                                ),
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontSize =
+                                    when (block.style.header?.toInt()) {
+                                        1 -> 21.sp
+                                        2 -> 19.sp
+                                        3 -> 17.sp
+                                        null -> 16.sp
+                                        else -> 15.sp
+                                    },
+                                fontFamily = T3.fonts,
+                                modifier = Modifier.padding(start = if (block.style.quoted) 12.dp else 0.dp),
+                            )
+                        }
+                }
+                is MarkdownBlock.Visualization ->
+                    Text(block.path, color = T3.color("textMuted"), style = MaterialTheme.typography.bodySmall)
                 is MarkdownBlock.Table -> MarkdownTable(block, index)
             }
         }
@@ -162,7 +113,7 @@ private fun MarkdownTable(table: MarkdownBlock.Table, index: Int) {
                             markdownText(cell.runs),
                             modifier =
                                 Modifier.width(width).padding(10.dp).testTag("markdown.cell.$index.$row.$column"),
-                            style = MaterialTheme.typography.bodyLarge,
+                            style = MaterialTheme.typography.bodySmall,
                             textAlign =
                                 when (table.columns[column]) {
                                     MarkdownAlignment.LEFT -> TextAlign.Left

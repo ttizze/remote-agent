@@ -1,3 +1,5 @@
+import com.ncorti.ktfmt.gradle.tasks.KtfmtCheckTask
+import com.ncorti.ktfmt.gradle.tasks.KtfmtFormatTask
 import org.gradle.api.tasks.Exec
 
 plugins {
@@ -12,6 +14,22 @@ ktfmt {
     kotlinLangStyle()
     maxWidth.set(120)
 }
+
+// AGP's built-in Kotlin source set is not discovered by ktfmt-gradle.
+val ktfmtFormatNative by
+    tasks.registering(KtfmtFormatTask::class) {
+        source = fileTree("src/main/kotlin")
+        include("**/*.kt")
+    }
+val ktfmtCheckNative by
+    tasks.registering(KtfmtCheckTask::class) {
+        source = fileTree("src/main/kotlin")
+        include("**/*.kt")
+    }
+
+tasks.named("ktfmtFormat") { dependsOn(ktfmtFormatNative) }
+
+tasks.named("ktfmtCheck") { dependsOn(ktfmtCheckNative) }
 
 detekt {
     toolVersion = "1.23.8"
@@ -31,6 +49,7 @@ val generateAgentBindings by
         inputs.dir(rootProject.file("crates/agent-core"))
         inputs.dir(rootProject.file("crates/agent-protocol"))
         inputs.dir(rootProject.file("crates/agent-transport"))
+        inputs.dir(rootProject.file("crates/orchestration"))
         outputs.dir(rootProject.file("target/agent-bindings"))
     }
 val buildAgentAndroid by
@@ -55,6 +74,7 @@ val buildAgentAndroid by
         inputs.dir(rootProject.file("crates/agent-core"))
         inputs.dir(rootProject.file("crates/agent-protocol"))
         inputs.dir(rootProject.file("crates/agent-transport"))
+        inputs.dir(rootProject.file("crates/orchestration"))
         outputs.dir(layout.buildDirectory.dir("generated/jniLibs"))
     }
 
@@ -83,6 +103,7 @@ android {
     sourceSets.getByName("androidTest").assets.srcDir(rootProject.file("crates/agent-core/tests/fixtures/markdown"))
     sourceSets.getByName("main") {
         kotlin.srcDir(rootProject.file("target/agent-bindings/dev"))
+        res.srcDir("native-res")
         jniLibs.srcDir(layout.buildDirectory.dir("generated/jniLibs").get().asFile)
     }
 }

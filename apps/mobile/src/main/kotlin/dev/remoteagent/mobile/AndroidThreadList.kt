@@ -1,143 +1,244 @@
 package dev.remoteagent.mobile
 
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import dev.remoteagent.core.Intent
-import dev.remoteagent.core.ListQuery
-import dev.remoteagent.core.ListSessions
-import dev.remoteagent.core.ReadThread
-import dev.remoteagent.core.SessionRef
-import dev.remoteagent.core.ThreadList
-import dev.remoteagent.core.ThreadSummary
-import dev.remoteagent.core.WorktreeStatus
+import dev.remoteagent.core.*
+import java.time.Instant
+import kotlinx.coroutines.delay
 
 @Composable
-internal fun ThreadListScreen(
-    list: ThreadList?,
-    query: ListQuery,
-    perform: (Intent) -> Unit,
-    showHosts: () -> Unit,
-    openConversation: (Intent) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val threads = list?.threads.orEmpty()
+internal fun ThreadListScreen(model: AndroidAppModel, modifier: Modifier = Modifier) {
     var search by remember { mutableStateOf("") }
-    val currentQuery by rememberUpdatedState(query)
-    val dispatch by rememberUpdatedState(perform)
-    LaunchedEffect(search) {
-        kotlinx.coroutines.delay(SEARCH_DEBOUNCE_MILLIS)
-        if (currentQuery.searchTerm != search)
-            dispatch(Intent.ListSessions(ListSessions(query = currentQuery.copy(searchTerm = search))))
-    }
-    LazyColumn(
-        modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        item {
-            Row {
-                Button(onClick = showHosts) { Text("PC一覧") }
-                Button(onClick = { perform(Intent.ListSessions(ListSessions(query = query))) }) { Text("更新") }
-            }
-            OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), label = { Text("チャットを検索") })
-            Text("プロジェクト", style = MaterialTheme.typography.headlineSmall)
+    var collapsed by remember { mutableStateOf(emptySet<ShelfKind>()) }
+    var settledLimit by remember { mutableStateOf(10u) }
+    var now by remember { mutableStateOf(System.currentTimeMillis()) }
+    var projectMenu by remember { mutableStateOf(false) }
+    var archive by remember { mutableStateOf(false) }
+    var settings by remember { mutableStateOf(false) }
+    var addProject by remember { mutableStateOf(false) }
+    var path by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000)
+            now = System.currentTimeMillis()
         }
-        list?.notice?.let { notice -> item { Text(notice) } }
-        projectThreads(list, openConversation, perform)
-        item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("チャット", style = MaterialTheme.typography.titleMedium)
-                TextButton(onClick = { openConversation(Intent.NewChat("")) }) { Text("新規") }
-            }
-        }
-        items(threads.filter { it.projectId == null }, key = { it.id.listKey }) { SummaryRow(it, openConversation) }
-        if (list?.hasMoreChats == true)
-            item { TextButton(onClick = { perform(Intent.ExpandThreadList(null, false)) }) { Text("もっと見る") } }
-        if (list != null && threads.isEmpty()) item { Text("タスクがありません。") }
     }
-}
-
-@Composable
-private fun SummaryRow(thread: ThreadSummary, openConversation: (Intent) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth()
-            .clickable { openConversation(Intent.ReadThread(ReadThread(thread.id, open = true))) }
-            .padding(vertical = 8.dp)
-    ) {
-        Text(thread.title, Modifier.weight(1f))
-        if (thread.active) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-        else if (thread.unread) Text("● 完了・未確認")
-        thread.worktreeStatus?.let { status ->
-            val unmerged = status == WorktreeStatus.UNMERGED
-            Icon(
-                painterResource(if (unmerged) R.drawable.ic_diff else R.drawable.ic_merge),
-                if (unmerged) "main に未反映の変更あり" else "main にマージ済み",
-                Modifier.padding(start = 8.dp).size(18.dp),
-                tint = if (unmerged) Color(UNMERGED_COLOR_ARGB) else MaterialTheme.colorScheme.tertiary,
+    val shelves = remember(model.snapshot, now, settledLimit) { model.snapshot.shelves(now, settledLimit) }
+    Column(modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            OutlinedTextField(
+                search,
+                {
+                    search = it
+                    model.perform(Intent.Search(it))
+                },
+                Modifier.weight(1f),
+                placeholder = { Text("Search") },
+                singleLine = true,
             )
-        }
-    }
-}
-
-private const val SEARCH_DEBOUNCE_MILLIS = 200L
-private const val UNMERGED_COLOR_ARGB = 0xFFFB923C
-
-private val SessionRef.listKey: String
-    get() = "session:$provider:$id"
-
-private fun LazyListScope.projectThreads(
-    list: ThreadList?,
-    openConversation: (Intent) -> Unit,
-    perform: (Intent) -> Unit,
-) {
-    val projects = list?.projects.orEmpty()
-    val threads = list?.threads.orEmpty()
-    projects.forEach { project ->
-        item(key = "project:${project.id}") {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("📁 ${project.name}", style = MaterialTheme.typography.titleMedium)
-                TextButton(
-                    onClick = { openConversation(Intent.NewChat(project.roots.firstOrNull()?.path.orEmpty())) }
-                ) {
-                    Text("新規")
+            Box {
+                TextButton(onClick = { projectMenu = true }) { Text("▾") }
+                DropdownMenu(projectMenu, { projectMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("All projects") },
+                        onClick = {
+                            projectMenu = false
+                            model.perform(Intent.FilterProject(null))
+                        },
+                    )
+                    model.snapshot.projects().forEach { project ->
+                        DropdownMenuItem(
+                            text = { Text(project.name) },
+                            onClick = {
+                                projectMenu = false
+                                model.perform(Intent.FilterProject(project.id))
+                            },
+                        )
+                    }
                 }
             }
+            TextButton(onClick = { addProject = true }) { Text("+") }
+            TextButton(onClick = { model.newThread() }) { Text("New") }
         }
-        items(threads.filter { it.projectId == project.id }, key = { it.id.listKey }) {
-            SummaryRow(it, openConversation)
-        }
-        if (project.id in list?.moreProjectIds.orEmpty())
-            item(key = "more:${project.id}") {
-                TextButton(onClick = { perform(Intent.ExpandThreadList(project.id, false)) }) { Text("もっと見る") }
+        LazyColumn(
+            Modifier.weight(1f),
+            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            shelves.forEach { shelf ->
+                item(key = "shelf:${shelf.kind}") {
+                    TextButton(
+                        onClick = {
+                            collapsed = if (shelf.kind in collapsed) collapsed - shelf.kind else collapsed + shelf.kind
+                        }
+                    ) {
+                        Text(
+                            "${if (shelf.kind in collapsed) "›" else "⌄"} ${shelf.title}  ${shelf.total}",
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                    }
+                }
+                if (shelf.kind !in collapsed) {
+                    items(shelf.rows, key = { it.id }) { row ->
+                        ThreadCard(model, row, shelf.kind == ShelfKind.SETTLED)
+                    }
+                    if (shelf.hasMore) item { TextButton(onClick = { settledLimit += 25u }) { Text("Load 25 more") } }
+                }
             }
+            item { TextButton(onClick = { archive = !archive }) { Text("${if (archive) "⌄" else "›"} Archived") } }
+            if (archive) items(model.snapshot.archivedThreads(now), key = { it.id }) { ThreadCard(model, it, false) }
+            item { TextButton(onClick = { settings = true }) { Text("Settings") } }
+        }
     }
-    if (list?.hasMoreProjects == true)
-        item { TextButton(onClick = { perform(Intent.ExpandThreadList(null, true)) }) { Text("もっと見る") } }
+    if (settings) SettingsDialog(model) { settings = false }
+    if (addProject)
+        AlertDialog(
+            onDismissRequest = { addProject = false },
+            title = { Text("Add project") },
+            text = { OutlinedTextField(path, { path = it }, label = { Text("Absolute path on Host") }) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        model.perform(Intent.RegisterProject(path))
+                        path = ""
+                        addProject = false
+                    }
+                ) {
+                    Text("Add")
+                }
+            },
+            dismissButton = { TextButton(onClick = { addProject = false }) { Text("Cancel") } },
+        )
+}
+
+@Composable
+private fun ThreadCard(model: AndroidAppModel, row: ThreadRow, settled: Boolean) {
+    var menu by remember(row.id) { mutableStateOf(false) }
+    Box {
+        Surface(
+            Modifier.fillMaxWidth()
+                .combinedClickable(onClick = { model.openThread(row.id) }, onLongClick = { menu = true }),
+            color = T3.color(if (row.selected) "mobileSelected" else "surface"),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+        ) {
+            Row(
+                Modifier.padding(horizontal = 12.dp, vertical = if (row.slim) 8.dp else 12.dp)
+                    .heightIn(min = if (row.slim) 20.dp else 58.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ProviderIcon(row.provider, Modifier.size(16.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        row.title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = if (row.unread) FontWeight.Bold else FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                    if (!row.slim) {
+                        Text(
+                            row.preview,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = T3.color("textMuted"),
+                            maxLines = 1,
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(row.status, style = MaterialTheme.typography.labelSmall, color = T3.status(row.tone))
+                            row.durationMs?.let {
+                                Text(
+                                    "${it / 1000u}s",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = T3.color("textMuted"),
+                                )
+                            }
+                            row.wakeLabel?.let {
+                                Text(it, style = MaterialTheme.typography.labelSmall, color = T3.color("textMuted"))
+                            }
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                model.snapshot.projects().firstOrNull { it.id == row.projectId }?.name ?: "",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = T3.color("textMuted"),
+                            )
+                        }
+                        row.branch?.let {
+                            Text(
+                                it,
+                                fontFamily = FontFamily.Monospace,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = T3.color("textMuted"),
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+                if (row.unread) Text("•", color = T3.color("accent"))
+            }
+        }
+        DropdownMenu(menu, { menu = false }) {
+            ThreadActionItems(model, row.id, row.pinned, row.archived, settled) { menu = false }
+        }
+    }
+}
+
+@Composable
+internal fun ThreadActionItems(
+    model: AndroidAppModel,
+    id: String,
+    pinned: Boolean,
+    archived: Boolean,
+    settled: Boolean,
+    close: () -> Unit,
+) {
+    fun action(value: ThreadAction) {
+        close()
+        model.perform(Intent.Thread(id, value))
+    }
+    DropdownMenuItem(
+        text = { Text(if (pinned) "Unpin" else "Pin") },
+        onClick = { action(if (pinned) ThreadAction.Unpin else ThreadAction.Pin) },
+    )
+    if (pinned) {
+        DropdownMenuItem(
+            text = { Text("Move up") },
+            onClick = {
+                close()
+                model.perform(Intent.MovePinned(id, true))
+            },
+        )
+        DropdownMenuItem(
+            text = { Text("Move down") },
+            onClick = {
+                close()
+                model.perform(Intent.MovePinned(id, false))
+            },
+        )
+    }
+    DropdownMenuItem(
+        text = { Text(if (settled) "Un-settle" else "Settle") },
+        onClick = { action(if (settled) ThreadAction.Unsettle else ThreadAction.Settle) },
+    )
+    DropdownMenuItem(
+        text = { Text("Snooze 1 hour") },
+        onClick = { action(ThreadAction.Snooze(Instant.now().plusSeconds(3600).toString())) },
+    )
+    DropdownMenuItem(text = { Text("Mark unread") }, onClick = { action(ThreadAction.MarkUnread) })
+    DropdownMenuItem(
+        text = { Text(if (archived) "Unarchive" else "Archive") },
+        onClick = { action(if (archived) ThreadAction.Unarchive else ThreadAction.Archive) },
+    )
+    DropdownMenuItem(
+        text = { Text("Delete", color = T3.color("errorForeground")) },
+        onClick = {
+            action(ThreadAction.Delete)
+            if (model.snapshot.selectedThreadId() == id) model.showThreads()
+        },
+    )
 }

@@ -1,69 +1,19 @@
 package dev.remoteagent.mobile
 
 import android.content.Context
-import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
-import dev.remoteagent.core.AgentException
-import dev.remoteagent.core.AgentStore
-import dev.remoteagent.core.Connection
-import dev.remoteagent.core.Intent
-import dev.remoteagent.core.ListSessions
-import dev.remoteagent.core.LoadHostName
-import dev.remoteagent.core.OperationKey
-import dev.remoteagent.core.Outcome
-import dev.remoteagent.core.Snapshot
-import dev.remoteagent.core.ThreadList
-import dev.remoteagent.core.UploadAttachment
-import dev.remoteagent.core.generateIdentity
-import dev.remoteagent.core.parseInvitation
-import dev.remoteagent.core.ticketIdentity
-import java.io.File
-import java.io.IOException
-import java.security.GeneralSecurityException
-import kotlin.time.Duration.Companion.milliseconds
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
-import kotlinx.coroutines.cancel
+import dev.remoteagent.core.*
+import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.joinAll
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import kotlinx.serialization.SerializationException
 
 internal enum class Screen {
     Hosts,
@@ -72,15 +22,14 @@ internal enum class Screen {
     Conversation,
 }
 
-/** One core Snapshot feeds Compose; all business changes are queued typed intents. */
 internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val repository = AndroidMobileRepository(context)
     var snapshot by mutableStateOf(Snapshot.empty())
         private set
 
-    var conversation by mutableStateOf<ConversationProjection?>(null)
-        private set
+    val conversation
+        get() = snapshot.conversation()
 
     var profiles by mutableStateOf(emptyList<HostProfile>())
         private set
@@ -90,92 +39,131 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     var screen by mutableStateOf(Screen.Hosts)
     var busy by mutableStateOf(false)
-    var notice by mutableStateOf<String?>(null)
-    val loadingHistory: Boolean
-        get() = snapshot.navigation().threadId?.let { snapshot.operationRunning(OperationKey.History(it)) } ?: false
-    var list by mutableStateOf<ThreadList?>(null)
         private set
 
+    var notice by mutableStateOf<String?>(null)
+    var invitation by mutableStateOf<Invitation?>(null)
+        private set
+
+    var composerText by mutableStateOf("")
+        private set
+
+    private var draftRevision = 0L
+    private var pendingDraft: Long? = null
     private var owner: AgentStore? = null
     private var initialization: Job? = null
     private var connection: Job? = null
     private var observation: Job? = null
     private var persistence: Job? = null
-    private val writes = Channel<Pair<String, Snapshot>>(Channel.UNLIMITED)
+    private val pending = ArrayDeque<Pair<Intent, (Result<Outcome>) -> Unit>>()
+    private val operations = mutableSetOf<Job>()
+    private val writes = Channel<Pair<String, Snapshot>>(8)
     private val writer =
         scope.launch(Dispatchers.IO) {
             for ((id, current) in writes) {
-                try {
-                    repository.save(id, current.serializeLocalState())
-                } catch (error: IOException) {
-                    withContext(Dispatchers.Main) { notice = error.message }
-                }
+                runCatching {
+                        repository.save(id, current.serializeLocalState())
+                        repository.saveModelPreferences(current.serializeModelPreferences())
+                    }
+                    .onFailure { error -> withContext(Dispatchers.Main) { notice = error.message } }
             }
         }
-    private val operations = mutableSetOf<Deferred<Outcome>>()
-    private val flushes = mutableSetOf<Job>()
-    private val pending = ArrayDeque<Pair<Intent, (Result<Outcome>) -> Unit>>()
-    val draftKey
-        get() = snapshot.navigation().draftKey
-
-    val selectionKey
-        get() = profileId to draftKey
 
     init {
-        try {
-            profiles = repository.profiles()
-            repository.selected?.takeIf { id -> profiles.any { it.id == id } }?.let(::selectProfile)
-        } catch (error: SerializationException) {
-            notice = error.message
-        }
+        runCatching { profiles = repository.profiles() }.onFailure { notice = it.message }
+        repository.selected?.takeIf { id -> profiles.any { it.id == id } }?.let(::selectProfile)
     }
 
     fun perform(intent: Intent, complete: (Result<Outcome>) -> Unit = {}) {
         val store = owner
         if (store == null) {
-            if (initialization != null) pending.addLast(intent to complete)
+            if (initialization != null && pending.size < 64) pending.addLast(intent to complete)
             else complete(Result.failure(IllegalStateException("Host not connected")))
             return
         }
         val receipt =
-            try {
-                store.dispatch(intent)
-            } catch (error: AgentException) {
-                complete(Result.failure(error))
-                return
-            }
-        publish(store.snapshot())
+            runCatching { store.dispatch(intent) }
+                .getOrElse {
+                    complete(Result.failure(it))
+                    return
+                }
         val host = profileId
-        val operation = scope.async(start = CoroutineStart.LAZY) { receipt.wait() }
+        lateinit var operation: Job
+        operation =
+            scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    val result = runCatching { receipt.wait() }
+                    if (host == profileId) {
+                        publish(store.snapshot())
+                        result.exceptionOrNull()?.let { notice = snapshot.error() ?: it.message }
+                        complete(result)
+                    } else complete(Result.failure(CancellationException("Host changed")))
+                } finally {
+                    operations.remove(operation)
+                }
+            }
         operations.add(operation)
-        scope.launch {
-            val result = runCatching { operation.await() }
-            operations.remove(operation)
-            if (host == profileId) publish(store.snapshot())
-            complete(result)
+        operation.start()
+    }
+
+    private fun resetEditor() {
+        draftRevision += 1
+        pendingDraft = null
+    }
+
+    fun editDraft(text: String) {
+        composerText = text
+        val revision = ++draftRevision
+        pendingDraft = revision
+        perform(Intent.EditDraft(snapshot.draft().copy(text = text))) {
+            if (pendingDraft == revision) {
+                pendingDraft = null
+                composerText = snapshot.draft().text
+            }
         }
     }
 
+    fun openThread(id: String) {
+        resetEditor()
+        screen = Screen.Conversation
+        perform(Intent.OpenThread(id))
+    }
+
+    fun newThread(project: String? = snapshot.selectedProjectId()) {
+        resetEditor()
+        screen = Screen.Conversation
+        perform(Intent.NewThread(project))
+    }
+
+    fun showThreads() {
+        resetEditor()
+        screen = Screen.Threads
+        perform(Intent.LeaveThread)
+    }
+
+    fun showHosts() {
+        persist()
+        screen = Screen.Hosts
+    }
+
     fun selectProfile(id: String) {
+        if (profiles.none { it.id == id }) return
         screen = Screen.Threads
         if (profileId == id && owner != null) {
             connect()
             return
         }
-        persist()
-        initialization?.cancel()
-        observation?.cancel()
-        connection?.cancel()
-        val old = owner
-        owner = null
-        while (pending.isNotEmpty()) pending.removeFirst().second(Result.failure(CancellationException()))
+        val old = detach()
         profileId = id
         repository.selected = id
-        busy = false
+        publish(Snapshot.empty())
+        scope.launch { runCatching { old?.shutdown() } }
         initialization = scope.launch {
-            old?.shutdown()
             try {
-                val bytes = withContext(Dispatchers.IO) { repository.load(id) }
+                val bytes =
+                    withContext(Dispatchers.IO) {
+                        applyModelPreferences(repository.load(id), repository.modelPreferences())
+                    }
                 val store = AgentStore.offline(bytes, repository.diagnosticsDirectory(id))
                 if (profileId != id || !isActive) {
                     store.shutdown()
@@ -184,74 +172,118 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 owner = store
                 initialization = null
                 publish(store.snapshot())
-                perform(Intent.ShowThreadList)
                 while (pending.isNotEmpty()) {
                     val (intent, complete) = pending.removeFirst()
                     perform(intent, complete)
                 }
                 observe(store, id)
                 connect()
-            } catch (error: IOException) {
-                failInitialization(id, error)
-            } catch (error: AgentException) {
-                failInitialization(id, error)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (profileId == id) {
+                    initialization = null
+                    notice = error.message
+                    while (pending.isNotEmpty()) pending.removeFirst().second(Result.failure(error))
+                }
             }
         }
     }
 
-    private fun failInitialization(id: String, error: Exception) {
-        if (profileId == id) {
-            initialization = null
-            notice = error.message
-            while (pending.isNotEmpty()) pending.removeFirst().second(Result.failure(error))
-        }
+    private fun detach(): AgentStore? {
+        persist()
+        resetEditor()
+        initialization?.cancel()
+        observation?.cancel()
+        connection?.cancel()
+        initialization = null
+        busy = false
+        while (pending.isNotEmpty()) pending.removeFirst().second(Result.failure(CancellationException()))
+        val old = owner
+        owner = null
+        return old
     }
 
-    fun pair(contents: String) {
-        connection?.cancel()
+    fun removeProfile(id: String) {
+        runCatching {
+                AndroidCredentialStore(context, id).remove()
+                if (profileId == id) {
+                    val old = detach()
+                    profileId = null
+                    repository.selected = null
+                    publish(Snapshot.empty())
+                    scope.launch { old?.shutdown() }
+                }
+                profiles = profiles.filterNot { it.id == id }
+                repository.saveProfiles(profiles)
+            }
+            .onFailure { notice = it.message }
+    }
+
+    fun preparePairing(contents: String) {
+        invitation = null
+        notice = null
+        runCatching { parseInvitation(contents, (System.currentTimeMillis() / 1000).toULong()) }
+            .onSuccess { invitation = it }
+            .onFailure { notice = it.message }
+    }
+
+    fun openPairing() {
+        screen = Screen.Pairing
+        invitation = null
+        notice = null
+    }
+
+    fun pair() {
+        val target = invitation ?: return
+        if (busy) return
         busy = true
         notice = null
         connection = scope.launch {
+            var paired: AgentStore? = null
             try {
-                val invitation =
-                    parseInvitation(contents, System.currentTimeMillis().milliseconds.inWholeSeconds.toULong())
-                val id = ticketIdentity(invitation.endpoint)
+                val id = validateInvitation(target, (System.currentTimeMillis() / 1000).toULong())
                 val identity =
                     withContext(Dispatchers.IO) { AndroidCredentialStore(context, id).loadOrCreate(::generateIdentity) }
+                val bytes =
+                    withContext(Dispatchers.IO) { applyModelPreferences(byteArrayOf(), repository.modelPreferences()) }
                 val store =
                     try {
                         AgentStore.connect(
-                            Connection(invitation.endpoint, identity, invitation.invitation, true),
-                            byteArrayOf(),
+                            Connection(target.endpoint, identity, target.invitation, true),
+                            bytes,
                             repository.diagnosticsDirectory(id),
                         )
                     } finally {
                         identity.fill(0)
                     }
+                paired = store
+                if (!isActive) {
+                    store.shutdown()
+                    return@launch
+                }
                 persist()
+                resetEditor()
                 initialization?.cancel()
                 observation?.cancel()
-                owner?.shutdown()
-                profiles = profiles.filterNot { it.id == id } + HostProfile(id, id, invitation.endpoint)
+                val old = owner
+                profiles = profiles.filterNot { it.id == id } + HostProfile(id, target.hostName, target.endpoint)
                 repository.saveProfiles(profiles)
                 repository.selected = id
                 profileId = id
                 owner = store
+                paired = null
                 publish(store.snapshot())
                 observe(store, id)
-                perform(Intent.LoadHostName(LoadHostName()))
+                invitation = null
                 screen = Screen.Threads
                 busy = false
-            } catch (error: AgentException) {
-                busy = false
-                notice = error.message
-            } catch (error: IOException) {
-                busy = false
-                notice = error.message
-            } catch (error: GeneralSecurityException) {
-                busy = false
-                notice = error.message
-            } catch (error: IllegalArgumentException) {
+                scope.launch { old?.shutdown() }
+            } catch (error: CancellationException) {
+                runCatching { paired?.shutdown() }
+                throw error
+            } catch (error: Exception) {
+                runCatching { paired?.shutdown() }
                 busy = false
                 notice = error.message
             }
@@ -259,10 +291,11 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     fun connect() {
-        val store = owner
-        val profile = profiles.firstOrNull { it.id == profileId }
-        if (store == null || profile == null || busy) return
+        val store = owner ?: return
+        val profile = profiles.firstOrNull { it.id == profileId } ?: return
+        if (busy || screen == Screen.Pairing) return
         busy = true
+        notice = null
         connection = scope.launch {
             try {
                 val identity =
@@ -270,38 +303,41 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                         AndroidCredentialStore(context, profile.id).loadOrCreate(::generateIdentity)
                     }
                 try {
-                    store.reconnect(Connection(profile.ticket, identity, null, true))
+                    store.resume(Connection(profile.ticket, identity, null, true))
                 } finally {
                     identity.fill(0)
                 }
-                if (profileId != profile.id) return@launch
-                publish(store.snapshot())
-                perform(Intent.LoadHostName(LoadHostName()))
-                notice = null
-                busy = false
-            } catch (error: AgentException) {
-                connectionFailed(profile.id, error)
-            } catch (error: IOException) {
-                connectionFailed(profile.id, error)
-            } catch (error: GeneralSecurityException) {
-                connectionFailed(profile.id, error)
-            } catch (error: IllegalArgumentException) {
-                connectionFailed(profile.id, error)
+                if (profileId == profile.id) {
+                    publish(store.snapshot())
+                    busy = false
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (profileId == profile.id) {
+                    busy = false
+                    notice = error.message
+                }
             }
         }
     }
 
     private fun observe(store: AgentStore, id: String) {
-        val initial = snapshot
         observation = scope.launch {
-            var previous = initial
-            while (isActive) {
-                store.nextSnapshot(previous)
-                if (profileId != id) return@launch
-                val latest = store.snapshot()
-                publish(latest)
-                if (previous.connected() && !latest.connected() && !busy) connect()
-                previous = latest
+            var previous = store.snapshot()
+            try {
+                while (isActive) {
+                    store.nextSnapshot(previous)
+                    if (profileId != id) return@launch
+                    val latest = store.snapshot()
+                    publish(latest)
+                    if (previous.connected() && !latest.connected() && !busy) connect()
+                    previous = latest
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (profileId == id) notice = error.message
             }
         }
     }
@@ -312,65 +348,42 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             profiles = profiles.map { if (it.id == profileId) it.copy(name = name) else it }
             repository.saveProfiles(profiles)
         }
-        if (!next.listUnchanged(snapshot)) list = next.threadList()
-        conversation = projectConversationRows(next, next.conversationSource(), conversation)
         snapshot = next
+        if (pendingDraft == null) composerText = next.draft().text
         persistence?.cancel()
         persistence = scope.launch {
-            delay(250.milliseconds)
+            delay(250)
             persist()
-        }
-    }
-
-    fun attach(selection: Pair<String?, dev.remoteagent.core.DraftKey>, uri: Uri, complete: () -> Unit) {
-        if (selection != selectionKey) {
-            complete()
-            return
-        }
-        val key = draftKey
-        val directory = snapshot.navigation().cwd
-        scope.launch {
-            var local: File? = null
-            var uploading = false
-            try {
-                val attachment =
-                    withContext(Dispatchers.IO) { importAttachment(context, uri).also { local = File(it.path) } }
-                if (selection != selectionKey) return@launch
-                uploading = true
-                perform(Intent.UploadAttachment(UploadAttachment(key, attachment, directory))) {
-                    local?.parentFile?.deleteRecursively()
-                    complete()
-                }
-            } catch (error: SecurityException) {
-                if (selection == selectionKey) notice = error.message
-            } catch (error: IOException) {
-                if (selection == selectionKey) notice = error.message
-            } finally {
-                if (!uploading) {
-                    local?.parentFile?.deleteRecursively()
-                    complete()
-                }
-            }
         }
     }
 
     fun persist() {
         val id = profileId ?: return
-        val store = owner
-        val current = snapshot
-        val receipts = operations.toList()
-        lateinit var flush: Job
-        flush =
-            scope.launch(start = CoroutineStart.LAZY) {
-                try {
-                    for (receipt in receipts) runCatching { receipt.await() }
-                    writes.send(id to (store?.snapshot() ?: current))
-                } finally {
-                    flushes.remove(flush)
-                }
-            }
-        flushes.add(flush)
-        flush.start()
+        val current = owner?.snapshot() ?: snapshot
+        scope.launch { writes.send(id to current) }
+    }
+
+    suspend fun download(path: String, destination: String) {
+        val store = owner ?: error("Host not connected")
+        val host = profileId
+        store.downloadFile(path, destination)
+        if (host != profileId) throw CancellationException("Host changed")
+    }
+
+    suspend fun upload(source: String, directory: String, name: String): String {
+        val store = owner ?: error("Host not connected")
+        val host = profileId
+        val result = store.uploadFile(source, directory, name)
+        if (host != profileId) throw CancellationException("Host changed")
+        return result
+    }
+
+    suspend fun browser(request: BrowserRequest): BrowserFrame {
+        val store = owner ?: error("Host not connected")
+        val host = profileId
+        val result = store.browser(request)
+        if (host != profileId) throw CancellationException("Host changed")
+        return result
     }
 
     override fun onCleared() {
@@ -379,11 +392,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         initialization?.cancel()
         persistence?.cancel()
         scope.launch {
-            for (operation in operations.toList()) runCatching { operation.await() }
-            persistence?.cancel()
-            flushes.toList().joinAll()
-            val store = owner
-            if (store != null) {
+            operations.toList().joinAll()
+            owner?.let { store ->
                 runCatching { store.shutdown() }
                 profileId?.let { writes.send(it to store.snapshot()) }
             }
@@ -392,30 +402,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             scope.cancel()
         }
     }
-}
-
-private fun AndroidAppModel.connectionFailed(id: String, error: Exception) {
-    if (profileId == id) {
-        busy = false
-        notice = error.message
-    }
-}
-
-internal fun AndroidAppModel.showThreads() {
-    screen = Screen.Threads
-    perform(Intent.ShowThreadList)
-    perform(Intent.ListSessions(ListSessions(query = snapshot.listQuery())))
-}
-
-internal fun AndroidAppModel.showHosts() {
-    screen = Screen.Hosts
-    perform(Intent.ShowThreadList)
-}
-
-internal fun AndroidAppModel.older() {
-    if (loadingHistory) return
-    val id = snapshot.navigation().threadId ?: return
-    perform(Intent.ReadOlder(id))
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -433,33 +419,42 @@ internal fun RemoteAgentApp(
     BackHandler(model.screen != Screen.Hosts) {
         if (model.screen == Screen.Conversation) model.showThreads() else model.showHosts()
     }
-    MaterialTheme {
-        Scaffold(topBar = { TopAppBar(title = { Text("Remote Agent") }) }) { padding ->
-            Column(Modifier.padding(padding)) {
-                ConnectionStatus(
-                    model.notice ?: model.snapshot.error(),
-                    model.busy,
-                    !model.snapshot.connected() && model.profileId != null && model.screen != Screen.Pairing,
-                    model::connect,
-                )
-                when {
-                    model.screen == Screen.Pairing || model.profiles.isEmpty() ->
-                        PairingScreen(model.busy, model::pair, model::showHosts, requestQrScan)
-                    model.screen == Screen.Hosts ->
-                        ProfilesScreen(model.profiles, model::selectProfile) { model.screen = Screen.Pairing }
-                    model.screen == Screen.Threads ->
-                        ThreadListScreen(
-                            model.list,
-                            model.snapshot.listQuery(),
-                            { model.perform(it) },
-                            model::showHosts,
-                            { intent ->
-                                model.screen = Screen.Conversation
-                                model.perform(intent)
-                            },
-                            Modifier.weight(1f),
+    T3Theme {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    expandedHeight = 48.dp,
+                    title = {
+                        Text(
+                            if (model.screen == Screen.Conversation) model.conversation.title
+                            else model.profiles.firstOrNull { it.id == model.profileId }?.name ?: "Bex"
                         )
-                    else -> ConversationPane(model)
+                    },
+                    navigationIcon = {
+                        if (model.screen != Screen.Hosts)
+                            TextButton(
+                                onClick = {
+                                    if (model.screen == Screen.Conversation) model.showThreads() else model.showHosts()
+                                }
+                            ) {
+                                Text("‹")
+                            }
+                    },
+                )
+            }
+        ) { padding ->
+            Column(Modifier.padding(padding).fillMaxSize()) {
+                (model.notice ?: model.snapshot.error())?.let {
+                    Text(it, color = T3.color("errorForeground"), modifier = Modifier.padding(12.dp))
+                }
+                if (model.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (!model.snapshot.connected() && model.profileId != null && model.screen != Screen.Pairing)
+                    TextButton(onClick = model::connect, enabled = !model.busy) { Text("Reconnect") }
+                when {
+                    model.screen == Screen.Pairing || model.profiles.isEmpty() -> PairingScreen(model, requestQrScan)
+                    model.screen == Screen.Hosts -> ProfilesScreen(model)
+                    model.screen == Screen.Threads -> ThreadListScreen(model, Modifier.weight(1f))
+                    else -> ThreadDetailScreen(model, Modifier.weight(1f))
                 }
             }
         }
@@ -467,72 +462,55 @@ internal fun RemoteAgentApp(
 }
 
 @Composable
-private fun PairingScreen(
-    busy: Boolean,
-    pair: (String) -> Unit,
-    showHosts: () -> Unit,
-    scan: (onContents: (String) -> Unit) -> Unit,
-) {
+private fun PairingScreen(model: AndroidAppModel, scan: (onContents: (String) -> Unit) -> Unit) {
     var contents by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("PCとペアリング", style = MaterialTheme.typography.headlineMedium)
-        Text("PC Host ManagerのQRコードを読み取ります。QRの内容はこの端末に保存しません。")
-        Button(onClick = { scan { value -> contents = value } }) { Text("QRコードを読み取る") }
-        OutlinedTextField(
-            contents,
-            { contents = it },
-            Modifier.fillMaxWidth(),
-            label = { Text("ペアリングQR（手入力）") },
-            minLines = 3,
-        )
-        Button(onClick = { pair(contents) }, enabled = contents.isNotBlank() && !busy) { Text("ペアリング") }
-        Button(onClick = showHosts) { Text("戻る") }
-    }
-}
-
-@Composable
-private fun ProfilesScreen(profiles: List<HostProfile>, select: (String) -> Unit, pair: () -> Unit) {
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
-        item { Button(onClick = pair) { Text("PCを追加") } }
-        items(profiles, key = { it.id }) { profile ->
-            Card(onClick = { select(profile.id) }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                Column(Modifier.padding(16.dp)) {
-                    Text(profile.name)
-                    Text(profile.id, style = MaterialTheme.typography.bodySmall)
-                }
+        val invitation = model.invitation
+        if (invitation == null) {
+            Text("PC Host Manager の QR コードを読み取ります。")
+            Button(onClick = { scan { model.preparePairing(it) } }) { Text("QRコードを読み取る") }
+            OutlinedTextField(
+                contents,
+                { contents = it },
+                Modifier.fillMaxWidth(),
+                label = { Text("接続情報") },
+                minLines = 3,
+            )
+            Button(
+                onClick = {
+                    model.preparePairing(contents)
+                    contents = ""
+                },
+                enabled = contents.isNotBlank() && !model.busy,
+            ) {
+                Text("接続先を確認")
             }
+        } else {
+            Text(invitation.hostName, style = MaterialTheme.typography.titleLarge)
+            Text("メッセージと作業に必要な内容をこの PC と AI サービスに送信します。")
+            Text("AI処理: ${invitation.aiRecipients.joinToString("、")}")
+            invitation.transcriptionRecipient?.let { Text("音声入力: $it") }
+            Button(onClick = model::pair, enabled = !model.busy) { Text("同意して接続") }
+            TextButton(onClick = model::openPairing) { Text("変更") }
         }
+        TextButton(onClick = model::showHosts) { Text("戻る") }
     }
 }
 
 @Composable
-private fun ConnectionStatus(notice: String?, busy: Boolean, reconnect: Boolean, connect: () -> Unit) {
-    notice?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp)) }
-    if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-    if (reconnect) Button(onClick = connect, enabled = !busy) { Text("再接続") }
-}
-
-@Composable
-private fun androidx.compose.foundation.layout.ColumnScope.ConversationPane(model: AndroidAppModel) {
-    androidx.compose.runtime.key(model.selectionKey) {
-        var scrollToTopRequest by remember { mutableStateOf(0) }
-        ConversationHeader(
-            model.snapshot.navigation().threadId?.let(model.snapshot::conversation)?.title(),
-            model::showThreads,
-        ) {
-            scrollToTopRequest += 1
-        }
-        TerminalLauncher(model.snapshot, model::perform)
-        ThreadDetailScreen(
-            model.snapshot,
-            model.conversation,
-            model::perform,
-            if (model.loadingHistory) null else model::older,
-            Modifier.weight(1f),
-            scrollToTopRequest = scrollToTopRequest,
-        ) { onSend ->
-            ThreadComposer(model.snapshot, model::perform, onSend) {
-                AttachmentButton(model.selectionKey, model::attach)
+private fun ProfilesScreen(model: AndroidAppModel) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp)) {
+        item { Button(onClick = model::openPairing) { Text("PCを追加") } }
+        items(model.profiles, key = { it.id }) { profile ->
+            Card(
+                onClick = { model.selectProfile(profile.id) },
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            ) {
+                Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(profile.name, Modifier.weight(1f))
+                    TextButton(onClick = { model.removeProfile(profile.id) }) { Text("Remove") }
+                }
             }
         }
     }

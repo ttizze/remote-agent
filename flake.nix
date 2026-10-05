@@ -70,6 +70,20 @@
           }).androidsdk;
         in
         {
+          android = pkgs.mkShell {
+            packages = [ androidSdk pkgs.jdk21 pkgs.cargo-ndk pkgs.jq pkgs.git
+              (pkgs.rust-bin.stable.latest.minimal.override {
+                extensions = [ "rustfmt" "clippy" ];
+                targets = [ "aarch64-linux-android" "x86_64-linux-android" ];
+              })
+            ];
+            JAVA_HOME = pkgs.jdk21.home;
+            ANDROID_HOME = "${androidSdk}/libexec/android-sdk";
+            ANDROID_SDK_ROOT = "${androidSdk}/libexec/android-sdk";
+            shellHook = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+              export DEVELOPER_DIR="''${BEX_XCODE_DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+            '';
+          };
           kani = pkgs.mkShell {
             packages = with pkgs; [
               (callPackage ./tools/kani/package.nix { })

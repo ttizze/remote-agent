@@ -20,19 +20,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.termux.terminal.TerminalSession
-import dev.remoteagent.core.DetachTerminal
 import dev.remoteagent.core.Intent
-import dev.remoteagent.core.KillTerminal
 import dev.remoteagent.core.Outcome
-import dev.remoteagent.core.ResizeTerminal
 import dev.remoteagent.core.Snapshot
-import dev.remoteagent.core.StartTerminal
 import dev.remoteagent.core.TerminalSize
-import dev.remoteagent.core.WriteTerminal
 import dev.remoteagent.core.terminalHandle
 
 @Composable
@@ -41,18 +37,16 @@ internal fun TerminalDialog(
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
     dismiss: () -> Unit,
 ) {
-    val cwd = snapshot.navigation().cwd
+    val cwd = snapshot.currentDirectory()
     val handle = remember(cwd) { terminalHandle(cwd) }
     var terminated by remember { mutableStateOf(false) }
     val currentPerform by rememberUpdatedState(perform)
-    DisposableEffect(handle) {
-        onDispose { if (!terminated) currentPerform(Intent.DetachTerminal(DetachTerminal(handle))) {} }
-    }
+    DisposableEffect(handle) { onDispose { if (!terminated) currentPerform(Intent.DetachTerminal(handle)) {} } }
     Dialog(onDismissRequest = dismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize().imePadding()) {
             Column {
-                val terminal = snapshot.terminalView(handle)
-                if (terminal?.loading != false) {
+                val terminal = snapshot.terminal(handle, 0u)
+                if (terminal.loading) {
                     CircularProgressIndicator()
                 } else {
                     terminal.status?.let { Text(it) }
@@ -61,7 +55,7 @@ internal fun TerminalDialog(
                     TextButton(onClick = dismiss) { Text("閉じる") }
                     TextButton(
                         onClick = {
-                            perform(Intent.KillTerminal(KillTerminal(handle))) {
+                            perform(Intent.KillTerminal(handle)) {
                                 if (it.isSuccess) {
                                     terminated = true
                                     dismiss()
@@ -97,17 +91,21 @@ private fun TerminalBody(
                         context,
                         object : TerminalSession.Transport {
                             override fun write(data: ByteArray) {
-                                currentPerform(Intent.WriteTerminal(WriteTerminal(handle, data))) {}
+                                currentPerform(Intent.WriteTerminal(handle, data)) {}
                             }
 
                             override fun resize(columns: Int, rows: Int) {
                                 val size = TerminalSize(columns.toUShort(), rows.toUShort())
                                 if (!started) {
                                     started = true
-                                    currentPerform(Intent.StartTerminal(StartTerminal(handle, cwd, size))) {}
-                                } else currentPerform(Intent.ResizeTerminal(ResizeTerminal(handle, size))) {}
+                                    currentPerform(Intent.StartTerminal(handle, cwd, size.cols, size.rows)) {}
+                                } else currentPerform(Intent.ResizeTerminal(handle, size.cols, size.rows)) {}
                             }
                         },
+                        T3.color("terminalBackground").toArgb(),
+                        T3.color("terminalForeground").toArgb(),
+                        T3.color("terminalCursor").toArgb(),
+                        12,
                     )
                     .let { terminal ->
                         nativeTerminal = terminal
@@ -116,17 +114,13 @@ private fun TerminalBody(
             },
             update = { view ->
                 val terminal = requireNotNull(nativeTerminal)
-                snapshot.terminalView(handle)?.output?.forEach { chunk ->
-                    if (
-                        terminal.feed(
-                            chunk.sequence.toLong(),
-                            chunk.data,
-                            chunk.resetSize?.cols?.toInt() ?: 0,
-                            chunk.resetSize?.rows?.toInt() ?: 0,
-                        )
-                    ) {
-                        view.post { currentPerform(Intent.AcknowledgeTerminal(handle, chunk.sequence)) {} }
-                    }
+                snapshot.terminal(handle, 0u).output.forEach { chunk ->
+                    terminal.feed(
+                        chunk.sequence.toLong(),
+                        chunk.data,
+                        chunk.resetSize?.cols?.toInt() ?: 0,
+                        chunk.resetSize?.rows?.toInt() ?: 0,
+                    )
                 }
             },
         )
