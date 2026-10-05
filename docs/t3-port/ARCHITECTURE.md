@@ -151,3 +151,6 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-06: Host ランタイムは `crates/agent-runtime` に置く。Host の I/O（プロセス起動、Git、worktree、添付）は trait で注入し、`cargo test -p agent-runtime` を Host の重い依存なしで回せるようにする。
 - 2026-10-06: project は fact log の外にあるので、再開した shell 購読は最初に生きている project の完全な一覧（`ShellUpdate::Projects`）を送る。クライアントはそこにない project を消す。切断中の改名・追加・削除はこれで届く。
 - 2026-10-06: effect の結果は、その outbox 行が同じ worker の lease で実行中のときだけ確定する。取り消された effect の結果は事実を残さない。T3 の executor のテスト（EffectWorker のうち handler の振る舞いを確かめるもの）は、各 handler を実装する段で移植する。
+- 2026-10-06: provider の Start effect は frame を書き終えた時点で成功にする。後から届いた拒否は所有 attempt への `ProviderFailed` として入れ、`thread/resume` の失敗と、Claude の resume 起動で initialize の応答前に終了した場合は `session_lost` にする。生きた session がない Interrupt は `SessionClosed` で停止を完了させ、Steer は後続ターンにする。
+- 2026-10-06: Claude のプロセスは、native session と起動時にしか決まらないフラグが一致するときだけ再利用し、model と permission mode は応答を待って揃える。session は実行中の run か未解決の request がある間は busy、background work か未終了の native task がある間は上限 4 時間まで保持する。
+- 2026-10-06: 履歴の取り込みは T3 と同じく project ごとに 100 件の transcript を上限にし、登録済み project のルートと一致する cwd だけを取り込む。除外するディレクトリは綴りと実パスの両方で判定する。project を追加したときは Host がその project の取り込みを呼ぶ。
