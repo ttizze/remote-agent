@@ -219,7 +219,7 @@ pub fn decide(
                     now,
                     TurnItemBody::RunInterruptRequest { message: text },
                     "interrupt-request",
-                    next_ordinal(projection, Some(target)),
+                    next_ordinal(projection),
                 )),
             );
             if *hold_queue {
@@ -269,7 +269,7 @@ pub fn decide(
                             message: "Interrupted before provider start".into(),
                         },
                         "interrupt-result",
-                        next_ordinal(projection, Some(target)) + 1,
+                        next_ordinal(projection) + 1,
                     )),
                 );
                 if !hold_queue {
@@ -531,7 +531,7 @@ pub fn decide(
                         retry: None,
                     },
                     "preparation-error",
-                    next_ordinal(projection, Some(target)),
+                    next_ordinal(projection),
                 )),
             );
             promote_next(&mut decision, command, &projection.runs, now, Some(run_id));
@@ -839,7 +839,7 @@ pub fn decide(
     Ok(decision)
 }
 
-fn next_ordinal(projection: &ThreadProjection, _target: Option<&Run>) -> u64 {
+fn next_ordinal(projection: &ThreadProjection) -> u64 {
     projection
         .turn_items
         .iter()
@@ -1057,7 +1057,7 @@ pub fn failed_effect(
                 retry: None,
             },
             "error",
-            next_ordinal(projection, Some(target)),
+            next_ordinal(projection),
         )),
     );
     decision
@@ -1381,7 +1381,7 @@ fn dispatch(
         provider_turn_id: running_turn(projection, &target).map(|turn| turn.id.clone()),
         native_item_ref: None,
         parent_item_id: None,
-        ordinal: next_ordinal(projection, Some(&target)),
+        ordinal: next_ordinal(projection),
         status: ItemStatus::Completed,
         title: None,
         started_at: Some(now.clone()),
@@ -1889,6 +1889,74 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use proptest::prelude::*;
+    #[test]
+    fn stopping_a_scoped_run_enqueues_capture_before_the_next_start() {
+        let (mut p, _) = apply(
+            &projection(),
+            &send("first", DispatchMode::StartImmediately),
+        );
+        let run = p.runs[0].clone();
+        p.checkpoint_scopes.push(checkpoint_scope(&run));
+        let (p, _) = apply(&p, &send("queued", DispatchMode::QueueAfterActive));
+        let (_, decision) = apply(
+            &p,
+            &command(
+                "stop",
+                CommandBody::RunInterrupt {
+                    run_id: run.id,
+                    reason: None,
+                    hold_queue: false,
+                },
+            ),
+        );
+        assert!(matches!(
+            decision.effects[0].body,
+            EffectBody::CaptureCheckpoint { .. }
+        ));
+        assert!(matches!(decision.effects[1].body, EffectBody::Start { .. }));
+    }
+    #[test]
+    fn failed_preparation_promotes_queue_and_cannot_retry_over_an_active_run() {
+        let (p, _) = apply(
+            &projection(),
+            &send(
+                "prepared",
+                DispatchMode::DeferStart {
+                    workspace_strategy: None,
+                },
+            ),
+        );
+        let prepared = p.runs[0].id.clone();
+        let (p, _) = apply(&p, &send("queued", DispatchMode::QueueAfterActive));
+        let failure = ProviderFailure {
+            class: FailureClass::ProviderError,
+            message: "prepare failed".into(),
+            retryable: Some(false),
+            code: None,
+            reset_at: None,
+        };
+        let (p, _) = apply(
+            &p,
+            &command(
+                "failed",
+                CommandBody::PreparedRunFail {
+                    run_id: prepared.clone(),
+                    failure,
+                },
+            ),
+        );
+        assert_eq!(p.runs[1].status, RunStatus::Starting);
+        assert!(
+            decide(
+                &command("retry", CommandBody::PreparedRunRetry { run_id: prepared }),
+                Some(&p),
+                &now(),
+                &turns(),
+                Driver::Codex
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn recovery_finishes_streaming_items_and_messages() {
         let mut p = running();

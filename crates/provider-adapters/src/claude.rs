@@ -757,20 +757,25 @@ fn spawn(
         let _permit = permit;
         let mut writer = JsonlWriter::new(input);
         let mut reader = JsonlReader::new(stdout);
+        let mut buffer = crate::stream_buffer::DeltaBuffer::default();
+        let mut flush = tokio::time::interval(crate::stream_buffer::WINDOW);
+        flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let result:Result<(),AdapterError>=async{
             writer.write_line(&json!({"type":"control_request","request_id":"initialize","request":{"subtype":"initialize"}}).to_string()).await.map_err(error)?;
             loop{tokio::select!{
                 stopped=shutdown.changed()=>{if stopped.is_err()||*shutdown.borrow(){break;}}
+                _=flush.tick()=>{if let Some(frame)=buffer.flush(){ingest_claude_frame(&state,&output,&mut writer,frame).await?;changed.notify_waiters();}}
                 command=commands.recv()=>{let Some(command)=command else{break;};writer.write_line(&command.to_string()).await.map_err(error)?;}
                 line=reader.read_line()=>{let Some(line)=line.map_err(error)?else{break;};let frame:Value=serde_json::from_str(&line).map_err(error)?;
                     if frame["type"]=="control_response"&&frame["response"]["request_id"]=="initialize" {ready.send_replace(Some(if frame["response"]["subtype"]=="success"{Ok(())}else{Err("Claude initialization rejected".into())}));continue;}
-                    let timestamp=now();let (batch,responses)={let mut state=state.lock().unwrap_or_else(|e|e.into_inner());let translated=normalize::claude(&state,&frame,&timestamp);*state=translated.state;let batch=state.batch(translated.payloads,&timestamp);(batch,translated.immediate_responses)};
-                    if !batch.events.is_empty(){output.send(batch).await.map_err(error)?;}
-                    for (id,response) in responses{writer.write_line(&json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":response}}).to_string()).await.map_err(error)?;}
+                    for frame in buffer.push(frame) { ingest_claude_frame(&state, &output, &mut writer, frame).await?; }
                     changed.notify_waiters();
                 }
             }}Ok(())
         }.await;
+        if let Some(frame) = buffer.flush() {
+            let _ = ingest_claude_frame(&state, &output, &mut writer, frame).await;
+        }
         let timestamp = now();
         let message = result
             .as_ref()
@@ -808,6 +813,29 @@ async fn wait_done(handle: &ProcessHandle) -> Result<(), AdapterError> {
     })
     .await
     .map_err(|_| error("Claude supervisor did not finish"))?
+}
+
+async fn ingest_claude_frame<W: tokio::io::AsyncWrite + Unpin>(
+    state: &Mutex<TurnState>,
+    output: &mpsc::Sender<ProviderBatch>,
+    writer: &mut JsonlWriter<W>,
+    frame: Value,
+) -> Result<(), AdapterError> {
+    let timestamp = now();
+    let (batch, responses) = {
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        let translated = normalize::claude(&state, &frame, &timestamp);
+        *state = translated.state;
+        let batch = state.batch(translated.payloads, &timestamp);
+        (batch, translated.immediate_responses)
+    };
+    if !batch.events.is_empty() {
+        output.send(batch).await.map_err(error)?;
+    }
+    for (id, response) in responses {
+        writer.write_line(&json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":response}}).to_string()).await.map_err(error)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

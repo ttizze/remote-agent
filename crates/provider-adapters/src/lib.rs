@@ -131,3 +131,5 @@ async fn portable_fallback(
     }
     result.ok_or_else(|| error("fallback lost thread"))
 }
+
+mod stream_buffer;

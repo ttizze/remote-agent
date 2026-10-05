@@ -141,10 +141,7 @@ impl TurnState {
                 ordinal: None,
             }),
             parent_item_id: None,
-            ordinal: old.map_or(
-                self.run.ordinal * 1_000_000 + self.items.len() as u64 + 1,
-                |old| old.ordinal,
-            ),
+            ordinal: old.map_or(self.items.len() as u64 + 1, |old| old.ordinal),
             status,
             title: old.and_then(|item| item.title.clone()),
             started_at: old
@@ -1438,13 +1435,13 @@ pub fn disconnected(state: &TurnState, message: &str, now: &Timestamp) -> Transl
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use orchestration::capabilities::capabilities;
     fn timestamp() -> Timestamp {
         Timestamp::parse("2026-10-05T00:00:00Z").unwrap()
     }
-    fn state(driver: Driver) -> TurnState {
+    pub(crate) fn state(driver: Driver) -> TurnState {
         let now = timestamp();
         let command = Command {
             command_id: CommandId::new("create").unwrap(),

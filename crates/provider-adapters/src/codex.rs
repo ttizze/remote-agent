@@ -667,27 +667,98 @@ async fn pump(
     mut events: tokio::sync::broadcast::Receiver<PeerEvent>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let mut buffer = crate::stream_buffer::DeltaBuffer::default();
+    let mut flush = tokio::time::interval(crate::stream_buffer::WINDOW);
+    flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            changed=shutdown.changed()=>{if changed.is_err()||*shutdown.borrow(){break;}}
-            event=events.recv()=>{let Some(adapter)=adapter.upgrade() else{break;};match event{
-                Ok(PeerEvent::Message(message))=>{match serde_json::from_str::<Value>(&message.value){Ok(value)=>{let method=value["method"].as_str().unwrap_or("");if let Err(error)=adapter.handle(method,&value["params"],value.get("id")).await{tracing::error!(operation="orchestration.codex.ingest",message=%error);}},Err(error)=>{tracing::error!(operation="orchestration.codex.decode",message=%error);}}}
-                Ok(PeerEvent::Response{..})=>{},
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(count))=>{
-                    tracing::warn!(operation="orchestration.codex.lag", skipped=count);
-                    let natives:Vec<_>=adapter.states.lock().unwrap_or_else(|e|e.into_inner()).keys().cloned().collect();
-                    for native in natives { let _=adapter.disconnected(&native,"Codex notification stream lost events").await; }
-                    continue;
-                },
-                result=>{let message=match result{Ok(PeerEvent::Closed(message))=>message,Err(error)=>error.to_string(),_=>unreachable!()};let natives:Vec<_>=adapter.states.lock().unwrap_or_else(|e|e.into_inner()).keys().cloned().collect();for native in natives{let _=adapter.disconnected(&native,&message).await;}break;}
-            }}
+            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
+            _ = flush.tick() => { if let (Some(adapter), Some(frame)) = (adapter.upgrade(), buffer.flush()) { ingest_frame(&adapter, frame).await; } }
+            event = events.recv() => {
+                let Some(adapter) = adapter.upgrade() else { break; };
+                match event {
+                    Ok(PeerEvent::Message(message)) => match serde_json::from_str::<Value>(&message.value) {
+                        Ok(value) => for frame in buffer.push(value) { ingest_frame(&adapter, frame).await; },
+                        Err(error) => tracing::error!(operation="orchestration.codex.decode", message=%error),
+                    },
+                    Ok(PeerEvent::Response { .. }) => {},
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        let _ = buffer.flush();
+                        tracing::warn!(operation="orchestration.codex.lag", skipped=count);
+                        let natives: Vec<_> = adapter.states.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+                        for native in natives { let _ = adapter.disconnected(&native, "Codex notification stream lost events").await; }
+                    }
+                    result => {
+                        if let Some(frame) = buffer.flush() { ingest_frame(&adapter, frame).await; }
+                        let message = match result { Ok(PeerEvent::Closed(message)) => message, Err(error) => error.to_string(), _ => unreachable!() };
+                        let natives: Vec<_> = adapter.states.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+                        for native in natives { let _ = adapter.disconnected(&native, &message).await; }
+                        break;
+                    }
+                }
+            }
         }
+    }
+}
+async fn ingest_frame(adapter: &CodexAdapter, value: Value) {
+    let method = value["method"].as_str().unwrap_or("");
+    if let Err(error) = adapter
+        .handle(method, &value["params"], value.get("id"))
+        .await
+    {
+        tracing::error!(operation="orchestration.codex.ingest", message=%error);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn notification_pump_survives_lag_and_delivers_a_later_turn() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("fixture-provider");
+        std::fs::write(&program, "#!/bin/sh\nread -r initialize\nprintf '%s\\n' '{\"id\":1,\"result\":{\"userAgent\":\"fixture\",\"codexHome\":\"/tmp\"}}'\ncat >/dev/null\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let server = Arc::new(
+            CodexAppServer::spawn(codex_app_server::AppServerConfig {
+                program,
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let (output, mut batches) = mpsc::channel(16);
+        let (shutdown, receiver) = watch::channel(false);
+        let adapter = Arc::new(CodexAdapter {
+            server: server.clone(),
+            states: Mutex::new(BTreeMap::new()),
+            output,
+            changed: Notify::new(),
+            shutdown,
+        });
+        let (events, incoming) = tokio::sync::broadcast::channel(2);
+        for _ in 0..10 {
+            events.send(PeerEvent::Response { sequence: 0 }).unwrap();
+        }
+        let task = tokio::spawn(pump(Arc::downgrade(&adapter), incoming, receiver));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!task.is_finished(), "lag must not stop the pump");
+        adapter.states.lock().unwrap().insert(
+            "native".into(),
+            crate::normalize::tests::state(Driver::Codex),
+        );
+        events.send(PeerEvent::Message(agent_transport::peer::Reply { sequence: 1, value: json!({"method":"item/agentMessage/delta","params":{"threadId":"native","itemId":"text","delta":"after lag"}}).to_string().into() })).unwrap();
+        let batch = tokio::time::timeout(std::time::Duration::from_secs(2), batches.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(batch.events.iter().any(|event| matches!(&event.payload, EventPayload::MessageUpdated(message) if message.text == "after lag")));
+        adapter.shutdown.send(true).unwrap();
+        task.await.unwrap();
+        server.shutdown().await.unwrap();
+    }
     #[test]
     fn runtime_modes_match_t3_without_enlarging_sandbox_permissions() {
         let model = ModelSelection {

@@ -4,7 +4,7 @@ use crate::{contracts::*, decider, projector};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Mutex, MutexGuard},
 };
@@ -37,6 +37,7 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 pub struct Store {
     connection: Mutex<Connection>,
     committed: broadcast::Sender<StoredEvent>,
+    shell_cache: Mutex<BTreeMap<ThreadId, (u64, Option<ThreadShell>)>>,
 }
 #[derive(Debug, Clone)]
 pub struct Commit {
@@ -90,6 +91,7 @@ impl Store {
         Ok(Self {
             connection: Mutex::new(connection),
             committed,
+            shell_cache: Mutex::new(BTreeMap::new()),
         })
     }
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -371,8 +373,28 @@ impl Store {
                 .ok_or_else(|| StoreError::InvalidEvent("empty guarded write".into()))?
                 .thread_id
                 .clone();
-            let projection =
-                load_projection(&transaction, &thread_id)?.ok_or(StoreError::ThreadNotFound)?;
+            let needs_history = checkpoint_capture
+                || events.iter().any(|e| {
+                    matches!(
+                        e.payload,
+                        EventPayload::PlanUpdated(_)
+                            | EventPayload::ProviderTurnUpdated(_)
+                            | EventPayload::RunUpdated(_)
+                    )
+                });
+            let projection = if needs_history {
+                load_projection(&transaction, &thread_id)?.ok_or(StoreError::ThreadNotFound)?
+            } else {
+                // A stream delta needs only its current run guard, not every
+                // historical message, tool output and inherited timeline item.
+                let json: String = transaction.query_row("SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id=?1", [thread_id.as_str()], |row| row.get(0)).optional()?.ok_or(StoreError::ThreadNotFound)?;
+                let mut projection = ThreadProjection::empty(serde_json::from_str(&json)?);
+                let run: Option<String> = transaction.query_row("SELECT payload_json FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND run_id=?2", params![thread_id.as_str(), run_id.as_str()], |row| row.get(0)).optional()?;
+                if let Some(json) = run {
+                    projection.runs.push(serde_json::from_str(&json)?);
+                }
+                projection
+            };
             if !projection.runs.iter().any(|run| {
                 run.id == *run_id
                     && (run.status.is_blocking() && !checkpoint_capture
@@ -658,7 +680,41 @@ impl Store {
         })
     }
     pub fn shell_update(&self, event: &StoredEvent) -> Result<ShellStreamItem> {
-        shell_update(&*self.lock()?, &event.event.thread_id, event.sequence)
+        let connection = self.lock()?;
+        let mut cache = self.shell_cache.lock().map_err(|_| StoreError::Poisoned)?;
+        let latest = latest_sequence(&connection, Some(&event.event.thread_id))?;
+        let id = &event.event.thread_id;
+        if cache
+            .get(id)
+            .is_none_or(|(sequence, _)| *sequence != latest)
+        {
+            let streamed = match cache.get(id) {
+                Some((after, Some(previous))) => {
+                    streaming_shell(&connection, id, previous, *after, latest)?
+                }
+                _ => None,
+            };
+            let shell = match streamed {
+                Some(shell) => Some(shell),
+                None => load_projection(&connection, id)?
+                    .filter(|p| p.thread.deleted_at.is_none())
+                    .map(|p| projector::shell(&p)),
+            };
+            cache.insert(id.clone(), (latest, shell));
+        }
+        // Replay sequences stay at the original event cursor. A cached record
+        // must not move a device past changes to other threads in that replay.
+        Ok(match &cache[id].1 {
+            Some(shell) => ShellStreamItem::ThreadUpdated {
+                sequence: event.sequence,
+                archived: shell.thread.archived_at.is_some(),
+                thread: Box::new(shell.clone()),
+            },
+            None => ShellStreamItem::ThreadRemoved {
+                sequence: event.sequence,
+                thread_id: id.clone(),
+            },
+        })
     }
     pub fn turn_item(&self, id: &ThreadId, item_id: &TurnItemId) -> Result<Option<TurnItem>> {
         let connection = self.lock()?;
@@ -792,6 +848,75 @@ impl Store {
         }
         Ok(retry)
     }
+}
+// Streaming changes only the visible message and item counts. Lifecycle and
+// metadata changes use the complete projector, including fork lineage.
+fn streaming_shell(
+    connection: &Connection,
+    id: &ThreadId,
+    previous: &ThreadShell,
+    after: u64,
+    through: u64,
+) -> Result<Option<ThreadShell>> {
+    let events = query_events(connection, "stream_id=?1", id.as_str(), after, through, 257)?;
+    if events.len() > 256
+        || events.iter().any(|event| {
+            !matches!(
+                &event.event.payload,
+                EventPayload::MessageUpdated(_)
+                    | EventPayload::TurnItemUpdated(TurnItem {
+                        body: TurnItemBody::AssistantMessage { .. }
+                            | TurnItemBody::Reasoning { .. }
+                            | TurnItemBody::CommandExecution { .. },
+                        ..
+                    })
+            )
+        })
+    {
+        return Ok(None);
+    }
+    let mut shell = previous.clone();
+    for event in events {
+        if let EventPayload::MessageUpdated(message) = event.event.payload {
+            if !matches!(message.role, Role::User | Role::Assistant) {
+                return Ok(None);
+            }
+            if let Some(run) = &message.run_id {
+                let eligible = connection.query_row("SELECT json_extract(payload_json,'$.status') NOT IN ('queued','cancelled','rolled_back') FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND run_id=?2", params![id.as_str(),run.as_str()], |row|row.get::<_, bool>(0)).optional()?.unwrap_or(true);
+                if !eligible {
+                    continue;
+                }
+            }
+            if message.role == Role::User
+                && shell
+                    .latest_user_message_at
+                    .as_ref()
+                    .is_none_or(|at| at < &message.created_at)
+            {
+                shell.latest_user_message_at = Some(message.created_at.clone());
+            }
+            if shell
+                .latest_visible_message
+                .as_ref()
+                .is_none_or(|old| (&old.updated_at, &old.id) <= (&message.updated_at, &message.id))
+            {
+                shell.latest_visible_message = Some(VisibleMessage {
+                    id: message.id,
+                    role: message.role,
+                    text: message.text,
+                    updated_at: message.updated_at,
+                });
+            }
+        }
+    }
+    let count = connection.query_row(
+        "SELECT COUNT(*) FROM orchestration_v2_projection_turn_items WHERE thread_id=?1",
+        [id.as_str()],
+        |row| row.get::<_, u64>(0),
+    )?;
+    shell.visible_item_count += count.saturating_sub(shell.item_count);
+    shell.item_count = count;
+    Ok(Some(shell))
 }
 
 fn kind_name(body: &impl Serialize) -> Result<String> {
@@ -1282,6 +1407,150 @@ mod tests {
         store
             .dispatch(command, &now(), &turns(), Driver::Codex)
             .unwrap()
+    }
+    #[test]
+    fn completed_steer_becomes_one_idempotent_followup_on_the_selected_provider() {
+        let store = setup();
+        dispatch(&store, &send("start", DispatchMode::StartImmediately));
+        let running = running();
+        store
+            .ingest(
+                crate::events(
+                    &running.thread.id,
+                    "running",
+                    vec![
+                        EventPayload::RunUpdated(running.runs[0].clone()),
+                        EventPayload::RunAttemptUpdated(running.attempts[0].clone()),
+                        EventPayload::ProviderTurnUpdated(running.provider_turns[0].clone()),
+                    ],
+                    &now(),
+                ),
+                None,
+                &now(),
+            )
+            .unwrap();
+        let commit = dispatch(
+            &store,
+            &send(
+                "steer",
+                DispatchMode::SteerActive {
+                    target_run_id: running.runs[0].id.clone(),
+                },
+            ),
+        );
+        let effect = read_effects(&store.lock().unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|e| matches!(e.body, EffectBody::Steer { .. }))
+            .unwrap();
+        assert!(!commit.events.is_empty());
+        let mut completed = running.runs[0].clone();
+        completed.status = RunStatus::Completed;
+        completed.completed_at = Some(now());
+        store
+            .ingest(
+                crate::events(
+                    &running.thread.id,
+                    "completed",
+                    vec![EventPayload::RunUpdated(completed)],
+                    &now(),
+                ),
+                None,
+                &now(),
+            )
+            .unwrap();
+        let mut selection = running.thread.model_selection.clone();
+        selection.instance_id = ProviderInstanceId::new("claude").unwrap();
+        store
+            .dispatch(
+                &command(
+                    "switch",
+                    CommandBody::ProviderSwitch {
+                        model_selection: selection,
+                    },
+                ),
+                &now(),
+                &turns(),
+                Driver::Claude,
+            )
+            .unwrap();
+        assert!(!store.steer_follow_up(&effect, &now()).unwrap().replayed);
+        assert!(store.steer_follow_up(&effect, &now()).unwrap().replayed);
+        let p = store.projection(&running.thread.id).unwrap();
+        assert_eq!(
+            p.messages
+                .iter()
+                .filter(|m| m.id.as_str() == "message:steer")
+                .count(),
+            1
+        );
+        assert_eq!(p.runs.len(), 2);
+        assert_eq!(p.runs[0].status, RunStatus::Completed);
+        assert_eq!(p.runs[1].provider_instance_id.as_str(), "claude");
+    }
+    #[test]
+    fn delta_ingest_skips_unrelated_history_and_shell_subscribers_share_the_projection() {
+        let store = setup();
+        dispatch(&store, &send("start", DispatchMode::StartImmediately));
+        let p = store.projection(&create().thread_id).unwrap();
+        let mut item = p.turn_items[0].clone();
+        item.id = TurnItemId::new("live-delta").unwrap();
+        item.body = TurnItemBody::Reasoning {
+            text: "live".into(),
+            streaming: true,
+        };
+        let run = &p.runs[0];
+        // Invalid unrelated history detects accidental full projection reads.
+        store.lock().unwrap().execute("UPDATE orchestration_v2_projection_nodes SET payload_json='invalid' WHERE thread_id=?1", [p.thread.id.as_str()]).unwrap();
+        let commit = store
+            .ingest(
+                crate::events(
+                    &p.thread.id,
+                    "delta",
+                    vec![EventPayload::TurnItemUpdated(item.clone())],
+                    &now(),
+                ),
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        assert_eq!(commit.events.len(), 1);
+        // Restore history before the first subscriber computes the shell.
+        for node in &p.nodes {
+            upsert(
+                &store.lock().unwrap(),
+                "nodes",
+                "node_id",
+                node.id.as_str(),
+                &p.thread.id,
+                node,
+            )
+            .unwrap();
+        }
+        let first = store.shell_update(&commit.events[0]).unwrap();
+        store.lock().unwrap().execute("UPDATE orchestration_v2_projection_nodes SET payload_json='invalid' WHERE thread_id=?1", [p.thread.id.as_str()]).unwrap();
+        let second = store.shell_update(&commit.events[0]).unwrap();
+        assert_eq!(first, second);
+        item.body = TurnItemBody::Reasoning {
+            text: "live continued".into(),
+            streaming: true,
+        };
+        let next = store
+            .ingest(
+                crate::events(
+                    &p.thread.id,
+                    "delta-next",
+                    vec![EventPayload::TurnItemUpdated(item)],
+                    &now(),
+                ),
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        let streamed = store.shell_update(&next.events[0]).unwrap();
+        assert!(
+            matches!(streamed, ShellStreamItem::ThreadUpdated { sequence, thread, .. } if sequence == next.events[0].sequence && thread.item_count == p.turn_items.len() as u64 + 1)
+        );
     }
     #[test]
     fn native_session_lookup_includes_bex_owned_threads_not_only_import_ids() {
