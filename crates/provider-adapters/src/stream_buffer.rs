@@ -85,21 +85,31 @@ mod tests {
     use serde_json::json;
     #[test]
     fn megabyte_burst_is_exact_and_does_not_persist_ten_thousand_snapshots() {
-        let mut buffer = DeltaBuffer::default();
-        let mut total = 0;
-        let mut snapshots = 0;
-        let mut serialized_text = 0;
-        for _ in 0..10_000 {
-            for frame in buffer.push(json!({"method":"item/agentMessage/delta","params":{"threadId":"thread","itemId":"item","delta":"x".repeat(100)}})) { total += frame["params"]["delta"].as_str().unwrap().len(); snapshots += 1; serialized_text += total; }
+        for method in [
+            "item/agentMessage/delta",
+            "item/commandExecution/outputDelta",
+        ] {
+            let mut buffer = DeltaBuffer::default();
+            let mut text = String::new();
+            let mut snapshots = 0;
+            let mut serialized_text = 0;
+            for _ in 0..10_000 {
+                for frame in buffer.push(json!({"method":method,"params":{"threadId":"thread","itemId":"item","delta":"x".repeat(100)}})) {
+                    assert_eq!(frame["method"], method);
+                    text.push_str(frame["params"]["delta"].as_str().unwrap());
+                    snapshots += 1;
+                    serialized_text += text.len();
+                }
+            }
+            if let Some(frame) = buffer.flush() {
+                text.push_str(frame["params"]["delta"].as_str().unwrap());
+                snapshots += 1;
+                serialized_text += text.len();
+            }
+            assert_eq!(text, "x".repeat(1_000_000));
+            assert!(snapshots < 20);
+            assert!(serialized_text < 10_000_000);
         }
-        if let Some(frame) = buffer.flush() {
-            total += frame["params"]["delta"].as_str().unwrap().len();
-            snapshots += 1;
-            serialized_text += total;
-        }
-        assert_eq!(total, 1_000_000);
-        assert!(snapshots < 20);
-        assert!(serialized_text < 10_000_000);
     }
     #[test]
     fn barriers_and_parallel_items_preserve_provider_order() {

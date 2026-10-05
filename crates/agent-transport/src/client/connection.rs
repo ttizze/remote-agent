@@ -362,6 +362,10 @@ fn invalid(error: impl std::fmt::Display) -> PeerError {
     PeerError::InvalidMessage(error.to_string())
 }
 
+fn disconnected(error: impl std::fmt::Display) -> PeerError {
+    PeerError::ConnectionClosed(error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,8 +632,4 @@ mod tests {
         .await
         .unwrap();
     }
-}
-
-fn disconnected(error: impl std::fmt::Display) -> PeerError {
-    PeerError::ConnectionClosed(error.to_string())
 }
