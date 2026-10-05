@@ -550,12 +550,7 @@ impl SessionManager {
                 }
                 Ok(())
             }
-            sent => unwrap_failure(settle_sent(
-                sent,
-                attempt,
-                Some(ProviderOperation::SetModel),
-                None,
-            )),
+            sent => unwrap_failure(settle_sent(sent, attempt, operation(command), None)),
         }
     }
 
@@ -981,9 +976,8 @@ fn operation(command: &ProviderCommand) -> Option<ProviderOperation> {
         ProviderCommand::Interrupt { .. } => ProviderOperation::Interrupt,
         ProviderCommand::Respond { .. } => ProviderOperation::Respond,
         ProviderCommand::Compact { .. } => ProviderOperation::Compact,
-        ProviderCommand::SetModel { .. } | ProviderCommand::SetRuntimeMode { .. } => {
-            ProviderOperation::SetModel
-        }
+        ProviderCommand::SetModel { .. } => ProviderOperation::SetModel,
+        ProviderCommand::SetRuntimeMode { .. } => ProviderOperation::SetRuntimeMode,
         ProviderCommand::Rollback { .. } | ProviderCommand::Fork { .. } => return None,
     })
 }

@@ -581,7 +581,8 @@ pub(crate) fn failed_operation(operation: &str) -> Option<(ProviderOperation, bo
         | "thread/backgroundTerminals/terminate"
         | "thread/backgroundTerminals/list" => (ProviderOperation::Interrupt, false),
         "thread/compact/start" => (ProviderOperation::Compact, false),
-        "set_model" | "set_permission_mode" => (ProviderOperation::SetModel, false),
+        "set_model" => (ProviderOperation::SetModel, false),
+        "set_permission_mode" => (ProviderOperation::SetRuntimeMode, false),
         _ => return None,
     })
 }

@@ -1238,7 +1238,7 @@ pub enum EffectResult {
         title: Option<String>,
     },
 }
-values! { ProviderOperation { Start, Steer, Interrupt, Respond, Compact, SetModel } }
+values! { ProviderOperation { Start, Steer, Interrupt, Respond, Compact, SetModel, SetRuntimeMode } }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Input {
     RuntimeOpened {

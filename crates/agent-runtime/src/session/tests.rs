@@ -289,6 +289,30 @@ fn options(idle: u64, pin: u64) -> SessionOptions {
 }
 
 #[test]
+fn control_failures_name_their_own_provider_operation() {
+    use task::failed_operation;
+    assert_eq!(
+        failed_operation("set_model"),
+        Some((ProviderOperation::SetModel, false))
+    );
+    assert_eq!(
+        failed_operation("set_permission_mode"),
+        Some((ProviderOperation::SetRuntimeMode, false))
+    );
+    assert_eq!(
+        failed_operation("thread/resume"),
+        Some((ProviderOperation::Start, true))
+    );
+    assert_eq!(
+        operation(&ProviderCommand::SetRuntimeMode {
+            runtime_mode: RuntimeMode::Auto,
+            interaction_mode: InteractionMode::Default,
+        }),
+        Some(ProviderOperation::SetRuntimeMode)
+    );
+}
+
+#[test]
 fn registered_kinds_are_the_outbox_kinds_of_the_effects() {
     let selection = selection(Driver::Codex, "gpt");
     let commands = [
