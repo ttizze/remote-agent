@@ -123,3 +123,7 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 - 2026-10-05: ローカル開発環境は macOS 標準 Bash 3 では Nix が出力する `;&` を読み込めないため、flake の固定 Bash 5 で `scripts/dev-env.sh` を実行する。共有 dev-env キャッシュを修正せず、他の worktree に影響させない。
 - 2026-10-05: provider adapter は `crates/provider-adapters` に置く。`orchestration → agent-transport → agent-protocol → orchestration` という循環を避けるため。adapter は完全なイベントを送出し、Host が run／attempt の所有権を検証して store へ反映する。
 - 2026-10-05: Claude の ExitPlanMode は T3 と同じく、空でない計画を保存して `deny` を返し、後続ターンのユーザー指示を待たせる。AskUserQuestion の複数選択は CLI が要求する文字列へ変換する。native session の再開は CLI の `--resume` を使い、プロセスの終了確認まで capacity permit を保持する。
+- 2026-10-05: 新しい会話 RPC は Postcard の型が変わるため ALPN を streams/6 にする。接続の identity・通知配送は会話 owner から独立させ、terminal と共有する。provider 通知は store で現在の run／attempt を検証してから受理する。
+- 2026-10-05: 初回 transcript 走査は読み取り専用・最近30日・各 provider 最新100ファイル・各会話200発言とする。最初のユーザー発言を残し、native session UUID と実際の cwd を保存する。取り込み済み会話は上書きしない。取り込み時の既定モデルは固定 T3 ソースの gpt-6-astra と claude-fable-5-1 を使う。
+- 2026-10-05: provider-thread が native session を持つ段階で app thread の activeProviderThreadId を更新する。キュー作成だけの placeholder は更新しない。T3 のサーバー側更新規則を共通 projector に含め、Host とクライアントを一致させる。
+- 2026-10-05: 会話の launch では既存 Host の worktree 自動作成設定を維持する。M2 の新しい workspace strategy はまだ実装しない。Host 検証は --lib の単体テストに限定し、実 Host を起動する integration test は実行しない。terminal 単体テストに必要な supervisor は同じ worktree にビルドする。

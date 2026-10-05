@@ -316,7 +316,7 @@ pub struct Worktree {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorktreeThread {
-    pub id: crate::session::SessionRef,
+    pub id: ::orchestration::ThreadId,
     pub name: String,
     pub active: bool,
 }

@@ -390,21 +390,16 @@ impl TurnState {
                 old.status,
                 ItemStatus::Running | ItemStatus::Pending | ItemStatus::Waiting
             ) {
-                let mut item = old;
-                item.status = match status {
-                    TurnStatus::Completed => ItemStatus::Completed,
-                    TurnStatus::Interrupted => ItemStatus::Interrupted,
-                    TurnStatus::Cancelled => ItemStatus::Cancelled,
-                    _ => ItemStatus::Failed,
-                };
-                item.completed_at = Some(now.clone());
-                item.updated_at = now.clone();
-                match &mut item.body {
-                    TurnItemBody::AssistantMessage { streaming, .. }
-                    | TurnItemBody::Reasoning { streaming, .. }
-                    | TurnItemBody::ProposedPlan { streaming, .. } => *streaming = false,
-                    _ => {}
-                }
+                let item = orchestration::projector::finished_item(
+                    &old,
+                    match status {
+                        TurnStatus::Completed => ItemStatus::Completed,
+                        TurnStatus::Interrupted => ItemStatus::Interrupted,
+                        TurnStatus::Cancelled => ItemStatus::Cancelled,
+                        _ => ItemStatus::Failed,
+                    },
+                    now,
+                );
                 self.record_item(&key, item, now, payloads);
             }
         }

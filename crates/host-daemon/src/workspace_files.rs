@@ -29,10 +29,6 @@ const EDIT_LIMIT: u64 = 1024 * 1024;
 pub(crate) const TRANSFER_LIMIT: u64 = 512 * 1024 * 1024;
 const GRANT_LIFETIME: Duration = Duration::from_secs(120);
 
-#[cfg(test)]
-#[path = "workspace_files/item_read_tests.rs"]
-mod item_read_tests;
-
 #[derive(Clone)]
 pub(crate) struct WorkspaceFiles {
     upload_directory: Arc<Path>,
@@ -76,36 +72,6 @@ impl WorkspaceFiles {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, grant| grant.session != session);
-    }
-
-    /// An anonymous transfer file is closed on consumption, expiry or disconnect.
-    /// It is never added to native history or the attachment directory.
-    pub(crate) async fn download_bytes(
-        &self,
-        session: SessionId,
-        bytes: Vec<u8>,
-    ) -> Result<TransferGrant> {
-        let files = self.clone();
-        tokio::task::spawn_blocking(move || {
-            use std::io::{Seek, SeekFrom};
-            if bytes.len() as u64 > TRANSFER_LIMIT {
-                return Err(anyhow!("transfer exceeds 512 MiB"));
-            }
-            let mut file = tempfile::tempfile()?;
-            file.write_all(&bytes)?;
-            file.seek(SeekFrom::Start(0))?;
-            files.grant(Grant {
-                session,
-                expires: Instant::now() + GRANT_LIFETIME,
-                file: GrantFile::Download(file),
-                size: bytes.len() as u64,
-                digest: digest::digest(&SHA256, &bytes)
-                    .as_ref()
-                    .try_into()
-                    .expect("SHA-256 length"),
-            })
-        })
-        .await?
     }
 
     fn dispatch(&self, session: SessionId, request: Call) -> Result<Body> {

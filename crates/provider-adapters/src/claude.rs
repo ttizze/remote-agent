@@ -16,10 +16,10 @@ use std::{
 };
 use tokio::sync::{Notify, Semaphore, mpsc, watch};
 
+#[derive(Clone)]
 pub struct ClaudeConfig {
     pub program: PathBuf,
     pub config_home: PathBuf,
-    pub credentials_home: PathBuf,
 }
 struct ProcessHandle {
     native_session: String,
@@ -30,9 +30,15 @@ struct ProcessHandle {
     done: watch::Receiver<bool>,
     changed: Arc<Notify>,
     cwd: PathBuf,
+    credentials_home: PathBuf,
     runtime_mode: RuntimeMode,
     interaction_mode: InteractionMode,
     model: ModelSelection,
+}
+impl Drop for ProcessHandle {
+    fn drop(&mut self) {
+        let _ = self.stop.send(true);
+    }
 }
 pub struct ClaudeAdapter {
     config: ClaudeConfig,
@@ -55,9 +61,13 @@ impl ClaudeAdapter {
         projection: &ThreadProjection,
         cwd: &Path,
         browser: Option<Value>,
+        credentials_home: &Path,
     ) -> Result<(), AdapterError> {
         match effect {
-            EffectBody::Start { run_id } => self.start(projection, run_id, cwd, browser).await,
+            EffectBody::Start { run_id } => {
+                self.start(projection, run_id, cwd, browser, credentials_home)
+                    .await
+            }
             EffectBody::Steer {
                 run_id, message_id, ..
             } => {
@@ -108,47 +118,11 @@ impl ClaudeAdapter {
                 request_id,
                 decision,
                 answers,
-            } => {
-                let (handle, request) = {
-                    let processes = self.processes.lock().await;
-                    processes.values().find_map(|handle| {
-                        let request = handle
-                            .state
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .take_request(request_id, &now())?;
-                        Some((handle.clone(), request))
-                    })
-                }
-                .ok_or_else(|| error("Claude callback is no longer live"))?;
-                let response = normalize::claude_response(&request, *decision, answers.as_ref());
-                handle.input.send(json!({"type":"control_response","response":{"subtype":"success","request_id":request.id,"response":response}})).await.map_err(error)
-            }
+            } => self.respond(request_id, *decision, answers.as_ref()).await,
             EffectBody::Detach {
                 provider_session_id,
-            } => {
-                let removed = {
-                    let mut processes = self.processes.lock().await;
-                    let id = processes
-                        .iter()
-                        .find(|(_, handle)| {
-                            handle
-                                .state
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .session
-                                .id
-                                == *provider_session_id
-                        })
-                        .map(|(id, _)| id.clone());
-                    id.and_then(|id| processes.remove(&id))
-                };
-                if let Some(handle) = removed {
-                    let _ = handle.stop.send(true);
-                    wait_done(&handle).await?;
-                }
-                Ok(())
-            }
+                ..
+            } => self.detach(provider_session_id).await,
             EffectBody::Restart { .. } => {
                 Err(error("Claude does not support interrupt-restart steering"))
             }
@@ -173,12 +147,60 @@ impl ClaudeAdapter {
             .cloned()
             .ok_or_else(|| error("Claude runtime is no longer live"))
     }
+    pub async fn respond(
+        &self,
+        request_id: &RuntimeRequestId,
+        decision: Option<ApprovalDecision>,
+        answers: Option<&Answers>,
+    ) -> Result<(), AdapterError> {
+        let (handle, request) = {
+            let processes = self.processes.lock().await;
+            processes.values().find_map(|handle| {
+                let request = handle
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take_request(request_id, &now())?;
+                Some((handle.clone(), request))
+            })
+        }
+        .ok_or_else(|| error("Claude callback is no longer live"))?;
+        let response = normalize::claude_response(&request, decision, answers);
+        handle.input.send(json!({"type":"control_response","response":{"subtype":"success","request_id":request.id,"response":response}})).await.map_err(error)
+    }
+    pub async fn detach(
+        &self,
+        provider_session_id: &ProviderSessionId,
+    ) -> Result<(), AdapterError> {
+        let removed = {
+            let mut processes = self.processes.lock().await;
+            let id = processes
+                .iter()
+                .find(|(_, handle)| {
+                    handle
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .session
+                        .id
+                        == *provider_session_id
+                })
+                .map(|(id, _)| id.clone());
+            id.and_then(|id| processes.remove(&id))
+        };
+        if let Some(handle) = removed {
+            let _ = handle.stop.send(true);
+            wait_done(&handle).await?;
+        }
+        Ok(())
+    }
     async fn start(
         &self,
         projection: &ThreadProjection,
         run_id: &RunId,
         cwd: &Path,
         browser: Option<Value>,
+        credentials_home: &Path,
     ) -> Result<(), AdapterError> {
         let run = projection
             .runs
@@ -209,6 +231,7 @@ impl ClaudeAdapter {
             .cloned();
         let reusable = existing.as_ref().is_some_and(|handle| {
             handle.cwd == cwd
+                && handle.credentials_home == credentials_home
                 && handle.model == run.model_selection
                 && handle.runtime_mode == projection.thread.runtime_mode
                 && handle.interaction_mode == projection.thread.interaction_mode
@@ -243,6 +266,14 @@ impl ClaudeAdapter {
             updated_at: timestamp.clone(),
             last_error: None,
         };
+        let mut session = session;
+        if let Some(old) = projection
+            .provider_sessions
+            .iter()
+            .find(|old| old.id == session.id)
+        {
+            session.created_at = old.created_at.clone();
+        }
         provider_thread.provider_session_id = Some(session.id.clone());
         provider_thread.native_thread_ref = Some(ProviderRef {
             driver: Driver::Claude,
@@ -299,6 +330,7 @@ impl ClaudeAdapter {
         } else {
             let command = process_command(
                 &self.config,
+                credentials_home,
                 cwd,
                 &native,
                 resume,
@@ -314,6 +346,7 @@ impl ClaudeAdapter {
                 permit.expect("new process has reserved capacity"),
                 self.output.clone(),
                 cwd,
+                credentials_home,
                 projection.thread.runtime_mode,
                 projection.thread.interaction_mode,
                 run.model_selection.clone(),
@@ -396,6 +429,7 @@ pub fn permission_mode(runtime: RuntimeMode, interaction: InteractionMode) -> &'
 )]
 fn process_command(
     config: &ClaudeConfig,
+    credentials_home: &Path,
     cwd: &Path,
     native: &str,
     resume: bool,
@@ -407,7 +441,7 @@ fn process_command(
     let mut command = bex_process::command(&config.program).map_err(error)?;
     command
         .env("CLAUDE_CONFIG_DIR", &config.config_home)
-        .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &config.credentials_home)
+        .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", credentials_home)
         .env("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1")
         .env_remove("ANTHROPIC_API_KEY")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
@@ -453,6 +487,61 @@ fn process_command(
         .stderr(Stdio::inherit());
     Ok(command)
 }
+/// Short-lived native control query for provider-owned metadata; no inference input is sent.
+pub async fn query_control(
+    config: &ClaudeConfig,
+    credentials_home: &Path,
+    cwd: &Path,
+    request: Option<(&str, Value)>,
+) -> Result<Value, AdapterError> {
+    let model = ModelSelection {
+        instance_id: ProviderInstanceId::new("claude").expect("constant id"),
+        model: "default".into(),
+        options: Default::default(),
+    };
+    let mut command = process_command(
+        config,
+        credentials_home,
+        cwd,
+        &uuid::Uuid::new_v4().to_string(),
+        false,
+        &model,
+        RuntimeMode::ApprovalRequired,
+        InteractionMode::Default,
+        None,
+    )?;
+    let mut child = command.spawn().map_err(error)?;
+    let mut writer = JsonlWriter::new(
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| error("Claude stdin missing"))?,
+    );
+    let mut reader = JsonlReader::new(
+        child
+            .stdout
+            .take()
+            .ok_or_else(|| error("Claude stdout missing"))?,
+    );
+    let result=tokio::time::timeout(std::time::Duration::from_secs(30),async {
+        writer.write_line(&json!({"type":"control_request","request_id":"initialize","request":{"subtype":"initialize"}}).to_string()).await.map_err(error)?;
+        let mut expected="initialize";
+        while let Some(line)=reader.read_line().await.map_err(error)? {
+            let frame:Value=serde_json::from_str(&line).map_err(error)?;
+            if frame["type"]!="control_response"||frame["response"]["request_id"]!=expected {continue;}
+            if frame["response"]["subtype"]!="success" {return Err(error("Claude control query rejected"));}
+            if expected=="initialize" && let Some((id,body))=&request {writer.write_line(&json!({"type":"control_request","request_id":id,"request":body}).to_string()).await.map_err(error)?;expected=id;continue;}
+            return Ok(frame["response"]["response"].clone());
+        }
+        Err(error("Claude closed before returning metadata"))
+    }).await.map_err(|_|error("Claude control query timed out"));
+    drop(writer);
+    drop(reader);
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
+    result?
+}
 fn user_frame(native: &str, message: &ConversationMessage, steer: bool) -> Value {
     let mut frame = json!({"type":"user","uuid":uuid::Uuid::new_v4().to_string(),"session_id":native,"message":{"role":"user","content":[{"type":"text","text":message.text}]},"parent_tool_use_id":null});
     if steer {
@@ -471,6 +560,7 @@ fn spawn(
     permit: tokio::sync::OwnedSemaphorePermit,
     output: mpsc::Sender<ProviderBatch>,
     cwd: &Path,
+    credentials_home: &Path,
     runtime_mode: RuntimeMode,
     interaction_mode: InteractionMode,
     model: ModelSelection,
@@ -499,6 +589,7 @@ fn spawn(
         done: done_receiver,
         changed: changed.clone(),
         cwd: cwd.into(),
+        credentials_home: credentials_home.into(),
         runtime_mode,
         interaction_mode,
         model,

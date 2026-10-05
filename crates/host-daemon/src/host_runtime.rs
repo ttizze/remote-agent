@@ -291,7 +291,7 @@ impl HostRuntime {
         node: NodeId,
         session: SessionId,
         message: &Call,
-    ) -> Result<crate::host_rpc::routing::HostReply> {
+    ) -> Result<crate::host_rpc::connections::HostReply> {
         if matches!(message, Call::HostName(_)) {
             return Ok(Response::Success {
                 result: Body::from(self.name.clone()),

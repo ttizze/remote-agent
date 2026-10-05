@@ -1,5 +1,5 @@
 //! The native user config owns permissions. Nothing is added to turn requests.
-use super::{codex::Codex, service::Failure};
+use super::{resources::CodexResources, service::Failure};
 use agent_protocol::permissions::{PermissionMode, PermissionSettings};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,7 +20,7 @@ struct ConfigLayer {
     version: String,
 }
 
-impl Codex {
+impl CodexResources {
     async fn user_permission_layer(&self) -> Result<ConfigLayer, Failure> {
         let config: ConfigRead = self
             .request("config/read", &json!({"includeLayers":true}))

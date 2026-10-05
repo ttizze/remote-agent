@@ -1222,6 +1222,7 @@ pub enum EffectBody {
     #[serde(rename = "provider-session.detach")]
     Detach {
         provider_session_id: ProviderSessionId,
+        driver: Driver,
     },
     #[serde(rename = "terminal.cleanup")]
     TerminalCleanup,

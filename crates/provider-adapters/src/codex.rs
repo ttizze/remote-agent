@@ -34,7 +34,7 @@ impl CodexAdapter {
             shutdown,
         });
         let events = adapter.server.subscribe();
-        tokio::spawn(pump(adapter.clone(), events, receiver));
+        tokio::spawn(pump(Arc::downgrade(&adapter), events, receiver));
         adapter
     }
     async fn request(&self, method: &str, params: Value) -> Result<Value, AdapterError> {
@@ -143,43 +143,54 @@ impl CodexAdapter {
                 request_id,
                 decision,
                 answers,
-            } => {
-                let request = {
-                    let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
-                    states
-                        .values_mut()
-                        .find_map(|state| state.take_request(request_id, &now()))
-                }
-                .ok_or_else(|| error("Codex approval callback is no longer live"))?;
-                let response = normalize::codex_response(&request, *decision, answers.as_ref());
-                self.server
-                    .send_raw(&json!({"id":request.id,"result":response}).to_string())
-                    .await
-                    .map_err(error)
-            }
+            } => self.respond(request_id, *decision, answers.as_ref()).await,
             EffectBody::Detach {
                 provider_session_id,
-            } => {
-                let natives: Vec<_> = {
-                    let states = self.states.lock().unwrap_or_else(|e| e.into_inner());
-                    states
-                        .iter()
-                        .filter(|(_, state)| state.session.id == *provider_session_id)
-                        .map(|(native, _)| native.clone())
-                        .collect()
-                };
-                for native in natives {
-                    self.request("thread/unsubscribe", json!({"threadId":native}))
-                        .await?;
-                    self.states
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&native);
-                }
-                Ok(())
-            }
+                ..
+            } => self.detach(provider_session_id).await,
             _ => Err(error("effect belongs to Host resource management")),
         }
+    }
+    pub async fn respond(
+        &self,
+        request_id: &RuntimeRequestId,
+        decision: Option<ApprovalDecision>,
+        answers: Option<&Answers>,
+    ) -> Result<(), AdapterError> {
+        let request = {
+            let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
+            states
+                .values_mut()
+                .find_map(|state| state.take_request(request_id, &now()))
+        }
+        .ok_or_else(|| error("Codex approval callback is no longer live"))?;
+        let response = normalize::codex_response(&request, decision, answers);
+        self.server
+            .send_raw(&json!({"id":request.id,"result":response}).to_string())
+            .await
+            .map_err(error)
+    }
+    pub async fn detach(
+        &self,
+        provider_session_id: &ProviderSessionId,
+    ) -> Result<(), AdapterError> {
+        let natives: Vec<_> = {
+            let states = self.states.lock().unwrap_or_else(|e| e.into_inner());
+            states
+                .iter()
+                .filter(|(_, state)| state.session.id == *provider_session_id)
+                .map(|(native, _)| native.clone())
+                .collect()
+        };
+        for native in natives {
+            self.request("thread/unsubscribe", json!({"threadId":native}))
+                .await?;
+            self.states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&native);
+        }
+        Ok(())
     }
     async fn start(
         &self,
@@ -251,6 +262,14 @@ impl CodexAdapter {
             updated_at: timestamp.clone(),
             last_error: None,
         };
+        let mut session = session;
+        if let Some(old) = projection
+            .provider_sessions
+            .iter()
+            .find(|old| old.id == session.id)
+        {
+            session.created_at = old.created_at.clone();
+        }
         provider_thread.provider_session_id = Some(session.id.clone());
         provider_thread.native_thread_ref = Some(ProviderRef {
             driver: Driver::Codex,
@@ -440,14 +459,14 @@ pub fn turn_start_params(
     params
 }
 async fn pump(
-    adapter: Arc<CodexAdapter>,
+    adapter: std::sync::Weak<CodexAdapter>,
     mut events: tokio::sync::broadcast::Receiver<PeerEvent>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
         tokio::select! {
             changed=shutdown.changed()=>{if changed.is_err()||*shutdown.borrow(){break;}}
-            event=events.recv()=>{match event{
+            event=events.recv()=>{let Some(adapter)=adapter.upgrade() else{break;};match event{
                 Ok(PeerEvent::Message(message))=>{match serde_json::from_str::<Value>(&message.value){Ok(value)=>{let method=value["method"].as_str().unwrap_or("");if let Err(error)=adapter.handle(method,&value["params"],value.get("id")).await{tracing::error!(operation="orchestration.codex.ingest",message=%error);}},Err(error)=>{tracing::error!(operation="orchestration.codex.decode",message=%error);}}}
                 Ok(PeerEvent::Response{..})=>{},
                 result=>{let message=match result{Ok(PeerEvent::Closed(message))=>message,Err(error)=>error.to_string(),_=>unreachable!()};let natives:Vec<_>=adapter.states.lock().unwrap_or_else(|e|e.into_inner()).keys().cloned().collect();for native in natives{let _=adapter.disconnected(&native,&message).await;}break;}

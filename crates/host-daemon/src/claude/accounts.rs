@@ -1,7 +1,7 @@
 //! Credentials stay in Claude Code's own storage. Only account labels and the
 //! selection are persisted here. Conversation settings and transcripts stay in
 //! the native home; only secure credential storage changes with the account.
-use crate::host_rpc::agent::{AccountCommand, AccountReply};
+use crate::host_rpc::identity::{AccountCommand, AccountReply};
 use agent_protocol::{
     models::Empty,
     operations::{Account, AccountLogin, AccountLoginStatus, AccountSelection},
@@ -42,7 +42,6 @@ pub(crate) struct Accounts {
     directory: PathBuf,
     native_home: PathBuf,
     registry: Registry,
-    revision: u64,
     native_checked_at: Option<Instant>,
     login: Option<Login>,
     usage: crate::account_usage::UsageCache,
@@ -67,7 +66,7 @@ impl Drop for Cli {
 }
 
 impl Accounts {
-    pub(super) async fn load(
+    pub(crate) async fn load(
         program: PathBuf,
         directory: PathBuf,
         native_home: PathBuf,
@@ -83,18 +82,13 @@ impl Accounts {
             directory,
             native_home,
             registry,
-            revision: 0,
             native_checked_at: None,
             login: None,
             usage: Default::default(),
         })
     }
 
-    pub(super) fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    pub(super) fn selected_home(&self) -> Result<Option<PathBuf>, String> {
+    pub(crate) fn selected_home(&self) -> Result<Option<PathBuf>, String> {
         match self.registry.selected_id.as_deref() {
             Some("claude:desktop") => Ok(Some(self.native_home.clone())),
             Some(id) => self.account_home(id).map(Some),
@@ -202,24 +196,25 @@ impl Accounts {
         let directory = self.directory.clone();
         let cache = self.usage.entry(id.to_owned()).or_default().clone();
         Ok(async move {
-            cache.read(async {
-                let (mut process, _) = super::process::Process::start(
-                    &program, &config_home, &home, &directory, None, None, None,
-                ).await?;
-                let result = async {
-                    process.write(&serde_json::json!({"type":"control_request","request_id":"usage","request":{"subtype":"get_usage","skip_behaviors":true}})).await?;
-                    while let Some(message) = process.read().await? {
-                        if message["type"] == "control_response" && message["response"]["request_id"] == "usage" {
-                            return if message["response"]["subtype"] == "success" {
-                                Ok(crate::account_usage::claude(&message["response"]["response"]))
-                            } else { Err("Claude usage unavailable".into()) };
-                        }
-                    }
-                    Err("Claude exited".into())
-                }.await;
-                let _ = process.finish().await;
-                result
-            }).await
+            cache
+                .read(async {
+                    let response = provider_adapters::claude::query_control(
+                        &provider_adapters::claude::ClaudeConfig {
+                            program,
+                            config_home,
+                        },
+                        &home,
+                        &directory,
+                        Some((
+                            "usage",
+                            serde_json::json!({"subtype":"get_usage","skip_behaviors":true}),
+                        )),
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    Ok(crate::account_usage::claude(&response))
+                })
+                .await
         })
     }
 
@@ -238,7 +233,6 @@ impl Accounts {
                     self.registry.selected_id = previous;
                     return Err(error);
                 }
-                self.revision += 1;
                 Ok(AccountSelection {
                     provider: ProviderKind::Claude,
                     selected_id: id,
@@ -259,7 +253,6 @@ impl Accounts {
                         return Err(error);
                     }
                 }
-                self.revision += 1;
                 let mut process = Cli::start(&self.program, &home, &["auth", "logout"], None)?;
                 if !process.finish().await?.0 {
                     return Err("Claude のログアウトに失敗しました。".into());
@@ -406,7 +399,7 @@ impl Accounts {
         }
     }
 
-    pub(super) async fn cancel(&mut self) -> Result<(), String> {
+    pub(crate) async fn cancel(&mut self) -> Result<(), String> {
         if let Some(mut login) = self.login.take() {
             login.process.input.take();
             let _ = login.process.child.wait().await;

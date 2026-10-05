@@ -122,21 +122,15 @@ async fn execute(
                         && run.status.is_blocking()
                         && run.active_attempt_id == attempt_id
                 }) {
-                    let mut run = run.clone();
-                    run.status = RunStatus::Failed;
-                    run.completed_at = Some(timestamp.clone());
-                    let event = DomainEvent {
-                        id: EventId::new(format!("event:effect-failed:{}", claim.effect.id))
-                            .expect("derived id"),
-                        thread_id: claim.effect.thread_id.clone(),
-                        occurred_at: timestamp.clone(),
-                        payload: EventPayload::RunUpdated(run),
-                    };
-                    store.ingest(
-                        vec![event],
-                        Some((&run_id, attempt_id.as_ref())),
+                    let events = crate::decider::failed_effect(
+                        &projection,
+                        run,
+                        &claim.effect.id,
+                        &error.message,
                         &timestamp,
-                    )?;
+                    )
+                    .events;
+                    store.ingest(events, Some((&run_id, attempt_id.as_ref())), &timestamp)?;
                 }
             }
         }
@@ -221,9 +215,15 @@ mod tests {
         execute(store.clone(), Arc::new(Failure), claim)
             .await
             .unwrap();
-        assert_eq!(
-            store.projection(&create().thread_id).unwrap().runs[0].status,
-            RunStatus::Failed
+        let projection = store.projection(&create().thread_id).unwrap();
+        assert_eq!(projection.runs[0].status, RunStatus::Failed);
+        assert_eq!(projection.attempts[0].status, AttemptStatus::Failed);
+        assert_eq!(projection.nodes[0].status, NodeStatus::Failed);
+        assert!(
+            projection
+                .turn_items
+                .iter()
+                .any(|item| matches!(item.body, TurnItemBody::Error { .. }))
         );
         assert!(store.claim_effect("worker", now_ms()).unwrap().is_none());
     }

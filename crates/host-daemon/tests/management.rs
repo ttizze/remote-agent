@@ -73,9 +73,11 @@ async fn headless_invitation_pairs_once_and_status_uses_the_running_host() {
         .unwrap();
 
         assert_eq!(
-            peer.call(&agent_core::state::operations::LoadHostName {})
-                .await
-                .unwrap(),
+            peer.request::<String>(&agent_protocol::protocol::Call::HostName(
+                agent_protocol::models::Empty {}
+            ))
+            .await
+            .unwrap(),
             "Linux fixture"
         );
         assert!(

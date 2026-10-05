@@ -84,7 +84,12 @@ pub fn apply(
             upsert!(provider_sessions, value)
         }
         ProviderSessionDetached(id) => next.provider_sessions.retain(|value| value.id != *id),
-        ProviderThreadUpdated(value) => upsert!(provider_threads, value),
+        ProviderThreadUpdated(value) => {
+            if let Some(thread) = updated_thread_for_provider(&next.thread, value) {
+                next.thread = thread;
+            }
+            upsert!(provider_threads, value);
+        }
         ProviderTurnUpdated(value) => {
             let value = updated_provider_turn(
                 next.provider_turns.iter().find(|old| old.id == value.id),
@@ -115,6 +120,39 @@ pub fn apply(
         next.visible_turn_items = visible_items(&next);
     }
     Some(next)
+}
+
+/// Finalize the visible item and its streaming body together.
+pub fn finished_item(item: &TurnItem, status: ItemStatus, now: &Timestamp) -> TurnItem {
+    let mut item = item.clone();
+    item.status = status;
+    item.completed_at = Some(now.clone());
+    item.updated_at = now.clone();
+    match &mut item.body {
+        TurnItemBody::AssistantMessage { streaming, .. }
+        | TurnItemBody::Reasoning { streaming, .. }
+        | TurnItemBody::ProposedPlan { streaming, .. } => *streaming = false,
+        _ => {}
+    }
+    item
+}
+
+/// A queued placeholder does not become the active native conversation before delivery.
+pub fn updated_thread_for_provider(
+    thread: &AppThread,
+    provider: &ProviderThread,
+) -> Option<AppThread> {
+    let placeholder = provider.status == ProviderThreadStatus::NotLoaded
+        && provider.first_run_ordinal.is_none()
+        && provider.native_thread_ref.is_none()
+        && provider.provider_session_id.is_none();
+    if provider.app_thread_id.as_ref() != Some(&thread.id) || placeholder {
+        return None;
+    }
+    let mut thread = thread.clone();
+    thread.active_provider_thread_id = Some(provider.id.clone());
+    thread.updated_at = provider.updated_at.clone();
+    Some(thread)
 }
 
 pub fn updated_provider_turn(
@@ -296,6 +334,30 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use proptest::prelude::*;
+    #[test]
+    fn native_delivery_activates_provider_thread_but_queued_placeholder_does_not() {
+        let (projection, _) = crate::test_support::apply(
+            &projection(),
+            &send("start", DispatchMode::StartImmediately),
+        );
+        let mut provider = projection.provider_threads[0].clone();
+        assert!(updated_thread_for_provider(&projection.thread, &provider).is_none());
+        provider.native_thread_ref = Some(ProviderRef {
+            driver: Driver::Codex,
+            native_id: Some("native".into()),
+            strength: Strength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        });
+        let event = DomainEvent {
+            id: EventId::new("native-delivery").unwrap(),
+            thread_id: projection.thread.id.clone(),
+            occurred_at: now(),
+            payload: EventPayload::ProviderThreadUpdated(provider.clone()),
+        };
+        let next = super::apply(Some(&projection), &event, Default::default()).unwrap();
+        assert_eq!(next.thread.active_provider_thread_id, Some(provider.id));
+    }
     #[test]
     fn visit_updates_read_state_without_changing_activity() {
         let projection = projection();

@@ -1,4 +1,4 @@
-use crate::host_rpc::agent::{AccountCommand, AccountReply};
+use crate::host_rpc::identity::{AccountCommand, AccountReply};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use agent_protocol::operations as op;

@@ -67,7 +67,7 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         tracing::error!(target: "bex", operation = "host.codex", message = %error);
     }
     let account_directory = config.account_state_dir.as_deref().unwrap_or(&directory);
-    let service = HostRpcService::new(app_server.clone(), projects);
+    let service = HostRpcService::new(app_server.clone(), projects)?;
     #[cfg(unix)]
     service
         .enable_browser(directory.join("browser"))

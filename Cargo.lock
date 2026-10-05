@@ -188,6 +188,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
+ "orchestration",
  "postcard",
  "proptest",
  "serde",
@@ -4666,7 +4667,6 @@ dependencies = [
 name = "host-daemon"
 version = "0.1.0"
 dependencies = [
- "agent-core",
  "agent-protocol",
  "agent-transport",
  "alacritty_terminal",
@@ -4683,7 +4683,9 @@ dependencies = [
  "dunce",
  "futures-io",
  "futures-util",
+ "orchestration",
  "proptest",
+ "provider-adapters",
  "reqwest",
  "ring",
  "rustls",

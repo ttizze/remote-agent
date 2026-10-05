@@ -1,5 +1,5 @@
 //! Normalize Codex's catalog at the provider boundary.
-use super::codex::Codex;
+use super::resources::CodexResources;
 use agent_protocol::composer::{ComposerCandidate, ComposerCatalog, Invocation, InvocationKind};
 use serde::Deserialize;
 use serde_json::json;
@@ -46,7 +46,7 @@ struct PluginInterface {
     short_description: Option<String>,
 }
 
-impl Codex {
+impl CodexResources {
     pub(super) async fn composer_catalog(&self, cwd: &str) -> ComposerCatalog {
         let cwds: Vec<&str> = if cwd.is_empty() { vec![] } else { vec![cwd] };
         let params = json!({"cwds":cwds});

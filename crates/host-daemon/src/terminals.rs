@@ -1,6 +1,6 @@
 //! Device-owned PTYs, retained across transport disconnects. The private supervisor pipe carries terminal I/O;
 //! only this owner publishes events and grants access to a process handle.
-use crate::host_rpc::routing::{SessionId, SessionRouter};
+use crate::host_rpc::connections::{Connections, SessionId};
 use agent_protocol::{
     operations::TerminalSize,
     protocol::{Call, Notification},
@@ -80,7 +80,7 @@ impl Drop for Terminals {
 impl Terminals {
     pub(crate) async fn start(
         &self,
-        router: SessionRouter,
+        router: Connections,
         owner: SessionId,
         handle: String,
         cwd: String,
@@ -287,6 +287,26 @@ impl Terminals {
             .values()
             .any(|record| record.cwd.starts_with(path))
     }
+    pub(crate) async fn cleanup_handle(&self, handle: &str) {
+        let records: Vec<_> = self
+            .records
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|record| record.handle == handle)
+            .map(|record| {
+                record.stop.cancel();
+                record.finished.clone()
+            })
+            .collect();
+        for mut finished in records {
+            while finished.borrow_and_update().is_none() {
+                if finished.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
     pub(crate) async fn shutdown(&self) {
         let records: Vec<_> = self
             .records
@@ -308,7 +328,7 @@ impl Terminals {
     }
 }
 struct Worker {
-    router: SessionRouter,
+    router: Connections,
     attached: Arc<Mutex<Option<SessionId>>>,
     started: Arc<std::sync::atomic::AtomicBool>,
     handle: String,
@@ -539,7 +559,7 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let cwd = directory.path().to_string_lossy().into_owned();
             let size = TerminalSize { cols: 80, rows: 24 };
-            let router = SessionRouter::new();
+            let router = Connections::new();
             let terminals = Terminals::default();
             let first = router.open_authenticated_session(Some("phone".into()));
             for handle in ["one", "two"] {
@@ -584,7 +604,7 @@ mod tests {
                 let directory = tempfile::tempdir().unwrap();
                 let cwd = dunce::canonicalize(directory.path()).unwrap();
                 let terminals = Terminals::default();
-                let router = SessionRouter::new();
+                let router = Connections::new();
                 let connection = router.open_session();
                 terminals.start(router, connection.id(), "jobs".into(), directory.path().to_string_lossy().into_owned(), TerminalSize {rows:24, cols:80}).await.unwrap();
                 // Linux validation runs this Host with SHELL=/bin/sh (dash).
@@ -637,7 +657,7 @@ mod tests {
     async fn disconnect_during_startup_releases_the_reservation_before_shutdown_returns() {
         let directory = tempfile::tempdir().unwrap();
         let terminals = Terminals::default();
-        let router = SessionRouter::new();
+        let router = Connections::new();
         let connection = router.open_session();
         let mut starting = Box::pin(terminals.start(
             router.clone(),

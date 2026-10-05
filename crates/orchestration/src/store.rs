@@ -670,7 +670,18 @@ fn persist_event(connection: &Connection, event: &DomainEvent) -> Result<()> {
         ProviderSessionDetached(value) => {
             connection.execute("DELETE FROM orchestration_v2_projection_provider_sessions WHERE thread_id=?1 AND provider_session_id=?2", params![thread_id.as_str(), value.as_str()])?;
         }
-        ProviderThreadUpdated(value) => record!("provider_threads", "provider_thread_id", value),
+        ProviderThreadUpdated(value) => {
+            record!("provider_threads", "provider_thread_id", value);
+            let json: String = connection.query_row(
+                "SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id=?1",
+                [thread_id.as_str()],
+                |row| row.get(0),
+            )?;
+            let thread: AppThread = serde_json::from_str(&json)?;
+            if let Some(thread) = projector::updated_thread_for_provider(&thread, value) {
+                connection.execute("UPDATE orchestration_v2_projection_threads SET payload_json=?2 WHERE thread_id=?1",params![thread_id.as_str(),serde_json::to_string(&thread)?])?;
+            }
+        }
         ProviderTurnUpdated(value) => {
             let previous: Option<String> = connection.query_row("SELECT payload_json FROM orchestration_v2_projection_provider_turns WHERE thread_id=?1 AND provider_turn_id=?2", params![thread_id.as_str(), value.id.as_str()], |row| row.get(0)).optional()?;
             let previous: Option<ProviderTurn> = previous

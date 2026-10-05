@@ -9,6 +9,7 @@ pub mod items;
 pub mod message;
 pub mod models;
 pub mod operations;
+pub mod orchestration;
 pub mod permissions;
 pub mod protocol;
 pub mod requests;

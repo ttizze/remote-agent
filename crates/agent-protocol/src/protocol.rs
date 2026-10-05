@@ -92,6 +92,10 @@ macro_rules! results {
     }
 }
 results! {
+    Dispatched(crate::orchestration::DispatchReceipt),
+    ShellStream(::orchestration::ShellStreamItem), ThreadStream(::orchestration::ThreadStreamItem),
+    Projection(::orchestration::ThreadProjection), TurnItem(Option<::orchestration::TurnItem>),
+    ThreadHistory(::orchestration::ThreadHistoryPage), Search(Vec<::orchestration::SearchMatch>), Projects(Vec<crate::models::Project>),
     Browser(crate::browser::BrowserFrame),
     Opened(crate::session::OpenedSession), Item(crate::operations::ItemResponse),
     History(crate::session::HistoryPage),

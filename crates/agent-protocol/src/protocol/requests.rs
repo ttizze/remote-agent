@@ -62,6 +62,15 @@ macro_rules! contracts {
     };
 }
 contracts! {
+    DispatchCommand, "orchestration/dispatchCommand" => (::orchestration::Command, crate::orchestration::DispatchReceipt) [clone],
+    LaunchThread, "orchestration/launchThread" => (Box<crate::orchestration::LaunchThread>, crate::orchestration::DispatchReceipt) [clone],
+    SubscribeShell, "orchestration/subscribeShell" => (crate::orchestration::SubscribeShell, ::orchestration::ShellStreamItem),
+    SubscribeThread, "orchestration/subscribeThread" => (crate::orchestration::SubscribeThread, ::orchestration::ThreadStreamItem),
+    GetThreadProjection, "orchestration/getThreadProjection" => (crate::orchestration::GetThreadProjection, ::orchestration::ThreadProjection) [clone],
+    GetTurnItem, "orchestration/getTurnItem" => (crate::orchestration::GetTurnItem, Option<::orchestration::TurnItem>) [clone],
+    ReadThreadHistory, "orchestration/readThreadHistory" => (crate::orchestration::ReadThreadHistory, ::orchestration::ThreadHistoryPage) [clone],
+    SearchThreads, "orchestration/searchThreads" => (crate::orchestration::SearchThreads, Vec<::orchestration::SearchMatch>) [clone],
+    ListProjects, "host/project/list" => (m::Empty, Vec<m::Project>),
     OpenSession, "host/session/open" => (s::OpenSession, s::OpenedSession),
     ReadHistory, "host/session/history/read" => (s::ReadHistory, s::HistoryPage) [clone],
     ReadTurnItems, "host/session/turn/items" => (s::ReadTurnItems, m::Empty) [clone],

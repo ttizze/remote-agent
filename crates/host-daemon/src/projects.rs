@@ -7,7 +7,6 @@ use std::{
 };
 
 pub(crate) mod state;
-pub(crate) mod titles;
 /// The Host owns project registration independently of native provider catalogs.
 #[derive(Debug, Clone)]
 pub struct ProjectStore {
@@ -103,11 +102,6 @@ impl ProjectStore {
             }
         }
         snapshot.worktree_roots = crate::worktrees::workspace_roots(&self.path).await?;
-        snapshot.chat_directory = match tokio::fs::canonicalize(self.chat_directory()).await {
-            Ok(path) => Some(dunce::simplified(&path).to_owned()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
         Ok(snapshot)
     }
 }

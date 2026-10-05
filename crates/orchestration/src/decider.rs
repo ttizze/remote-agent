@@ -545,6 +545,12 @@ pub fn decide(
                 &mut decision,
                 command,
                 EffectBody::Detach {
+                    driver: projection
+                        .provider_sessions
+                        .iter()
+                        .find(|session| session.id == *provider_session_id)
+                        .expect("session validated")
+                        .driver,
                     provider_session_id: provider_session_id.clone(),
                 },
             );
@@ -585,6 +591,22 @@ pub fn decide(
                     thread.deleted_at = Some(now.clone());
                     thread.updated_at = now.clone();
                     decision.cancel_unsettled_effects = true;
+                    for session in &projection.provider_sessions {
+                        emit(
+                            &mut decision,
+                            command,
+                            now,
+                            EventPayload::ProviderSessionDetached(session.id.clone()),
+                        );
+                        effect(
+                            &mut decision,
+                            command,
+                            EffectBody::Detach {
+                                provider_session_id: session.id.clone(),
+                                driver: session.driver,
+                            },
+                        );
+                    }
                     effect(&mut decision, command, EffectBody::TerminalCleanup);
                     effect(&mut decision, command, EffectBody::AttachmentCleanup);
                     EventPayload::ThreadDeleted(thread)
@@ -858,18 +880,155 @@ fn terminalize(
             EventPayload::RunAttemptUpdated(attempt),
         );
     }
-    if let Some(id) = &target.root_node_id
-        && let Some(node) = nodes.iter().find(|node| node.id == *id)
-    {
-        let mut node = node.clone();
-        node.status = match status {
-            RunStatus::Interrupted => NodeStatus::Interrupted,
-            RunStatus::Failed => NodeStatus::Failed,
-            _ => NodeStatus::Cancelled,
-        };
-        node.completed_at = Some(now.clone());
-        emit(decision, command, now, EventPayload::NodeUpdated(node));
+    if let Some(id) = &target.root_node_id {
+        for node in finish_nodes(
+            id,
+            nodes,
+            match status {
+                RunStatus::Interrupted => NodeStatus::Interrupted,
+                RunStatus::Failed => NodeStatus::Failed,
+                _ => NodeStatus::Cancelled,
+            },
+            now,
+        ) {
+            emit(decision, command, now, EventPayload::NodeUpdated(node));
+        }
     }
+}
+fn finish_nodes(
+    root: &NodeId,
+    nodes: &[ExecutionNode],
+    status: NodeStatus,
+    now: &Timestamp,
+) -> Vec<ExecutionNode> {
+    nodes
+        .iter()
+        .filter(|node| {
+            node.root_node_id == *root
+                && matches!(
+                    node.status,
+                    NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
+                )
+        })
+        .map(|node| {
+            let mut node = node.clone();
+            node.status = status;
+            node.completed_at = Some(now.clone());
+            node
+        })
+        .collect()
+}
+fn finish_provider_turn(
+    turn: &ProviderTurn,
+    requests: &[RuntimeRequest],
+    items: &[TurnItem],
+    now: &Timestamp,
+    status: TurnStatus,
+) -> Vec<EventPayload> {
+    let mut result = vec![];
+    for request in requests.iter().filter(|request| {
+        request.provider_turn_id.as_ref() == Some(&turn.id)
+            && request.status == RequestStatus::Pending
+    }) {
+        let mut request = request.clone();
+        request.status = RequestStatus::Cancelled;
+        request.resolved_at = Some(now.clone());
+        result.push(EventPayload::RuntimeRequestUpdated(request));
+    }
+    for item in items.iter().filter(|item| {
+        item.provider_turn_id.as_ref() == Some(&turn.id)
+            && matches!(
+                item.status,
+                ItemStatus::Pending | ItemStatus::Running | ItemStatus::Waiting
+            )
+    }) {
+        let status = if matches!(
+            item.body,
+            TurnItemBody::ApprovalRequest { .. } | TurnItemBody::UserInputRequest { .. }
+        ) {
+            ItemStatus::Cancelled
+        } else if status == TurnStatus::Interrupted {
+            ItemStatus::Interrupted
+        } else {
+            ItemStatus::Failed
+        };
+        result.push(EventPayload::TurnItemUpdated(
+            crate::projector::finished_item(item, status, now),
+        ));
+    }
+    let mut turn = turn.clone();
+    turn.status = status;
+    turn.completed_at = Some(now.clone());
+    result.push(EventPayload::ProviderTurnUpdated(turn));
+    result
+}
+/// A permanent effect failure settles every record owned by the current attempt.
+pub fn failed_effect(
+    projection: &ThreadProjection,
+    target: &Run,
+    effect_id: &str,
+    message: &str,
+    now: &Timestamp,
+) -> Decision {
+    let command = Command {
+        command_id: CommandId::new(format!("effect-failed:{effect_id}")).expect("derived id"),
+        thread_id: projection.thread.id.clone(),
+        body: CommandBody::PreparedRunFail {
+            run_id: target.id.clone(),
+            failure: ProviderFailure {
+                class: FailureClass::ProviderError,
+                message: message.into(),
+                code: None,
+                retryable: Some(false),
+                reset_at: None,
+            },
+        },
+    };
+    let CommandBody::PreparedRunFail { failure, .. } = &command.body else {
+        unreachable!()
+    };
+    let mut decision = Decision::default();
+    terminalize(
+        &mut decision,
+        &command,
+        target,
+        &projection.attempts,
+        &projection.nodes,
+        now,
+        RunStatus::Failed,
+    );
+    if let Some(turn) = projection
+        .provider_turns
+        .iter()
+        .find(|turn| turn.run_attempt_id.as_ref() == target.active_attempt_id.as_ref())
+    {
+        for payload in finish_provider_turn(
+            turn,
+            &projection.runtime_requests,
+            &projection.turn_items,
+            now,
+            TurnStatus::Failed,
+        ) {
+            emit(&mut decision, &command, now, payload);
+        }
+    }
+    emit(
+        &mut decision,
+        &command,
+        now,
+        EventPayload::TurnItemUpdated(notice_item(
+            &command,
+            target,
+            now,
+            TurnItemBody::Error {
+                failure: failure.clone(),
+                retry: None,
+            },
+            "error",
+            next_ordinal(projection, Some(target)),
+        )),
+    );
+    decision
 }
 fn promote_next(
     decision: &mut Decision,
@@ -1198,6 +1357,23 @@ fn dispatch(
                     now,
                     EventPayload::RunAttemptUpdated(attempt),
                 );
+            }
+            for payload in finish_provider_turn(
+                turn,
+                &projection.runtime_requests,
+                &projection.turn_items,
+                now,
+                TurnStatus::Interrupted,
+            ) {
+                emit(decision, command, now, payload);
+            }
+            for node in finish_nodes(
+                &turn.node_id,
+                &projection.nodes,
+                NodeStatus::Interrupted,
+                now,
+            ) {
+                emit(decision, command, now, EventPayload::NodeUpdated(node));
             }
             let attempt_id = RunAttemptId::new(format!("attempt:{}:restart", command.command_id))
                 .expect("derived id");
@@ -1649,6 +1825,8 @@ mod tests {
             ),
         );
         assert_eq!(projection.attempts[0].status, AttemptStatus::Superseded);
+        assert_eq!(projection.provider_turns[0].status, TurnStatus::Interrupted);
+        assert_eq!(projection.nodes[0].status, NodeStatus::Interrupted);
         assert_eq!(
             projection.attempts[1].reason,
             AttemptReason::SteeringRestart
