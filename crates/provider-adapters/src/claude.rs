@@ -47,6 +47,39 @@ pub struct ClaudeAdapter {
     output: mpsc::Sender<ProviderBatch>,
 }
 impl ClaudeAdapter {
+    pub async fn rollback(
+        &self,
+        projection: &ThreadProjection,
+        scope: &CheckpointScopeId,
+        checkpoint: &CheckpointId,
+    ) -> Result<ProviderThread, AdapterError> {
+        let (_, checkpoint, provider, target) =
+            orchestration::rollback::target(projection, scope, checkpoint).map_err(error)?;
+        if let Some(handle) = self.processes.lock().await.remove(&provider.id) {
+            let _ = handle.stop.send(true);
+            wait_done(&handle).await?;
+        }
+        let mut provider = provider.clone();
+        if let Some(target) = target {
+            let reference = target
+                .native_turn_ref
+                .as_ref()
+                .filter(|r| {
+                    r.native_id
+                        .as_ref()
+                        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+                })
+                .ok_or_else(|| error("Claude assistant message cursor is unavailable"))?;
+            provider.native_conversation_head_ref = Some(reference.clone());
+        } else {
+            provider.native_thread_ref = None;
+            provider.native_conversation_head_ref = None;
+        }
+        provider.status = ProviderThreadStatus::Idle;
+        provider.last_run_ordinal = checkpoint.app_run_ordinal.filter(|n| *n > 0);
+        provider.updated_at = now();
+        Ok(provider)
+    }
     pub fn new(config: ClaudeConfig, output: mpsc::Sender<ProviderBatch>) -> Self {
         Self {
             config,
@@ -339,6 +372,15 @@ impl ClaudeAdapter {
                 projection.thread.interaction_mode,
                 browser,
             )?;
+            let mut command = command;
+            if let Some(cursor) = state
+                .provider_thread
+                .native_conversation_head_ref
+                .as_ref()
+                .and_then(|r| r.native_id.as_ref())
+            {
+                command.args(["--resume-session-at", cursor]);
+            }
             spawn(
                 command,
                 state,

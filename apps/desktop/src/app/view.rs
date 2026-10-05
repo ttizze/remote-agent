@@ -692,6 +692,39 @@ impl Desktop {
                             .selectable(true),
                         ),
                 );
+                if let Some(checkpoint) = &row.rollback_checkpoint_id {
+                    let checkpoint = checkpoint.clone();
+                    body = body.child(
+                        Button::new(SharedString::from(format!("rollback-{}", row.id)))
+                            .label("Edit from here")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(move |_, _, window, cx| {
+                                let answer = window.prompt(
+                                    gpui::PromptLevel::Warning,
+                                    "Revert this thread?",
+                                    Some("The conversation after this message will be rewound."),
+                                    &["Cancel", "Revert files too", "Revert and keep changes"],
+                                    cx,
+                                );
+                                let checkpoint = checkpoint.clone();
+                                cx.spawn(async move |view, cx| {
+                                    if let Ok(choice @ (1 | 2)) = answer.await {
+                                        let _ = view.update(cx, |view, _| {
+                                            view.perform(
+                                                Intent::Rollback {
+                                                    checkpoint_id: checkpoint,
+                                                    restore_files: choice == 1,
+                                                },
+                                                None,
+                                            )
+                                        });
+                                    }
+                                })
+                                .detach();
+                            })),
+                    );
+                }
             }
             RowKind::Assistant => {
                 body = body

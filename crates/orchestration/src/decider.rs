@@ -146,6 +146,8 @@ pub fn decide(
             last_visited_at: None,
             deleted_at: None,
             imported: false,
+            rollback_request_id: None,
+            rollback_failure: None,
         };
         emit(
             &mut decision,
@@ -164,6 +166,20 @@ pub fn decide(
     use CommandBody::*;
     match &command.body {
         ThreadCreate { .. } => unreachable!(),
+        CheckpointRollback {
+            scope_id,
+            checkpoint_id,
+            restore_files,
+        } => {
+            return crate::rollback::request(
+                command,
+                projection,
+                scope_id,
+                checkpoint_id,
+                *restore_files,
+                now,
+            );
+        }
         MessageDispatch(message) => dispatch(
             &mut decision,
             command,
@@ -1079,6 +1095,10 @@ fn dispatch(
     require(
         projection.thread.archived_at.is_none(),
         "thread is archived",
+    )?;
+    require(
+        projection.thread.rollback_request_id.is_none(),
+        "rollback is pending",
     )?;
     require(
         !message.text.trim().is_empty() || !message.attachments.is_empty(),

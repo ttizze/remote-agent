@@ -24,6 +24,96 @@ pub struct CodexAdapter {
     shutdown: watch::Sender<bool>,
 }
 impl CodexAdapter {
+    pub async fn rollback(
+        &self,
+        projection: &ThreadProjection,
+        scope: &CheckpointScopeId,
+        checkpoint: &CheckpointId,
+        cwd: &Path,
+    ) -> Result<ProviderThread, AdapterError> {
+        let (_, checkpoint, provider, target) =
+            orchestration::rollback::target(projection, scope, checkpoint).map_err(error)?;
+        let native = provider
+            .native_thread_ref
+            .as_ref()
+            .and_then(|r| r.native_id.as_ref())
+            .ok_or_else(|| error("native thread missing"))?;
+        let removed: std::collections::BTreeSet<_> = projection
+            .runs
+            .iter()
+            .filter(|r| r.status == RunStatus::RolledBack)
+            .map(|r| &r.id)
+            .collect();
+        let count = projection
+            .provider_turns
+            .iter()
+            .filter(|t| {
+                t.provider_thread_id == provider.id
+                    && target.is_none_or(|target| t.ordinal > target.ordinal)
+                    && t.run_attempt_id.as_ref().is_none_or(|id| {
+                        projection
+                            .attempts
+                            .iter()
+                            .find(|a| &a.id == id)
+                            .is_none_or(|a| !removed.contains(&a.run_id))
+                    })
+            })
+            .count();
+        if count > 0 {
+            let metadata = self
+                .request(
+                    "thread/read",
+                    json!({"threadId":native,"includeTurns":false}),
+                )
+                .await?;
+            if metadata["thread"]["historyMode"] != "paginated" {
+                return Err(error("Codex legacy history cannot be reverted"));
+            }
+            self.request("thread/resume", json!({"threadId":native,"excludeTurns":true,"cwd":cwd,"model":projection.thread.model_selection.model})).await?;
+            let mut remaining = count;
+            let mut cursor = Value::Null;
+            let mut visited = std::collections::BTreeSet::new();
+            let mut before = None;
+            while remaining > 0 {
+                if !visited.insert(cursor.to_string()) {
+                    return Err(error("Codex history pagination repeated a cursor"));
+                }
+                let page = self.request("thread/turns/list", json!({"threadId":native,"cursor":cursor,"limit":remaining.min(100),"sortDirection":"desc","itemsView":"summary"})).await?;
+                for turn in page["data"]
+                    .as_array()
+                    .ok_or_else(|| error("Codex history page is invalid"))?
+                {
+                    before = Some(
+                        turn["id"]
+                            .as_str()
+                            .ok_or_else(|| error("native turn id missing"))?
+                            .to_owned(),
+                    );
+                    remaining -= 1;
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+                cursor = page["nextCursor"].clone();
+                if cursor.is_null() {
+                    break;
+                }
+            }
+            if let Some(before) = before {
+                self.request(
+                    "thread/revert",
+                    json!({"threadId":native,"beforeTurnId":before}),
+                )
+                .await?;
+            }
+        }
+        let mut provider = provider.clone();
+        provider.native_conversation_head_ref = target.and_then(|t| t.native_turn_ref.clone());
+        provider.status = ProviderThreadStatus::Idle;
+        provider.last_run_ordinal = checkpoint.app_run_ordinal.filter(|n| *n > 0);
+        provider.updated_at = now();
+        Ok(provider)
+    }
     pub fn new(server: Arc<CodexAppServer>, output: mpsc::Sender<ProviderBatch>) -> Arc<Self> {
         let (shutdown, receiver) = watch::channel(false);
         let adapter = Arc::new(Self {

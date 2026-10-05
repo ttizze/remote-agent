@@ -322,6 +322,8 @@ pub struct AppThread {
     pub last_visited_at: Option<Timestamp>,
     pub deleted_at: Option<Timestamp>,
     pub imported: bool,
+    pub rollback_request_id: Option<CommandId>,
+    pub rollback_failure: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1160,6 +1162,12 @@ pub enum CommandBody {
         decision: Option<ApprovalDecision>,
         answers: Option<Answers>,
     },
+    #[serde(rename = "checkpoint.rollback")]
+    CheckpointRollback {
+        scope_id: CheckpointScopeId,
+        checkpoint_id: CheckpointId,
+        restore_files: bool,
+    },
     #[serde(rename = "thread.user-input.dismiss")]
     ThreadUserInputDismiss { request_id: RuntimeRequestId },
 }
@@ -1201,6 +1209,14 @@ pub struct Effect {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectBody {
+    #[serde(rename = "provider-thread.rollback")]
+    Rollback {
+        request_id: CommandId,
+        provider_thread_id: ProviderThreadId,
+        checkpoint_id: CheckpointId,
+        scope_id: CheckpointScopeId,
+        restore_files: bool,
+    },
     #[serde(rename = "checkpoint.capture")]
     CaptureCheckpoint { run_id: RunId },
     #[serde(rename = "provider-turn.start")]

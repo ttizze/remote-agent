@@ -964,6 +964,42 @@ impl Owner {
                     })))
                 }
             }
+            Intent::Rollback {
+                checkpoint_id,
+                restore_files,
+            } => {
+                let projection = self
+                    .state
+                    .projection()
+                    .ok_or_else(|| invalid("No thread selected"))?;
+                let checkpoint = projection
+                    .checkpoints
+                    .iter()
+                    .find(|c| c.id.as_str() == checkpoint_id)
+                    .ok_or_else(|| invalid("Checkpoint unavailable"))?;
+                body = Some(CommandBody::CheckpointRollback {
+                    scope_id: checkpoint.scope_id.clone(),
+                    checkpoint_id: checkpoint.id.clone(),
+                    restore_files,
+                });
+                let text = projection
+                    .runs
+                    .iter()
+                    .find(|r| Some(r.ordinal) == checkpoint.app_run_ordinal.map(|n| n + 1))
+                    .and_then(|r| {
+                        projection
+                            .messages
+                            .iter()
+                            .find(|m| m.id == r.user_message_id)
+                    })
+                    .map(|m| m.text.clone());
+                if let Some(text) = text {
+                    let mut draft = self.state.current_draft();
+                    draft.text = text;
+                    self.state.drafts.insert(self.state.draft_key(), draft);
+                }
+                None
+            }
             Intent::Stop => {
                 body = Some(CommandBody::RunInterrupt {
                     run_id: self.active().ok_or_else(|| invalid("No active run"))?,

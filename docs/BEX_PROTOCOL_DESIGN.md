@@ -1,6 +1,6 @@
 # Native orchestration protocol
 
-`remote-agent/streams/6` uses Postcard over iroh QUIC, with one request per
+`remote-agent/streams/7` uses Postcard over iroh QUIC, with one request per
 bidirectional stream. The unreleased product supports only the current format.
 `orchestration` owns conversation contracts, decisions and projection; the RPC
 table is `agent-protocol/src/protocol/requests.rs`.

@@ -166,6 +166,7 @@ pub struct TimelineRow {
     pub response_mode_message: bool,
     pub actionable: bool,
     pub run_id: Option<String>,
+    pub rollback_checkpoint_id: Option<String>,
     pub duration_ms: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -616,6 +617,29 @@ pub fn timeline(projection: &ThreadProjection) -> Vec<TimelineRow> {
             response_mode_message: false,
             actionable,
             run_id: item.run_id.as_ref().map(ToString::to_string),
+            rollback_checkpoint_id: item
+                .run_id
+                .as_ref()
+                .and_then(|id| projection.runs.iter().find(|r| &r.id == id))
+                .and_then(|r| {
+                    if projection.thread.rollback_request_id.is_some() {
+                        return None;
+                    }
+                    projection
+                        .checkpoints
+                        .iter()
+                        .find(|c| {
+                            c.app_run_ordinal == Some(r.ordinal.saturating_sub(1))
+                                && c.status == CheckpointStatus::Ready
+                                && orchestration::rollback::target(projection, &c.scope_id, &c.id)
+                                    .is_ok()
+                                && projection
+                                    .checkpoint_scopes
+                                    .iter()
+                                    .any(|s| s.id == c.scope_id && s.kind == ScopeKind::RootRun)
+                        })
+                        .map(|c| c.id.to_string())
+                }),
             duration_ms: item
                 .started_at
                 .as_ref()
@@ -844,6 +868,7 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
         enabled: snapshot.connected
             && !creating
             && !archived
+            && thread.is_none_or(|t| t.rollback_request_id.is_none())
             && !live_request
             && !draft.text.trim().is_empty()
             && !draft.model.is_empty(),
@@ -854,7 +879,11 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
         queue_held: queue.iter().any(|r| r.held),
         editing,
         working: active.is_some(),
-        notice: if archived {
+        notice: if let Some(error) = thread.and_then(|t| t.rollback_failure.clone()) {
+            Some(error)
+        } else if thread.is_some_and(|t| t.rollback_request_id.is_some()) {
+            Some("Reverting thread…".into())
+        } else if archived {
             Some("Archived thread".into())
         } else if live_request {
             Some("Respond to the pending request to continue".into())

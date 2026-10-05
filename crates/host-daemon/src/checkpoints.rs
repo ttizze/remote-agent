@@ -90,6 +90,62 @@ async fn text(cwd: &Path, args: &[&str], index: Option<&Path>) -> Result<String>
 }
 
 impl Checkpoints {
+    pub async fn restore(&self, scope: &CheckpointScope, checkpoint: &Checkpoint) -> Result<()> {
+        let cwd = Path::new(&scope.cwd);
+        let lock = self.lock(cwd);
+        let _guard = lock.lock().await;
+        let root = PathBuf::from(text(cwd, &["rev-parse", "--show-toplevel"], None).await?);
+        let saved = git(
+            cwd,
+            &[
+                "ls-tree",
+                "-rz",
+                "--full-tree",
+                "--name-only",
+                checkpoint.reference.as_str(),
+            ],
+            None,
+        )
+        .await?;
+        let saved: std::collections::HashSet<_> =
+            saved.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
+        let temporary = tempfile::tempdir()?;
+        let index = temporary.path().join("index");
+        git(
+            cwd,
+            &["read-tree", checkpoint.reference.as_str()],
+            Some(&index),
+        )
+        .await?;
+        // Use checkout-relative names even when the thread's cwd is nested.
+        let current = git(
+            &root,
+            &[
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            None,
+        )
+        .await?;
+        let removed = current
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty() && !saved.contains(p))
+            .map(|p| String::from_utf8(p.to_vec()))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for path in removed {
+            let path = root.join(path);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        git(&root, &["checkout-index", "--all", "--force"], Some(&index)).await?;
+        Ok(())
+    }
     fn lock(&self, cwd: &Path) -> Arc<AsyncMutex<()>> {
         let mut locks = self
             .workspaces
@@ -335,6 +391,53 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "--quiet"], None).await.unwrap();
         dir
+    }
+    #[tokio::test]
+    async fn restore_recovers_files_and_removes_later_untracked_files_without_changing_head_or_index()
+     {
+        let dir = repo().await;
+        let cwd = dir.path();
+        std::fs::write(cwd.join("tracked"), "before\n").unwrap();
+        std::fs::write(cwd.join(".gitignore"), "ignored\n").unwrap();
+        git(cwd, &["add", "."], None).await.unwrap();
+        git(cwd, &["commit", "-m", "initial"], None).await.unwrap();
+        std::fs::write(cwd.join("tracked"), "staged\n").unwrap();
+        git(cwd, &["add", "tracked"], None).await.unwrap();
+        std::fs::write(cwd.join("tracked"), "checkpoint\n").unwrap();
+        std::fs::write(cwd.join("untracked"), "saved\n").unwrap();
+        let checkpoints = Checkpoints::default();
+        let scope = scope(cwd);
+        let checkpoint = checkpoints
+            .capture(
+                &scope,
+                scope.run_id.as_ref().unwrap(),
+                &scope.node_id,
+                1,
+                &Timestamp::from_millis(0).unwrap(),
+            )
+            .await;
+        let index = std::fs::read(cwd.join(".git/index")).unwrap();
+        let head = text(cwd, &["rev-parse", "HEAD"], None).await.unwrap();
+        std::fs::write(cwd.join("tracked"), "later\n").unwrap();
+        std::fs::remove_file(cwd.join("untracked")).unwrap();
+        std::fs::write(cwd.join("new"), "later\n").unwrap();
+        std::fs::write(cwd.join("ignored"), "keep\n").unwrap();
+        checkpoints.restore(&scope, &checkpoint).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("tracked")).unwrap(),
+            "checkpoint\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("untracked")).unwrap(),
+            "saved\n"
+        );
+        assert!(!cwd.join("new").exists());
+        assert_eq!(
+            std::fs::read_to_string(cwd.join("ignored")).unwrap(),
+            "keep\n"
+        );
+        assert_eq!(std::fs::read(cwd.join(".git/index")).unwrap(), index);
+        assert_eq!(text(cwd, &["rev-parse", "HEAD"], None).await.unwrap(), head);
     }
     #[tokio::test]
     async fn captures_worktree_and_untracked_files_without_mutating_index_or_head() {

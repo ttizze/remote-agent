@@ -547,6 +547,8 @@ fn events(transcript: &Transcript, project_id: ProjectId) -> Vec<DomainEvent> {
         last_visited_at: None,
         deleted_at: None,
         imported: true,
+        rollback_request_id: None,
+        rollback_failure: None,
     };
     let provider_thread = ProviderThread {
         id: provider_thread_id,

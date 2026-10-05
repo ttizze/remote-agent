@@ -97,19 +97,24 @@ async fn execute(
                 Err(error) => return Err(error),
             }
             if !events.is_empty() {
-                let ingest = if matches!(claim.effect.body, EffectBody::CaptureCheckpoint { .. }) {
-                    Store::ingest_checkpoint
+                if let EffectBody::Rollback { request_id, .. } = &claim.effect.body {
+                    store.ingest_rollback(events, request_id, &timestamp)?;
                 } else {
-                    Store::ingest
-                };
-                ingest(
-                    &store,
-                    events,
-                    expected
-                        .as_ref()
-                        .map(|(run, attempt)| (run, attempt.as_ref())),
-                    &timestamp,
-                )?;
+                    let ingest =
+                        if matches!(claim.effect.body, EffectBody::CaptureCheckpoint { .. }) {
+                            Store::ingest_checkpoint
+                        } else {
+                            Store::ingest
+                        };
+                    ingest(
+                        &store,
+                        events,
+                        expected
+                            .as_ref()
+                            .map(|(run, attempt)| (run, attempt.as_ref())),
+                        &timestamp,
+                    )?;
+                }
             }
             match store.finish_effect(&claim, None, now_ms()) {
                 Ok(_) | Err(StoreError::LeaseLost) => {}
@@ -126,6 +131,22 @@ async fn execute(
                 Err(StoreError::LeaseLost) => return Ok(()),
                 Err(error) => return Err(error),
             };
+            if !retry && let EffectBody::Rollback { request_id, .. } = &claim.effect.body {
+                let mut thread = store.projection(&claim.effect.thread_id)?.thread;
+                thread.rollback_request_id = None;
+                thread.rollback_failure = Some(error.message.clone());
+                thread.updated_at = timestamp.clone();
+                store.ingest_rollback(
+                    crate::rollback::events(
+                        &claim.effect.thread_id,
+                        &format!("rollback-failed:{request_id}"),
+                        vec![EventPayload::ThreadMetadataUpdated(thread)],
+                        &timestamp,
+                    ),
+                    request_id,
+                    &timestamp,
+                )?;
+            }
             if !retry && let Some((run_id, attempt_id)) = expected {
                 let projection = store.projection(&claim.effect.thread_id)?;
                 if let Some(run) = projection.runs.iter().find(|run| {

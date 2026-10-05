@@ -1024,6 +1024,19 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
             }
         }
         "assistant" => {
+            if let Some(cursor) = frame["uuid"]
+                .as_str()
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            {
+                next.turn.native_turn_ref = Some(ProviderRef {
+                    driver: Driver::Claude,
+                    native_id: Some(cursor.into()),
+                    strength: Strength::Weak,
+                    fingerprint: None,
+                    ordinal: None,
+                });
+                payloads.push(EventPayload::ProviderTurnUpdated(next.turn.clone()));
+            }
             let message = &frame["message"];
             let native = message["id"]
                 .as_str()

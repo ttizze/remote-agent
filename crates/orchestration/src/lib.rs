@@ -9,3 +9,5 @@ pub mod worker;
 pub use contracts::*;
 #[cfg(test)]
 mod test_support;
+
+pub mod rollback;

@@ -92,6 +92,7 @@ struct ServiceInner {
     stop: tokio::sync::watch::Sender<bool>,
 }
 struct HostResources {
+    orchestration: Arc<Store>,
     codex: Arc<CodexResources>,
     codex_adapter: Option<Arc<provider_adapters::codex::CodexAdapter>>,
     claude: OnceLock<Arc<ClaudeResources>>,
@@ -134,6 +135,7 @@ impl HostRpcService {
             provider_adapters::codex::CodexAdapter::new(server.clone(), output.clone())
         });
         let resources = Arc::new(HostResources {
+            orchestration: store.clone(),
             codex_adapter,
             codex: Arc::new(CodexResources::new(codex.clone())),
             claude: OnceLock::new(),
@@ -428,7 +430,30 @@ impl HostRpcService {
             None
         };
         let response = match request {
-            Call::DispatchCommand(command) => self.dispatch_command(command)?.into(),
+            Call::DispatchCommand(command) => {
+                if let CommandBody::CheckpointRollback {
+                    scope_id,
+                    restore_files: true,
+                    ..
+                } = &command.body
+                {
+                    let projection = self
+                        .inner
+                        .store
+                        .projection(&command.thread_id)
+                        .map_err(store_failure)?;
+                    let scope = projection
+                        .checkpoint_scopes
+                        .iter()
+                        .find(|s| s.id == *scope_id)
+                        .ok_or_else(|| Failure::new("checkpoint_unavailable", "scope missing"))?;
+                    self.inner
+                        .resources
+                        .ensure_restore_isolated(&projection.thread, &scope.cwd)
+                        .await?;
+                }
+                self.dispatch_command(command)?.into()
+            }
             Call::LaunchThread(params) => {
                 let mut create = params.create.clone();
                 if self.inner.store.projection(&create.thread_id).is_err()
@@ -1114,6 +1139,75 @@ fn thread_cwd(
         .map(|root| PathBuf::from(&root.path))
         .ok_or_else(|| Failure::new("workspace_unavailable", "project root missing"))
 }
+impl HostResources {
+    async fn ensure_restore_isolated(&self, thread: &AppThread, cwd: &str) -> Result<(), Failure> {
+        let fail = || {
+            Failure::new(
+                "shared_workspace",
+                "File restore requires an isolated worktree. Rewind the conversation without restoring files instead.",
+            )
+        };
+        let Some(worktree) = &thread.worktree_path else {
+            return Err(fail());
+        };
+        let cwd = dunce::canonicalize(cwd).map_err(|_| fail())?;
+        if dunce::canonicalize(worktree).map_err(|_| fail())? != cwd {
+            return Err(fail());
+        }
+        let shell = self.orchestration.shell_snapshot().map_err(store_failure)?;
+        let projects = self
+            .projects
+            .load()
+            .await
+            .map_err(|e| Failure::new("workspace_unavailable", e))?
+            .projects;
+        for other in shell
+            .threads
+            .iter()
+            .chain(&shell.archived_threads)
+            .filter(|t| t.thread.id != thread.id)
+        {
+            let other = self
+                .orchestration
+                .projection(&other.thread.id)
+                .map_err(store_failure)?;
+            let mut paths = other
+                .checkpoint_scopes
+                .iter()
+                .map(|s| PathBuf::from(&s.cwd))
+                .collect::<Vec<_>>();
+            paths.push(if other.thread.project_id.as_str() == "bex:chats" {
+                self.projects.chat_directory()
+            } else {
+                thread_cwd(&other.thread, &projects)?
+            });
+            paths.extend(
+                other
+                    .provider_sessions
+                    .iter()
+                    .filter(|s| {
+                        s.status != SessionStatus::Stopped
+                            && !s
+                                .capabilities
+                                .sessions
+                                .supports_multiple_provider_threads_per_session
+                    })
+                    .map(|s| PathBuf::from(&s.cwd)),
+            );
+            for path in paths {
+                match dunce::canonicalize(path) {
+                    Ok(path) if path.starts_with(&cwd) || cwd.starts_with(&path) => {
+                        return Err(fail());
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(fail()),
+                }
+            }
+        }
+        Ok(())
+    }
+}
 #[async_trait::async_trait]
 impl ProviderAdapter for HostResources {
     async fn execute(
@@ -1121,6 +1215,61 @@ impl ProviderAdapter for HostResources {
         effect: &Effect,
         projection: ThreadProjection,
     ) -> Result<Vec<DomainEvent>, AdapterError> {
+        if let EffectBody::Rollback {
+            request_id,
+            provider_thread_id,
+            checkpoint_id,
+            scope_id,
+            restore_files,
+        } = &effect.body
+        {
+            let _workspace = self.worktree_access.read().await;
+            if projection.thread.rollback_request_id.as_ref() != Some(request_id) {
+                return Ok(vec![]);
+            }
+            let (scope, checkpoint, provider, _) =
+                orchestration::rollback::target(&projection, scope_id, checkpoint_id)
+                    .map_err(adapter_error)?;
+            if provider.id != *provider_thread_id {
+                return Err(adapter_error("active provider changed before rollback"));
+            }
+            if *restore_files {
+                self.ensure_restore_isolated(&projection.thread, &scope.cwd)
+                    .await
+                    .map_err(adapter_error)?;
+            }
+            let cwd = PathBuf::from(&scope.cwd);
+            let provider = match provider.driver {
+                Driver::Codex => {
+                    self.codex_adapter
+                        .as_ref()
+                        .ok_or_else(|| adapter_error("Codex unavailable"))?
+                        .rollback(&projection, scope_id, checkpoint_id, &cwd)
+                        .await?
+                }
+                Driver::Claude => {
+                    self.claude
+                        .get()
+                        .ok_or_else(|| adapter_error("Claude unavailable"))?
+                        .adapter
+                        .rollback(&projection, scope_id, checkpoint_id)
+                        .await?
+                }
+            };
+            if *restore_files {
+                self.checkpoints
+                    .restore(scope, checkpoint)
+                    .await
+                    .map_err(adapter_error)?;
+            }
+            return Ok(orchestration::rollback::finish(
+                &projection,
+                checkpoint,
+                provider,
+                request_id,
+                &now(),
+            ));
+        }
         if let EffectBody::CaptureCheckpoint { run_id } = &effect.body {
             let run = projection
                 .runs

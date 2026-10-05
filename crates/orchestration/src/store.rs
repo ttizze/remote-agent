@@ -183,6 +183,45 @@ impl Store {
     ) -> Result<Commit> {
         self.ingest_events(events, expected_run, now, false)
     }
+    pub fn ingest_rollback(
+        &self,
+        events: Vec<DomainEvent>,
+        request_id: &CommandId,
+        now: &Timestamp,
+    ) -> Result<Commit> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let thread_id = &events
+            .first()
+            .ok_or_else(|| StoreError::InvalidEvent("empty rollback write".into()))?
+            .thread_id;
+        let projection =
+            load_projection(&transaction, thread_id)?.ok_or(StoreError::ThreadNotFound)?;
+        if projection.thread.rollback_request_id.as_ref() != Some(request_id) {
+            return Ok(Commit {
+                sequence: latest_sequence(&transaction, None)?,
+                events: vec![],
+                replayed: false,
+            });
+        }
+        let stored = commit_decision(
+            &transaction,
+            Decision {
+                events,
+                ..Decision::default()
+            },
+            None,
+            now,
+        )?;
+        let sequence = latest_sequence(&transaction, None)?;
+        transaction.commit()?;
+        self.publish(&stored);
+        Ok(Commit {
+            sequence,
+            events: stored,
+            replayed: false,
+        })
+    }
     pub fn ingest_checkpoint(
         &self,
         events: Vec<DomainEvent>,

@@ -312,6 +312,10 @@ pub enum Intent {
         behavior: SendBehavior,
     },
     Stop,
+    Rollback {
+        checkpoint_id: String,
+        restore_files: bool,
+    },
     Thread {
         thread_id: String,
         action: ThreadAction,

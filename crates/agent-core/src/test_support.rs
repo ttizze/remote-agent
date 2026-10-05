@@ -42,6 +42,8 @@ pub fn projection() -> ThreadProjection {
         last_visited_at: None,
         deleted_at: None,
         imported: false,
+        rollback_request_id: None,
+        rollback_failure: None,
     })
 }
 pub fn event(id: &str, payload: EventPayload) -> DomainEvent {
