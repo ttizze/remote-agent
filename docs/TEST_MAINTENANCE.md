@@ -194,8 +194,13 @@ transfer server just to delete that check would reverse A14.
   Each runner has separate processes,
   memory and logs. iPhone acceptance uses the Host's normal preinstalled Google
   Chrome with unchanged launch arguments, retaining its startup time and stderr
-  in `qa/chrome.log`. Mac and iPhone Rust dependency caches are separate;
-  only shard zero saves each cache. All iPhone shards restore the Swift bindings,
+  in `qa/chrome.log`. The Browser shard initializes the real Host-owned browser
+  through its normal RPC before booting the Simulator, avoiding overlapping
+  Chrome's first launch with the Simulator's background app initialization.
+  Mac and iPhone Rust dependency caches are separate;
+  only shard zero saves each Apple cache. PR runs restore existing caches without
+  saving branch-specific copies; main and manual runs populate caches so duplicate
+  PR outputs do not evict shared builds. All iPhone shards restore the Swift bindings,
   headless Markdown build and Xcode DerivedData cache, with one shard saving
   it even when acceptance fails. Builders check the current source/toolchain
   hashes before reusing Swift outputs, and still rebuild and exercise current

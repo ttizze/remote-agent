@@ -129,6 +129,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -158,17 +159,29 @@ async fn monitor_diagnostics(
 ) -> Result<()> {
     let mut recorded_startup = false;
     let mut sampled = BTreeSet::new();
-    let timeout = Duration::from_secs(10);
+    let timeout = Duration::from_secs(30);
     loop {
         tokio::time::sleep(Duration::from_secs(5)).await;
-        let processes = supervision::run(
+        let progress = fs::metadata(prefix.with_extension("log"))?.modified()?;
+        let quiet = progress.elapsed().unwrap_or_default();
+        if recorded_startup && quiet < Duration::from_secs(30) {
+            continue;
+        }
+        let processes = match supervision::run(
             &args!["/bin/ps", "-axo", "pid,ppid,rss,pcpu,comm", "-m"],
             cwd,
             Io::Capture,
             cancel,
             timeout,
         )
-        .await?;
+        .await
+        {
+            Ok(processes) => processes,
+            Err(error) => {
+                eprintln!("Simulator {simulator}: diagnostic process listing failed: {error}");
+                continue;
+            }
+        };
         let Some(pid) = simulator_app_pid(std::str::from_utf8(&processes.stdout)?, simulator)
         else {
             continue;
@@ -180,29 +193,32 @@ async fn monitor_diagnostics(
                 &processes.stdout,
             )?;
             let memory = File::create(prefix.with_extension("startup-memory.txt"))?;
-            supervision::run(
+            if let Err(error) = supervision::run(
                 &args!["/usr/bin/vm_stat"],
                 cwd,
                 Io::Log(&memory),
                 cancel,
                 timeout,
             )
-            .await?;
+            .await
+            {
+                eprintln!("Simulator {simulator}: diagnostic memory counters failed: {error}");
+            }
         }
-        let quiet = fs::metadata(prefix.with_extension("log"))?
-            .modified()?
-            .elapsed()
-            .unwrap_or_default();
-        if quiet < Duration::from_secs(30) || !sampled.insert(pid) {
+        if quiet < Duration::from_secs(30)
+            || fs::metadata(prefix.with_extension("log"))?.modified()? != progress
+            || !sampled.insert(pid)
+        {
             continue;
         }
         fs::write(
             prefix.with_extension(format!("hang-{pid}-processes.txt")),
             &processes.stdout,
         )?;
-        let output = File::create(prefix.with_extension(format!("hang-{pid}-sample-output.txt")))?;
+        let mut output =
+            File::create(prefix.with_extension(format!("hang-{pid}-sample-output.txt")))?;
         // Hosted macOS permits passwordless diagnostics of this worker's Debug app.
-        let _ = supervision::run(
+        if let Err(error) = supervision::run(
             &args![
                 "sudo",
                 "-n",
@@ -217,7 +233,10 @@ async fn monitor_diagnostics(
             cancel,
             timeout,
         )
-        .await;
+        .await
+        {
+            writeln!(output, "Diagnostic sampling failed: {error}")?;
+        }
     }
 }
 
@@ -407,6 +426,13 @@ async fn worker(
         .stdin(std::process::Stdio::null())
         .stdout(host_log.try_clone()?)
         .stderr(host_log);
+    if std::env::var("CI").as_deref() == Ok("true")
+        && tests
+            .iter()
+            .any(|test| test == "testSimulatorBrowserIsSeparateFromConversationAndPreservesPage")
+    {
+        command.arg("--prepare-browser");
+    }
     let mut host = Child::spawn(command)?;
     let result: Result<_> = async {
             let deadline = Instant::now() + Duration::from_secs(30);
