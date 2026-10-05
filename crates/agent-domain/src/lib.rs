@@ -4,10 +4,12 @@ mod fact;
 mod ids;
 mod machine;
 mod model;
+mod notification;
 pub use fact::*;
 pub use ids::*;
 pub use machine::*;
 pub use model::*;
+pub use notification::*;
 
 #[cfg(test)]
 mod tests;

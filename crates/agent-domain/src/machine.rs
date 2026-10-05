@@ -135,8 +135,24 @@ impl Decision {
             Some(run.clone()),
             None,
             message.to_string(),
-            ItemKind::UserMessage {
-                message: message.clone(),
+            if let Some(notification) = self
+                .state
+                .messages
+                .iter()
+                .find(|m| &m.id == message)
+                .and_then(|m| m.notification.as_ref())
+            {
+                ItemKind::BackgroundNotification {
+                    message: message.clone(),
+                    summary: notification.summary.clone(),
+                    source: notification.source,
+                    child_thread: notification.child_thread.clone(),
+                    outcome: notification.outcome,
+                }
+            } else {
+                ItemKind::UserMessage {
+                    message: message.clone(),
+                }
             },
         );
         let text = self
@@ -367,6 +383,44 @@ impl Decision {
                     command: Box::new(Command::Stop),
                 },
             );
+        }
+    }
+    fn finish_task(&mut self, id: &NodeId, status: ItemStatus, result: &str) {
+        let Some(task) = self.state.tasks.iter().find(|t| &t.id == id).cloned() else {
+            return;
+        };
+        let changed =
+            task.status != status || !result.is_empty() && task.result.as_deref() != Some(result);
+        if changed {
+            self.fact(FactBody::TaskFinished {
+                id: id.clone(),
+                status,
+                result: result.into(),
+            });
+        }
+        if let Some(item) = self
+            .state
+            .items
+            .iter()
+            .find(|i| {
+                matches!(&i.kind,ItemKind::Subagent { task } if task==id) && !i.status.terminal()
+            })
+            .map(|i| i.id.clone())
+        {
+            self.fact(FactBody::ItemCompleted { id: item, status });
+        }
+        if changed && task.background && !task.app_owned && !task.status.terminal() {
+            self.fact(FactBody::NativeWorkReported {
+                key: id.to_string(),
+                report: WorkReport {
+                    kind: BackgroundKind::Subagent,
+                    label: Some(task.title.unwrap_or(task.prompt)),
+                    outcome: status.into(),
+                    child_thread: Some(task.child_thread),
+                    exit_code: None,
+                },
+                text: result.into(),
+            });
         }
     }
     fn interrupt_provider(&mut self, attempt: &RunAttemptId) {
@@ -1530,6 +1584,7 @@ impl Decision {
                     return reject("task-already-exists");
                 }
                 self.fact(FactBody::TaskStarted {
+                    background: false,
                     id: task.clone(),
                     native_key: task.to_string(),
                     run: Some(run.id),
@@ -1576,6 +1631,21 @@ impl Decision {
                 );
                 Reply::Thread(child.clone())
             }
+            TaskProgress {
+                task,
+                progress,
+                model,
+            } => {
+                if !self.state.tasks.iter().any(|t| &t.id == task) {
+                    return reject("task-not-found");
+                }
+                self.fact(FactBody::TaskProgressed {
+                    id: task.clone(),
+                    progress: progress.clone(),
+                    model: model.clone(),
+                });
+                Reply::Accepted
+            }
             TaskResult {
                 task,
                 status,
@@ -1584,11 +1654,7 @@ impl Decision {
                 if !self.state.tasks.iter().any(|t| &t.id == task) {
                     return reject("task-not-found");
                 }
-                self.fact(FactBody::TaskFinished {
-                    id: task.clone(),
-                    status: *status,
-                    result: result.clone(),
-                });
+                self.finish_task(task, *status, result);
                 self.wake_tasks();
                 Reply::Accepted
             }
@@ -1877,6 +1943,7 @@ impl Decision {
             || matches!(
                 event,
                 ProviderEvent::SubagentStarted { .. }
+                    | ProviderEvent::SubagentNativeBound { .. }
                     | ProviderEvent::SubagentNamed { .. }
                     | ProviderEvent::SubagentProgress { .. }
                     | ProviderEvent::SubagentFinished { .. }
@@ -2314,7 +2381,44 @@ impl Decision {
                     });
                 }
             }
+            SubagentNativeBound { key, native_task } => {
+                if let Some(id) = self
+                    .state
+                    .tasks
+                    .iter()
+                    .find(|task| &task.native_key == key)
+                    .map(|t| t.id.clone())
+                {
+                    self.fact(FactBody::TaskNativeBound {
+                        id,
+                        native_task: native_task.clone(),
+                    });
+                }
+            }
+            ModelObserved { model } => {
+                if child {
+                    let mut selection = self.state.thread.as_ref().unwrap().selection.clone();
+                    if selection.model != *model {
+                        selection.model = model.clone();
+                        self.fact(FactBody::ModelSelected { selection });
+                    }
+                    if let Some((parent, task)) = self.state.native_parent.clone() {
+                        self.effect(
+                            Some(attempt.clone()),
+                            EffectBody::SendToThread {
+                                thread: parent,
+                                command: Box::new(Command::TaskProgress {
+                                    task,
+                                    progress: None,
+                                    model: Some(model.clone()),
+                                }),
+                            },
+                        );
+                    }
+                }
+            }
             SubagentStarted {
+                background,
                 native_thread,
                 key,
                 parent,
@@ -2331,12 +2435,15 @@ impl Decision {
                     if task.status.terminal() {
                         self.fact(FactBody::TaskReopened {
                             id: task.id.clone(),
+                            run: run_id.cloned(),
+                            attempt: attempt.clone(),
+                            prompt: prompt.clone(),
                         });
                     }
                     self.effect(
                         Some(attempt.clone()),
                         EffectBody::SendToThread {
-                            thread: task.child_thread,
+                            thread: task.child_thread.clone(),
                             command: Box::new(Command::BindNativeChild {
                                 native_thread: native_thread.clone(),
                                 owner: attempt.clone(),
@@ -2345,6 +2452,21 @@ impl Decision {
                             }),
                         },
                     );
+                    if task.status.terminal() && !prompt.is_empty() {
+                        self.effect(
+                            Some(attempt.clone()),
+                            EffectBody::SendToThread {
+                                thread: task.child_thread,
+                                command: Box::new(Command::NativeInput {
+                                    attempt: attempt.clone(),
+                                    event: Box::new(ProviderEvent::UserMessage {
+                                        key: self.key("resume-prompt", key),
+                                        text: prompt.clone(),
+                                    }),
+                                }),
+                            },
+                        );
+                    }
                 } else {
                     let id = NodeId::new(self.native_key("task", attempt, key)).unwrap();
                     let child_thread =
@@ -2352,8 +2474,17 @@ impl Decision {
                     let parent_task = parent
                         .as_ref()
                         .and_then(|p| self.state.tasks.iter().find(|t| &t.native_key == p))
-                        .map(|t| t.id.clone());
+                        .map(|t| t.id.clone())
+                        .or_else(|| {
+                            parent.as_ref().and(
+                                self.state
+                                    .native_parent
+                                    .as_ref()
+                                    .map(|(_, task)| task.clone()),
+                            )
+                        });
                     self.fact(FactBody::TaskStarted {
+                        background: *background,
                         id: id.clone(),
                         native_key: key.clone(),
                         run: run_id.cloned(),
@@ -2373,6 +2504,10 @@ impl Decision {
                         ItemKind::Subagent { task: id.clone() },
                     );
                     let t = self.state.thread.as_ref().unwrap().clone();
+                    let mut selection = t.selection;
+                    if let Some(model) = model {
+                        selection.model = model.clone();
+                    }
                     self.effect(
                         Some(attempt.clone()),
                         EffectBody::SendToThread {
@@ -2381,7 +2516,7 @@ impl Decision {
                                 thread: child_thread.clone(),
                                 project: t.project,
                                 title: prompt.clone(),
-                                selection: t.selection,
+                                selection,
                                 runtime_mode: t.runtime_mode,
                                 interaction_mode: t.interaction_mode,
                             }),
@@ -2452,7 +2587,7 @@ impl Decision {
                 {
                     self.fact(FactBody::TaskProgressed {
                         id,
-                        progress: progress.clone(),
+                        progress: Some(progress.clone()),
                         model: model.clone(),
                     });
                 }
@@ -2485,28 +2620,7 @@ impl Decision {
                             },
                         );
                     }
-                    let id = task.id;
-                    self.fact(FactBody::TaskFinished {
-                        id: id.clone(),
-                        status: *status,
-                        result: if result.is_empty() {
-                            task.result.unwrap_or_default()
-                        } else {
-                            result.clone()
-                        },
-                    });
-                    if let Some(item) = self
-                        .state
-                        .items
-                        .iter()
-                        .find(|i| matches!(&i.kind,ItemKind::Subagent { task } if task==&id))
-                        .map(|i| i.id.clone())
-                    {
-                        self.fact(FactBody::ItemCompleted {
-                            id: item,
-                            status: *status,
-                        });
-                    }
+                    self.finish_task(&task.id, *status, result);
                     self.wake_tasks();
                 }
             }
@@ -2545,39 +2659,19 @@ impl Decision {
             } => {
                 if let Some(status) = status {
                     if let Some(work) = self.state.background_work.get(key).cloned() {
-                        let label = match work.kind {
-                            BackgroundKind::Command => "Command",
-                            BackgroundKind::Monitor => "Monitor",
-                            BackgroundKind::Subagent => "Subagent",
-                            BackgroundKind::BackgroundTask => "Background task",
-                        };
-                        let outcome = match status {
-                            ItemStatus::Completed => "finished",
-                            ItemStatus::Cancelled | ItemStatus::Interrupted => "was stopped",
-                            _ => "failed",
-                        };
-                        let id =
-                            TurnItemId::new(self.native_key("notification", attempt, key)).unwrap();
-                        self.item_start(
-                            id.clone(),
-                            run_id.cloned(),
-                            Some(attempt.clone()),
-                            key.clone(),
-                            ItemKind::BackgroundNotification {
-                                summary: format!("{label} \"{}\" {outcome}", work.description),
-                                outcome: *status,
-                                source: work.kind,
+                        self.fact(FactBody::NativeWorkReported {
+                            key: key.clone(),
+                            report: WorkReport {
+                                kind: work.kind,
+                                label: Some(work.description),
+                                outcome: (*status).into(),
+                                child_thread: None,
+                                exit_code: None,
                             },
-                        );
-                        self.fact(FactBody::ItemCompleted {
-                            id,
-                            status: ItemStatus::Completed,
+                            text: summary.clone().unwrap_or_default(),
                         });
                     }
-                    self.fact(FactBody::BackgroundTaskFinished {
-                        key: key.clone(),
-                        summary: summary.clone(),
-                    });
+                    self.fact(FactBody::BackgroundTaskFinished { key: key.clone() });
                 } else {
                     self.fact(FactBody::BackgroundTaskStarted {
                         key: key.clone(),
@@ -2629,8 +2723,8 @@ impl Decision {
             } else {
                 self.state
                     .wake_reports
-                    .values()
-                    .cloned()
+                    .iter()
+                    .map(|report| report.text.clone())
                     .collect::<Vec<_>>()
                     .join("\n")
             },
@@ -2639,6 +2733,19 @@ impl Decision {
             created_by: MessageAuthor::Agent,
             creation_source: "provider".into(),
         });
+        if let Some(notification) = background_notification(
+            &self
+                .state
+                .wake_reports
+                .iter()
+                .map(|record| record.report.clone())
+                .collect::<Vec<_>>(),
+        ) {
+            self.fact(FactBody::MessageNotificationAssigned {
+                id: message.clone(),
+                notification,
+            });
+        }
         self.fact(FactBody::WakeReportsConsumed);
         self.fact(FactBody::RunRequested {
             id: run.clone(),
@@ -2683,6 +2790,18 @@ impl Decision {
                         | AttemptStatus::Failed
                 )
         }) && self.state.native_owner.as_ref() != Some(owner)
+        {
+            return Reply::Ignored;
+        }
+        if root
+            && let (Some(active), Some(source)) = (
+                self.state.active_run(),
+                self.state
+                    .runs
+                    .iter()
+                    .find(|r| r.attempt.as_ref() == Some(owner)),
+            )
+            && active.selection.instance != source.selection.instance
         {
             return Reply::Ignored;
         }
@@ -3089,39 +3208,106 @@ impl ThreadMachine {
         // The common streaming path only inspects its owner and item. It does
         // not copy history or accumulated text into a scratch projection.
         if let Input::Provider {
-            attempt,
-            event: ProviderEvent::TextDelta { key, text, .. },
+            attempt: owner,
+            event,
         } = &envelope.input
         {
-            let current = state.native_owner.as_ref() == Some(attempt)
-                || state.runs.iter().any(|r| {
-                    r.attempt.as_ref() == Some(attempt)
-                        && matches!(r.status, RunStatus::Starting | RunStatus::Running)
-                });
-            if !current {
-                return Step {
-                    facts: vec![],
-                    effects: vec![],
-                    reply: Reply::Ignored,
-                    receipt: None,
-                };
-            }
-            if let Some(item) = state.items.iter().find(|i| {
-                i.attempt.as_ref() == Some(attempt) && &i.native_key == key && !i.status.terminal()
-            }) {
-                return Step {
-                    facts: vec![Fact {
-                        at: envelope.at.clone(),
-                        body: FactBody::ItemTextAppended {
-                            id: item.id.clone(),
-                            offset: item.text.len(),
+            let mut attempt = owner;
+            let mut observed = false;
+            let event = if let ProviderEvent::NativeOutput {
+                echoed_prompts,
+                acknowledged_prompt,
+                root: true,
+                result: None,
+                events,
+            } = event
+            {
+                if echoed_prompts.is_empty()
+                    && acknowledged_prompt.is_none()
+                    && events.len() == 1
+                    && state.pending_prompt.as_ref().is_none_or(|p| {
+                        p.confirmed || state.prompt_echo_mode != PromptEchoMode::Early
+                    })
+                {
+                    if let Some(active) = state
+                        .active_run()
+                        .filter(|r| matches!(r.status, RunStatus::Starting | RunStatus::Running))
+                    {
+                        let owner_run = state
+                            .runs
+                            .iter()
+                            .find(|r| r.attempt.as_ref() == Some(owner));
+                        if owner_run
+                            .is_some_and(|r| r.selection.instance == active.selection.instance)
+                        {
+                            attempt = active.attempt.as_ref().unwrap_or(owner);
+                            observed = state.pending_prompt.as_ref().is_some_and(|p| !p.confirmed);
+                            &events[0]
+                        } else {
+                            event
+                        }
+                    } else {
+                        event
+                    }
+                } else {
+                    event
+                }
+            } else {
+                event
+            };
+            if let ProviderEvent::TextDelta { key, text, .. }
+            | ProviderEvent::PlanDelta { key, text } = event
+            {
+                let current = state.native_owner.as_ref() == Some(attempt)
+                    || state.runs.iter().any(|r| {
+                        r.attempt.as_ref() == Some(attempt)
+                            && matches!(r.status, RunStatus::Starting | RunStatus::Running)
+                    });
+                if !current {
+                    return Step {
+                        facts: vec![],
+                        effects: vec![],
+                        reply: Reply::Ignored,
+                        receipt: None,
+                    };
+                }
+                if let Some(item) = state.items.iter().find(|i| {
+                    i.attempt.as_ref() == Some(attempt)
+                        && &i.native_key == key
+                        && !i.status.terminal()
+                }) {
+                    let mut bodies = vec![];
+                    if observed {
+                        bodies.push(FactBody::PromptFrameObserved);
+                    }
+                    if let ProviderEvent::PlanDelta { .. } = event
+                        && let ItemKind::ProposedPlan { plan } = &item.kind
+                        && let Some(plan) = state.plans.iter().find(|p| &p.id == plan)
+                    {
+                        bodies.push(FactBody::PlanMarkdownAppended {
+                            id: plan.id.clone(),
+                            offset: plan.markdown.len(),
                             text: text.clone(),
-                        },
-                    }],
-                    effects: vec![],
-                    reply: Reply::Accepted,
-                    receipt: None,
-                };
+                        });
+                    }
+                    bodies.push(FactBody::ItemTextAppended {
+                        id: item.id.clone(),
+                        offset: item.text.len(),
+                        text: text.clone(),
+                    });
+                    return Step {
+                        facts: bodies
+                            .into_iter()
+                            .map(|body| Fact {
+                                at: envelope.at.clone(),
+                                body,
+                            })
+                            .collect(),
+                        effects: vec![],
+                        reply: Reply::Accepted,
+                        receipt: None,
+                    };
+                }
             }
         }
         let mut decision = Decision::new(state, envelope);

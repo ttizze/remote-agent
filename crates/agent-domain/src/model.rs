@@ -136,6 +136,7 @@ pub struct Thread {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
+    pub notification: Option<Notification>,
     pub id: MessageId,
     pub run: Option<RunId>,
     pub role: Role,
@@ -253,8 +254,10 @@ pub enum ItemKind {
         message: String,
     },
     BackgroundNotification {
+        message: MessageId,
+        child_thread: Option<ThreadId>,
         summary: String,
-        outcome: ItemStatus,
+        outcome: NotificationOutcome,
         source: BackgroundKind,
     },
 }
@@ -362,6 +365,8 @@ pub struct Checkpoint {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
+    pub native_task: Option<String>,
+    pub background: bool,
     pub id: NodeId,
     pub native_key: String,
     pub run: Option<RunId>,
@@ -434,6 +439,13 @@ pub struct BackgroundWork {
     pub kind: BackgroundKind,
     pub attempt: RunAttemptId,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WakeReport {
+    pub key: String,
+    pub report: WorkReport,
+    pub text: String,
+    pub prompt_ordinal: u64,
+}
 /// Receipts are passed back to step by the owning actor, separately from projection facts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Receipt {
@@ -469,7 +481,8 @@ pub struct State {
     pub pending_prompt: Option<PendingPrompt>,
     pub native_continuations: BTreeMap<RunId, Vec<ProviderEvent>>,
     pub background_work: BTreeMap<String, BackgroundWork>,
-    pub wake_reports: BTreeMap<String, String>,
+    pub wake_reports: Vec<WakeReport>,
+    pub prompt_ordinal: u64,
     pub pending_forks: BTreeMap<CommandId, PendingFork>,
     pub native_sessions: BTreeMap<String, String>,
 }
@@ -669,6 +682,11 @@ pub enum Command {
         selection: ModelSelection,
         wake: CompletionWake,
     },
+    TaskProgress {
+        task: NodeId,
+        progress: Option<String>,
+        model: Option<String>,
+    },
     TaskResult {
         task: NodeId,
         status: ItemStatus,
@@ -817,7 +835,15 @@ pub enum ProviderEvent {
         steps: Vec<PlanStep>,
     },
     Usage(TokenUsage),
+    ModelObserved {
+        model: String,
+    },
+    SubagentNativeBound {
+        key: String,
+        native_task: String,
+    },
     SubagentStarted {
+        background: bool,
         native_thread: Option<String>,
         key: String,
         parent: Option<String>,

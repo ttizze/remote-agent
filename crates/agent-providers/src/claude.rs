@@ -24,6 +24,9 @@ pub struct ClaudeProtocol {
     tools: BTreeMap<String, (String, Value)>,
     presentations: BTreeMap<String, ToolPresentation>,
     parents: BTreeMap<String, String>,
+    aliases: BTreeMap<String, String>,
+    observed_models: BTreeMap<String, String>,
+    background_tasks: BTreeSet<String>,
     /// SDK task ID -> native tool-use ID. Local Bash tasks have no child thread.
     tasks: BTreeMap<String, (String, bool)>,
     text_seen: BTreeSet<String>,
@@ -140,7 +143,35 @@ impl ClaudeProtocol {
         if let Some(control) = self.control.receive(frame)? {
             return Ok(control);
         }
-        let route = optional(frame, "parent_tool_use_id").unwrap_or_default();
+        let native_route = optional(frame, "parent_tool_use_id").unwrap_or_default();
+        let mut route = self
+            .aliases
+            .get(&native_route)
+            .cloned()
+            .unwrap_or(native_route);
+        if frame["type"] == "system"
+            && matches!(
+                string(frame, "subtype").as_str(),
+                "task_started" | "task_progress" | "task_notification"
+            )
+        {
+            let tool = optional(frame, "tool_use_id").or_else(|| {
+                optional(frame, "task_id")
+                    .and_then(|id| self.tasks.get(&id).map(|(tool, _)| tool.clone()))
+            });
+            if let Some(tool) = tool {
+                let tool = self.aliases.get(&tool).unwrap_or(&tool);
+                if let Some(parent) = self.parents.get(tool) {
+                    route = parent.clone();
+                }
+            }
+            if frame["task_type"] == "local_bash"
+                || optional(frame, "task_id")
+                    .is_some_and(|id| self.tasks.get(&id).is_some_and(|(_, agent)| !agent))
+            {
+                route.clear();
+            }
+        }
         let mut output = Translation::default();
         let mut events = vec![];
         match string(frame, "type").as_str() {
@@ -198,7 +229,14 @@ impl ClaudeProtocol {
                 }),
                 "task_started" => {
                     let task = required(frame, "task_id")?;
-                    let tool = optional(frame, "tool_use_id").unwrap_or_else(|| task.clone());
+                    let offered_tool =
+                        optional(frame, "tool_use_id").unwrap_or_else(|| task.clone());
+                    let tool = self
+                        .tasks
+                        .get(&task)
+                        .map(|(tool, _)| tool.clone())
+                        .unwrap_or_else(|| offered_tool.clone());
+                    self.aliases.insert(offered_tool.clone(), tool.clone());
                     let agent = string(frame, "task_type") == "local_agent"
                         || self
                             .tools
@@ -207,9 +245,10 @@ impl ClaudeProtocol {
                     self.tasks.insert(task.clone(), (tool.clone(), agent));
                     if agent {
                         events.push(ProviderEvent::SubagentStarted {
+                            background: frame["is_backgrounded"] == true,
                             native_thread: None,
                             key: tool.clone(),
-                            parent: optional(frame, "parent_tool_use_id"),
+                            parent: (!route.is_empty()).then(|| route.clone()),
                             prompt: optional(frame, "prompt")
                                 .or_else(|| {
                                     self.tools
@@ -217,13 +256,20 @@ impl ClaudeProtocol {
                                         .and_then(|(_, input)| optional(input, "prompt"))
                                 })
                                 .unwrap_or_default(),
-                            model: optional(frame, "model"),
+                            model: optional(frame, "model")
+                                .or_else(|| self.observed_models.get(&route).cloned()),
+                        });
+                        events.push(ProviderEvent::SubagentNativeBound {
+                            key: tool.clone(),
+                            native_task: task.clone(),
                         });
                         events.push(ProviderEvent::SubagentNamed {
                             key: tool,
                             title: string(frame, "description"),
                         });
-                    } else {
+                    } else if frame["owned_by_subagent"] != true || frame["is_backgrounded"] == true
+                    {
+                        self.background_tasks.insert(task.clone());
                         events.push(ProviderEvent::BackgroundTask {
                             key: task,
                             tool: tool.clone(),
@@ -254,7 +300,7 @@ impl ClaudeProtocol {
                 }
                 "task_notification" => {
                     let task = required(frame, "task_id")?;
-                    if let Some((tool, agent)) = self.tasks.remove(&task) {
+                    if let Some((tool, agent)) = self.tasks.get(&task).cloned() {
                         if agent {
                             events.push(ProviderEvent::SubagentFinished {
                                 key: tool,
@@ -265,7 +311,7 @@ impl ClaudeProtocol {
                                 },
                                 result: string(frame, "summary"),
                             });
-                        } else {
+                        } else if self.background_tasks.remove(&task) {
                             events.push(ProviderEvent::BackgroundTask {
                                 key: task,
                                 tool: tool.clone(),
@@ -366,6 +412,12 @@ impl ClaudeProtocol {
             }
             "assistant" => {
                 let message = &frame["message"];
+                if !route.is_empty()
+                    && let Some(model) = optional(message, "model")
+                {
+                    self.observed_models.insert(route.clone(), model.clone());
+                    events.push(ProviderEvent::ModelObserved { model });
+                }
                 let id = required(message, "id")?;
                 if let Some(key) = optional(frame, "uuid") {
                     events.push(ProviderEvent::AssistantCursor { key });
@@ -434,9 +486,10 @@ impl ClaudeProtocol {
                                 let server = optional(meta, "server_display_name");
                                 self.presentations.insert(key.clone(), ToolPresentation { title: optional(meta, "display_name"), source: server.map(|server| Json(json!({"key":format!("mcp:{}", server.to_lowercase()),"name":server,"kind":"integration","icon":{"_tag":"themed-logo","logoUrl":meta["icon_url"]}}))) });
                             }
+                            self.parents.insert(key.clone(), route.clone());
                             if name == "Agent" || name == "Task" {
-                                self.parents.insert(key.clone(), route.clone());
                                 events.push(ProviderEvent::SubagentStarted {
+                                    background: input["run_in_background"] == true,
                                     native_thread: None,
                                     key,
                                     parent: if route.is_empty() {
@@ -445,7 +498,8 @@ impl ClaudeProtocol {
                                         Some(route.clone())
                                     },
                                     prompt: string(&input, "prompt"),
-                                    model: optional(&input, "model"),
+                                    model: optional(&input, "model")
+                                        .or_else(|| self.observed_models.get(&route).cloned()),
                                 });
                             } else if name == "TodoWrite" {
                                 events.push(ProviderEvent::Plan {
@@ -500,6 +554,7 @@ impl ClaudeProtocol {
                                     && name != "Task"
                                 {
                                     self.tasks.insert(task.clone(), (key.clone(), false));
+                                    self.background_tasks.insert(task.clone());
                                     events.push(ProviderEvent::BackgroundTask {
                                         key: task,
                                         tool: key.clone(),

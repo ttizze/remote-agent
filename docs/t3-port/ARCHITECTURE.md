@@ -110,3 +110,7 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-05: checkpoint 保存失敗は captures の対象を消さず outbox の再試行に任せる。停止 run の status は保存待ちでも interrupted/cancelled を保ち、captures が残る間は後続 run を始めない。rollback 済み run の遅い保存結果は採用しない。
 - 2026-10-05: 添付は image/file の種別を持ち、captured-window の accessibility を明示的な入力にする。T3 と同じ JSON の囲み・省略規則・入力文字数制限で provider prompt を構成する。空の todo と proposed plan を区別し、plan 本文の追記は offset 付き事実、本文と steps の置換は別の事実にする。
 - 2026-10-05: native 子の承認は親スレッドの要求として記録する。要求に native 親子経路を保存し、子の timeline には承認カードを作らない。CLI initialize が返す未解決の承認・resume dialog は再登録し、同じ native request ID の再通知は二重表示しない。
+- 2026-10-05: background の終了報告は wake 発言の notification metadata として保存する。発言自体は保持し、timeline は通知として表示する。複数の終了報告は T3 の Notification.ts と同じ集約を行う。報告は prompt の世代で管理し、次の世代まで保持する T3 の規則を移植する。
+- 2026-10-05: Claude の task ID と tool-use ID の対応を保持し、SendMessage で tool-use ID が変わっても同じ子を再開する。再開の run/attempt/prompt と startedAt を更新し、古い progress を消す。子の snapshot にある実際の model は子の selection と親の task に反映し、孫は所有する子の model を引き継ぐ。
+- 2026-10-05: Claude の foreground な子の Bash は root の background roster と wake に含めない。native local_bash の background 報告は native session の root に帰属し、TaskStop で subagent と command が終了した場合も T3 と同じ通知にまとめる。
+- 2026-10-05: 正規化された native TextDelta と plan の追記も、既存項目がある場合は scratch projection を複製せず offset 付きの事実だけを返す。別 provider instance の終了済み attempt の root 出力は、現在の run を更新しない。

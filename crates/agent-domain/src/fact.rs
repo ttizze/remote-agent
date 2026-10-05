@@ -41,9 +41,13 @@ pub enum FactBody {
     },
     BackgroundTaskFinished {
         key: String,
-        summary: Option<String>,
     },
     BackgroundWorkStopped,
+    NativeWorkReported {
+        key: String,
+        report: WorkReport,
+        text: String,
+    },
     WakeReportsConsumed,
     PromptOffered {
         attempt: RunAttemptId,
@@ -137,6 +141,10 @@ pub enum FactBody {
         intent: InputIntent,
         created_by: MessageAuthor,
         creation_source: String,
+    },
+    MessageNotificationAssigned {
+        id: MessageId,
+        notification: Notification,
     },
     MessageEdited {
         id: MessageId,
@@ -307,7 +315,12 @@ pub enum FactBody {
         id: ContextTransferId,
         run: RunId,
     },
+    TaskNativeBound {
+        id: NodeId,
+        native_task: String,
+    },
     TaskStarted {
+        background: bool,
         id: NodeId,
         native_key: String,
         run: Option<RunId>,
@@ -321,7 +334,7 @@ pub enum FactBody {
     },
     TaskProgressed {
         id: NodeId,
-        progress: String,
+        progress: Option<String>,
         model: Option<String>,
     },
     TaskFinished {
@@ -331,6 +344,9 @@ pub enum FactBody {
     },
     TaskReopened {
         id: NodeId,
+        run: Option<RunId>,
+        attempt: RunAttemptId,
+        prompt: String,
     },
     TaskWakeChanged {
         id: NodeId,
@@ -428,25 +444,39 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 },
             );
         }
-        BackgroundTaskFinished { key, summary } => {
+        BackgroundTaskFinished { key } => {
             state.background_work.remove(key);
-            if let Some(summary) = summary {
-                state.wake_reports.insert(key.clone(), summary.clone());
-            }
         }
         BackgroundWorkStopped => {
             state.background_work.clear();
             state.wake_reports.clear();
         }
+        NativeWorkReported { key, report, text } => {
+            let recorded = WakeReport {
+                key: key.clone(),
+                report: report.clone(),
+                text: text.clone(),
+                prompt_ordinal: state.prompt_ordinal,
+            };
+            if let Some(existing) = state.wake_reports.iter_mut().find(|r| &r.key == key) {
+                *existing = recorded;
+            } else {
+                state.wake_reports.push(recorded);
+            }
+        }
         WakeReportsConsumed => state.wake_reports.clear(),
         PromptOffered { attempt, key } => {
+            state.prompt_ordinal += 1;
+            state
+                .wake_reports
+                .retain(|report| report.prompt_ordinal >= state.prompt_ordinal - 1);
             state.pending_prompt = Some(PendingPrompt {
                 attempt: attempt.clone(),
                 key: key.clone(),
                 confirmed: false,
                 frames_before_echo: 0,
                 held: vec![],
-            })
+            });
         }
         PromptEchoModeLearned { mode } => state.prompt_echo_mode = *mode,
         PromptFrameObserved => {
@@ -650,6 +680,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 return Err(FoldError::Conflict);
             }
             state.messages.push(Message {
+                notification: None,
                 id: id.clone(),
                 run: run.clone(),
                 role: *role,
@@ -662,6 +693,10 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 created_at: at.clone(),
                 updated_at: at.clone(),
             });
+        }
+        MessageNotificationAssigned { id, notification } => {
+            find_mut(&mut state.messages, "message", |m| &m.id == id)?.notification =
+                Some(notification.clone());
         }
         MessageEdited {
             id,
@@ -1052,7 +1087,12 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             find_mut(&mut state.transfers, "transfer", |t| &t.id == id)?.consumed_by =
                 Some(run.clone())
         }
+        TaskNativeBound { id, native_task } => {
+            find_mut(&mut state.tasks, "task", |t| &t.id == id)?.native_task =
+                Some(native_task.clone());
+        }
         TaskStarted {
+            background,
             id,
             native_key,
             run,
@@ -1068,6 +1108,8 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 return Err(FoldError::Conflict);
             }
             state.tasks.push(Task {
+                native_task: None,
+                background: *background,
                 id: id.clone(),
                 native_key: native_key.clone(),
                 run: run.clone(),
@@ -1093,7 +1135,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             model,
         } => {
             let task = find_mut(&mut state.tasks, "task", |t| &t.id == id)?;
-            task.progress = Some(progress.clone());
+            if progress.is_some() {
+                task.progress = progress.clone();
+            }
             if model.is_some() {
                 task.model = model.clone();
             }
@@ -1101,13 +1145,25 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
         TaskFinished { id, status, result } => {
             let task = find_mut(&mut state.tasks, "task", |t| &t.id == id)?;
             task.status = *status;
-            task.result = Some(result.clone());
+            if !result.is_empty() {
+                task.result = Some(result.clone());
+            }
             task.completed_at = Some(at.clone());
         }
-        TaskReopened { id } => {
+        TaskReopened {
+            id,
+            run,
+            attempt,
+            prompt,
+        } => {
             let t = find_mut(&mut state.tasks, "task", |t| &t.id == id)?;
             t.status = ItemStatus::Running;
+            t.run = run.clone();
+            t.attempt = attempt.clone();
+            t.prompt = prompt.clone();
             t.result = None;
+            t.progress = None;
+            t.started_at = at.clone();
             t.delivery = DeliveryState::Pending;
             t.completed_at = None;
         }

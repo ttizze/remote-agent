@@ -1085,3 +1085,12 @@ Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機�
 | `claude_local_bash_task` / `web_search`（両 provider） / `claude_mcp_tool_presentation` | 原本の assistant 文言、検索 query/result URL、command output、記録された MCP title/source と metadata がない場合の空値。 |
 | `AttachmentPrompt.test.ts` | `agent-providers::attachments::tests`。パスの全文、escaped JSON、accessibility 圧縮と bounds、入力上限、image/file 判定の期待値を維持。 |
 | `CheckpointCaptureService.ts` の stopped/at-least-once 規則 | `agent-domain::tests::failed_capture_is_retryable_and_stopped_capture_keeps_its_terminal_status`。失敗でキューを解放せず、保存結果で terminal status を変えない。 |
+
+| 追加した原本の検証 | Rust の検証 |
+| --- | --- |
+| `claude_background_subagent_after_root` / `claude_nested_background_subagent_wake` | 子の作業は子に保存、root の wake は直下の子の終了だけ、通知は該当する子を開く。 |
+| `claude_background_subagent_lifecycle` | 7 run の原本の返信、再開後も 2 子のまま、Agent A の prompt/reply の順序と新しい run への帰属。 |
+| `claude_nested_subagent_model` | 孫まで実際の observed model を継承し、子の selection に保存。 |
+| `claude_background_wake_before_queued_prompt` / `_no_echo` | UUID echo の有無による原本の返信の帰属、混在する停止通知の summary/source。 |
+| `claude_idle_resume` / `multi_turn_restart` | 原本の 2 つの完了返信と native session の継続。実プロセスの休眠／再起動は段階 3 の session 管理で検証する。 |
+| `Notification.test.ts` の background report | 空、単独、混在、件数表示、command の exit code、monitor の更新文言を pure function で確認。delegated completion の表示は core の接続し直しでも使用する。 |

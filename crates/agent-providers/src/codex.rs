@@ -433,6 +433,7 @@ impl CodexProtocol {
                         );
                         match string(item, "kind").as_str() {
                             "started" => events.push(ProviderEvent::SubagentStarted {
+                                background: false,
                                 native_thread: Some(child.clone()),
                                 key: child,
                                 parent: native_thread
@@ -474,6 +475,7 @@ impl CodexProtocol {
                             );
                             if matches!(tool.as_str(), "spawnAgent" | "sendInput" | "resumeAgent") {
                                 events.push(ProviderEvent::SubagentStarted {
+                                    background: false,
                                     native_thread: Some(child.clone()),
                                     key: child.clone(),
                                     parent: native_thread

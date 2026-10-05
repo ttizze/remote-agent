@@ -676,6 +676,7 @@ fn background_command_and_monitor_replays_keep_roster_notifications_and_wake_own
                     summary,
                     outcome,
                     source,
+                    ..
                 } = &i.kind
                 {
                     Some((summary.clone(), *outcome, *source))
@@ -693,7 +694,7 @@ fn background_command_and_monitor_replays_keep_roster_notifications_and_wake_own
             notifications,
             vec![(
                 format!("{label} \"{description}\" finished"),
-                ItemStatus::Completed,
+                NotificationOutcome::Completed,
                 kind
             )]
         );
@@ -1019,4 +1020,241 @@ fn background_interrupt_replay_clears_the_roster_and_keeps_completed_launches() 
             .collect::<Vec<_>>(),
         vec![ItemStatus::Completed, ItemStatus::Interrupted]
     );
+}
+
+#[test]
+fn background_subagent_replay_keeps_child_work_and_only_the_child_completion_wakes_root() {
+    for (scenario, expected_wake) in [
+        ("claude_background_subagent_after_root", "SUB_FINAL_REPORT"),
+        ("claude_nested_background_subagent_wake", "CHILD_DONE"),
+    ] {
+        let replay = Replay::run(scenario, Driver::Claude);
+        replay.integrity();
+        assert_eq!(
+            replay.statuses(),
+            vec![RunStatus::Completed; 2],
+            "{scenario}"
+        );
+        assert!(replay.state().background_work.is_empty());
+        let wake = &replay.state().runs[1];
+        assert_eq!(
+            replay
+                .state()
+                .messages
+                .iter()
+                .find(|m| m.id == wake.message)
+                .unwrap()
+                .text,
+            expected_wake
+        );
+        let notifications: Vec<_> = replay
+            .state()
+            .items
+            .iter()
+            .filter(|i| matches!(i.kind, ItemKind::BackgroundNotification { .. }))
+            .collect();
+        assert_eq!(notifications.len(), 1, "{scenario}");
+        assert!(matches!(
+            &notifications[0].kind,
+            ItemKind::BackgroundNotification {
+                source: BackgroundKind::Subagent,
+                child_thread: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(replay.state().tasks.len(), 1);
+        assert_eq!(replay.state().tasks[0].status, ItemStatus::Completed);
+        assert_eq!(
+            replay.state().tasks[0].run.as_ref(),
+            Some(&replay.state().runs[0].id)
+        );
+    }
+}
+#[test]
+fn nested_subagent_model_replay_inherits_the_model_observed_in_the_owner_snapshot() {
+    let replay = Replay::run("claude_nested_subagent_model", Driver::Claude);
+    replay.integrity();
+    assert_eq!(replay.statuses(), vec![RunStatus::Completed]);
+    assert_eq!(replay.states.len(), 3);
+    for task in replay.states.values().flat_map(|s| &s.tasks) {
+        assert_eq!(task.status, ItemStatus::Completed);
+        assert_eq!(task.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(
+            replay.states[&task.child_thread]
+                .thread
+                .as_ref()
+                .unwrap()
+                .selection
+                .model,
+            "claude-haiku-4-5-20251001"
+        );
+        assert!(task.native_task.is_some());
+    }
+}
+#[test]
+fn background_subagent_resume_reuses_child_thread_and_keeps_prompt_reply_order() {
+    let replay = Replay::run("claude_background_subagent_lifecycle", Driver::Claude);
+    replay.integrity();
+    assert_eq!(replay.statuses(), vec![RunStatus::Completed; 7]);
+    assert_eq!(
+        replay
+            .state()
+            .runs
+            .iter()
+            .map(|r| replay.replies(&r.id))
+            .collect::<Vec<_>>()[0],
+        vec!["LAUNCHED"]
+    );
+    assert_eq!(
+        replay.replies(&replay.state().runs[1].id),
+        vec!["A_REPORTED"]
+    );
+    assert_eq!(
+        replay.replies(&replay.state().runs[2].id),
+        vec!["B_STOPPED"]
+    );
+    assert_eq!(replay.replies(&replay.state().runs[4].id), vec!["RESUMED"]);
+    assert_eq!(
+        replay.replies(&replay.state().runs[5].id),
+        vec!["A_RESUME_REPORTED"]
+    );
+    assert_eq!(replay.replies(&replay.state().runs[6].id), vec!["ALL_DONE"]);
+    assert_eq!(replay.state().tasks.len(), 2);
+    let agent = replay
+        .state()
+        .tasks
+        .iter()
+        .find(|t| t.native_task.as_deref() == Some("a1a715b7d0bdfefea"))
+        .unwrap();
+    assert_eq!(agent.status, ItemStatus::Completed);
+    assert_eq!(agent.result.as_deref(), Some("A_SECOND"));
+    assert_eq!(agent.run.as_ref(), Some(&replay.state().runs[4].id));
+    let child = &replay.states[&agent.child_thread];
+    assert_eq!(
+        child
+            .items
+            .iter()
+            .filter(|i| matches!(
+                i.kind,
+                ItemKind::UserMessage { .. } | ItemKind::AssistantMessage { .. }
+            ))
+            .map(|i| i.text.trim())
+            .collect::<Vec<_>>(),
+        vec![
+            "Reply with exactly: A_FIRST",
+            "A_FIRST",
+            "Reply with exactly: A_SECOND",
+            "A_SECOND"
+        ]
+    );
+}
+
+#[test]
+fn wake_before_queued_prompt_replays_preserve_echo_and_no_echo_assignment() {
+    for scenario in [
+        "claude_background_wake_before_queued_prompt",
+        "claude_background_wake_before_queued_prompt_no_echo",
+    ] {
+        let replay = Replay::run(scenario, Driver::Claude);
+        replay.integrity();
+        assert!(
+            replay.statuses().iter().all(|s| *s == RunStatus::Completed),
+            "{scenario}: {:?}",
+            replay.statuses()
+        );
+        let user_runs: Vec<_> = replay
+            .state()
+            .runs
+            .iter()
+            .filter(|r| {
+                replay
+                    .state()
+                    .messages
+                    .iter()
+                    .any(|m| m.id == r.message && m.created_by == MessageAuthor::User)
+            })
+            .collect();
+        assert_eq!(user_runs.len(), 4);
+        assert_eq!(replay.replies(&user_runs[1].id), vec!["B_STOPPED"]);
+        if scenario.ends_with("no_echo") {
+            assert_eq!(
+                replay.replies(&user_runs[2].id),
+                vec!["Agent B has been confirmed killed."]
+            );
+        } else {
+            assert_eq!(replay.replies(&user_runs[0].id), vec!["LAUNCHED"]);
+            assert_eq!(replay.replies(&user_runs[2].id), vec!["RESUMED"]);
+            assert_eq!(replay.replies(&user_runs[3].id), vec!["ALL_DONE"]);
+            let continuations: Vec<_> = replay
+                .state()
+                .runs
+                .iter()
+                .filter(|r| !user_runs.contains(r))
+                .flat_map(|r| replay.replies(&r.id))
+                .collect();
+            assert_eq!(
+                continuations,
+                vec![
+                    "A_REPORTED",
+                    "Agent B's kill is confirmed by the notification. No further action needed — the task is complete."
+                ]
+            );
+            let notifications: Vec<_> = replay
+                .state()
+                .items
+                .iter()
+                .filter_map(|i| match &i.kind {
+                    ItemKind::BackgroundNotification {
+                        summary, source, ..
+                    } => Some((summary.as_str(), *source)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                notifications,
+                vec![
+                    ("Subagent \"Agent A\" finished", BackgroundKind::Subagent),
+                    (
+                        "Subagent \"Agent B\" and command \"Sleep 60 seconds then echo B_DONE\" were stopped",
+                        BackgroundKind::BackgroundTask
+                    )
+                ]
+            );
+        }
+    }
+}
+#[test]
+fn idle_and_restart_replays_preserve_completed_turns_and_native_resume_identity() {
+    for (scenario, expected) in [
+        (
+            "claude_idle_resume",
+            vec![
+                "idle resume first turn complete",
+                "idle resume second turn complete",
+            ],
+        ),
+        (
+            "multi_turn_restart",
+            vec![
+                "first fixture turn complete",
+                "second fixture turn complete",
+            ],
+        ),
+    ] {
+        let replay = Replay::run(scenario, Driver::Claude);
+        assert_eq!(replay.statuses(), vec![RunStatus::Completed; 2]);
+        assert_eq!(
+            replay
+                .state()
+                .runs
+                .iter()
+                .flat_map(|r| replay.replies(&r.id))
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            replay.state().attempts[0].native_thread,
+            replay.state().attempts[1].native_thread
+        );
+    }
 }

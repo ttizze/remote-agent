@@ -191,6 +191,7 @@ fn restart_supersedes_attempt_and_interrupts_native_children() {
         "child",
         &a,
         ProviderEvent::SubagentStarted {
+            background: false,
             native_thread: None,
             key: "child".into(),
             parent: None,
@@ -838,6 +839,7 @@ fn native_subagent_followup_reopens_completed_task() {
     let mut s = state();
     let (_, a) = running(&mut s, "first");
     let start = ProviderEvent::SubagentStarted {
+        background: false,
         native_thread: None,
         key: "child".into(),
         parent: None,
@@ -1208,4 +1210,88 @@ fn failed_capture_is_retryable_and_stopped_capture_keeps_its_terminal_status() {
     checkpoint(&mut s, &second, &b, "stopped-cp");
     assert_eq!(s.runs[1].status, RunStatus::Interrupted);
     assert_eq!(s.runs[2].status, RunStatus::Starting);
+}
+
+#[test]
+fn native_text_and_plan_streams_append_without_entity_replacements() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    provider(
+        &mut s,
+        "text-start",
+        &a,
+        ProviderEvent::TextDelta {
+            key: "text".into(),
+            kind: ProviderItem::Text,
+            text: "日本語".into(),
+        },
+    );
+    let wrapped = provider(
+        &mut s,
+        "wrapped",
+        &a,
+        ProviderEvent::NativeOutput {
+            echoed_prompts: vec![],
+            acknowledged_prompt: None,
+            root: true,
+            result: None,
+            events: vec![ProviderEvent::TextDelta {
+                key: "text".into(),
+                kind: ProviderItem::Text,
+                text: "追記".into(),
+            }],
+        },
+    );
+    assert!(
+        matches!(&wrapped.facts[..],[Fact { body:FactBody::ItemTextAppended { offset:9,text,.. },.. }] if text == "追記")
+    );
+    provider(
+        &mut s,
+        "plan-start",
+        &a,
+        ProviderEvent::PlanDelta {
+            key: "proposal".into(),
+            text: "計画".into(),
+        },
+    );
+    let appended = provider(
+        &mut s,
+        "plan-delta",
+        &a,
+        ProviderEvent::PlanDelta {
+            key: "proposal".into(),
+            text: "追記".into(),
+        },
+    );
+    assert!(matches!(
+        &appended.facts[..],
+        [
+            Fact {
+                body: FactBody::PlanMarkdownAppended { offset: 6, .. },
+                ..
+            },
+            Fact {
+                body: FactBody::ItemTextAppended { offset: 6, .. },
+                ..
+            }
+        ]
+    ));
+    assert_eq!(s.plans[0].markdown, "計画追記");
+    provider(
+        &mut s,
+        "todo-empty",
+        &a,
+        ProviderEvent::Plan {
+            kind: PlanKind::Todo,
+            key: "todo".into(),
+            markdown: String::new(),
+            steps: vec![],
+        },
+    );
+    assert_eq!(s.plans[1].kind, PlanKind::Todo);
+    assert!(
+        s.items
+            .iter()
+            .any(|i| matches!(i.kind, ItemKind::TodoList { .. }))
+    );
 }
