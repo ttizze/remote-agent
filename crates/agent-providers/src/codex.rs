@@ -1,6 +1,6 @@
 use crate::*;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
 pub struct WireContext {
@@ -26,7 +26,10 @@ pub struct CodexProtocol {
     next_id: u64,
     pending: BTreeMap<u64, Pending>,
     thread: Option<String>,
-    turn: Option<String>,
+    turns: BTreeMap<String, String>,
+    processes: BTreeMap<String, BTreeSet<String>>,
+    interrupt_pending: BTreeSet<String>,
+    stop_before_thread: bool,
     /// Native child thread -> native parent, used solely to route notifications.
     children: BTreeMap<String, String>,
 }
@@ -57,7 +60,7 @@ impl CodexProtocol {
             } => {
                 let mut input = vec![];
                 for file in attachments {
-                    if native_image_mime(&file.mime_type) {
+                    if native_image(file) {
                         input.push(json!({"type":"localImage","path":file.path}));
                     }
                 }
@@ -97,11 +100,14 @@ impl CodexProtocol {
                     .thread
                     .as_ref()
                     .ok_or_else(|| ProtocolError::Invalid("no native thread".into()))?;
-                let turn = self.turn.as_ref().ok_or_else(|| ProtocolError::Remote {
-                    operation: "turn/steer".into(),
-                    message: "No active turn".into(),
-                    turn_completed: true,
-                })?;
+                let turn = self
+                    .turns
+                    .get(thread)
+                    .ok_or_else(|| ProtocolError::Remote {
+                        operation: "turn/steer".into(),
+                        message: "No active turn".into(),
+                        turn_completed: true,
+                    })?;
                 let input = json!([{"type":"text","text":attachment_text(text,attachments)}]);
                 self.request(
                     "turn/steer",
@@ -109,16 +115,31 @@ impl CodexProtocol {
                     Pending::Operation("turn/steer".into()),
                 )
             }
-            ProviderCommand::Interrupt => {
-                if let (Some(thread), Some(turn)) = (&self.thread, &self.turn) {
-                    self.request(
-                        "turn/interrupt",
-                        json!({"threadId":thread,"turnId":turn}),
-                        Pending::Operation("turn/interrupt".into()),
-                    )
-                } else {
-                    return Ok(vec![]);
+            ProviderCommand::Interrupt {
+                native_thread,
+                native_turn,
+            } => {
+                let thread = native_thread.as_ref().or(self.thread.as_ref()).cloned();
+                if let Some(thread) = thread {
+                    let turn = native_turn.as_ref().or(self.turns.get(&thread)).cloned();
+                    if turn.is_none()
+                        && self
+                            .pending
+                            .values()
+                            .any(|p| matches!(p, Pending::Operation(op) if op == "turn/start"))
+                    {
+                        self.interrupt_pending.insert(thread.clone());
+                    }
+                    return Ok(self.interrupt(&thread, turn.as_deref()));
                 }
+                if self
+                    .pending
+                    .values()
+                    .any(|p| matches!(p, Pending::Thread { .. }))
+                {
+                    self.stop_before_thread = true;
+                }
+                return Ok(vec![]);
             }
             ProviderCommand::Respond {
                 native_key,
@@ -180,6 +201,25 @@ impl CodexProtocol {
         };
         Ok(vec![frame])
     }
+    fn interrupt(&mut self, thread: &str, turn: Option<&str>) -> Vec<Value> {
+        let mut outbound = vec![];
+        if let Some(turn) = turn {
+            outbound.push(self.request(
+                "turn/interrupt",
+                json!({"threadId":thread,"turnId":turn}),
+                Pending::Operation("turn/interrupt".into()),
+            ));
+        }
+        let processes = self.processes.get(thread).cloned().unwrap_or_default();
+        for process in processes {
+            outbound.push(self.request(
+                "thread/backgroundTerminals/terminate",
+                json!({"threadId":thread,"processId":process}),
+                Pending::Operation("thread/backgroundTerminals/terminate".into()),
+            ));
+        }
+        outbound
+    }
     pub fn receive(&mut self, frame: &Value) -> Result<Translation, ProtocolError> {
         let mut output = Translation::default();
         if frame.get("method").is_none() {
@@ -222,7 +262,8 @@ impl CodexProtocol {
                     output.events.push(ProviderEvent::SessionReady {
                         native_thread: thread.clone(),
                     });
-                    if !start.is_null() {
+                    let stopped = std::mem::take(&mut self.stop_before_thread);
+                    if !start.is_null() && !stopped {
                         start["threadId"] = json!(thread);
                         output.outbound.push(self.request(
                             "turn/start",
@@ -247,8 +288,12 @@ impl CodexProtocol {
                 Pending::Operation(operation) => {
                     if operation == "turn/start"
                         && let Some(turn) = optional(&result["turn"], "id")
+                        && let Some(thread) = self.thread.clone()
                     {
-                        self.turn = Some(turn);
+                        self.turns.insert(thread.clone(), turn.clone());
+                        if self.interrupt_pending.remove(&thread) {
+                            output.outbound.extend(self.interrupt(&thread, Some(&turn)));
+                        }
                     }
                 }
             }
@@ -272,8 +317,11 @@ impl CodexProtocol {
             }
             "turn/started" => {
                 let turn = required(&p["turn"], "id")?;
-                if native_thread == self.thread {
-                    self.turn = Some(turn.clone());
+                if let Some(thread) = &native_thread {
+                    self.turns.insert(thread.clone(), turn.clone());
+                    if self.interrupt_pending.remove(thread) {
+                        output.outbound.extend(self.interrupt(thread, Some(&turn)));
+                    }
                 }
                 events.push(ProviderEvent::TurnStarted {
                     native_turn: Some(turn),
@@ -281,8 +329,9 @@ impl CodexProtocol {
             }
             "turn/completed" => {
                 let turn = &p["turn"];
-                if native_thread == self.thread {
-                    self.turn = None;
+                if let Some(thread) = &native_thread {
+                    self.turns.remove(thread);
+                    self.interrupt_pending.remove(thread);
                 }
                 events.push(ProviderEvent::TurnFinished {
                     status: terminal(&string(turn, "status")),
@@ -315,6 +364,7 @@ impl CodexProtocol {
                 text: string(p, "delta"),
             }),
             "turn/plan/updated" => events.push(ProviderEvent::Plan {
+                kind: PlanKind::Todo,
                 key: "todo".into(),
                 markdown: optional(p, "explanation").unwrap_or_default(),
                 steps: p["plan"]
@@ -342,6 +392,21 @@ impl CodexProtocol {
                 let item = &p["item"];
                 let key = required(item, "id")?;
                 let completed = method == "item/completed";
+                if string(item, "type") == "commandExecution"
+                    && let (Some(thread), Some(process)) =
+                        (&native_thread, optional(item, "processId"))
+                {
+                    if completed {
+                        if let Some(processes) = self.processes.get_mut(thread) {
+                            processes.remove(&process);
+                        }
+                    } else {
+                        self.processes
+                            .entry(thread.clone())
+                            .or_default()
+                            .insert(process);
+                    }
+                }
                 match string(item, "type").as_str() {
                     "userMessage" => {
                         if completed {
@@ -368,6 +433,7 @@ impl CodexProtocol {
                         );
                         match string(item, "kind").as_str() {
                             "started" => events.push(ProviderEvent::SubagentStarted {
+                                native_thread: Some(child.clone()),
                                 key: child,
                                 parent: native_thread
                                     .clone()
@@ -408,6 +474,7 @@ impl CodexProtocol {
                             );
                             if matches!(tool.as_str(), "spawnAgent" | "sendInput" | "resumeAgent") {
                                 events.push(ProviderEvent::SubagentStarted {
+                                    native_thread: Some(child.clone()),
                                     key: child.clone(),
                                     parent: native_thread
                                         .clone()
@@ -434,6 +501,7 @@ impl CodexProtocol {
                         }
                     }
                     "plan" => events.push(ProviderEvent::Plan {
+                        kind: PlanKind::Proposed,
                         key,
                         markdown: string(item, "text"),
                         steps: vec![],
@@ -455,6 +523,7 @@ impl CodexProtocol {
                 }
             }
             "item/tool/requestUserInput" => events.push(ProviderEvent::RequestOpened {
+                owner_path: vec![],
                 key: frame["id"].to_string(),
                 body: RequestBody::Questions {
                     questions: questions(&p["questions"]),
@@ -503,6 +572,7 @@ impl CodexProtocol {
                         ]
                     });
                 events.push(ProviderEvent::RequestOpened {
+                    owner_path: vec![],
                     key: frame["id"].to_string(),
                     body: RequestBody::Approval {
                         kind: kind.into(),
@@ -540,7 +610,21 @@ impl CodexProtocol {
             _ => {}
         }
         if let Some(thread) = native_thread.filter(|t| self.thread.as_ref() != Some(t)) {
-            output.events = child_events(events, &thread, &self.children)?;
+            let path = native_path(&thread, &self.children)?;
+            let mut routed = vec![];
+            for mut event in events {
+                match &mut event {
+                    ProviderEvent::RequestOpened { owner_path, .. } => {
+                        *owner_path = path.iter().rev().map(|s| (*s).to_owned()).collect();
+                        output.events.push(event);
+                    }
+                    ProviderEvent::RequestClosed { .. } => output.events.push(event),
+                    _ => routed.push(event),
+                }
+            }
+            output
+                .events
+                .extend(child_events(routed, &thread, &self.children)?);
         } else {
             output.events = events;
         }
@@ -560,12 +644,15 @@ fn codex_item(kind: &str, item: &Value) -> Option<(ProviderItem, Option<String>)
         "agentMessage" => (ProviderItem::Text, optional(item, "text")),
         "reasoning" => (
             ProviderItem::Reasoning,
-            item["summary"].as_array().map(|a| {
-                a.iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }),
+            item["summary"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .filter(|text| !text.is_empty()),
         ),
         "commandExecution" => (
             ProviderItem::Command {
@@ -583,12 +670,16 @@ fn codex_item(kind: &str, item: &Value) -> Option<(ProviderItem, Option<String>)
         ),
         "webSearch" => (
             ProviderItem::WebSearch {
-                query: string(item, "query"),
+                query: optional(item, "query")
+                    .or_else(|| optional(&item["action"], "query"))
+                    .unwrap_or_default(),
+                results: item.get("results").cloned().map(Json),
             },
             None,
         ),
         "dynamicToolCall" | "mcpToolCall" => (
             ProviderItem::Tool {
+                presentation: ToolPresentation::default(),
                 name: optional(item, "tool")
                     .or_else(|| optional(item, "toolName"))
                     .unwrap_or_default(),
@@ -647,32 +738,6 @@ pub fn absolute_revert_count(turns: &[Value], head: Option<&str>) -> Result<usiz
     } else {
         Ok(turns.len())
     }
-}
-pub fn attachment_text(text: &str, attachments: &[Attachment]) -> String {
-    let mut text = text.to_owned();
-    for file in attachments {
-        let kind = if file.mime_type.starts_with("image/") {
-            "image"
-        } else {
-            "file"
-        };
-        if file.path.is_empty() {
-            continue;
-        }
-        let context = format!(
-            "[Attached {kind} \"{}\" is saved at: {}]",
-            file.name, file.path
-        );
-        let candidate = if text.is_empty() {
-            context
-        } else {
-            format!("{text}\n\n{context}")
-        };
-        if candidate.encode_utf16().count() <= 120_000 {
-            text = candidate;
-        }
-    }
-    text
 }
 pub fn native_image_mime(mime: &str) -> bool {
     matches!(

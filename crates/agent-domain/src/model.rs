@@ -25,6 +25,8 @@ values! {
     DeliveryState { Pending, Claimed, Acknowledged, Delivered, Disposed }
     TransferKind { Fork, MergeBack, ProviderHandoff, SubagentSpawn, SubagentResult }
     BackgroundKind { Command, Monitor, Subagent, BackgroundTask }
+    AttachmentKind { Image, File }
+    PlanKind { Proposed, Todo }
 }
 impl RunStatus {
     pub fn blocking(self) -> bool {
@@ -54,11 +56,60 @@ pub struct ModelSelection {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
+    pub kind: AttachmentKind,
+    pub source: Option<CapturedWindow>,
     pub id: String,
     pub name: String,
     pub mime_type: String,
     pub path: String,
     pub size: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapturedWindow {
+    pub app_name: String,
+    pub window_title: String,
+    pub accessible_text: Option<String>,
+    pub accessibility: Option<Accessibility>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "format", rename_all = "kebab-case")]
+pub enum Accessibility {
+    FlatText {
+        text: String,
+        truncated: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    ElementTree {
+        coordinate_space: String,
+        image_size: ImageSize,
+        truncated: bool,
+        root: Box<AccessibilityNode>,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageSize {
+    pub width: u64,
+    pub height: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bounds {
+    pub x: i64,
+    pub y: i64,
+    pub width: u64,
+    pub height: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityNode {
+    pub role: String,
+    pub name: Option<String>,
+    pub value: Option<String>,
+    pub description: Option<String>,
+    pub bounds: Option<Bounds>,
+    pub state: Option<Json>,
+    #[serde(default)]
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub children: Vec<AccessibilityNode>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Thread {
@@ -136,6 +187,11 @@ pub struct TokenUsage {
     pub total: u64,
     pub max: Option<u64>,
 }
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolPresentation {
+    pub title: Option<String>,
+    pub source: Option<Json>,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ItemKind {
     UserMessage {
@@ -145,6 +201,10 @@ pub enum ItemKind {
         message: MessageId,
     },
     Reasoning,
+    RunInterruptRequest,
+    RunInterruptResult {
+        request: TurnItemId,
+    },
     CommandExecution {
         command: String,
         cwd: Option<String>,
@@ -154,12 +214,14 @@ pub enum ItemKind {
         changes: Json,
     },
     DynamicTool {
+        presentation: ToolPresentation,
         name: String,
         input: Json,
         output: Option<Json>,
     },
     WebSearch {
         query: String,
+        results: Option<Json>,
     },
     ProposedPlan {
         plan: PlanId,
@@ -262,6 +324,7 @@ pub enum ResponseCapability {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
+    pub owner_path: Vec<String>,
     pub id: RuntimeRequestId,
     pub attempt: RunAttemptId,
     pub native_key: String,
@@ -276,6 +339,7 @@ pub struct Request {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
+    pub kind: PlanKind,
     pub id: PlanId,
     pub run: RunId,
     pub native_key: String,
@@ -399,6 +463,8 @@ pub struct State {
     pub stopping: BTreeSet<RunAttemptId>,
     pub native_owner: Option<RunAttemptId>,
     pub native_parent: Option<(ThreadId, NodeId)>,
+    pub native_child_thread: Option<String>,
+    pub native_child_turn: Option<String>,
     pub prompt_echo_mode: PromptEchoMode,
     pub pending_prompt: Option<PendingPrompt>,
     pub native_continuations: BTreeMap<RunId, Vec<ProviderEvent>>,
@@ -624,6 +690,7 @@ pub enum Command {
     Compact,
     Stop,
     BindNativeChild {
+        native_thread: Option<String>,
         owner: RunAttemptId,
         parent: ThreadId,
         task: NodeId,
@@ -647,12 +714,14 @@ pub enum ProviderItem {
         changes: Json,
     },
     Tool {
+        presentation: ToolPresentation,
         name: String,
         input: Json,
         output: Option<Json>,
     },
     WebSearch {
         query: String,
+        results: Option<Json>,
     },
     Compaction {
         before: Option<u64>,
@@ -693,6 +762,9 @@ pub enum ProviderEvent {
         result: Option<NativeResult>,
         events: Vec<ProviderEvent>,
     },
+    SessionClosed {
+        error: Option<String>,
+    },
     TurnAborted {
         reason: String,
     },
@@ -730,6 +802,7 @@ pub enum ProviderEvent {
         status: ItemStatus,
     },
     RequestOpened {
+        owner_path: Vec<String>,
         key: String,
         body: RequestBody,
         capability: ResponseCapability,
@@ -738,12 +811,14 @@ pub enum ProviderEvent {
         key: String,
     },
     Plan {
+        kind: PlanKind,
         key: String,
         markdown: String,
         steps: Vec<PlanStep>,
     },
     Usage(TokenUsage),
     SubagentStarted {
+        native_thread: Option<String>,
         key: String,
         parent: Option<String>,
         prompt: String,
@@ -796,7 +871,10 @@ pub enum ProviderCommand {
         text: String,
         attachments: Vec<Attachment>,
     },
-    Interrupt,
+    Interrupt {
+        native_thread: Option<String>,
+        native_turn: Option<String>,
+    },
     Respond {
         native_key: String,
         decision: Option<ApprovalDecision>,

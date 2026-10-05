@@ -284,6 +284,24 @@ impl Replay {
             if row["type"] == "emit_inbound" {
                 replay.receive(frame);
             }
+            if row["type"] == "runtime_exit"
+                && let Some(owner) = replay.owner.clone()
+            {
+                let root = replay.root.clone();
+                replay.apply(
+                    &root,
+                    Input::Provider {
+                        attempt: owner,
+                        event: ProviderEvent::SessionClosed {
+                            error: if row["status"] == "success" {
+                                None
+                            } else {
+                                Some("Provider process exited".into())
+                            },
+                        },
+                    },
+                );
+            }
             if row["type"] != "expect_outbound" {
                 continue;
             }
@@ -829,4 +847,176 @@ fn native_subagent_replays_keep_children_runless_and_output_out_of_the_parent() 
             }
         }
     }
+}
+
+#[test]
+fn stop_replays_close_attempts_tools_and_interrupt_rows() {
+    for driver in [Driver::Claude, Driver::Codex] {
+        for scenario in ["turn_interrupt", "turn_interrupt_mid_tool"] {
+            let replay = Replay::run(scenario, driver);
+            replay.integrity();
+            assert_eq!(
+                replay.statuses(),
+                vec![RunStatus::Interrupted],
+                "{driver:?} {scenario}"
+            );
+            assert_eq!(
+                replay.state().attempts[0].status,
+                AttemptStatus::Interrupted
+            );
+            let request = replay
+                .state()
+                .items
+                .iter()
+                .find(|i| matches!(i.kind, ItemKind::RunInterruptRequest))
+                .unwrap();
+            let result = replay.state().items.iter().find(|i| matches!(&i.kind, ItemKind::RunInterruptResult { request: id } if *id == request.id)).unwrap();
+            assert_eq!(request.status, ItemStatus::Completed);
+            assert_eq!(result.status, ItemStatus::Interrupted);
+            if scenario == "turn_interrupt_mid_tool" {
+                let tool = replay
+                    .state()
+                    .items
+                    .iter()
+                    .find(|i| matches!(i.kind, ItemKind::CommandExecution { .. }))
+                    .unwrap();
+                assert_eq!(tool.status, ItemStatus::Interrupted);
+                assert!(tool.completed_at.is_some());
+                assert!(
+                    matches!(&tool.kind, ItemKind::CommandExecution { command, .. } if command.contains("node -e"))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn native_child_approvals_are_owned_by_the_root_and_never_appear_in_child_threads() {
+    for scenario in ["subagent_v2_approval", "subagent_v2_nested_approval"] {
+        let replay = Replay::run(scenario, Driver::Codex);
+        replay.integrity();
+        assert_eq!(replay.statuses(), vec![RunStatus::Completed]);
+        assert_eq!(replay.state().requests.len(), 1);
+        let request = &replay.state().requests[0];
+        assert_eq!(request.status, RequestStatus::Resolved);
+        assert_eq!(request.decision, Some(ApprovalDecision::Accept));
+        assert_eq!(
+            Some(&request.attempt),
+            replay.state().runs[0].attempt.as_ref()
+        );
+        assert!(!request.owner_path.is_empty());
+        for child in replay.states.values().filter(|s| s.native_parent.is_some()) {
+            assert!(child.requests.is_empty());
+            assert!(
+                !child
+                    .items
+                    .iter()
+                    .any(|item| matches!(item.kind, ItemKind::ApprovalRequest { .. }))
+            );
+        }
+    }
+}
+#[test]
+fn local_bash_task_replay_keeps_command_output_without_child_threads() {
+    let replay = Replay::run("claude_local_bash_task", Driver::Claude);
+    replay.integrity();
+    assert_eq!(replay.statuses(), vec![RunStatus::Completed]);
+    assert_eq!(replay.states.len(), 1);
+    assert!(replay.state().tasks.is_empty());
+    assert_eq!(
+        replay.replies(&replay.state().runs[0].id),
+        vec![
+            "I'll run the typecheck command now.",
+            "claude local bash task fixture complete"
+        ]
+    );
+    let tool = replay
+        .state()
+        .items
+        .iter()
+        .find(|i| matches!(i.kind, ItemKind::CommandExecution { .. }))
+        .unwrap();
+    assert!(
+        matches!(&tool.kind,ItemKind::CommandExecution { command,.. } if command.contains("vp run --filter @t3tools/web typecheck"))
+    );
+    assert!(tool.text.contains("tsgo --noEmit"));
+}
+#[test]
+fn web_search_replays_preserve_queries_and_structured_result_urls() {
+    for driver in [Driver::Claude, Driver::Codex] {
+        let replay = Replay::run("web_search", driver);
+        assert_eq!(replay.statuses(), vec![RunStatus::Completed]);
+        assert!(replay.state().requests.is_empty());
+        let searches: Vec<_> = replay
+            .state()
+            .items
+            .iter()
+            .filter(|i| matches!(i.kind, ItemKind::WebSearch { .. }))
+            .collect();
+        assert_eq!(searches.len(), 1);
+        assert_eq!(searches[0].status, ItemStatus::Completed);
+        let ItemKind::WebSearch { query, results } = &searches[0].kind else {
+            panic!()
+        };
+        if driver == Driver::Claude {
+            assert_eq!(query, "FIFA World Cup 2026 ticket pricing");
+            assert!(results.as_ref().unwrap().0.to_string().contains("fifa.com"));
+        } else {
+            assert_eq!(query, "FIFA World Cup 2026 ticket prices official");
+        }
+        assert!(
+            replay
+                .replies(&replay.state().runs[0].id)
+                .iter()
+                .any(|text| text.contains("web search fixture complete"))
+        );
+    }
+}
+#[test]
+fn mcp_tool_replay_keeps_recorded_presentation_and_leaves_absent_metadata_empty() {
+    let replay = Replay::run("claude_mcp_tool_presentation", Driver::Claude);
+    assert_eq!(replay.statuses(), vec![RunStatus::Completed]);
+    let tools: Vec<_> = replay
+        .state()
+        .items
+        .iter()
+        .filter_map(|i| match &i.kind {
+            ItemKind::DynamicTool {
+                name, presentation, ..
+            } => Some((i.status, name, presentation)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tools.iter().map(|t| t.1.as_str()).collect::<Vec<_>>(),
+        vec![
+            "mcp__claude_ai_Firecrawl__firecrawl_scrape",
+            "mcp__claude_ai_Firecrawl__firecrawl_map"
+        ]
+    );
+    assert_eq!(tools[0].0, ItemStatus::Completed);
+    assert_eq!(tools[0].2.title.as_deref(), Some("Firecrawl scrape"));
+    assert_eq!(
+        tools[0].2.source.as_ref().unwrap().0,
+        json!({"key":"mcp:firecrawl","name":"Firecrawl","kind":"integration","icon":{"_tag":"themed-logo","logoUrl":"https://www.google.com/s2/favicons?domain=firecrawl.dev&sz=64"}})
+    );
+    assert_eq!(tools[1].0, ItemStatus::Completed);
+    assert_eq!(*tools[1].2, ToolPresentation::default());
+}
+#[test]
+fn background_interrupt_replay_clears_the_roster_and_keeps_completed_launches() {
+    let replay = Replay::run("claude_background_task_interrupt", Driver::Claude);
+    assert_eq!(replay.statuses(), vec![RunStatus::Interrupted]);
+    assert!(replay.state().background_work.is_empty());
+    assert!(replay.state().tasks.is_empty());
+    assert_eq!(
+        replay
+            .state()
+            .items
+            .iter()
+            .filter(|i| matches!(i.kind, ItemKind::CommandExecution { .. }))
+            .map(|i| i.status)
+            .collect::<Vec<_>>(),
+        vec![ItemStatus::Completed, ItemStatus::Interrupted]
+    );
 }

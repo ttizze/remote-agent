@@ -81,9 +81,13 @@ pub enum FactBody {
         key: String,
     },
     NativeChildBound {
+        native_thread: Option<String>,
         owner: RunAttemptId,
         parent: ThreadId,
         task: NodeId,
+    },
+    NativeChildTurnBound {
+        native_turn: Option<String>,
     },
     ThreadRenamed {
         title: String,
@@ -229,6 +233,7 @@ pub enum FactBody {
         status: ItemStatus,
     },
     RequestOpened {
+        owner_path: Vec<String>,
         id: RuntimeRequestId,
         attempt: RunAttemptId,
         native_key: String,
@@ -242,11 +247,23 @@ pub enum FactBody {
         answers: Option<Answers>,
         attachments: BTreeMap<String, Vec<Attachment>>,
     },
-    PlanRecorded {
+    PlanStarted {
         id: PlanId,
         run: RunId,
         native_key: String,
-        markdown: String,
+        kind: PlanKind,
+    },
+    PlanMarkdownAppended {
+        id: PlanId,
+        offset: usize,
+        text: String,
+    },
+    PlanMarkdownReplaced {
+        id: PlanId,
+        text: String,
+    },
+    PlanStepsReplaced {
+        id: PlanId,
         steps: Vec<PlanStep>,
     },
     PlanImplemented {
@@ -259,9 +276,6 @@ pub enum FactBody {
         run_ordinal: u64,
         native_heads: BTreeMap<String, Option<String>>,
         file_ref: String,
-    },
-    CaptureFailed {
-        run: RunId,
     },
     RollbackRequested {
         command: CommandId,
@@ -508,17 +522,24 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             state.pending_children.remove(key);
         }
         NativeChildBound {
+            native_thread,
             owner,
             parent,
             task,
         } => {
             state.native_owner = Some(owner.clone());
+            state.native_child_thread = native_thread.clone();
+            state.native_child_turn = None;
+            state.stopping.remove(owner);
             state.native_parent = Some((parent.clone(), task.clone()));
             state
                 .thread
                 .as_mut()
                 .ok_or(FoldError::Missing("thread"))?
                 .parent = Some(parent.clone());
+        }
+        NativeChildTurnBound { native_turn } => {
+            state.native_child_turn = native_turn.clone();
         }
         ThreadRenamed { title } => {
             state
@@ -717,7 +738,15 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             }
         }
         RunWaitingForCapture { id, terminal } => {
-            find_mut(&mut state.runs, "run", |r| &r.id == id)?.status = RunStatus::Waiting;
+            let run = find_mut(&mut state.runs, "run", |r| &r.id == id)?;
+            run.status = if matches!(terminal, RunStatus::Interrupted | RunStatus::Cancelled) {
+                *terminal
+            } else {
+                RunStatus::Waiting
+            };
+            if run.status.terminal() {
+                run.completed_at = Some(at.clone());
+            }
             state.captures.insert(id.clone(), *terminal);
         }
         RunFinished { id, status } => {
@@ -836,6 +865,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             }
         }
         RequestOpened {
+            owner_path,
             id,
             attempt,
             native_key,
@@ -846,6 +876,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 return Err(FoldError::Conflict);
             }
             state.requests.push(Request {
+                owner_path: owner_path.clone(),
                 id: id.clone(),
                 attempt: attempt.clone(),
                 native_key: native_key.clone(),
@@ -878,26 +909,37 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             r.attachments = attachments.clone();
             r.resolved_at = Some(at.clone());
         }
-        PlanRecorded {
+        PlanStarted {
             id,
             run,
             native_key,
-            markdown,
-            steps,
+            kind,
         } => {
-            if let Some(p) = state.plans.iter_mut().find(|p| &p.id == id) {
-                p.markdown = markdown.clone();
-                p.steps = steps.clone();
-            } else {
-                state.plans.push(Plan {
-                    id: id.clone(),
-                    run: run.clone(),
-                    native_key: native_key.clone(),
-                    markdown: markdown.clone(),
-                    steps: steps.clone(),
-                    implemented_by: None,
-                });
+            if state.plans.iter().any(|p| &p.id == id) {
+                return Err(FoldError::Conflict);
             }
+            state.plans.push(Plan {
+                id: id.clone(),
+                kind: *kind,
+                run: run.clone(),
+                native_key: native_key.clone(),
+                markdown: String::new(),
+                steps: vec![],
+                implemented_by: None,
+            });
+        }
+        PlanMarkdownAppended { id, offset, text } => {
+            let plan = find_mut(&mut state.plans, "plan", |p| &p.id == id)?;
+            if plan.markdown.len() != *offset {
+                return Err(FoldError::Offset);
+            }
+            plan.markdown.push_str(text);
+        }
+        PlanMarkdownReplaced { id, text } => {
+            find_mut(&mut state.plans, "plan", |p| &p.id == id)?.markdown = text.clone();
+        }
+        PlanStepsReplaced { id, steps } => {
+            find_mut(&mut state.plans, "plan", |p| &p.id == id)?.steps = steps.clone();
         }
         PlanImplemented { id, run } => {
             find_mut(&mut state.plans, "plan", |p| &p.id == id)?.implemented_by = Some(run.clone())
@@ -919,9 +961,6 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             if let Some(run) = run {
                 find_mut(&mut state.runs, "run", |r| &r.id == run)?.checkpoint = Some(id.clone());
             }
-        }
-        CaptureFailed { run } => {
-            state.captures.remove(run);
         }
         RollbackRequested {
             command,

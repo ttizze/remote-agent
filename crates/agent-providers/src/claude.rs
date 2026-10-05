@@ -22,6 +22,7 @@ pub struct ClaudeProtocol {
     messages: BTreeMap<String, MessageCursor>,
     current: BTreeMap<String, String>,
     tools: BTreeMap<String, (String, Value)>,
+    presentations: BTreeMap<String, ToolPresentation>,
     parents: BTreeMap<String, String>,
     /// SDK task ID -> native tool-use ID. Local Bash tasks have no child thread.
     tasks: BTreeMap<String, (String, bool)>,
@@ -68,7 +69,7 @@ impl ClaudeProtocol {
             ProviderCommand::Steer { text, attachments } => result.outbound.push(
                 claude_user_message(text, attachments, user_uuid, true, images)?,
             ),
-            ProviderCommand::Interrupt => result
+            ProviderCommand::Interrupt { .. } => result
                 .outbound
                 .push(self.control.request("interrupt", json!({}))),
             ProviderCommand::Respond {
@@ -206,6 +207,7 @@ impl ClaudeProtocol {
                     self.tasks.insert(task.clone(), (tool.clone(), agent));
                     if agent {
                         events.push(ProviderEvent::SubagentStarted {
+                            native_thread: None,
                             key: tool.clone(),
                             parent: optional(frame, "parent_tool_use_id"),
                             prompt: optional(frame, "prompt")
@@ -423,9 +425,19 @@ impl ClaudeProtocol {
                             let input = block["input"].clone();
                             self.tools
                                 .insert(key.clone(), (name.clone(), input.clone()));
+                            let meta = frame["tool_use_meta"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .find(|meta| meta["id"] == key);
+                            if let Some(meta) = meta {
+                                let server = optional(meta, "server_display_name");
+                                self.presentations.insert(key.clone(), ToolPresentation { title: optional(meta, "display_name"), source: server.map(|server| Json(json!({"key":format!("mcp:{}", server.to_lowercase()),"name":server,"kind":"integration","icon":{"_tag":"themed-logo","logoUrl":meta["icon_url"]}}))) });
+                            }
                             if name == "Agent" || name == "Task" {
                                 self.parents.insert(key.clone(), route.clone());
                                 events.push(ProviderEvent::SubagentStarted {
+                                    native_thread: None,
                                     key,
                                     parent: if route.is_empty() {
                                         None
@@ -437,6 +449,7 @@ impl ClaudeProtocol {
                                 });
                             } else if name == "TodoWrite" {
                                 events.push(ProviderEvent::Plan {
+                                    kind: PlanKind::Todo,
                                     key: key.clone(),
                                     markdown: String::new(),
                                     steps: input["todos"]
@@ -451,8 +464,13 @@ impl ClaudeProtocol {
                                 });
                             } else {
                                 events.push(ProviderEvent::ItemStarted {
+                                    kind: claude_tool(
+                                        &name,
+                                        &input,
+                                        None,
+                                        self.presentations.get(&key),
+                                    ),
                                     key,
-                                    kind: claude_tool(&name, &input, None),
                                 });
                             }
                         }
@@ -515,8 +533,13 @@ impl ClaudeProtocol {
                                     });
                                 } else {
                                     events.push(ProviderEvent::ItemFinished {
+                                        kind: claude_tool(
+                                            name,
+                                            input,
+                                            Some(&frame["tool_use_result"]),
+                                            self.presentations.get(&key),
+                                        ),
                                         key,
-                                        kind: claude_tool(name, input, Some(&block["content"])),
                                         text: Some(text),
                                         status,
                                     });
@@ -707,7 +730,12 @@ fn claude_terminal_status(frame: &Value, hint: Option<&str>) -> RunStatus {
         RunStatus::Failed
     }
 }
-fn claude_tool(name: &str, input: &Value, output: Option<&Value>) -> ProviderItem {
+fn claude_tool(
+    name: &str,
+    input: &Value,
+    output: Option<&Value>,
+    presentation: Option<&ToolPresentation>,
+) -> ProviderItem {
     match name {
         "Bash" => ProviderItem::Command {
             command: string(input, "command"),
@@ -719,8 +747,10 @@ fn claude_tool(name: &str, input: &Value, output: Option<&Value>) -> ProviderIte
         },
         "WebSearch" => ProviderItem::WebSearch {
             query: string(input, "query"),
+            results: output.and_then(|v| v.get("results")).cloned().map(Json),
         },
         _ => ProviderItem::Tool {
+            presentation: presentation.cloned().unwrap_or_default(),
             name: name.into(),
             input: Json(input.clone()),
             output: output.cloned().map(Json),
@@ -761,7 +791,7 @@ pub fn claude_user_message(
 ) -> Result<Value, ProtocolError> {
     let mut content = vec![];
     for file in attachments {
-        if native_image_mime(&file.mime_type) {
+        if native_image(file) {
             let image = images
                 .iter()
                 .find(|image| image.attachment_id == file.id)

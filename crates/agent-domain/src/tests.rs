@@ -191,6 +191,7 @@ fn restart_supersedes_attempt_and_interrupts_native_children() {
         "child",
         &a,
         ProviderEvent::SubagentStarted {
+            native_thread: None,
             key: "child".into(),
             parent: None,
             prompt: "child prompt".into(),
@@ -247,7 +248,7 @@ fn stop_during_start_emits_interrupt_even_without_native_turn() {
     assert_eq!(stopped.effects[0].attempt, Some(a.clone()));
     assert!(matches!(
         stopped.effects[0].body,
-        EffectBody::Provider(ProviderCommand::Interrupt)
+        EffectBody::Provider(ProviderCommand::Interrupt { .. })
     ));
     assert_eq!(s.runs[0].status, RunStatus::Interrupted);
     assert!(s.runs[1].queue_held);
@@ -329,6 +330,7 @@ fn recovery_holds_queued_work_finishes_streaming_and_preserves_async_questions()
             key,
             &a,
             ProviderEvent::RequestOpened {
+                owner_path: vec![],
                 key: key.into(),
                 body: RequestBody::Questions { questions: vec![] },
                 capability,
@@ -675,6 +677,7 @@ fn plan_followup_preserves_attachments_and_consumes_the_proposal() {
         "proposal",
         &a,
         ProviderEvent::Plan {
+            kind: PlanKind::Proposed,
             key: "proposal".into(),
             markdown: "replay fixture plan".into(),
             steps: vec![],
@@ -683,6 +686,8 @@ fn plan_followup_preserves_attachments_and_consumes_the_proposal() {
     finish(&mut s, &a);
     let plan = s.plans[0].id.clone();
     let file = Attachment {
+        kind: AttachmentKind::File,
+        source: None,
         id: "image".into(),
         name: "image.png".into(),
         mime_type: "image/png".into(),
@@ -716,6 +721,7 @@ fn approvals_resolve_once_and_questions_keep_attachment_answers() {
         "approval",
         &a,
         ProviderEvent::RequestOpened {
+            owner_path: vec![],
             key: "approval".into(),
             body: RequestBody::Approval {
                 kind: "command".into(),
@@ -756,6 +762,7 @@ fn approvals_resolve_once_and_questions_keep_attachment_answers() {
         "question",
         &a,
         ProviderEvent::RequestOpened {
+            owner_path: vec![],
             key: "question".into(),
             body: RequestBody::Questions {
                 questions: vec![Question {
@@ -831,6 +838,7 @@ fn native_subagent_followup_reopens_completed_task() {
     let mut s = state();
     let (_, a) = running(&mut s, "first");
     let start = ProviderEvent::SubagentStarted {
+        native_thread: None,
         key: "child".into(),
         parent: None,
         prompt: "Hello".into(),
@@ -933,7 +941,7 @@ proptest! {
                 (0|1,_) => { command(&mut s,&key,send_message(&key,DispatchMode::QueueAfterActive)); }
                 (2,Some(a)) => { provider(&mut s,&key,&a,ProviderEvent::TurnStarted { native_turn:Some(key.clone()) }); }
                 (3,Some(a)) => { provider(&mut s,&key,&a,ProviderEvent::TextDelta { key:"text".into(),kind:ProviderItem::Text,text:"日本語🙂".into() }); }
-                (4,Some(a)) => { provider(&mut s,&key,&a,ProviderEvent::RequestOpened { key:key.clone(),body:RequestBody::Questions { questions:vec![] },capability:ResponseCapability::Live }); }
+                (4,Some(a)) => { provider(&mut s,&key,&a,ProviderEvent::RequestOpened { owner_path:vec![], key:key.clone(),body:RequestBody::Questions { questions:vec![] },capability:ResponseCapability::Live }); }
                 (5,_) => { if let Some(request) = s.requests.iter().find(|r|r.status == RequestStatus::Pending).cloned() { command(&mut s,&key,Command::Respond { request:request.id,answers:Some(BTreeMap::new()),decision:None,attachments:BTreeMap::new() }); } }
                 (6,Some(a)) => { provider(&mut s,&key,&a,ProviderEvent::TurnFinished { status:RunStatus::Completed,native_head:Some(key.clone()) }); }
                 (7,_) => { command(&mut s,&key,Command::Stop); }
@@ -1160,4 +1168,44 @@ fn visible_items_sort_by_authoritative_ordinal_and_keep_inherited_rows() {
             .collect::<Vec<_>>(),
         ["inherited"]
     );
+}
+
+#[test]
+fn failed_capture_is_retryable_and_stopped_capture_keeps_its_terminal_status() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "baseline");
+    finish(&mut s, &a);
+    checkpoint(&mut s, &first, &a, "baseline-cp");
+    let (second, b) = running(&mut s, "second");
+    command(&mut s, "stop-second", Command::Stop);
+    provider(
+        &mut s,
+        "stopped",
+        &b,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Interrupted,
+            native_head: Some("stopped-head".into()),
+        },
+    );
+    assert_eq!(s.runs[1].status, RunStatus::Interrupted);
+    assert_eq!(s.captures.get(&second), Some(&RunStatus::Interrupted));
+    result(
+        &mut s,
+        "capture-failed",
+        EffectResult::CheckpointFailed {
+            run: second.clone(),
+            attempt: Some(b.clone()),
+            message: "temporary failure".into(),
+        },
+    );
+    assert_eq!(s.captures.get(&second), Some(&RunStatus::Interrupted));
+    command(
+        &mut s,
+        "next",
+        send_message("next", DispatchMode::StartImmediately),
+    );
+    assert_eq!(s.runs[2].status, RunStatus::Queued);
+    checkpoint(&mut s, &second, &b, "stopped-cp");
+    assert_eq!(s.runs[1].status, RunStatus::Interrupted);
+    assert_eq!(s.runs[2].status, RunStatus::Starting);
 }

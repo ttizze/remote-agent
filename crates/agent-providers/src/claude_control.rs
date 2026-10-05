@@ -31,16 +31,38 @@ impl ClaudeControl {
             "control_response" => {
                 let response = &frame["response"];
                 let id = required(response, "request_id")?;
-                if let Some(operation) = self.pending.remove(&id)
-                    && response["subtype"] == "error"
-                {
+                let Some(operation) = self.pending.remove(&id) else {
+                    return Ok(Some(Translation::default()));
+                };
+                if response["subtype"] == "error" {
                     return Err(ProtocolError::Remote {
                         operation,
                         message: string(response, "error"),
                         turn_completed: false,
                     });
                 }
-                Ok(Some(Translation::default()))
+                let mut output = Translation {
+                    replies: vec![NativeReply {
+                        request: id,
+                        operation: operation.clone(),
+                        result: Json(response["response"].clone()),
+                    }],
+                    ..Translation::default()
+                };
+                if operation == "initialize" {
+                    for key in [
+                        "pending_permission_requests",
+                        "pending_user_dialog_requests",
+                    ] {
+                        for request in response["response"][key].as_array().into_iter().flatten() {
+                            if let Some(recovered) = self.receive(request)? {
+                                output.events.extend(recovered.events);
+                                output.outbound.extend(recovered.outbound);
+                            }
+                        }
+                    }
+                }
+                Ok(Some(output))
             }
             "control_cancel_request" => {
                 let key = required(frame, "request_id")?;
@@ -54,6 +76,9 @@ impl ClaudeControl {
             "control_request" => {
                 let key = required(frame, "request_id")?;
                 let request = &frame["request"];
+                if self.permissions.contains_key(&key) {
+                    return Ok(Some(Translation::default()));
+                }
                 match string(request, "subtype").as_str() {
                     "can_use_tool" => {
                         let tool = required(request, "tool_name")?;
@@ -63,6 +88,7 @@ impl ClaudeControl {
                             let mut events = vec![];
                             if !markdown.trim().is_empty() {
                                 events.push(ProviderEvent::Plan {
+                                    kind: PlanKind::Proposed,
                                     key: optional(request, "tool_use_id")
                                         .unwrap_or_else(|| key.clone()),
                                     markdown: markdown.trim().into(),
@@ -103,6 +129,7 @@ impl ClaudeControl {
                         };
                         Ok(Some(Translation {
                             events: vec![ProviderEvent::RequestOpened {
+                                owner_path: vec![],
                                 key,
                                 body,
                                 capability: ResponseCapability::Live,
@@ -148,6 +175,7 @@ impl ClaudeControl {
                         );
                         Ok(Some(Translation {
                             events: vec![ProviderEvent::RequestOpened {
+                                owner_path: vec![],
                                 key,
                                 body: RequestBody::Questions {
                                     questions: vec![Question { id:question.clone(),header:"Resume session".into(),question,multiple:false,options:vec![QuestionOption { label:"Compact and continue".into(),description:Some("Resume with a summary and use fewer tokens.".into()) },QuestionOption { label:"Keep full history".into(),description:Some("Resume without changing the conversation.".into()) },QuestionOption { label:"Don't ask again".into(),description:Some("Keep full history and skip future resume prompts.".into()) }] },],

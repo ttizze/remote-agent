@@ -1074,3 +1074,14 @@ Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機�
 | `claude_result_is_error` | 認証の文言、api_error_401 / provider_error、assistant の二重表示なし、次の run の成功 |
 | `subagent`（両 driver）, `subagent_v2`, `subagent_v2_nested`（Codex） | 子の run を増やさず、1 / 2 / 3 段の子スレッド、元の結果・prompt・title・親への tool 漏れなし |
 | `ClaudeAdapterV2.test.ts` の resume dialog | 元の 1h 30m / 120,000 tokens の質問、選択肢、compact の control response |
+
+### 追加した段階 1・2 の挙動検証
+
+| T3 の原本 | 新設計での検証 |
+| --- | --- |
+| `turn_interrupt` / `turn_interrupt_mid_tool`（両 provider） | `agent-providers::replay::stop_replays_close_attempts_tools_and_interrupt_rows`。run/attempt/停止カードの status と command terminalization。native の起動前停止・子停止・terminal terminate は command 翻訳のテストでも確認。 |
+| `claude_background_task_interrupt` | roster 消去、launch は completed、foreground command は interrupted、continuation なし。 |
+| `subagent_v2_approval` / `subagent_v2_nested_approval` | 親の承認解決、親 attempt への帰属、子に要求と承認カードがないこと。 |
+| `claude_local_bash_task` / `web_search`（両 provider） / `claude_mcp_tool_presentation` | 原本の assistant 文言、検索 query/result URL、command output、記録された MCP title/source と metadata がない場合の空値。 |
+| `AttachmentPrompt.test.ts` | `agent-providers::attachments::tests`。パスの全文、escaped JSON、accessibility 圧縮と bounds、入力上限、image/file 判定の期待値を維持。 |
+| `CheckpointCaptureService.ts` の stopped/at-least-once 規則 | `agent-domain::tests::failed_capture_is_retryable_and_stopped_capture_keeps_its_terminal_status`。失敗でキューを解放せず、保存結果で terminal status を変えない。 |

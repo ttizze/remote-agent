@@ -72,3 +72,144 @@ async fn json_lines_continue_after_invalid_frames_and_preserve_large_unicode_out
     );
     assert!(read_frame(&mut reader).await.unwrap().is_none());
 }
+
+fn codex_start() -> ProviderCommand {
+    ProviderCommand::Start {
+        selection: ModelSelection {
+            instance: "codex".into(),
+            driver: Driver::Codex,
+            model: "gpt-5.4".into(),
+            options: std::collections::BTreeMap::new(),
+        },
+        runtime_mode: RuntimeMode::Auto,
+        interaction_mode: InteractionMode::Default,
+        text: "hello".into(),
+        attachments: vec![],
+        native_thread: None,
+        resume_at: None,
+        context: String::new(),
+    }
+}
+fn wire_context() -> WireContext {
+    WireContext {
+        cwd: "/workspace".into(),
+        client_name: "agent-client".into(),
+        client_version: "1".into(),
+    }
+}
+#[test]
+fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start() {
+    use serde_json::json;
+    let mut protocol = CodexProtocol::default();
+    let start = protocol.command(&codex_start(), &wire_context()).unwrap();
+    assert_eq!(start[0]["method"], "thread/start");
+    assert!(
+        protocol
+            .command(
+                &ProviderCommand::Interrupt {
+                    native_thread: None,
+                    native_turn: None
+                },
+                &wire_context()
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let ready = protocol
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"root"}}}))
+        .unwrap();
+    assert!(ready.outbound.is_empty());
+    let next = protocol.command(&codex_start(), &wire_context()).unwrap();
+    assert_eq!(next[0]["method"], "turn/start");
+    assert_eq!(next[0]["params"]["approvalsReviewer"], "auto_review");
+    assert_eq!(next[0]["params"]["approvalPolicy"], "on-request");
+    assert_eq!(
+        next[0]["params"]["input"],
+        json!([{"type":"text","text":"hello"}])
+    );
+}
+#[test]
+fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes() {
+    use serde_json::json;
+    let mut protocol = CodexProtocol::default();
+    let start = protocol.command(&codex_start(), &wire_context()).unwrap();
+    let ready = protocol
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"root"}}}))
+        .unwrap();
+    assert!(
+        protocol
+            .command(
+                &ProviderCommand::Interrupt {
+                    native_thread: Some("root".into()),
+                    native_turn: None
+                },
+                &wire_context()
+            )
+            .unwrap()
+            .is_empty()
+    );
+    let started = protocol.receive(&json!({"method":"turn/started","params":{"threadId":"root","turn":{"id":"turn-root"}}})).unwrap();
+    assert_eq!(started.outbound[0]["method"], "turn/interrupt");
+    let reply = protocol
+        .receive(&json!({"id":ready.outbound[0]["id"],"result":{"turn":{"id":"turn-root"}}}))
+        .unwrap();
+    assert!(reply.outbound.is_empty());
+    protocol.receive(&json!({"method":"item/started","params":{"threadId":"root","item":{"id":"tool","type":"commandExecution","command":"sleep 30","processId":"123"}}})).unwrap();
+    let stop = protocol
+        .command(
+            &ProviderCommand::Interrupt {
+                native_thread: Some("root".into()),
+                native_turn: Some("turn-root".into()),
+            },
+            &wire_context(),
+        )
+        .unwrap();
+    assert_eq!(
+        stop.iter()
+            .map(|f| f["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["turn/interrupt", "thread/backgroundTerminals/terminate"]
+    );
+    assert_eq!(
+        stop[1]["params"],
+        json!({"threadId":"root","processId":"123"})
+    );
+    let child = protocol
+        .command(
+            &ProviderCommand::Interrupt {
+                native_thread: Some("child".into()),
+                native_turn: Some("turn-child".into()),
+            },
+            &wire_context(),
+        )
+        .unwrap();
+    assert_eq!(child.len(), 1);
+    assert_eq!(
+        child[0]["params"],
+        json!({"threadId":"child","turnId":"turn-child"})
+    );
+}
+
+#[test]
+fn initialize_recovers_pending_requests_once_and_preserves_reply_correlation() {
+    use serde_json::json;
+    let mut control = ClaudeControl::default();
+    let init = control.initialize();
+    let permission = json!({"type":"control_request","request_id":"permission-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"tool-1"}});
+    let dialog = json!({"type":"control_request","request_id":"dialog-1","request":{"subtype":"request_user_dialog","dialog_kind":"resume_return","payload":{"sessionAgeMinutes":20,"estimatedTokens":2000}}});
+    let output = control.receive(&json!({"type":"control_response","response":{"subtype":"success","request_id":init["request_id"],"response":{"pending_permission_requests":[permission.clone()],"pending_user_dialog_requests":[dialog.clone()]}}})).unwrap().unwrap();
+    assert_eq!(output.events.len(), 2);
+    assert_eq!(output.replies[0].operation, "initialize");
+    assert!(
+        control
+            .receive(&permission)
+            .unwrap()
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    assert!(control.receive(&dialog).unwrap().unwrap().events.is_empty());
+    let unknown = control.receive(&json!({"type":"control_request","request_id":"unknown-dialog","request":{"subtype":"request_user_dialog","dialog_kind":"future_dialog"}})).unwrap().unwrap();
+    assert!(unknown.events.is_empty());
+    assert!(unknown.outbound.is_empty());
+}

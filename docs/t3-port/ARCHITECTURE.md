@@ -106,3 +106,7 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-05: native fork は親に固定した子作成 command を記録してから provider effect を実行し、成功結果を受けて子へ送る。native セッションがない場合は portable context を使う。成功結果の再送は子作成を繰り返さない。
 - 2026-10-05: rollback の絶対 head は checkpoint に固定する。Claude の assistant UUID は翻訳層の累積 cursor から terminal result に付けず、所有者が決まった frame の事実として attempt に記録する。先行した peer ターンや子の cursor が、別の run の rollback 境界にならないため。
 - 2026-10-05: provider は native の親子関係だけを保持し、深い子の通知を `Child` の経路として正規化する。各 actor は直下の子だけへ effect を送る。session 共有のルーティング用 app entity を adapter に作らない。
+- 2026-10-05: 停止 command は対象の native thread/turn を明示する。起動 RPC の応答より先に停止した場合、翻訳層は未送信 prompt を取り消すか、native turn ID が判明してから interrupt する。プロセス終了は `SessionClosed` 入力で確定し、終了フレームのない Claude の停止も run とツールを terminal にする。
+- 2026-10-05: checkpoint 保存失敗は captures の対象を消さず outbox の再試行に任せる。停止 run の status は保存待ちでも interrupted/cancelled を保ち、captures が残る間は後続 run を始めない。rollback 済み run の遅い保存結果は採用しない。
+- 2026-10-05: 添付は image/file の種別を持ち、captured-window の accessibility を明示的な入力にする。T3 と同じ JSON の囲み・省略規則・入力文字数制限で provider prompt を構成する。空の todo と proposed plan を区別し、plan 本文の追記は offset 付き事実、本文と steps の置換は別の事実にする。
+- 2026-10-05: native 子の承認は親スレッドの要求として記録する。要求に native 親子経路を保存し、子の timeline には承認カードを作らない。CLI initialize が返す未解決の承認・resume dialog は再登録し、同じ native request ID の再通知は二重表示しない。

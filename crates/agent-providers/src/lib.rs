@@ -1,9 +1,11 @@
 //! Native protocol translation. Application identities belong to agent-domain.
+mod attachments;
 mod claude;
 mod claude_control;
 mod codex;
 mod stdio;
 use agent_domain::*;
+pub use attachments::*;
 pub use claude::*;
 pub use claude_control::*;
 pub use codex::*;
@@ -68,11 +70,10 @@ fn required(value: &Value, key: &str) -> Result<String, ProtocolError> {
 fn optional(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
-fn child_events(
-    events: Vec<ProviderEvent>,
-    route: &str,
-    parents: &std::collections::BTreeMap<String, String>,
-) -> Result<Vec<ProviderEvent>, ProtocolError> {
+fn native_path<'a>(
+    route: &'a str,
+    parents: &'a std::collections::BTreeMap<String, String>,
+) -> Result<Vec<&'a str>, ProtocolError> {
     let mut path = vec![];
     let mut key = route;
     while !key.is_empty() {
@@ -82,6 +83,14 @@ fn child_events(
         path.push(key);
         key = parents.get(key).map(String::as_str).unwrap_or("");
     }
+    Ok(path)
+}
+fn child_events(
+    events: Vec<ProviderEvent>,
+    route: &str,
+    parents: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<ProviderEvent>, ProtocolError> {
+    let path = native_path(route, parents)?;
     Ok(events
         .into_iter()
         .map(|mut event| {

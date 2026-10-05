@@ -279,6 +279,7 @@ impl Decision {
     }
     fn promote(&mut self) {
         if self.state.active_run().is_some()
+            || !self.state.captures.is_empty()
             || self.state.rollback.is_some()
             || self
                 .state
@@ -368,6 +369,58 @@ impl Decision {
             );
         }
     }
+    fn interrupt_provider(&mut self, attempt: &RunAttemptId) {
+        let owner = self.state.attempts.iter().find(|a| &a.id == attempt);
+        let (native_thread, native_turn) = if self.state.native_owner.as_ref() == Some(attempt) {
+            (
+                self.state.native_child_thread.clone(),
+                self.state.native_child_turn.clone(),
+            )
+        } else {
+            (
+                owner.and_then(|a| a.native_thread.clone()),
+                owner.and_then(|a| a.native_turn.clone()),
+            )
+        };
+        self.effect(
+            Some(attempt.clone()),
+            EffectBody::Provider(ProviderCommand::Interrupt {
+                native_thread,
+                native_turn,
+            }),
+        );
+    }
+    fn interrupt_item(&mut self, attempt: &RunAttemptId, run: &RunId, status: Option<ItemStatus>) {
+        let key = self.native_key("interrupt-request", attempt, "stop");
+        let request = TurnItemId::new(key.clone()).unwrap();
+        if !self.state.items.iter().any(|item| item.id == request) {
+            self.item_start(
+                request.clone(),
+                Some(run.clone()),
+                Some(attempt.clone()),
+                key,
+                ItemKind::RunInterruptRequest,
+            );
+            self.fact(FactBody::ItemCompleted {
+                id: request.clone(),
+                status: ItemStatus::Completed,
+            });
+        }
+        if let Some(status) = status {
+            let key = self.native_key("interrupt-result", attempt, "stop");
+            let result = TurnItemId::new(key.clone()).unwrap();
+            if !self.state.items.iter().any(|item| item.id == result) {
+                self.item_start(
+                    result.clone(),
+                    Some(run.clone()),
+                    Some(attempt.clone()),
+                    key,
+                    ItemKind::RunInterruptResult { request },
+                );
+                self.fact(FactBody::ItemCompleted { id: result, status });
+            }
+        }
+    }
     fn finish(&mut self, run: &RunId, status: RunStatus, capture: bool) {
         let r = self
             .state
@@ -388,6 +441,9 @@ impl Decision {
                 status: a,
             });
             self.close_attempt_items(attempt, i, false);
+            if self.state.stopping.contains(attempt) {
+                self.interrupt_item(attempt, run, Some(i));
+            }
         }
         if capture
             && self
@@ -483,10 +539,7 @@ impl Decision {
                     id: attempt.clone(),
                     status: AttemptStatus::Superseded,
                 });
-                self.effect(
-                    Some(attempt),
-                    EffectBody::Provider(ProviderCommand::Interrupt),
-                );
+                self.interrupt_provider(&attempt);
                 let ordinal =
                     self.state.attempts.iter().filter(|a| a.run == *run).count() as u64 + 1;
                 let next =
@@ -525,7 +578,10 @@ impl Decision {
             return Reply::Run(run.clone());
         }
         let held = self.state.queued_runs().iter().any(|r| r.queue_held);
-        let queued = active.is_some() || held || !self.state.queued_runs().is_empty();
+        let queued = active.is_some()
+            || !self.state.captures.is_empty()
+            || held
+            || !self.state.queued_runs().is_empty();
         let deferred = matches!(mode, DispatchMode::DeferStart);
         if deferred && active.is_some() {
             return reject("run-already-active");
@@ -637,19 +693,21 @@ impl Decision {
                 if let Some(owner) = self.state.native_owner.clone() {
                     self.stop_tasks(&owner, ItemStatus::Interrupted);
                     self.close_attempt_items(&owner, ItemStatus::Interrupted, false);
-                    self.effect(
-                        Some(owner),
-                        EffectBody::Provider(ProviderCommand::Interrupt),
-                    );
+                    self.fact(FactBody::StopRequested {
+                        attempt: owner.clone(),
+                    });
+                    self.interrupt_provider(&owner);
                 }
                 Reply::Accepted
             }
             BindNativeChild {
+                native_thread,
                 owner,
                 parent,
                 task,
             } => {
                 self.fact(FactBody::NativeChildBound {
+                    native_thread: native_thread.clone(),
                     owner: owner.clone(),
                     parent: parent.clone(),
                     task: task.clone(),
@@ -708,10 +766,7 @@ impl Decision {
                 self.hold_queue();
                 for run in runs {
                     if let Some(a) = &run.attempt {
-                        self.effect(
-                            Some(a.clone()),
-                            EffectBody::Provider(ProviderCommand::Interrupt),
-                        );
+                        self.interrupt_provider(a);
                         self.stop_tasks(a, ItemStatus::Cancelled);
                     }
                     self.finish(&run.id, RunStatus::Cancelled, false);
@@ -927,13 +982,14 @@ impl Decision {
                 }
                 self.fact(FactBody::BackgroundWorkStopped);
                 if let Some(attempt) = &target.attempt {
+                    if self.state.stopping.contains(attempt) {
+                        return Reply::Ignored;
+                    }
+                    self.interrupt_item(attempt, run, None);
                     self.fact(FactBody::StopRequested {
                         attempt: attempt.clone(),
                     });
-                    self.effect(
-                        Some(attempt.clone()),
-                        EffectBody::Provider(ProviderCommand::Interrupt),
-                    );
+                    self.interrupt_provider(attempt);
                     self.stop_tasks(attempt, ItemStatus::Interrupted);
                     if background && !target.status.blocking() {
                         return Reply::Accepted;
@@ -1707,16 +1763,19 @@ impl Decision {
                 changes: changes.clone(),
             },
             ProviderItem::Tool {
+                presentation,
                 name,
                 input,
                 output,
             } => ItemKind::DynamicTool {
+                presentation: presentation.clone(),
                 name: name.clone(),
                 input: input.clone(),
                 output: output.clone(),
             },
-            ProviderItem::WebSearch { query } => ItemKind::WebSearch {
+            ProviderItem::WebSearch { query, results } => ItemKind::WebSearch {
                 query: query.clone(),
+                results: results.clone(),
             },
             ProviderItem::Compaction { before, after } => ItemKind::Compaction {
                 before: *before,
@@ -1757,6 +1816,35 @@ impl Decision {
         }
         id
     }
+    fn ensure_plan(
+        &mut self,
+        run: &RunId,
+        attempt: &RunAttemptId,
+        key: &str,
+        kind: PlanKind,
+    ) -> (PlanId, TurnItemId) {
+        let id = PlanId::new(self.native_key("plan", attempt, key)).unwrap();
+        let item = TurnItemId::new(self.native_key("plan-item", attempt, key)).unwrap();
+        if !self.state.plans.iter().any(|p| p.id == id) {
+            self.fact(FactBody::PlanStarted {
+                id: id.clone(),
+                run: run.clone(),
+                native_key: key.into(),
+                kind,
+            });
+            self.item_start(
+                item.clone(),
+                Some(run.clone()),
+                Some(attempt.clone()),
+                key.into(),
+                match kind {
+                    PlanKind::Proposed => ItemKind::ProposedPlan { plan: id.clone() },
+                    PlanKind::Todo => ItemKind::TodoList { plan: id.clone() },
+                },
+            );
+        }
+        (id, item)
+    }
     fn provider(&mut self, attempt: &RunAttemptId, event: &ProviderEvent) -> Reply {
         if let ProviderEvent::NativeOutput {
             echoed_prompts,
@@ -1785,16 +1873,17 @@ impl Decision {
         if !child && run.is_none() {
             return Reply::Ignored;
         }
-        let background = matches!(
-            event,
-            ProviderEvent::SubagentStarted { .. }
-                | ProviderEvent::SubagentNamed { .. }
-                | ProviderEvent::SubagentProgress { .. }
-                | ProviderEvent::SubagentFinished { .. }
-                | ProviderEvent::Child { .. }
-                | ProviderEvent::BackgroundTask { .. }
-                | ProviderEvent::Wake { .. }
-        );
+        let background = matches!(event, ProviderEvent::RequestOpened { owner_path, .. } if !owner_path.is_empty())
+            || matches!(
+                event,
+                ProviderEvent::SubagentStarted { .. }
+                    | ProviderEvent::SubagentNamed { .. }
+                    | ProviderEvent::SubagentProgress { .. }
+                    | ProviderEvent::SubagentFinished { .. }
+                    | ProviderEvent::Child { .. }
+                    | ProviderEvent::BackgroundTask { .. }
+                    | ProviderEvent::Wake { .. }
+            );
         if !child
             && run
                 .as_ref()
@@ -1873,15 +1962,52 @@ impl Decision {
             NativeOutput { .. } => {
                 unreachable!("native output is routed before applying its events")
             }
+            SessionClosed { error } => {
+                if let Some(run) = &run {
+                    let status = if self.state.stopping.contains(attempt) {
+                        RunStatus::Interrupted
+                    } else {
+                        RunStatus::Failed
+                    };
+                    if let Some(error) = error {
+                        self.provider(
+                            attempt,
+                            &ProviderEvent::ItemFinished {
+                                key: self.native_key("session-error", attempt, "exit"),
+                                kind: ProviderItem::Error {
+                                    message: error.clone(),
+                                    retrying: false,
+                                    code: None,
+                                    class: Some("provider_error".into()),
+                                    retryable: None,
+                                },
+                                text: None,
+                                status: ItemStatus::Failed,
+                            },
+                        );
+                    }
+                    self.stop_tasks(
+                        attempt,
+                        if status == RunStatus::Interrupted {
+                            ItemStatus::Interrupted
+                        } else {
+                            ItemStatus::Failed
+                        },
+                    );
+                    self.finish(&run.id, status, true);
+                }
+            }
             TurnAborted { .. } => {
                 if let Some(run) = &run {
-                    if self.state.messages.iter().any(|m| {
-                        m.run.as_ref() == Some(&run.id)
-                            && matches!(
-                                m.intent,
-                                InputIntent::Steer | InputIntent::PromotedQueuedToSteer
-                            )
-                    }) {
+                    if !self.state.stopping.contains(attempt)
+                        && self.state.messages.iter().any(|m| {
+                            m.run.as_ref() == Some(&run.id)
+                                && matches!(
+                                    m.intent,
+                                    InputIntent::Steer | InputIntent::PromotedQueuedToSteer
+                                )
+                        })
+                    {
                         return Reply::Ignored;
                     }
                     self.finish(&run.id, RunStatus::Interrupted, true);
@@ -1896,7 +2022,11 @@ impl Decision {
                 }
             }
             TurnStarted { native_turn } => {
-                if !child {
+                if child {
+                    self.fact(FactBody::NativeChildTurnBound {
+                        native_turn: native_turn.clone(),
+                    });
+                } else {
                     self.fact(FactBody::TurnBound {
                         attempt: attempt.clone(),
                         native_turn: native_turn.clone(),
@@ -2024,6 +2154,7 @@ impl Decision {
                 }
             }
             RequestOpened {
+                owner_path,
                 key,
                 body,
                 capability,
@@ -2033,6 +2164,7 @@ impl Decision {
                     return Reply::Ignored;
                 }
                 self.fact(FactBody::RequestOpened {
+                    owner_path: owner_path.clone(),
                     id: id.clone(),
                     attempt: attempt.clone(),
                     native_key: key.clone(),
@@ -2108,24 +2240,39 @@ impl Decision {
                 }
             }
             PlanDelta { key, text } => {
-                let existing = self
+                let Some(run) = run_id else {
+                    return Reply::Ignored;
+                };
+                let (id, item) = self.ensure_plan(run, attempt, key, PlanKind::Proposed);
+                let offset = self
                     .state
                     .plans
                     .iter()
-                    .find(|p| &p.native_key == key)
-                    .map(|p| p.markdown.as_str())
-                    .unwrap_or("");
-                let markdown = format!("{existing}{text}");
-                return self.provider(
-                    attempt,
-                    &ProviderEvent::Plan {
-                        key: key.clone(),
-                        markdown,
-                        steps: vec![],
-                    },
-                );
+                    .find(|p| p.id == id)
+                    .unwrap()
+                    .markdown
+                    .len();
+                self.fact(FactBody::PlanMarkdownAppended {
+                    id,
+                    offset,
+                    text: text.clone(),
+                });
+                let offset = self
+                    .state
+                    .items
+                    .iter()
+                    .find(|i| i.id == item)
+                    .unwrap()
+                    .text
+                    .len();
+                self.fact(FactBody::ItemTextAppended {
+                    id: item,
+                    offset,
+                    text: text.clone(),
+                });
             }
             Plan {
+                kind,
                 key,
                 markdown,
                 steps,
@@ -2133,32 +2280,31 @@ impl Decision {
                 let Some(run) = run_id else {
                     return Reply::Ignored;
                 };
-                let id = PlanId::new(self.native_key("plan", attempt, key)).unwrap();
-                self.fact(FactBody::PlanRecorded {
-                    id: id.clone(),
-                    run: run.clone(),
-                    native_key: key.clone(),
-                    markdown: markdown.clone(),
-                    steps: steps.clone(),
-                });
-                let item = TurnItemId::new(self.native_key("plan-item", attempt, key)).unwrap();
-                if !self.state.items.iter().any(|i| i.id == item) {
-                    self.item_start(
-                        item.clone(),
-                        Some(run.clone()),
-                        Some(attempt.clone()),
-                        key.clone(),
-                        if steps.is_empty() {
-                            ItemKind::ProposedPlan { plan: id }
-                        } else {
-                            ItemKind::TodoList { plan: id }
-                        },
-                    );
+                let (id, item) = self.ensure_plan(run, attempt, key, *kind);
+                if self
+                    .state
+                    .plans
+                    .iter()
+                    .find(|p| p.id == id)
+                    .unwrap()
+                    .markdown
+                    != *markdown
+                {
+                    self.fact(FactBody::PlanMarkdownReplaced {
+                        id: id.clone(),
+                        text: markdown.clone(),
+                    });
+                    self.fact(FactBody::ItemTextReplaced {
+                        id: item,
+                        text: markdown.clone(),
+                    });
                 }
-                self.fact(FactBody::ItemTextReplaced {
-                    id: item,
-                    text: markdown.clone(),
-                });
+                if self.state.plans.iter().find(|p| p.id == id).unwrap().steps != *steps {
+                    self.fact(FactBody::PlanStepsReplaced {
+                        id,
+                        steps: steps.clone(),
+                    });
+                }
             }
             Usage(usage) => {
                 if !child {
@@ -2169,6 +2315,7 @@ impl Decision {
                 }
             }
             SubagentStarted {
+                native_thread,
                 key,
                 parent,
                 prompt,
@@ -2191,6 +2338,7 @@ impl Decision {
                         EffectBody::SendToThread {
                             thread: task.child_thread,
                             command: Box::new(Command::BindNativeChild {
+                                native_thread: native_thread.clone(),
                                 owner: attempt.clone(),
                                 parent: self.state.thread.as_ref().unwrap().id.clone(),
                                 task: task.id,
@@ -2244,6 +2392,7 @@ impl Decision {
                         EffectBody::SendToThread {
                             thread: child_thread.clone(),
                             command: Box::new(Command::BindNativeChild {
+                                native_thread: native_thread.clone(),
                                 owner: attempt.clone(),
                                 parent: t.id,
                                 task: id,
@@ -2736,7 +2885,9 @@ impl Decision {
                 else {
                     return Reply::Ignored;
                 };
-                if self.state.checkpoints.iter().any(|c| &c.id == checkpoint) {
+                if r.status == RunStatus::RolledBack
+                    || self.state.checkpoints.iter().any(|c| &c.id == checkpoint)
+                {
                     return Reply::Ignored;
                 }
                 self.fact(FactBody::CheckpointCaptured {
@@ -2747,7 +2898,10 @@ impl Decision {
                         .state
                         .runs
                         .iter()
-                        .filter(|candidate| candidate.ordinal <= r.ordinal)
+                        .filter(|candidate| {
+                            candidate.ordinal <= r.ordinal
+                                && candidate.status != RunStatus::RolledBack
+                        })
                         .filter_map(|candidate| {
                             candidate
                                 .attempt
@@ -2782,13 +2936,10 @@ impl Decision {
                 {
                     return Reply::Ignored;
                 }
-                if let Some(status) = self.state.captures.get(run).copied() {
-                    self.fact(FactBody::CaptureFailed { run: run.clone() });
-                    self.fact(FactBody::RunFinished {
-                        id: run.clone(),
-                        status,
-                    });
-                    self.promote();
+                // The outbox retries a failed capture. Keep its durable target
+                // and block promotion until a successful result arrives.
+                if !self.state.captures.contains_key(run) {
+                    return Reply::Ignored;
                 }
             }
             EffectResult::RollbackFinished { command } => {
@@ -2828,6 +2979,7 @@ impl Decision {
     }
     fn recover(&mut self, trigger: RecoveryTrigger) {
         self.hold_queue();
+        self.fact(FactBody::BackgroundWorkStopped);
         let requests = self
             .state
             .requests
@@ -3047,7 +3199,7 @@ pub fn validate_attachments(files: &[Attachment]) -> Result<(), &'static str> {
         if !ids.insert(&file.id) {
             return Err("duplicate-attachment-id");
         }
-        if file.mime_type.starts_with("image/") {
+        if file.kind == AttachmentKind::Image {
             if file.size > 10 * 1024 * 1024 {
                 return Err("image-too-large");
             }

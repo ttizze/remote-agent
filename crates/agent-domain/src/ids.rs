@@ -84,7 +84,7 @@ impl<'de> Deserialize<'de> for Timestamp {
 }
 
 /// JSON is open only at provider/tool boundaries; Postcard carries a string.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Json(pub serde_json::Value);
 impl Serialize for Json {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
