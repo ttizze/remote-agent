@@ -353,6 +353,37 @@ fn codex_rejected_resume_and_start_name_their_own_operation() {
     }
 }
 #[test]
+fn codex_compact_on_a_fresh_process_resumes_the_saved_thread_first() {
+    let mut protocol = CodexProtocol::default();
+    let compact = ProviderCommand::Compact {
+        native_thread: Some("saved".into()),
+    };
+    let resume = protocol
+        .command(&compact, &wire_context(), &[])
+        .unwrap()
+        .outbound;
+    assert_eq!(resume.len(), 1);
+    assert_eq!(resume[0]["method"], "thread/resume");
+    assert_eq!(resume[0]["params"]["threadId"], "saved");
+    assert_eq!(resume[0]["params"]["excludeTurns"], true);
+    let ready = protocol
+        .receive(&json!({"id":resume[0]["id"],"result":{"thread":{"id":"saved"}}}))
+        .unwrap();
+    assert_eq!(
+        ready.events,
+        [ProviderEvent::SessionReady {
+            native_thread: "saved".into()
+        }]
+    );
+    assert_eq!(ready.outbound[0]["method"], "thread/compact/start");
+    assert_eq!(ready.outbound[0]["params"]["threadId"], "saved");
+    let again = protocol
+        .command(&compact, &wire_context(), &[])
+        .unwrap()
+        .outbound;
+    assert_eq!(again[0]["method"], "thread/compact/start");
+}
+#[test]
 fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start() {
     use serde_json::json;
     let mut protocol = CodexProtocol::default();

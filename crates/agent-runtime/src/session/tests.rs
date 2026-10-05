@@ -861,6 +861,45 @@ async fn a_failed_resume_continues_the_run_on_a_fresh_native_session() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compact_on_a_fresh_process_resumes_the_saved_native_thread() {
+    let rig = rig(SessionOptions::default(), 5);
+    let id = thread("thread-compact-restart");
+    rig.codex_turn(&id).await;
+    rig.finish_codex_turn(0);
+    rig.until_status(&id, RunStatus::Completed).await;
+    rig.host.process(0).exit(true);
+    rig.gone(&id).await;
+    rig.command(&id, Command::Compact).await;
+    rig.until("compact sent", async || {
+        rig.drain().await;
+        rig.host.spawned() > 1
+            && rig
+                .host
+                .process(1)
+                .written()
+                .iter()
+                .any(|frame| frame["method"] == "thread/compact/start")
+    })
+    .await;
+    let written = rig.host.process(1).written();
+    let methods: Vec<_> = written
+        .iter()
+        .map(|frame| frame["method"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "initialize",
+            "initialized",
+            "thread/resume",
+            "thread/compact/start"
+        ]
+    );
+    assert_eq!(written[2]["params"]["threadId"], "native-thread");
+    assert_eq!(written[3]["params"]["threadId"], "native-thread");
+}
+
 // ProviderTurnControlService.test.ts: "interrupts the historical session only
 // for the exact committed restart replacement" — a stop reaches only the
 // process that ran its attempt.
