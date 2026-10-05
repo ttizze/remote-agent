@@ -2,6 +2,7 @@
 mod attachments;
 mod claude;
 mod claude_control;
+mod claude_fork;
 mod claude_models;
 mod codex;
 mod codex_tools;
@@ -12,6 +13,7 @@ use agent_domain::*;
 pub use attachments::*;
 pub use claude::*;
 pub use claude_control::*;
+pub use claude_fork::*;
 pub use claude_models::*;
 pub use codex::*;
 use codex_tools::*;
