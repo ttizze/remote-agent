@@ -14,8 +14,8 @@
 
 | crate | 役割 | I/O |
 | --- | --- | --- |
-| `bex-domain` | ID、エンティティ、コマンド、事実（イベント）、スレッドの状態機械、事実から projection を作る fold。Host とクライアントで共有する。 | なし |
-| `bex-providers` | provider の通信を、正規化した provider コマンドと provider イベントに相互変換する。Codex app-server と Claude（SDK の制御手順を移植）。 | provider プロセスの stdio |
+| `agent-domain` | ID、エンティティ、コマンド、事実（イベント）、スレッドの状態機械、事実から projection を作る fold。Host とクライアントで共有する。 | なし |
+| `agent-providers` | provider の通信を、正規化した provider コマンドと provider イベントに相互変換する。Codex app-server と Claude（SDK の制御手順を移植）。 | provider プロセスの stdio |
 | Host ランタイム（`host-daemon` 内） | スレッドごとの actor、SQLite、effect の実行、provider セッション管理、購読と同期、履歴の取り込み。 | SQLite、プロセス、Git、ファイル |
 | `agent-core` | 接続、購読、fold、表示用データ。UniFFI でモバイルへ公開する。 | iroh |
 | `agent-transport` | iroh と framing。変更しない。 | ネットワーク |
@@ -84,7 +84,7 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 ## 今のブランチから残すもの・作り直すもの
 
 - 残す: `agent-transport`、ペアリング、Host の会話以外の機能、各クライアントの画面のコード、`PORT_MAP.md` のファイル一覧。
-- 作り直す: `crates/orchestration`（`bex-domain` と Host ランタイムへ分ける）、`crates/provider-adapters`（`bex-providers` へ）、`host_rpc/service.rs` の会話部分、`agent-core` の同期と状態管理。
+- 作り直す: `crates/orchestration`（`agent-domain` と Host ランタイムへ分ける）、`crates/provider-adapters`（`agent-providers` へ）、`host_rpc/service.rs` の会話部分、`agent-core` の同期と状態管理。
 
 ## 決定事項
 
