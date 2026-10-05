@@ -310,7 +310,12 @@ pub fn shell(projection: &ThreadProjection) -> ThreadShell {
             .cloned(),
         latest_run_requested_at: latest.map(|run| run.requested_at.clone()),
         latest_run_started_at: latest.and_then(|run| run.started_at.clone()),
-        latest_run_completed_at: latest.and_then(|run| run.completed_at.clone()),
+        latest_run_completed_at: projection
+            .runs
+            .iter()
+            .filter_map(|run| run.completed_at.as_ref())
+            .max()
+            .cloned(),
         active_run_started_at: active.and_then(|run| run.started_at.clone()),
         has_actionable_proposed_plan: projection.plans.iter().any(|plan| {
             matches!(plan.status, PlanStatus::Draft | PlanStatus::Active)

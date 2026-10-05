@@ -44,6 +44,7 @@ impl Draft {
 pub struct ThreadCache {
     pub projection: Arc<ThreadProjection>,
     pub sequence: u64,
+    pub snapshot_sequence: u64,
     pub history_cursor: Option<HistoryCursor>,
     pub has_more_history: bool,
     pub synchronized: bool,
@@ -84,6 +85,9 @@ pub struct Snapshot {
 }
 impl Snapshot {
     pub fn draft_key(&self) -> String {
+        if let (Some(thread), Some(run)) = (&self.selected_thread, &self.editing_run) {
+            return format!("queue:{thread}:{run}");
+        }
         self.selected_thread
             .as_ref()
             .map(ToString::to_string)
@@ -93,6 +97,14 @@ impl Snapshot {
                     self.selected_project.as_deref().unwrap_or("bex:chats")
                 )
             })
+    }
+    pub fn draft_pending(&self) -> bool {
+        let draft = self.current_draft();
+        self.pending_commands.iter().any(|command| self.selected_thread.as_ref() == Some(&command.thread_id) && match &command.body {
+            CommandBody::MessageDispatch(message) => self.editing_run.is_none() && message.text == draft.text,
+            CommandBody::QueuedRunEdit { run_id, text, .. } => self.editing_run.as_ref() == Some(run_id) && *text == draft.text,
+            _ => false,
+        }) || self.selected_thread.is_none() && self.pending_launches.iter().any(|launch| matches!(&launch.create.body, CommandBody::ThreadCreate { project_id, .. } if project_id.as_str() == self.selected_project.as_deref().unwrap_or("bex:chats")))
     }
     pub fn current_draft(&self) -> Draft {
         self.drafts
@@ -191,9 +203,10 @@ impl Snapshot {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Workspace {
     pub directory: Option<crate::models::FileList>,
-    pub file: Option<crate::models::FileContent>,
-    pub file_drafts: BTreeMap<String, FileDraft>,
-    pub review: Option<crate::models::WorkspaceReview>,
+    pub file: Option<Arc<crate::models::FileContent>>,
+    pub file_drafts: BTreeMap<String, Arc<FileDraft>>,
+    pub review_generation: u64,
+    pub review: Option<Arc<crate::models::WorkspaceReview>>,
     pub diff_request: Option<agent_protocol::orchestration::GetTurnDiff>,
     pub worktree_settings: Option<crate::models::WorktreeSettings>,
     pub worktrees: Vec<crate::models::Worktree>,
@@ -208,7 +221,7 @@ pub struct Terminal {
     pub cwd: String,
     pub size: agent_protocol::operations::TerminalSize,
     pub phase: TerminalPhase,
-    pub output: Vec<TerminalOutput>,
+    pub output: Vec<Arc<TerminalOutput>>,
     pub sequence: u64,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +320,7 @@ pub enum Intent {
     },
     EditDraft {
         draft: Draft,
+        base_text: Option<String>,
     },
     Send {
         behavior: SendBehavior,

@@ -35,6 +35,7 @@ pub struct Store {
 }
 struct Inner {
     sender: mpsc::Sender<OwnerEvent>,
+    intents: mpsc::UnboundedSender<OwnerEvent>,
     snapshots: watch::Receiver<Arc<Snapshot>>,
     stop: CancellationToken,
 }
@@ -48,6 +49,7 @@ enum OwnerEvent {
     Attach {
         peer: Arc<Client>,
         host_name: String,
+        ticket: transport::Ticket,
         session: transport::Session,
         events: Updates,
         complete: oneshot::Sender<()>,
@@ -65,6 +67,11 @@ enum OwnerEvent {
     Dictation(String, CancellationToken),
     Transfer(FileTransfer, oneshot::Sender<Result<String, PeerError>>),
     Performance(crate::diagnostics::ConnectionPerformance),
+    Resume {
+        endpoint: transport::Endpoint,
+        ticket: transport::Ticket,
+        complete: oneshot::Sender<Option<crate::diagnostics::ConnectionPerformance>>,
+    },
 }
 enum FileTransfer {
     Download {
@@ -111,6 +118,7 @@ enum Reply {
 struct Network {
     peer: Arc<Client>,
     session: transport::Session,
+    ticket: transport::Ticket,
     epoch: u64,
     tasks: Vec<AbortOnDropHandle<()>>,
     thread: Option<AbortOnDropHandle<()>>,
@@ -137,6 +145,7 @@ struct Owner {
     network: Option<Network>,
     epoch: u64,
     source: CreationSource,
+    visited: BTreeMap<ThreadId, Timestamp>,
 }
 
 fn invalid(error: impl std::fmt::Display) -> PeerError {
@@ -219,6 +228,7 @@ impl Store {
     }
     pub fn offline_for(snapshot: Snapshot, source: CreationSource) -> Self {
         let (sender, mut receiver) = mpsc::channel(64);
+        let (intents, mut input) = mpsc::unbounded_channel();
         let (snapshots, updates) = watch::channel(Arc::new(snapshot.clone()));
         let stop = CancellationToken::new();
         let mut owner = Owner {
@@ -228,11 +238,12 @@ impl Store {
             network: None,
             epoch: 0,
             source,
+            visited: BTreeMap::new(),
         };
         let stopped = stop.clone();
         tokio::spawn(async move {
             loop {
-                let event = tokio::select! {biased;_=stopped.cancelled()=>break,event=receiver.recv()=>match event{Some(e)=>e,None=>break}};
+                let event = tokio::select! {biased;_=stopped.cancelled()=>break,event=input.recv()=>match event{Some(e)=>e,None=>break},event=receiver.recv()=>match event{Some(e)=>e,None=>break}};
                 if owner.handle(event).await {
                     break;
                 }
@@ -244,6 +255,7 @@ impl Store {
         Self {
             inner: Arc::new(Inner {
                 sender,
+                intents,
                 snapshots: updates,
                 stop,
             }),
@@ -259,11 +271,11 @@ impl Store {
         let (sender, receiver) = oneshot::channel();
         if let Err(error) = self
             .inner
-            .sender
-            .try_send(OwnerEvent::Dispatch(intent, sender))
+            .intents
+            .send(OwnerEvent::Dispatch(intent, sender))
         {
             let reason = invalid(&error);
-            if let OwnerEvent::Dispatch(_, complete) = error.into_inner() {
+            if let OwnerEvent::Dispatch(_, complete) = error.0 {
                 let _ = complete.send(Err(reason));
             }
         }
@@ -292,6 +304,7 @@ impl Store {
             .send(OwnerEvent::Attach {
                 peer: peer.clone(),
                 host_name,
+                ticket: ticket.clone(),
                 session,
                 events,
                 complete,
@@ -312,6 +325,19 @@ impl Store {
         endpoint: &transport::Endpoint,
         ticket: &transport::Ticket,
     ) -> Result<crate::diagnostics::ConnectionPerformance, PeerError> {
+        let (complete, result) = oneshot::channel();
+        self.inner
+            .sender
+            .send(OwnerEvent::Resume {
+                endpoint: endpoint.clone(),
+                ticket: ticket.clone(),
+                complete,
+            })
+            .await
+            .map_err(invalid)?;
+        if let Some(performance) = result.await.map_err(invalid)? {
+            return Ok(performance);
+        }
         self.reconnect(endpoint, ticket, None).await
     }
     pub async fn close(&self) -> Result<(), PeerError> {
@@ -362,6 +388,55 @@ impl Owner {
     fn publish(&mut self) {
         self.state.revision += 1;
         self.snapshots.send_replace(Arc::new(self.state.clone()));
+    }
+    fn visit_selected(&mut self) {
+        let Some(id) = self.state.selected_thread.clone() else {
+            return;
+        };
+        let Some(shell) = self.state.shell.as_ref().and_then(|shell| {
+            shell
+                .threads
+                .iter()
+                .chain(&shell.archived_threads)
+                .find(|s| s.thread.id == id)
+        }) else {
+            return;
+        };
+        let watermark = shell
+            .latest_run_completed_at
+            .as_ref()
+            .map_or(&shell.thread.updated_at, |time| {
+                time.max(&shell.thread.updated_at)
+            })
+            .clone();
+        if shell
+            .thread
+            .last_visited_at
+            .as_ref()
+            .is_some_and(|visited| visited >= &watermark)
+            || self
+                .visited
+                .get(&id)
+                .is_some_and(|visited| visited >= &watermark)
+        {
+            return;
+        }
+        if self
+            .job(
+                Call::DispatchCommand(command(
+                    id.clone(),
+                    CommandBody::ThreadVisit {
+                        visited_at: watermark.clone(),
+                    },
+                )),
+                None,
+                None,
+                None,
+            )
+            .is_ok()
+        {
+            self.visited.insert(id, watermark);
+        }
     }
     fn selected(&self) -> Result<ThreadId, PeerError> {
         self.state
@@ -427,7 +502,19 @@ impl Owner {
         let peer = network.peer.clone();
         let sender = self.sender.clone();
         let task = tokio::spawn(async move {
-            let result = execute(&peer, &call).await;
+            let mut delay = Duration::from_millis(250);
+            let result = loop {
+                let result = execute(&peer, &call).await;
+                if mutation_thread(&call).is_some()
+                    && matches!(result, Err(PeerError::RequestTimeout { .. }))
+                    && !peer.is_closed()
+                {
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(Duration::from_secs(5));
+                    continue;
+                }
+                break result;
+            };
             let _ = sender
                 .send(OwnerEvent::Finished(
                     epoch,
@@ -475,7 +562,9 @@ impl Owner {
             Call::ListAccounts(m::Empty {}),
         ] {
             if let Err(error) = self.job(call, None, None, None) {
-                self.state.error = Some(error.to_string());
+                self.state.error = Some(crate::presentation::error::error_message(
+                    &error.to_string(),
+                ));
             }
         }
     }
@@ -484,12 +573,17 @@ impl Owner {
             OwnerEvent::Attach {
                 peer,
                 host_name,
+                ticket,
                 session,
                 events,
                 complete,
             } => {
                 if let Some(network) = self.network.take() {
-                    network.peer.close().await;
+                    tokio::spawn(async move {
+                        let peer = network.peer.clone();
+                        drop(network);
+                        peer.close().await;
+                    });
                 }
                 self.epoch += 1;
                 self.state.connected = true;
@@ -513,6 +607,7 @@ impl Owner {
                 self.network = Some(Network {
                     peer,
                     session,
+                    ticket,
                     epoch,
                     tasks,
                     thread: None,
@@ -550,17 +645,25 @@ impl Owner {
             }
             OwnerEvent::Dispatch(intent, complete) => {
                 if let Err((error, complete)) = self.intent(intent, complete) {
-                    self.state.error = Some(error.to_string());
+                    self.state.error = Some(crate::presentation::error::error_message(
+                        &error.to_string(),
+                    ));
                     self.publish();
                     let _ = complete.send(Err(error));
                 }
                 return false;
             }
             OwnerEvent::Shell(epoch, item) if epoch == self.epoch => {
-                crate::sync::shell(&mut self.state, item, &now())
+                let selected = self.state.selected_thread.clone();
+                crate::sync::shell(&mut self.state, item, &now());
+                if selected != self.state.selected_thread {
+                    self.subscribe_thread();
+                }
+                self.visit_selected();
             }
             OwnerEvent::Thread(epoch, id, item) if epoch == self.epoch => {
-                crate::sync::thread(&mut self.state, &id, item)
+                crate::sync::thread(&mut self.state, &id, item);
+                self.visit_selected();
             }
             OwnerEvent::Notification(epoch, notification) if epoch == self.epoch => {
                 self.notification(notification)
@@ -582,13 +685,41 @@ impl Owner {
                 self.finished(*result);
                 return false;
             }
+            OwnerEvent::Resume {
+                endpoint,
+                ticket,
+                complete,
+            } => {
+                let reused = self
+                    .network
+                    .as_ref()
+                    .filter(|network| {
+                        self.state.connected
+                            && !network.peer.is_closed()
+                            && network.session.uses_endpoint(&endpoint)
+                            && network.ticket == ticket
+                    })
+                    .map(|network| crate::diagnostics::ConnectionPerformance {
+                        reused: true,
+                        connection_id: network.peer.diagnostic_id,
+                        ..Default::default()
+                    });
+                let _ = complete.send(reused);
+                return false;
+            }
             OwnerEvent::Close(complete) => {
                 if let Some(network) = self.network.take() {
-                    network.peer.close().await;
+                    tokio::spawn(async move {
+                        let peer = network.peer.clone();
+                        drop(network);
+                        peer.close().await;
+                        let _ = complete.send(());
+                    });
+                } else {
+                    let _ = complete.send(());
                 }
                 self.state.connected = false;
                 self.publish();
-                let _ = complete.send(());
                 return true;
             }
             OwnerEvent::Browser(request, complete) => {
@@ -738,6 +869,20 @@ impl Owner {
             }
             // Keep the receipt available if the request cannot be scheduled.
             if self.network.is_none() || !self.state.connected {
+                if let Call::DispatchCommand(command) = &call
+                    && matches!(
+                        command.body,
+                        CommandBody::ThreadModelSelectionSet { .. }
+                            | CommandBody::ProviderSwitch { .. }
+                            | CommandBody::ThreadRuntimeModeSet { .. }
+                            | CommandBody::ThreadInteractionModeSet { .. }
+                    )
+                {
+                    self.state.pending_commands.push(command.clone());
+                    self.publish();
+                    let _ = complete.send(Ok(Outcome::Applied));
+                    return Ok(());
+                }
                 return Err((invalid("Connect to the Host"), complete));
             }
             self.job(call, Some(complete), sent, launched)
@@ -869,10 +1014,9 @@ impl Owner {
                 self.state.workspace.review = None;
                 self.state.workspace.diff_request = None;
                 self.subscribe_thread();
+                self.visited.remove(&id);
                 target = Some(id);
-                body = Some(CommandBody::ThreadVisit {
-                    visited_at: timestamp,
-                });
+                self.visit_selected();
                 None
             }
             Intent::NewThread { project_id } => {
@@ -890,16 +1034,34 @@ impl Owner {
             }
             Intent::Search { query } => {
                 self.state.search = query.clone();
-                Some(Call::SearchThreads(rpc::SearchThreads {
-                    query,
-                    limit: 100,
-                }))
+                self.state.search_matches.clear();
+                if self.state.connected && (2..=200).contains(&query.trim().chars().count()) {
+                    Some(Call::SearchThreads(rpc::SearchThreads {
+                        query: query.trim().into(),
+                        limit: 50,
+                    }))
+                } else {
+                    None
+                }
             }
-            Intent::EditDraft { draft } => {
+            Intent::EditDraft {
+                mut draft,
+                base_text,
+            } => {
+                if let Some(base) = base_text {
+                    draft.text = crate::presentation::merge_draft_text(
+                        base,
+                        draft.text,
+                        self.state.current_draft().text,
+                    );
+                }
                 self.state.drafts.insert(self.state.draft_key(), draft);
                 None
             }
             Intent::Send { behavior } => {
+                if self.state.draft_pending() {
+                    return Ok((None, None, None));
+                }
                 if self.source == CreationSource::Desktop
                     && crate::presentation::conversation(&self.state)
                         .composer
@@ -960,7 +1122,8 @@ impl Owner {
                     let title = draft
                         .text
                         .lines()
-                        .next()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
                         .unwrap_or("New thread")
                         .chars()
                         .take(100)
@@ -997,6 +1160,9 @@ impl Owner {
                 }
             }
             Intent::PlanFollowUp { new_thread } => {
+                if self.state.draft_pending() {
+                    return Ok((None, None, None));
+                }
                 let p = self
                     .state
                     .projection()
@@ -1203,10 +1369,16 @@ impl Owner {
                             .unwrap_or_default();
                         let mut draft = self.state.current_draft();
                         draft.text = text;
-                        self.state.drafts.insert(self.state.draft_key(), draft);
                         self.state.editing_run = Some(id);
+                        self.state
+                            .drafts
+                            .entry(self.state.draft_key())
+                            .or_insert(draft);
                     }
                     QueueAction::SaveEdit => {
+                        if self.state.draft_pending() {
+                            return Ok((None, None, None));
+                        }
                         let draft = self.state.current_draft();
                         body = Some(CommandBody::QueuedRunEdit {
                             run_id: self
@@ -1222,9 +1394,6 @@ impl Owner {
                     }
                     QueueAction::CancelEdit => {
                         self.state.editing_run = None;
-                        let mut draft = self.state.current_draft();
-                        draft.text.clear();
-                        self.state.drafts.insert(self.state.draft_key(), draft);
                     }
                     QueueAction::Reorder { run_ids } => {
                         if run_ids.len()
@@ -1263,7 +1432,22 @@ impl Owner {
                 service_tier,
             } => {
                 let mut draft = self.state.current_draft();
-                let switched = draft.instance_id != instance_id;
+                let switched = self.state.projection().map_or_else(
+                    || {
+                        self.state
+                            .shell
+                            .as_ref()
+                            .and_then(|shell| {
+                                shell.threads.iter().find(|s| {
+                                    Some(&s.thread.id) == self.state.selected_thread.as_ref()
+                                })
+                            })
+                            .map_or(draft.instance_id != instance_id, |s| {
+                                s.thread.provider_instance_id.as_str() != instance_id
+                            })
+                    },
+                    |p| p.thread.provider_instance_id.as_str() != instance_id,
+                );
                 draft.instance_id = instance_id;
                 draft.model = model;
                 draft.effort = effort;
@@ -1391,10 +1575,12 @@ impl Owner {
                     .workspace
                     .file_drafts
                     .entry(path)
-                    .and_modify(|draft| draft.text = text.clone())
-                    .or_insert(crate::state::FileDraft {
-                        text,
-                        revision: file.revision.clone(),
+                    .and_modify(|draft| Arc::make_mut(draft).text = text.clone())
+                    .or_insert_with(|| {
+                        Arc::new(crate::state::FileDraft {
+                            text,
+                            revision: file.revision.clone(),
+                        })
                     });
                 None
             }
@@ -1408,8 +1594,8 @@ impl Owner {
                     .ok_or_else(|| invalid("File has no edits"))?;
                 Some(Call::WriteFile(op::WriteFile {
                     path,
-                    revision: draft.revision,
-                    text: draft.text,
+                    revision: draft.revision.clone(),
+                    text: draft.text.clone(),
                 }))
             }
             Intent::ReviewWorkspace { cwd } => {
@@ -1549,12 +1735,15 @@ impl Owner {
         };
         let outcome = match result {
             Err(error) => {
-                self.state.error = Some(error.to_string());
+                self.state.error = Some(crate::presentation::error::error_message(
+                    &error.to_string(),
+                ));
                 if matches!(
                     error,
-                    PeerError::Remote { .. }
-                        | PeerError::InvalidMessage(_)
-                        | PeerError::InvalidResponse { .. }
+                    PeerError::Remote {
+                        delivery: agent_protocol::error::Delivery::NotSent,
+                        ..
+                    }
                 ) {
                     match &call {
                         Call::DispatchCommand(command) => {
@@ -1570,10 +1759,19 @@ impl Owner {
                         _ => {}
                     }
                 }
+                if let Call::StartTerminal(params) = &call {
+                    if let Some(terminal) = self.state.terminals.get_mut(&params.handle) {
+                        terminal.phase = TerminalPhase::Failed(
+                            crate::presentation::error::error_message(&error.to_string()),
+                        );
+                    }
+                }
                 Err(error)
             }
             Ok(reply) => {
-                self.state.error = None;
+                if complete.is_some() {
+                    self.state.error = None;
+                }
                 match reply {
                     Reply::Receipt(receipt) => {
                         if let Call::DispatchCommand(command) = &call {
@@ -1631,12 +1829,16 @@ impl Owner {
                                 }
                             }
                             self.state.selected_thread = Some(id.clone());
+                            self.visited.remove(id);
                             self.subscribe_thread();
+                            self.visit_selected();
                         }
                         let _ = receipt;
                     }
                     Reply::History(id, page) => {
-                        if let Some(cache) = self.state.threads.get_mut(&id) {
+                        if let Some(cache) = self.state.threads.get_mut(&id)
+                            && matches!(&call, Call::ReadThreadHistory(params) if params.cursor == cache.history_cursor)
+                        {
                             *cache = crate::sync::history(cache, page);
                         }
                     }
@@ -1696,7 +1898,7 @@ impl Owner {
                     }
                     Reply::Search(matches) => {
                         if let Call::SearchThreads(params) = &call
-                            && params.query == self.state.search
+                            && params.query == self.state.search.trim()
                         {
                             self.state.search_matches = matches;
                         }
@@ -1716,17 +1918,18 @@ impl Owner {
                             if draft.text == written.text {
                                 self.state.workspace.file_drafts.remove(&file.path);
                             } else {
-                                draft.revision = file.revision.clone();
+                                Arc::make_mut(draft).revision = file.revision.clone();
                             }
                         }
-                        self.state.workspace.file = Some(file);
+                        self.state.workspace.file = Some(Arc::new(file));
                     }
                     Reply::Review(review) => {
+                        self.state.workspace.review_generation += 1;
                         if let Call::ReviewWorkspace(request) = &call
                             && request.cwd == self.state.cwd()
                             && self.state.workspace.diff_request.is_none()
                         {
-                            self.state.workspace.review = Some(review);
+                            self.state.workspace.review = Some(Arc::new(review));
                         }
                     }
                     Reply::TurnDiff(diff) => {
@@ -1738,7 +1941,7 @@ impl Owner {
                             && request.to_turn_count == diff.to_turn_count
                         {
                             self.state.workspace.review =
-                                Some(crate::presentation::diff::turn_review(diff));
+                                Some(Arc::new(crate::presentation::diff::turn_review(diff)));
                         }
                     }
                     Reply::WorktreeSettings(settings) => {
@@ -1868,11 +2071,11 @@ impl Owner {
             if reset_size.is_some() {
                 t.output.clear();
             }
-            t.output.push(TerminalOutput {
+            t.output.push(Arc::new(TerminalOutput {
                 sequence: t.sequence,
                 data,
                 reset_size,
-            });
+            }));
             let mut bytes = t.output.iter().map(|o| o.data.len()).sum::<usize>();
             while bytes > 8 * 1024 * 1024 && t.output.len() > 1 {
                 bytes -= t.output.remove(0).data.len();
@@ -2044,7 +2247,306 @@ mod tests {
             network: None,
             epoch: 0,
             source: CreationSource::Desktop,
+            visited: BTreeMap::new(),
         }
+    }
+    fn queued_state() -> Snapshot {
+        let mut p = crate::test_support::projection();
+        let caps = TurnCapabilities {
+            exposes_native_turn_id: true,
+            emits_turn_started: true,
+            emits_turn_completed: true,
+            supports_interrupt: true,
+            supports_active_steering: true,
+            supports_steering_by_interrupt_restart: true,
+            supports_queued_messages: true,
+            terminal_status_quality: Strength::Strong,
+        };
+        for (key, mode) in [
+            (
+                "preparing",
+                DispatchMode::DeferStart {
+                    workspace_strategy: None,
+                },
+            ),
+            ("queued", DispatchMode::QueueAfterActive),
+        ] {
+            let draft = Draft {
+                text: key.into(),
+                instance_id: "codex".into(),
+                model: "model".into(),
+                runtime_mode: "full-access".into(),
+                interaction_mode: "default".into(),
+                ..Default::default()
+            };
+            let command = command(
+                p.thread.id.clone(),
+                CommandBody::MessageDispatch(
+                    crate::commands::message(
+                        &draft,
+                        MessageId::new(key).unwrap(),
+                        mode,
+                        CreationSource::Desktop,
+                    )
+                    .unwrap(),
+                ),
+            );
+            let decision = orchestration::decider::decide(
+                &command,
+                Some(&p),
+                &crate::test_support::now(),
+                &caps,
+                Driver::Codex,
+            )
+            .unwrap();
+            for event in decision.events {
+                p = orchestration::projector::apply(Some(&p), &event, Default::default()).unwrap();
+            }
+        }
+        let id = p.thread.id.clone();
+        let shell = orchestration::projector::shell(&p);
+        let mut state = Snapshot {
+            selected_thread: Some(id.clone()),
+            shell: Some(Arc::new(ShellSnapshot {
+                schema_version: 2,
+                snapshot_sequence: 1,
+                threads: vec![shell],
+                archived_threads: vec![],
+            })),
+            ..Default::default()
+        };
+        crate::sync::thread(
+            &mut state,
+            &id,
+            ThreadStreamItem::Snapshot {
+                snapshot_sequence: 1,
+                projection: Box::new(p),
+                history_cursor: None,
+                has_more_history: false,
+                latest_local_turn_ordinal: None,
+            },
+        );
+        state
+    }
+    #[test]
+    fn search_respects_server_limits_and_clear_remains_local() {
+        let mut owner = owner(Snapshot::default());
+        owner.state.connected = true;
+        let (call, _, _) = owner
+            .prepare(Intent::Search {
+                query: "bug".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            call,
+            Some(Call::SearchThreads(rpc::SearchThreads { limit: 50, .. }))
+        ));
+        for query in ["", "a"] {
+            assert!(
+                owner
+                    .prepare(Intent::Search {
+                        query: query.into()
+                    })
+                    .unwrap()
+                    .0
+                    .is_none()
+            );
+        }
+    }
+    #[test]
+    fn queue_edit_cancel_and_receipt_preserve_the_main_composer_draft() {
+        let mut owner = owner(queued_state());
+        let mut draft = owner.state.current_draft();
+        draft.text = "Unsent main draft".into();
+        owner
+            .state
+            .drafts
+            .insert(owner.state.draft_key(), draft.clone());
+        let run = owner
+            .state
+            .projection()
+            .unwrap()
+            .runs
+            .iter()
+            .find(|r| r.status == RunStatus::Queued)
+            .unwrap()
+            .id
+            .clone();
+        owner
+            .prepare(Intent::Queue {
+                action: QueueAction::Edit {
+                    run_id: run.to_string(),
+                },
+            })
+            .unwrap();
+        assert_eq!(owner.state.current_draft().text, "queued");
+        owner
+            .prepare(Intent::Queue {
+                action: QueueAction::CancelEdit,
+            })
+            .unwrap();
+        assert_eq!(owner.state.current_draft(), draft);
+        owner
+            .prepare(Intent::Queue {
+                action: QueueAction::Edit {
+                    run_id: run.to_string(),
+                },
+            })
+            .unwrap();
+        let (call, sent, _) = owner
+            .prepare(Intent::Queue {
+                action: QueueAction::SaveEdit,
+            })
+            .unwrap();
+        owner.finished(JobResult {
+            call: call.unwrap(),
+            result: Ok(Reply::Receipt(rpc::DispatchReceipt {
+                thread_id: owner.state.selected_thread.clone().unwrap(),
+                sequence: 2,
+                replayed: false,
+            })),
+            complete: None,
+            sent,
+            launched: None,
+        });
+        assert_eq!(owner.state.current_draft(), draft);
+    }
+    #[test]
+    fn awaiting_message_cannot_be_submitted_twice() {
+        let mut owner = owner(queued_state());
+        let mut draft = owner.state.current_draft();
+        draft.text = "Send me once".into();
+        owner.state.drafts.insert(owner.state.draft_key(), draft);
+        let (call, _, _) = owner
+            .prepare(Intent::Send {
+                behavior: SendBehavior::Default,
+            })
+            .unwrap();
+        let Some(Call::DispatchCommand(command)) = call else {
+            panic!("message command")
+        };
+        owner.state.pending_commands.push(command);
+        assert!(
+            owner
+                .prepare(Intent::Send {
+                    behavior: SendBehavior::Default
+                })
+                .unwrap()
+                .0
+                .is_none()
+        );
+        assert!(
+            !crate::presentation::conversation(&owner.state)
+                .composer
+                .enabled
+        );
+    }
+    #[test]
+    fn launch_title_uses_the_first_nonempty_trimmed_line() {
+        let mut owner = owner(Snapshot {
+            default_draft: Draft {
+                text: "  \n  Fix the bug \nMore details".into(),
+                instance_id: "codex".into(),
+                model: "model".into(),
+                runtime_mode: "full-access".into(),
+                interaction_mode: "default".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let (call, _, _) = owner
+            .prepare(Intent::Send {
+                behavior: SendBehavior::Default,
+            })
+            .unwrap();
+        assert!(
+            matches!(call, Some(Call::LaunchThread(launch)) if matches!(&launch.create.body, CommandBody::ThreadCreate { title, .. } if title == "Fix the bug"))
+        );
+    }
+    #[test]
+    fn failed_terminal_start_is_terminal_and_transport_failures_keep_pending_commands() {
+        let mut owner = owner(queued_state());
+        let (call, _, _) = owner
+            .prepare(Intent::StartTerminal {
+                handle: "terminal".into(),
+                cwd: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+            })
+            .unwrap();
+        owner.finished(JobResult {
+            call: call.unwrap(),
+            result: Err(PeerError::ConnectionClosed("lost".into())),
+            complete: None,
+            sent: None,
+            launched: None,
+        });
+        assert!(matches!(
+            owner.state.terminals["terminal"].phase,
+            TerminalPhase::Failed(_)
+        ));
+        let command = command(
+            owner.state.selected_thread.clone().unwrap(),
+            CommandBody::ThreadMarkUnread,
+        );
+        owner.state.pending_commands.push(command.clone());
+        owner.finished(JobResult {
+            call: Call::DispatchCommand(command),
+            result: Err(PeerError::InvalidMessage("truncated reply".into())),
+            complete: None,
+            sent: None,
+            launched: None,
+        });
+        assert_eq!(owner.state.pending_commands.len(), 1);
+        owner.finished(JobResult {
+            call: Call::ListProjects(m::Empty {}),
+            result: Ok(Reply::Projects(vec![])),
+            complete: None,
+            sent: None,
+            launched: None,
+        });
+        assert!(owner.state.error.is_some());
+    }
+    #[test]
+    fn model_switch_is_compared_with_the_host_thread_selection() {
+        let mut owner = owner(queued_state());
+        let mut draft = owner.state.current_draft();
+        draft.instance_id = "claude".into();
+        owner.state.drafts.insert(owner.state.draft_key(), draft);
+        let (call, _, _) = owner
+            .prepare(Intent::SetModel {
+                instance_id: "claude".into(),
+                model: "claude-model".into(),
+                effort: None,
+                service_tier: None,
+            })
+            .unwrap();
+        assert!(matches!(
+            call,
+            Some(Call::DispatchCommand(Command {
+                body: CommandBody::ProviderSwitch { .. },
+                ..
+            }))
+        ));
+    }
+    #[tokio::test]
+    async fn a_burst_of_input_over_the_stream_channel_capacity_keeps_every_edit() {
+        let store = Store::offline(Snapshot::default());
+        let mut receipts = vec![];
+        for i in 0..200 {
+            receipts.push(store.dispatch(Intent::EditDraft {
+                base_text: None,
+                draft: Draft {
+                    text: i.to_string(),
+                    ..Default::default()
+                },
+            }));
+        }
+        for receipt in receipts {
+            receipt.await.unwrap().unwrap();
+        }
+        assert_eq!(store.snapshot().current_draft().text, "199");
+        store.close().await.unwrap();
     }
     #[test]
     fn late_turn_diff_receipts_cannot_replace_another_range_or_thread() {
@@ -2095,7 +2597,7 @@ mod tests {
         };
         let mut owner = owner(Snapshot {
             workspace: crate::state::Workspace {
-                file: Some(file.clone()),
+                file: Some(Arc::new(file.clone())),
                 ..Default::default()
             },
             ..Default::default()
@@ -2236,6 +2738,7 @@ mod tests {
         let store = Store::offline(Snapshot::default());
         store
             .dispatch(Intent::EditDraft {
+                base_text: None,
                 draft: Draft {
                     text: "Unsent".into(),
                     ..Draft::default()

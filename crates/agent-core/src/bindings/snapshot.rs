@@ -75,6 +75,21 @@ impl Snapshot {
             settled_limit as usize,
         ))
     }
+    pub fn search_query(&self) -> String {
+        self.search.clone()
+    }
+    pub fn model_choices(&self) -> Vec<presentation::ModelChoice> {
+        presentation::model_choices(self)
+    }
+    pub fn can_open_terminal(&self) -> bool {
+        self.connected && !self.cwd().is_empty()
+    }
+    pub fn review_revision(&self) -> Option<String> {
+        self.workspace
+            .review
+            .as_ref()
+            .map(|_| format!("{}:{}", self.cwd(), self.workspace.review_generation))
+    }
     pub fn models(&self) -> Vec<Model> {
         self.models.clone()
     }
@@ -88,7 +103,10 @@ impl Snapshot {
         self.workspace.directory.clone()
     }
     pub fn file(&self) -> Option<FileContent> {
-        self.workspace.file.clone()
+        self.workspace
+            .file
+            .as_ref()
+            .map(|file| file.as_ref().clone())
     }
     pub fn file_draft(&self, path: String) -> Option<String> {
         self.workspace
@@ -116,7 +134,7 @@ impl Snapshot {
     }
 }
 #[derive(uniffi::Object)]
-pub struct WorkspaceReview(pub(crate) crate::models::WorkspaceReview);
+pub struct WorkspaceReview(pub(crate) Arc<crate::models::WorkspaceReview>);
 #[uniffi::export]
 impl WorkspaceReview {
     pub fn diff_files(&self) -> Vec<crate::presentation::diff::WorkspaceDiffFile> {

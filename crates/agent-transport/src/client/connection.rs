@@ -77,7 +77,7 @@ impl Client {
         }
         let (mut send, recv) = connection.open_bi().await.map_err(invalid)?;
         send.write_all(&[EVENTS]).await.map_err(invalid)?;
-        send.finish().map_err(invalid)?;
+        send.finish().map_err(disconnected)?;
         trace.record(Phase::EventsOpened, diagnostic_id, u64::from(send.id()), 0);
         let path_monitor = trace.enabled().then(|| {
             let mut paths = connection.path_events();
@@ -122,9 +122,9 @@ impl Client {
         tokio::select! {
             _ = self.connection.closed() => {},
             _ = tokio::time::timeout(Duration::from_secs(3), async {
-                let (mut send, mut recv) = self.connection.open_bi().await.map_err(invalid)?;
+                let (mut send, mut recv) = self.connection.open_bi().await.map_err(disconnected)?;
                 send.write_all(&[CLOSE]).await.map_err(invalid)?;
-                send.finish().map_err(invalid)?;
+                send.finish().map_err(disconnected)?;
                 recv.read_exact(&mut [0u8; 1]).await.map_err(invalid)?;
                 Ok::<(), PeerError>(())
             }) => {},
@@ -165,7 +165,7 @@ impl Client {
                 .await
                 .map_err(invalid)?;
             let permit_wait = started.elapsed().as_micros() as u64;
-            let (mut send, recv) = self.connection.open_bi().await.map_err(invalid)?;
+            let (mut send, recv) = self.connection.open_bi().await.map_err(disconnected)?;
             let stream = u64::from(send.id());
             if measured {
                 self.trace.record(
@@ -181,7 +181,7 @@ impl Client {
                     started.elapsed().as_micros() as u64,
                 );
             }
-            send.write_all(&[CALL]).await.map_err(invalid)?;
+            send.write_all(&[CALL]).await.map_err(disconnected)?;
             let encoding = std::time::Instant::now();
             let bytes = protocol::encode(call).map_err(invalid)?;
             if measured {
@@ -194,8 +194,8 @@ impl Client {
             }
             framing::write_frame(&mut send, &bytes)
                 .await
-                .map_err(invalid)?;
-            send.finish().map_err(invalid)?;
+                .map_err(disconnected)?;
+            send.finish().map_err(disconnected)?;
             if measured {
                 self.trace.record(
                     Phase::RequestSent,
@@ -215,8 +215,8 @@ impl Client {
                     let initial = reader
                         .read_frame()
                         .await
-                        .map_err(invalid)?
-                        .ok_or_else(|| invalid("response stream ended before its result"))?;
+                        .map_err(disconnected)?
+                        .ok_or_else(|| disconnected("response stream ended before its result"))?;
                     Ok((initial, reader))
                 };
                 tokio::time::timeout_at(deadline, read)
@@ -628,4 +628,8 @@ mod tests {
         .await
         .unwrap();
     }
+}
+
+fn disconnected(error: impl std::fmt::Display) -> PeerError {
+    PeerError::ConnectionClosed(error.to_string())
 }

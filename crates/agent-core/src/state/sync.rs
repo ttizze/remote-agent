@@ -7,6 +7,27 @@ pub fn shell(snapshot: &mut Snapshot, item: ShellStreamItem, now: &Timestamp) {
     match item {
         ShellStreamItem::Synchronized => snapshot.shell_synchronized = true,
         ShellStreamItem::Snapshot(shell) => {
+            if snapshot
+                .shell
+                .as_ref()
+                .is_some_and(|old| old.snapshot_sequence > shell.snapshot_sequence)
+            {
+                return;
+            }
+            if snapshot.selected_thread.as_ref().is_some_and(|id| {
+                !shell
+                    .threads
+                    .iter()
+                    .chain(&shell.archived_threads)
+                    .any(|s| s.thread.id == *id)
+                    && !snapshot
+                        .pending_launches
+                        .iter()
+                        .any(|launch| launch.create.thread_id == *id)
+            }) {
+                snapshot.selected_thread = None;
+                snapshot.editing_run = None;
+            }
             snapshot
                 .observed_returns
                 .retain(|id, _| shell.threads.iter().any(|s| &s.thread.id == id));
@@ -83,7 +104,12 @@ pub fn thread(snapshot: &mut Snapshot, id: &ThreadId, item: ThreadStreamItem) {
             has_more_history,
             latest_local_turn_ordinal,
         } => {
-            if projection.thread.id != *id {
+            if projection.thread.id != *id
+                || snapshot
+                    .threads
+                    .get(id)
+                    .is_some_and(|cache| cache.sequence > snapshot_sequence)
+            {
                 return;
             }
             snapshot.threads.insert(
@@ -91,6 +117,7 @@ pub fn thread(snapshot: &mut Snapshot, id: &ThreadId, item: ThreadStreamItem) {
                 ThreadCache {
                     projection: Arc::new(*projection),
                     sequence: snapshot_sequence,
+                    snapshot_sequence,
                     history_cursor,
                     has_more_history,
                     synchronized: false,
@@ -119,9 +146,27 @@ pub fn thread(snapshot: &mut Snapshot, id: &ThreadId, item: ThreadStreamItem) {
             }
         }
     }
+    if snapshot.selected_thread.as_ref() == Some(id)
+        && snapshot.editing_run.as_ref().is_some_and(|run_id| {
+            snapshot.threads.get(id).is_some_and(|cache| {
+                !cache
+                    .projection
+                    .runs
+                    .iter()
+                    .any(|run| run.id == *run_id && run.status == RunStatus::Queued)
+            })
+        })
+    {
+        let key = snapshot.draft_key();
+        snapshot.drafts.remove(&key);
+        snapshot.editing_run = None;
+    }
     evict(snapshot);
 }
 pub fn history(cache: &ThreadCache, page: ThreadHistoryPage) -> ThreadCache {
+    if page.snapshot_sequence < cache.snapshot_sequence {
+        return cache.clone();
+    }
     let mut next = cache.clone();
     let projection = Arc::make_mut(&mut next.projection);
     // A live update already in the cache wins over an older history result.
@@ -182,6 +227,51 @@ mod tests {
             },
         );
         snapshot
+    }
+    #[test]
+    fn older_snapshots_and_history_pages_cannot_move_the_window_backwards() {
+        let mut snapshot = initial();
+        let id = ThreadId::new("thread").unwrap();
+        thread(
+            &mut snapshot,
+            &id,
+            ThreadStreamItem::Snapshot {
+                snapshot_sequence: 9,
+                projection: Box::new(projection()),
+                history_cursor: Some(HistoryCursor { position: 2 }),
+                has_more_history: true,
+                latest_local_turn_ordinal: Some(99),
+            },
+        );
+        assert_eq!(snapshot.threads[&id].sequence, 10);
+        let cache = &snapshot.threads[&id];
+        let stale = history(
+            cache,
+            ThreadHistoryPage {
+                snapshot_sequence: 9,
+                items: vec![],
+                next_cursor: Some(HistoryCursor { position: 1 }),
+                has_more_history: true,
+            },
+        );
+        assert_eq!(stale.history_cursor, cache.history_cursor);
+        assert_eq!(stale.has_more_history, cache.has_more_history);
+    }
+    #[test]
+    fn reconnect_shell_snapshot_clears_a_deleted_selection() {
+        let mut snapshot = initial();
+        snapshot.selected_thread = Some(ThreadId::new("thread").unwrap());
+        shell(
+            &mut snapshot,
+            ShellStreamItem::Snapshot(ShellSnapshot {
+                schema_version: 2,
+                snapshot_sequence: 20,
+                threads: vec![],
+                archived_threads: vec![],
+            }),
+            &now(),
+        );
+        assert!(snapshot.selected_thread.is_none());
     }
     #[test]
     fn cursor_replay_does_not_regress_or_duplicate_records() {

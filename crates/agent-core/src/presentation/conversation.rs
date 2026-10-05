@@ -20,6 +20,7 @@ pub struct ThreadRow {
     pub branch: Option<String>,
     pub worktree: Option<String>,
     pub provider: String,
+    pub provider_kind: crate::provider::ProviderKind,
     pub preview: String,
     pub status: String,
     pub tone: StatusTone,
@@ -30,6 +31,8 @@ pub struct ThreadRow {
     pub wake_label: Option<String>,
     pub pinned: bool,
     pub archived: bool,
+    pub settled: bool,
+    pub snoozed: bool,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
@@ -189,6 +192,7 @@ pub struct ComposerView {
     pub plan_send_label: String,
     pub placeholder: String,
     pub enabled: bool,
+    pub can_edit: bool,
     pub can_stop: bool,
     pub can_steer: bool,
     pub can_restart: bool,
@@ -206,6 +210,7 @@ pub struct ConversationView {
     pub project: String,
     pub cwd: String,
     pub rows: Vec<TimelineRow>,
+    pub requests: Vec<TimelineRow>,
     pub queue: Vec<QueueRow>,
     pub composer: ComposerView,
     pub loading: bool,
@@ -241,12 +246,12 @@ pub fn snoozed(shell: &ThreadShell, now: &Timestamp) -> bool {
             }))
 }
 pub fn shelf_kind(shell: &ThreadShell, now: &Timestamp) -> ShelfKind {
-    if shell.thread.pinned_at.is_some() {
-        ShelfKind::Pinned
-    } else if snoozed(shell, now) {
+    if snoozed(shell, now) {
         ShelfKind::Snoozed
     } else if shell.thread.settled_override == Some(SettledOverride::Settled) {
         ShelfKind::Settled
+    } else if shell.thread.pinned_at.is_some() {
+        ShelfKind::Pinned
     } else if working(shell) {
         ShelfKind::Working
     } else {
@@ -407,10 +412,10 @@ fn thread_row(
     now: &Timestamp,
     archived: bool,
 ) -> ThreadRow {
-    let unread = s.thread.last_visited_at.as_ref().is_none_or(|visit| {
-        s.latest_visible_message
+    let unread = s.thread.last_visited_at.as_ref().is_some_and(|visit| {
+        s.latest_run_completed_at
             .as_ref()
-            .is_some_and(|message| message.role == Role::Assistant && message.updated_at > *visit)
+            .is_some_and(|completed| completed > visit)
     });
     let (status, tone) = if let Some(request) = &s.pending_runtime_request {
         if request.kind == RequestKind::UserInput {
@@ -436,6 +441,7 @@ fn thread_row(
         branch: s.thread.branch.clone(),
         worktree: s.thread.worktree_path.clone(),
         provider: s.thread.provider_instance_id.to_string(),
+        provider_kind: provider_kind(s.thread.provider_instance_id.as_str()),
         preview: s
             .latest_visible_message
             .as_ref()
@@ -457,6 +463,8 @@ fn thread_row(
         },
         pinned: s.thread.pinned_at.is_some(),
         archived,
+        settled: s.thread.settled_override == Some(SettledOverride::Settled),
+        snoozed: snoozed(s, now),
     }
 }
 pub fn archived_threads(snapshot: &Snapshot, now: &Timestamp) -> Vec<ThreadRow> {
@@ -909,7 +917,12 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
             "Ask anything…"
         }
         .into(),
-        enabled: snapshot.connected
+        can_edit: snapshot.connected
+            && !archived
+            && !live_request
+            && thread.is_none_or(|t| t.rollback_request_id.is_none()),
+        enabled: !snapshot.draft_pending()
+            && snapshot.connected
             && !creating
             && !archived
             && thread.is_none_or(|t| t.rollback_request_id.is_none())
@@ -932,10 +945,16 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
         } else if live_request {
             Some("Respond to the pending request to continue".into())
         } else {
-            snapshot.error.clone()
+            None
         },
     };
+    let (requests, rows) = projection
+        .map(timeline)
+        .unwrap_or_default()
+        .into_iter()
+        .partition(|row| matches!(row.kind, RowKind::Approval | RowKind::Question));
     ConversationView {
+        requests,
         thread_id: snapshot.selected_thread.as_ref().map(ToString::to_string),
         title: thread
             .map(|t| t.title.clone())
@@ -950,7 +969,7 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "Chats".into()),
         cwd: snapshot.cwd(),
-        rows: projection.map(timeline).unwrap_or_default(),
+        rows,
         queue,
         composer,
         loading: snapshot
@@ -995,7 +1014,7 @@ impl Snapshot {
                     t.output
                         .iter()
                         .filter(|o| o.sequence > after)
-                        .cloned()
+                        .map(|output| output.as_ref().clone())
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -1007,6 +1026,25 @@ impl Snapshot {
 mod tests {
     use super::*;
     use crate::test_support::*;
+    #[test]
+    fn unread_is_a_completion_watermark_and_never_visited_is_not_unread() {
+        let mut shell = projector::shell(&projection());
+        shell.latest_run_completed_at = Some(now());
+        assert!(!thread_row(&shell, None, ShelfKind::Active, &now(), false).unread);
+        shell.thread.last_visited_at = Some(Timestamp::from_millis(now().millis() - 1).unwrap());
+        assert!(thread_row(&shell, None, ShelfKind::Active, &now(), false).unread);
+        shell.thread.last_visited_at = Some(now());
+        assert!(!thread_row(&shell, None, ShelfKind::Active, &now(), false).unread);
+    }
+    #[test]
+    fn t3_snooze_and_settle_take_precedence_over_pinning() {
+        let mut shell = projector::shell(&projection());
+        shell.thread.pinned_at = Some(now());
+        shell.thread.settled_override = Some(SettledOverride::Settled);
+        assert_eq!(shelf_kind(&shell, &now()), ShelfKind::Settled);
+        shell.thread.snoozed_until = Some(Timestamp::from_millis(now().millis() + 1000).unwrap());
+        assert_eq!(shelf_kind(&shell, &now()), ShelfKind::Snoozed);
+    }
     #[test]
     fn default_followup_queues_while_explicit_actions_keep_the_target() {
         let run = RunId::new("run").unwrap();
@@ -1216,6 +1254,173 @@ mod tests {
                 }]
             )
             .is_none()
+        );
+    }
+}
+
+/// Provider selection and labels belong to core, not native views.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct ModelChoice {
+    pub instance_id: String,
+    pub model: crate::models::Model,
+    pub selected: bool,
+}
+pub fn model_choices(snapshot: &Snapshot) -> Vec<ModelChoice> {
+    let draft = snapshot.current_draft();
+    snapshot
+        .models
+        .iter()
+        .map(|model| {
+            let instance_id = match model.model.provider {
+                crate::provider::ProviderKind::Codex => "codex",
+                crate::provider::ProviderKind::Claude => "claude",
+            }
+            .to_owned();
+            ModelChoice {
+                selected: draft.instance_id == instance_id && draft.model == model.id,
+                instance_id,
+                model: model.clone(),
+            }
+        })
+        .collect()
+}
+fn provider_kind(instance: &str) -> crate::provider::ProviderKind {
+    match instance {
+        "claude" => crate::provider::ProviderKind::Claude,
+        _ => crate::provider::ProviderKind::Codex,
+    }
+}
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct RuntimeModeChoice {
+    pub id: String,
+    pub label: String,
+}
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn runtime_mode_choices() -> Vec<RuntimeModeChoice> {
+    [
+        ("approval-required", "Supervised"),
+        ("auto-accept-edits", "Auto-accept edits"),
+        ("auto", "Auto"),
+        ("full-access", "Full access"),
+    ]
+    .into_iter()
+    .map(|(id, label)| RuntimeModeChoice {
+        id: id.into(),
+        label: label.into(),
+    })
+    .collect()
+}
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn question_answer_values(selected: Vec<String>, custom: String, multi: bool) -> Vec<String> {
+    let mut values = if !multi && !custom.trim().is_empty() {
+        vec![]
+    } else {
+        selected
+    };
+    if !custom.trim().is_empty() {
+        values.push(custom);
+    }
+    values
+}
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn question_option_selected(
+    selected: Vec<String>,
+    custom: String,
+    multi: bool,
+    value: String,
+) -> bool {
+    (multi || custom.trim().is_empty()) && selected.contains(&value)
+}
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn safe_markdown_url(url: String) -> bool {
+    url.split_once(':').is_some_and(|(scheme, _)| {
+        ["http", "https", "mailto"]
+            .iter()
+            .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
+    })
+}
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn snapshot_is_newer(current: u64, incoming: u64) -> bool {
+    incoming > current
+}
+#[cfg(test)]
+mod review_presentation_tests {
+    use super::*;
+    #[test]
+    fn custom_single_answer_deselects_option_but_multi_preserves_it() {
+        let selected = vec!["one".into()];
+        assert!(!question_option_selected(
+            selected.clone(),
+            "custom".into(),
+            false,
+            "one".into()
+        ));
+        assert_eq!(
+            question_answer_values(selected.clone(), "custom".into(), false),
+            vec!["custom"]
+        );
+        assert_eq!(
+            question_answer_values(selected, "custom".into(), true),
+            vec!["one", "custom"]
+        );
+    }
+    #[test]
+    fn unsafe_markdown_links_are_rejected() {
+        for url in [
+            "javascript:alert(1)",
+            "file:/etc/passwd",
+            "intent:danger",
+            "data:text/html,hi",
+        ] {
+            assert!(!safe_markdown_url(url.into()));
+        }
+        for url in [
+            "https://example.org",
+            "http://localhost",
+            "mailto:me@example.org",
+        ] {
+            assert!(safe_markdown_url(url.into()));
+        }
+    }
+    #[test]
+    fn stale_or_duplicate_snapshots_are_rejected() {
+        assert!(!snapshot_is_newer(10, 9));
+        assert!(!snapshot_is_newer(10, 10));
+        assert!(snapshot_is_newer(10, 11));
+    }
+    #[test]
+    fn runtime_labels_match_t3() {
+        assert_eq!(runtime_mode_choices()[0].label, "Supervised");
+    }
+}
+
+/// Native edits based on an older visible buffer must preserve a core append
+/// (for example dictation) that arrived while the native edit was in flight.
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn merge_draft_text(base: String, edited: String, current: String) -> String {
+    if current != base && current.starts_with(&base) {
+        format!("{}{}", edited, &current[base.len()..])
+    } else {
+        edited
+    }
+}
+#[cfg(test)]
+mod draft_merge_tests {
+    #[test]
+    fn delayed_native_edit_preserves_transcription_append() {
+        assert_eq!(
+            super::merge_draft_text(
+                "hello".into(),
+                "hello there".into(),
+                "hello\ntranscript".into()
+            ),
+            "hello there\ntranscript"
+        );
+        assert_eq!(
+            super::merge_draft_text("hello".into(), "".into(), "hello".into()),
+            ""
         );
     }
 }

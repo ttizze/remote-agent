@@ -33,10 +33,7 @@ pub(crate) async fn prepare_dictation(
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn terminal_handle(cwd: String) -> String {
-    format!(
-        "bex-terminal-{}",
-        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, cwd.as_bytes())
-    )
+    agent_protocol::operations::terminal_handle(&cwd)
 }
 pub async fn pair_remote(
     local: &crate::transport::Session,

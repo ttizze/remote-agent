@@ -37,22 +37,22 @@
 | H14 | O8 と同じ worker の修正。 | 該当 crate の回帰テスト（追加分を含む）。 |
 | H15 | root scope に永続 Store instance ID を含め、store reset/別 Host の ref を分離。保存済み scope はその store の値を使用する。 | instance ID の再起動保持と別 Store の相違を検証。 |
 | H16 | Browser startup alias と bind_scope、削除済み runner 専用の xtask Android E2E helper/instrumentation test/依存を削除。 | Host/xtask の単体と integration を最終検証。 |
-| C1 | 照合・対応中 | 未完了 |
-| C2 | 照合・対応中 | 未完了 |
-| C3 | 照合・対応中 | 未完了 |
-| C4 | 照合・対応中 | 未完了 |
-| C5 | 照合・対応中 | 未完了 |
-| C6 | 照合・対応中 | 未完了 |
-| C7 | 照合・対応中 | 未完了 |
-| C8 | 照合・対応中 | 未完了 |
-| C9 | 照合・対応中 | 未完了 |
-| C10 | 照合・対応中 | 未完了 |
-| C11 | 照合・対応中 | 未完了 |
-| C12 | 照合・対応中 | 未完了 |
-| C13 | 照合・対応中 | 未完了 |
-| C14 | 照合・対応中 | 未完了 |
-| C15 | 照合・対応中 | 未完了 |
-| C16 | 照合・対応中 | 未完了 |
+| C1 | 検索は2..200文字・limit 50。空/短すぎる/offline は RPC を出さず、以前の検索結果を消す。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C2 | 未読は最新の完了 watermark と lastVisited を比較し、never visited は false。表示中/launch 後も server watermark で visit する。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C3 | 未受領の同じ draft/run/launch は composer を無効にし、owner が再送 Intent を no-op にする。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C4 | queued edit は run ごとの draft key。Cancel/成功で通常 draft を保持し、queue から消えれば編集を終了。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C5 | I/O は ConnectionClosed とし、NotSent が確定した Host rejection だけ durable pending を除去。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C6 | 生きている接続の timeout は同じ job/command ID で再試行し、thread ごとの mutation 順序を維持。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C7 | shell snapshot で消えた selected thread を外し、stream も停止。未確定 launch は保持。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C8 | terminal/file/review/file drafts を Arc 共有し、入力を損失しない専用 FIFO へ。旧 connection close は owner loop の外で行う。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C9 | 最初の空でない trimmed line を100文字まで title にする。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C10 | 固定 T3 の snoozed > settled > pinned に合わせる。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C11 | 古い snapshot と、その bounded window より古い history/page cursor を拒否する。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C12 | terminal start の失敗は Failed にし、Starting 表示を終える。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C13 | provider switch は Host thread/projection または shell の instance と比較する。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C14 | endpoint と ticket が同じ healthy session の resume は既存接続を使い reused=true を返す。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C15 | local/offline の編集を成功扱い。表示用 error formatter を使い、無関係な background 成功はエラーを消さない。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
+| C16 | 変更しない。固定 T3 Sidebar.logic.ts と同様、Working shelf 有効時の Active は復帰時刻順。UI は ActiveReorder を提供していない。 | core の unit/property tests と最終全 unit-tests。個別結果は下記の最終検証に記録。 |
 | D1 | 照合・対応中 | 未完了 |
 | D2 | 照合・対応中 | 未完了 |
 | D3 | 照合・対応中 | 未完了 |
