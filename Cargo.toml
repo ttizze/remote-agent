@@ -11,6 +11,7 @@ members = [
     "crates/host-daemon",
     "crates/xtask",
     "crates/host-fixture",
+    "crates/orchestration",
 ]
 resolver = "2"
 
