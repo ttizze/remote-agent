@@ -1,12 +1,12 @@
 //! `subscribeThread`: a snapshot or a bounded replay, an optional completion marker,
 //! then the facts of every later commit. Ported from T3 `ThreadStream.ts` and ws.ts.
 use super::history::{PagePolicy, bounded_state};
+use super::live::{LIVE_STREAM_MAX_BYTES, LiveReceiver};
 use super::wire::client_state;
 use crate::{StoredFact, ThreadHead};
 use agent_domain::State;
 use serde::Serialize;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 /// Facts a resume may replay before a snapshot is cheaper.
 pub const RESUME_MAX_REPLAY_FACTS: u64 = 128;
@@ -25,6 +25,8 @@ pub struct ThreadSubscribe {
     pub accept_bounded_snapshot: bool,
     /// Updates buffered before a slow subscriber is closed.
     pub capacity: usize,
+    /// Serialized fact bytes buffered before a slow subscriber is closed.
+    pub max_bytes: u64,
 }
 impl Default for ThreadSubscribe {
     fn default() -> Self {
@@ -33,6 +35,7 @@ impl Default for ThreadSubscribe {
             request_completion_marker: false,
             accept_bounded_snapshot: false,
             capacity: 1024,
+            max_bytes: LIVE_STREAM_MAX_BYTES,
         }
     }
 }
@@ -90,9 +93,20 @@ pub enum ThreadUpdate {
     Synchronized,
 }
 
+impl ThreadUpdate {
+    /// What the update holds against a live budget: the encoded facts. Snapshots are
+    /// the subscription's starting point and are not charged.
+    pub fn live_bytes(&self) -> u64 {
+        match self {
+            Self::Facts(facts) => replay_encoded_bytes(facts),
+            Self::Snapshot(_) | Self::Synchronized => 0,
+        }
+    }
+}
+
 /// The stream closes when the subscriber falls behind; resubscribe with `after_global_seq`.
 pub struct ThreadSubscription {
-    pub updates: mpsc::Receiver<ThreadUpdate>,
+    pub updates: LiveReceiver<ThreadUpdate>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

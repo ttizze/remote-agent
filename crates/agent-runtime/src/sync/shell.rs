@@ -1,6 +1,8 @@
 //! `subscribeShell`: the thread list as a snapshot or a replay of changed rows, then
 //! live changes batched (50 ms / 512) and coalesced per thread. Ported from T3
 //! `ShellStream.ts` and ws.ts.
+use super::history::json_len;
+use super::live::{LIVE_STREAM_MAX_BYTES, LiveReceiver, LiveSender, live_channel};
 use crate::{CommitListener, CommitNotice, RuntimeError, ShellRow, Store, StoreError};
 use agent_domain::{FactBody, ThreadId};
 use rusqlite::{Connection, params};
@@ -9,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 pub const SHELL_BATCH_WINDOW: Duration = Duration::from_millis(50);
 pub const SHELL_BATCH_MAX: usize = 512;
@@ -45,8 +47,10 @@ pub struct ShellSubscribe {
     pub after_global_seq: Option<u64>,
     pub request_completion_marker: bool,
     pub location: ShellLocation,
-    /// Updates buffered before a slow subscriber is closed.
+    /// Live updates buffered before a slow subscriber is closed.
     pub capacity: usize,
+    /// Serialized row bytes buffered before a slow subscriber is closed.
+    pub max_bytes: u64,
 }
 impl Default for ShellSubscribe {
     fn default() -> Self {
@@ -55,6 +59,7 @@ impl Default for ShellSubscribe {
             request_completion_marker: false,
             location: ShellLocation::Active,
             capacity: 1024,
+            max_bytes: LIVE_STREAM_MAX_BYTES,
         }
     }
 }
@@ -94,9 +99,23 @@ pub enum ShellUpdate {
     Synchronized,
 }
 
+impl ShellUpdate {
+    /// What the update holds against a live budget: its serialized rows.
+    pub fn live_bytes(&self) -> u64 {
+        match self {
+            Self::ThreadUpdated { thread, .. } => json_len(thread),
+            Self::ProjectUpdated { project, .. } => json_len(project),
+            Self::Snapshot(_)
+            | Self::ThreadRemoved { .. }
+            | Self::ProjectRemoved { .. }
+            | Self::Synchronized => 0,
+        }
+    }
+}
+
 /// The stream closes when the subscriber falls behind; resubscribe with `after_global_seq`.
 pub struct ShellSubscription {
-    pub updates: mpsc::Receiver<ShellUpdate>,
+    pub updates: LiveReceiver<ShellUpdate>,
 }
 
 /// One committed change to a list aggregate.
@@ -314,7 +333,8 @@ impl ShellHub {
         if options.request_completion_marker {
             first.push(ShellUpdate::Synchronized);
         }
-        let (sender, updates) = mpsc::channel(options.capacity.max(4));
+        let (sender, updates) =
+            live_channel(options.capacity.max(4) + first.len(), options.max_bytes);
         tokio::spawn(forward(
             first,
             start,
@@ -333,16 +353,22 @@ async fn forward(
     location: ShellLocation,
     mut live: broadcast::Receiver<ShellChange>,
     projects: Arc<dyn ProjectDirectory>,
-    sender: mpsc::Sender<ShellUpdate>,
+    sender: LiveSender<ShellUpdate>,
 ) {
-    for update in first {
-        if sender.send(update).await.is_err() {
-            return;
-        }
+    let offer = |update: ShellUpdate| {
+        let bytes = update.live_bytes();
+        sender.offer(update, bytes)
+    };
+    if !first.into_iter().all(offer) {
+        return;
     }
     loop {
-        let Ok(change) = live.recv().await else {
-            return;
+        let change = tokio::select! {
+            () = sender.closed() => return,
+            change = live.recv() => match change {
+                Ok(change) => change,
+                Err(_) => return,
+            },
         };
         let mut batch = vec![change];
         let deadline = tokio::time::Instant::now() + SHELL_BATCH_WINDOW;
@@ -365,7 +391,7 @@ async fn forward(
                 thread => update_for(location, thread),
             };
             if let Some(update) = update
-                && sender.send(update).await.is_err()
+                && !offer(update)
             {
                 return;
             }

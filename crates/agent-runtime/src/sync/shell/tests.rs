@@ -213,7 +213,7 @@ fn project(id: &str) -> ProjectShell {
 #[tokio::test(start_paused = true)]
 async fn batches_and_coalesces_live_changes_per_aggregate() {
     let (changes, live) = broadcast::channel(64);
-    let (sender, mut updates) = mpsc::channel(64);
+    let (sender, mut updates) = live_channel(64, LIVE_STREAM_MAX_BYTES);
     for change in [
         thread_change(3, "thread-old"),
         thread_change(11, "thread-a"),
@@ -267,7 +267,7 @@ async fn batches_and_coalesces_live_changes_per_aggregate() {
 #[tokio::test(start_paused = true)]
 async fn closes_a_subscriber_that_falls_behind_the_hub() {
     let (changes, live) = broadcast::channel(2);
-    let (sender, mut updates) = mpsc::channel(4);
+    let (sender, mut updates) = live_channel(4, LIVE_STREAM_MAX_BYTES);
     for sequence in 1..=4 {
         changes.send(thread_change(sequence, "thread-a")).unwrap();
     }
@@ -281,6 +281,75 @@ async fn closes_a_subscriber_that_falls_behind_the_hub() {
     )
     .await;
     assert!(updates.recv().await.is_none());
+}
+
+fn changes_for(changes: &broadcast::Sender<ShellChange>, threads: usize, payload: &str) {
+    for sequence in 1..=threads {
+        let mut thread = shell(&format!("thread-{sequence}"), false, false);
+        thread.row.payload = serde_json::json!({ "title": payload });
+        changes
+            .send(ShellChange::Thread {
+                sequence: sequence as u64,
+                thread,
+                left_archive: false,
+            })
+            .unwrap();
+    }
+}
+async fn drained(updates: &mut LiveReceiver<ShellUpdate>) -> usize {
+    let mut received = 0;
+    while updates.recv().await.is_some() {
+        received += 1;
+    }
+    received
+}
+
+#[tokio::test(start_paused = true)]
+async fn closes_a_slow_subscriber_instead_of_waiting_for_it() {
+    let (changes, live) = broadcast::channel(64);
+    let (sender, mut updates) = live_channel(2, LIVE_STREAM_MAX_BYTES);
+    let forwarding = tokio::spawn(forward(
+        vec![],
+        0,
+        ShellLocation::Active,
+        live,
+        Arc::new(Projects::default()),
+        sender,
+    ));
+    changes_for(&changes, 5, "row");
+    tokio::time::timeout(Duration::from_secs(1), forwarding)
+        .await
+        .expect("forwarding ends without the subscriber reading")
+        .unwrap();
+    assert_eq!(drained(&mut updates).await, 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn closes_a_subscriber_whose_undelivered_rows_exceed_the_byte_budget() {
+    let (changes, live) = broadcast::channel(64);
+    let mut row = shell("thread-1", false, false);
+    row.row.payload = serde_json::json!({ "title": "x".repeat(250) });
+    let row_bytes = ShellUpdate::ThreadUpdated {
+        sequence: 1,
+        thread: row,
+    }
+    .live_bytes();
+    assert!(row_bytes > 250);
+    let (sender, mut updates) = live_channel(64, row_bytes * 5 / 2);
+    let forwarding = tokio::spawn(forward(
+        vec![],
+        0,
+        ShellLocation::Active,
+        live,
+        Arc::new(Projects::default()),
+        sender,
+    ));
+    changes_for(&changes, 5, &"x".repeat(250));
+    tokio::time::timeout(Duration::from_secs(1), forwarding)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(drained(&mut updates).await, 2);
 }
 
 struct Host {
@@ -379,6 +448,25 @@ async fn sends_a_snapshot_then_live_changes_after_it() {
     assert_eq!((sequence, thread.thread.as_str()), (renamed, "thread-a"));
     let archived = dispatch(&a, "archive-a", Command::Archive { archived: true }).await;
     assert_eq!(next(&mut subscription).await, removed(archived, "thread-a"));
+}
+
+#[tokio::test]
+async fn stops_forwarding_once_an_idle_subscriber_is_dropped() {
+    let h = host();
+    let mut subscription = h.hub.subscribe(ShellSubscribe::default()).await.unwrap();
+    assert!(matches!(
+        next(&mut subscription).await,
+        ShellUpdate::Snapshot(_)
+    ));
+    assert_eq!(h.hub.changes.receiver_count(), 1);
+    drop(subscription);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while h.hub.changes.receiver_count() > 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the forwarding task releases its hub receiver");
 }
 
 #[tokio::test]

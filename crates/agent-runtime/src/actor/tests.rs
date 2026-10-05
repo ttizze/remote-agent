@@ -755,6 +755,52 @@ async fn closes_a_subscriber_that_falls_behind() {
     assert_eq!(received, 4);
 }
 
+// T3 LiveStreamBudget.ts: retained serialized bytes close a stream regardless of count.
+#[tokio::test]
+async fn closes_a_subscriber_whose_undelivered_facts_exceed_the_byte_budget() {
+    let h = harness();
+    let id = thread("thread:slow-bytes");
+    let handle = created(&h.context, &id).await;
+    let budget = ThreadSubscribe {
+        max_bytes: 5_000,
+        ..ThreadSubscribe::default()
+    };
+    let mut slow = handle.subscribe(budget).await.unwrap();
+    let mut fast = handle.subscribe(budget).await.unwrap();
+    assert!(matches!(
+        fast.updates.try_recv().unwrap(),
+        ThreadUpdate::Snapshot(_)
+    ));
+    assert!(matches!(
+        slow.updates.recv().await.unwrap(),
+        ThreadUpdate::Snapshot(_)
+    ));
+    let mut fast_received = 0;
+    for step in 0..6 {
+        handle
+            .dispatch(
+                command_id(&format!("wide{step}")),
+                rename(&format!("{step}{}", "x".repeat(2_000))),
+                CommandOrigin::Client,
+            )
+            .await
+            .unwrap();
+        let update = fast.updates.try_recv().unwrap();
+        assert!(update.live_bytes() > 2_000);
+        fast_received += 1;
+    }
+    assert_eq!(fast_received, 6);
+    assert_eq!(
+        fast.updates.try_recv().unwrap_err(),
+        tokio::sync::mpsc::error::TryRecvError::Empty
+    );
+    let mut received = 0;
+    while slow.updates.recv().await.is_some() {
+        received += 1;
+    }
+    assert_eq!(received, 2);
+}
+
 /// Claims rows as `worker` until the thread's provider start is running under its lease.
 async fn claim_start(h: &Harness, id: &ThreadId, worker: &str) -> (Arc<SqliteOutbox>, String) {
     let outbox = SqliteOutbox::new(h.context.store.clone(), h.clock.clone());

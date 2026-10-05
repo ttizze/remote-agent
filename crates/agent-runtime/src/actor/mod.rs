@@ -5,9 +5,9 @@ pub use coalesce::COALESCE_LIMIT;
 pub use registry::*;
 
 use crate::sync::{
-    RESUME_MAX_REPLAY_FACTS, ResumeInput, ResumePlan, ThreadSnapshot, ThreadSubscribe,
-    ThreadSubscription, ThreadUpdate, client_facts, decide_resume, replay_encoded_bytes,
-    replay_raw_payload_safe,
+    LiveSender, RESUME_MAX_REPLAY_FACTS, ResumeInput, ResumePlan, ThreadSnapshot, ThreadSubscribe,
+    ThreadSubscription, ThreadUpdate, client_facts, decide_resume, live_channel,
+    replay_encoded_bytes, replay_raw_payload_safe,
 };
 use crate::{
     Clock, CommitBatch, EffectSettlement, RuntimeError, SNAPSHOT_INTERVAL, Settlement,
@@ -319,7 +319,7 @@ pub(crate) struct Actor {
     last_at: Option<Timestamp>,
     shell: Option<ShellRow>,
     snapshot_due: bool,
-    subscribers: Vec<mpsc::Sender<ThreadUpdate>>,
+    subscribers: Vec<LiveSender<ThreadUpdate>>,
     mail: mpsc::Receiver<Mail>,
     held: VecDeque<Mail>,
     own: VecDeque<Input>,
@@ -668,9 +668,14 @@ impl Actor {
         }
     }
 
+    /// Never waits: a subscriber over its item or byte budget is dropped.
     fn publish(&mut self, update: ThreadUpdate) {
+        if self.subscribers.is_empty() {
+            return;
+        }
+        let bytes = update.live_bytes();
         self.subscribers
-            .retain(|subscriber| subscriber.try_send(update.clone()).is_ok());
+            .retain(|subscriber| subscriber.offer(update.clone(), bytes));
     }
 
     fn queue_handoff(&mut self, facts: &[crate::StoredFact]) {
@@ -712,7 +717,7 @@ impl Actor {
         &mut self,
         options: ThreadSubscribe,
     ) -> Result<ThreadSubscription, RuntimeError> {
-        let (sender, updates) = mpsc::channel(options.capacity.max(4));
+        let (sender, updates) = live_channel(options.capacity.max(4), options.max_bytes);
         let replay = match options.after_global_seq {
             Some(after) => self.replay(after).await?,
             None => None,
@@ -728,12 +733,13 @@ impl Actor {
         let marker = options
             .request_completion_marker
             .then_some(ThreadUpdate::Synchronized);
-        for update in first.into_iter().chain(marker) {
-            sender
-                .try_send(update)
-                .expect("a new subscription has room for its first updates");
+        let fits = first.into_iter().chain(marker).all(|update| {
+            let bytes = update.live_bytes();
+            sender.offer(update, bytes)
+        });
+        if fits {
+            self.subscribers.push(sender);
         }
-        self.subscribers.push(sender);
         Ok(ThreadSubscription { updates })
     }
 
