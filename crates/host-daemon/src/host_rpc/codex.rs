@@ -595,12 +595,9 @@ impl Identity for Codex {
 
 #[async_trait::async_trait]
 impl Agent for Codex {
-    fn running_input(&self) -> super::submission::RunningInput {
-        super::submission::RunningInput::SteerOrQueue
-    }
     fn capabilities(&self) -> agent_protocol::session::Capabilities {
         agent_protocol::session::Capabilities {
-            additional_input: true,
+            active_steering: true,
             fork: true,
             rename: true,
             model_change: true,

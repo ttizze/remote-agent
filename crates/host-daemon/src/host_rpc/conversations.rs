@@ -878,11 +878,30 @@ impl Conversations {
         Ok(())
     }
 
+    pub(super) fn queue_receipt(
+        &self,
+        target: &SessionRef,
+        id: &agent_protocol::ids::ClientInputId,
+    ) -> Result<Option<agent_protocol::session::SubmissionDelivery>> {
+        let delivery: Option<String> = self
+            .lock()
+            .query_row(
+                "SELECT delivery FROM commands WHERE conversation=?1 AND input_id=?2 AND queued=1",
+                params![target.id, id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        delivery
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
+
     /// Claim immediately before native IO. A crash after this commit is Unknown,
     /// never an automatic second execution of the same input.
     pub(super) fn claim_queued(
         &self,
         target: &SessionRef,
+        selected: Option<&agent_protocol::ids::ClientInputId>,
     ) -> Result<Option<agent_protocol::operations::Submission>> {
         let mut connection = self.lock();
         let tx = connection.transaction()?;
@@ -891,11 +910,11 @@ impl Conversations {
             [&target.id],
             |row| row.get(0),
         )?;
-        if held {
+        if held && selected.is_none() {
             return Ok(None);
         }
         let payload: Option<String> = tx
-            .query_row("SELECT execution FROM commands WHERE conversation=?1 AND delivery='\"queued\"' ORDER BY queue_position, rowid LIMIT 1", [&target.id], |row| row.get(0))
+            .query_row("SELECT execution FROM commands WHERE conversation=?1 AND delivery='\"queued\"' AND (?2 IS NULL OR input_id=?2) ORDER BY queue_position, rowid LIMIT 1", params![target.id, selected.map(|id| id.as_str())], |row| row.get(0))
             .optional()?;
         let Some(payload) = payload else {
             return Ok(None);

@@ -1208,7 +1208,7 @@ async fn live_claude_subscription_completes_and_resumes_through_store_and_host()
         assert!(snapshot.conversations[&id].turns.as_ref().unwrap()[3].items.as_ref().unwrap().iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. }) && item_text(item).is_some_and(|text| text.contains("BEX_CLAUDE_RECOVERED"))));
         send(&store, "Count from 1 to 100, one number per line. Do not use tools.", "live-before-additional").await;
         until(&store, |snapshot| snapshot.conversations[&id].turns.as_ref().is_some_and(|turns| turns.len() == 5 && turns[4].items.as_ref().is_some_and(|items| items.iter().any(|item| matches!(item.body(), agent_protocol::items::ItemBody::AssistantText { .. }) && item_text(item).is_some_and(|text| !text.is_empty()))))).await;
-        assert!(agent_protocol::session::input_unavailable_reason(&store.snapshot().conversations[&id]).is_none());
+        assert!(store.snapshot().conversations[&id].capabilities.unwrap().active_steering);
         send(&store, "Reply with exactly BEX_CLAUDE_ADDITIONAL_OK. Do not use tools.", "live-additional").await;
         let snapshot = completed(&store, &id, 5, "completed").await;
         assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
@@ -1817,8 +1817,10 @@ async fn claude_host_queue_preserves_edits_order_and_hold_across_restart() {
         .active_turn_id()
         .unwrap();
     assert!(
-        agent_protocol::session::input_unavailable_reason(&store.snapshot().conversations[&id])
-            .is_none()
+        store.snapshot().conversations[&id]
+            .capabilities
+            .unwrap()
+            .active_steering
     );
     let local = fixture.local().await.unwrap();
     assert!(

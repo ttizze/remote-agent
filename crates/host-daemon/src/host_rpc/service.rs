@@ -756,6 +756,15 @@ impl HostRpcService {
                     .and_then(|result| result)
                     .map(Into::into)
             }
+            Call::SteerQueued(params) => {
+                let service = self.clone();
+                let params = params.clone();
+                tokio::spawn(async move { service.steer_queued(&params).await })
+                    .await
+                    .map_err(|error| Failure::unknown("submission_outcome_unknown", error))
+                    .and_then(|result| result)
+                    .map(Into::into)
+            }
             Call::Interrupt(params) => {
                 let service = self.clone();
                 let params = params.clone();
@@ -800,7 +809,6 @@ impl HostRpcService {
     ) -> Result<op::SubmissionReceipt, Failure> {
         use agent_protocol::session::SubmissionDelivery;
         let target = &input.thread_id;
-        let id = input.client_user_message_id.as_str();
         let _execution = self
             .inner
             .router
@@ -894,6 +902,17 @@ impl HostRpcService {
             return Ok(op::SubmissionReceipt { turn_id: None });
         }
         let (route, reload) = prepared.expect("immediate input has an execution route");
+        self.deliver_input(target, input, route, reload).await
+    }
+
+    async fn deliver_input(
+        &self,
+        target: &agent_protocol::session::SessionRef,
+        input: &op::Submission,
+        route: super::submission::SubmissionTarget,
+        reload: bool,
+    ) -> Result<op::SubmissionReceipt, Failure> {
+        self.history_changed(target);
         let result = match self.inner.router.publish_submission(
             target,
             input.client_user_message_id.clone(),
@@ -902,8 +921,66 @@ impl HostRpcService {
             Ok(()) => self.submit_input(target, input, route, reload).await,
             Err(error) => Err(Failure::unknown("submission_outcome_unknown", error)),
         };
-        self.finish_input(target, id, &result)?;
+        self.finish_input(target, input.client_user_message_id.as_str(), &result)?;
+        self.history_changed(target);
         result
+    }
+
+    async fn steer_queued(
+        &self,
+        params: &agent_protocol::queue::SteerQueued,
+    ) -> Result<agent_protocol::models::Empty, Failure> {
+        use agent_protocol::session::SubmissionDelivery;
+        let target = &params.session;
+        let _execution = self
+            .inner
+            .router
+            .retain_execution(target.clone())
+            .map_err(|error| Failure::new("invalid_queue", error))?;
+        self.native_session(target)?;
+        let _workspace = self.inner.worktree_access.read().await;
+        let _serial = self.inner.router.submission_lock(target).lock_owned().await;
+        match self
+            .inner
+            .conversations
+            .queue_receipt(target, &params.id)
+            .map_err(|error| Failure::new("queue_read_failed", error))?
+        {
+            Some(SubmissionDelivery::Queued) => {}
+            Some(SubmissionDelivery::Accepted { turn_id })
+                if turn_id.as_ref() == Some(&params.turn_id) =>
+            {
+                return Ok(agent_protocol::models::Empty {});
+            }
+            Some(SubmissionDelivery::Sending | SubmissionDelivery::Unknown) => {
+                return Err(Failure::unknown(
+                    "submission_outcome_unknown",
+                    "queued input delivery is uncertain; it cannot be resent",
+                ));
+            }
+            _ => {
+                return Err(Failure::new(
+                    "invalid_queue",
+                    "queued input is no longer available",
+                ));
+            }
+        }
+        let (route, reload) = self.prepare_input(target).await?;
+        if !matches!(&route, super::submission::SubmissionTarget::Steer(turn) if turn == params.turn_id.as_str())
+        {
+            return Err(Failure::new(
+                "steer_unavailable",
+                "the observed turn is no longer available for steering",
+            ));
+        }
+        let input = self
+            .inner
+            .conversations
+            .claim_queued(target, Some(&params.id))
+            .map_err(|error| Failure::new("queue_claim_failed", error))?
+            .ok_or_else(|| Failure::new("invalid_queue", "queued input is no longer available"))?;
+        self.deliver_input(target, &input, route, reload).await?;
+        Ok(agent_protocol::models::Empty {})
     }
 
     fn finish_input(
@@ -959,7 +1036,7 @@ impl HostRpcService {
         let route = super::submission::submission_target(
             response.thread.status,
             running_turn,
-            agent.running_input(),
+            agent.capabilities().active_steering,
             response.thread.cwd.as_deref(),
         )
         .map_err(|e| Failure::new("submission_unavailable", e))?;
@@ -1104,24 +1181,14 @@ impl HostRpcService {
         let Some(input) = self
             .inner
             .conversations
-            .claim_queued(target)
+            .claim_queued(target, None)
             .map_err(|error| Failure::new("queue_claim_failed", error))?
         else {
             return Ok(());
         };
-        self.history_changed(target);
-        let id = input.client_user_message_id.as_str();
-        let result = match self.inner.router.publish_submission(
-            target,
-            input.client_user_message_id.clone(),
-            agent_protocol::session::SubmissionDelivery::Sending,
-        ) {
-            Ok(()) => self.submit_input(target, &input, route, reload).await,
-            Err(error) => Err(Failure::unknown("submission_outcome_unknown", error)),
-        };
-        self.finish_input(target, id, &result)?;
-        self.history_changed(target);
-        result.map(|_| ())
+        self.deliver_input(target, &input, route, reload)
+            .await
+            .map(|_| ())
     }
 
     async fn answer_request(
@@ -1586,6 +1653,7 @@ impl HostRpcService {
             }
 
             Call::CreateSession(_) => unreachable!("creation owns its subscription"),
+            Call::SteerQueued(_) => unreachable!("the Host owns queued steering"),
             Call::StartTerminal(params) => (self
                 .inner
                 .terminals
@@ -2291,6 +2359,7 @@ fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRe
             (Some(&p.thread_id), Some(p.client_user_message_id.as_str()))
         }
         Call::QueueControl(p) => (Some(&p.session), None),
+        Call::SteerQueued(p) => (Some(&p.session), None),
         Call::ForkSession(p) => (Some(&p.thread_id), None),
         Call::Interrupt(p) => (Some(&p.thread_id), None),
         Call::ReadItem(p) => (Some(&p.thread_id), None),
@@ -2515,6 +2584,7 @@ mod tests {
                 assert!(
                     input
                         .try_send(crate::claude::Command {
+                            user: None,
                             value: serde_json::Value::Null,
                             delivered: None,
                         })
@@ -2891,6 +2961,106 @@ mod tests {
             service.execute_submission(&input, false).await.unwrap(),
             replay
         );
+    }
+
+    #[tokio::test]
+    async fn queued_steering_replays_only_its_completed_target_without_redelivering_uncertain_input()
+     {
+        use super::*;
+        use agent_protocol::{
+            queue::{QueueAction, SteerQueued},
+            session::{SessionRef, SubmissionDelivery},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            Err("not available".into()),
+            ProjectStore::new(root.path().join("worktrees.json")),
+            Some(root.path().join("native")),
+        )
+        .unwrap();
+        let target = service
+            .inner
+            .conversations
+            .bind(
+                &SessionRef {
+                    provider: ProviderKind::Codex,
+                    id: "source".into(),
+                },
+                &service.storage_scope(ProviderKind::Codex).unwrap(),
+            )
+            .unwrap();
+        let _execution = service
+            .inner
+            .router
+            .retain_execution(target.clone())
+            .unwrap();
+        service
+            .inner
+            .conversations
+            .queue_control(&target, &QueueAction::Pause)
+            .unwrap();
+        let submission = op::Submission {
+            thread_id: target.clone(),
+            client_user_message_id: "queued".into(),
+            input: vec![op::Input::Text {
+                text: "preserve this input".into(),
+            }],
+            model: None,
+            effort: None,
+            service_tier: None,
+        };
+        service
+            .inner
+            .conversations
+            .admit(&submission, SubmissionDelivery::Queued)
+            .unwrap();
+        let mut command = SteerQueued {
+            session: target.clone(),
+            id: "queued".into(),
+            turn_id: "active".into(),
+        };
+        assert_eq!(
+            service.steer_queued(&command).await.unwrap_err().code,
+            "provider_unavailable"
+        );
+        assert_eq!(
+            service.inner.conversations.queued(&target).unwrap(),
+            std::slice::from_ref(&submission)
+        );
+        for delivery in [SubmissionDelivery::Sending, SubmissionDelivery::Unknown] {
+            service
+                .inner
+                .router
+                .finish_submission(&target, "queued", delivery)
+                .unwrap();
+            assert_eq!(
+                service.steer_queued(&command).await.unwrap_err().delivery,
+                agent_protocol::error::Delivery::Unknown
+            );
+        }
+        service
+            .inner
+            .router
+            .finish_submission(
+                &target,
+                "queued",
+                SubmissionDelivery::Accepted {
+                    turn_id: Some("active".into()),
+                },
+            )
+            .unwrap();
+        service.steer_queued(&command).await.unwrap();
+        command.turn_id = "different".into();
+        assert_eq!(
+            service.steer_queued(&command).await.unwrap_err().code,
+            "invalid_queue"
+        );
+        command.id = "missing".into();
+        assert_eq!(
+            service.steer_queued(&command).await.unwrap_err().code,
+            "invalid_queue"
+        );
+        assert!(service.inner.conversations.queue_held(&target).unwrap());
     }
 
     #[tokio::test]

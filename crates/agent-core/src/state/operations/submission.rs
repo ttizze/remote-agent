@@ -403,6 +403,22 @@ impl Operation for agent_protocol::queue::QueueControl {
     }
 }
 
+impl Operation for agent_protocol::queue::SteerQueued {
+    rpc_operation!();
+    const STALE_POLICY: StalePolicy = StalePolicy::Apply;
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Submission {
+            draft_key: DraftKey::Queued {
+                session: self.session.clone(),
+                id: self.id.clone(),
+            },
+        })
+    }
+    fn apply(self, _: &mut Snapshot, _: Self::Output) -> Vec<Effect> {
+        vec![Effect::continuation(ReadThread::new(self.session))]
+    }
+}
+
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UploadAttachment {

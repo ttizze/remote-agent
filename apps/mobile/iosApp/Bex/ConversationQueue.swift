@@ -81,6 +81,9 @@ struct ConversationQueuePanel: View {
             }
             Spacer(minLength: 0)
             Menu {
+                if let steer = message.steer {
+                    Button("Steerへ昇格") { edit(.steerQueued(steer)) }
+                }
                 if let move = message.moveUp {
                     Button("上へ移動") { action(move) }
                 }

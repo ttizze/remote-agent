@@ -309,7 +309,7 @@
       ],
       "updatedAt": 1,
       "capabilities": {
-        "additionalInput": true,
+        "activeSteering": true,
         "fork": true,
         "rename": true,
         "modelChange": true
@@ -338,7 +338,7 @@
           "id": "fixture-thread-1"
         },
         "capabilities": {
-          "additionalInput": true,
+          "activeSteering": true,
           "fork": true,
           "rename": true,
           "modelChange": true

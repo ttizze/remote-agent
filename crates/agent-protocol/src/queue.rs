@@ -32,6 +32,26 @@ pub struct QueueControl {
     pub action: QueueAction,
 }
 
+/// Promote a saved input into the observed active turn without consuming the
+/// composer's draft. The Host rechecks the target immediately before delivery.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SteerQueued {
+    pub session: SessionRef,
+    pub id: ClientInputId,
+    pub turn_id: crate::ids::TurnId,
+}
+
+pub fn steering_turn(
+    status: crate::execution::SessionStatus,
+    turn: Option<&str>,
+    supported: bool,
+) -> Option<&str> {
+    turn.filter(|turn| {
+        status == crate::execution::SessionStatus::Running && supported && !turn.trim().is_empty()
+    })
+}
+
 /// Moving before itself is a no-op. Missing targets fail rather than moving a
 /// different message when the queue changes while the client is editing it.
 pub fn move_before(
@@ -62,6 +82,25 @@ pub fn move_before(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn steering_binds_only_a_supported_observed_running_turn() {
+        use crate::execution::SessionStatus;
+        for status in [
+            SessionStatus::Idle,
+            SessionStatus::Unknown,
+            SessionStatus::Unavailable,
+            SessionStatus::Running,
+        ] {
+            for supported in [false, true] {
+                for turn in [None, Some(""), Some("  "), Some("active")] {
+                    let expected =
+                        (status == SessionStatus::Running && supported && turn == Some("active"))
+                            .then_some("active");
+                    assert_eq!(steering_turn(status, turn, supported), expected);
+                }
+            }
+        }
+    }
     #[test]
     fn moving_uses_the_remaining_order_and_rejects_stale_destinations() {
         let ids: Vec<ClientInputId> = ["a", "b", "c"].map(Into::into).into();

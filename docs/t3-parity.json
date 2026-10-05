@@ -124,8 +124,7 @@
           ],
           "remaining": [
             "per-client follow-up setting",
-            "opposite-action shortcut and mobile long press",
-            "promote oldest queued message to steer"
+            "opposite-action shortcut and mobile long press"
           ]
         },
         {
@@ -179,8 +178,7 @@
             "android"
           ],
           "remaining": [
-            "promote to steer",
-            "drag handles and keyboard shortcuts",
+            "drag handles and configurable keybindings",
             "native and visual acceptance"
           ],
           "verification": {
@@ -2269,7 +2267,30 @@
     {
       "name": "queued-message.promote-to-steer",
       "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
-      "state": "unreviewed"
+      "state": "implemented",
+      "clients": [
+        "desktop",
+        "ios",
+        "android"
+      ],
+      "implementation": [
+        "crates/agent-protocol/src/queue.rs",
+        "crates/host-daemon/src/host_rpc/service.rs",
+        "crates/host-daemon/src/host_rpc/conversations.rs",
+        "crates/host-daemon/src/claude.rs",
+        "crates/agent-core/src/state/queued_edit.rs",
+        "apps/desktop/src/app/view/queue.rs",
+        "apps/mobile/iosApp/Bex/ConversationQueue.swift",
+        "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt"
+      ],
+      "acceptance": "Exact active turn and capability are rechecked before selecting and claiming queued input. Draft, other input order and hold state survive; delivery is Host-owned; repeated accepted target is acknowledged without writing again; uncertain input is never automatically resent.",
+      "verification": {
+        "unit_tests": "scripts/dev-env.sh just unit-tests: 482 passed, 3 existing skips; Markdown regressions passed",
+        "native_compile": "passed",
+        "native_acceptance": "pending",
+        "visual_comparison": "pending",
+        "mutation_audit": "steering_turn: 4/4 caught; selected queue claim: 1/1 caught; no misses or timeouts"
+      }
     },
     {
       "name": "queue.resume",

@@ -52,11 +52,13 @@ pub struct QueueMessage {
     pub status: String,
     pub move_up: Option<agent_protocol::queue::QueueAction>,
     pub move_down: Option<agent_protocol::queue::QueueAction>,
+    pub steer: Option<agent_protocol::queue::SteerQueued>,
 }
 
 pub fn queue_messages(
     entries: &[agent_protocol::queue::QueueEntry],
     editing_id: Option<&str>,
+    steer_target: Option<(&crate::session::SessionRef, &str)>,
 ) -> Vec<QueueMessage> {
     use agent_protocol::operations::Input;
     use agent_protocol::{queue::QueueAction, session::SubmissionDelivery};
@@ -92,6 +94,15 @@ pub fn queue_messages(
                     })
                     .collect(),
                 delivery: entry.delivery.clone(),
+                steer: if entry.delivery == SubmissionDelivery::Queued {
+                    steer_target.map(|(session, turn)| agent_protocol::queue::SteerQueued {
+                        session: session.clone(),
+                        id: id.clone(),
+                        turn_id: turn.into(),
+                    })
+                } else {
+                    None
+                },
                 editable: entry.delivery == SubmissionDelivery::Queued,
                 editing: entry.delivery == SubmissionDelivery::Queued
                     && editing_id == Some(id.as_str()),
@@ -872,7 +883,7 @@ mod tests {
             delivery,
         })
         .collect();
-        let messages = super::queue_messages(&entries, None);
+        let messages = super::queue_messages(&entries, None, None);
         assert_eq!(
             messages[0].move_down,
             Some(QueueAction::Move {
@@ -1251,7 +1262,7 @@ mod tests {
                     [(
                         agent_protocol::session::SessionRef { provider: agent_protocol::session::ProviderKind::Codex, id: "thread".into() },
                         Arc::new(
-                            serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"capabilities":{"additionalInput":true,"fork":false,"rename":false,"modelChange":false},"turns":[{"id":"before","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"before","phase":"unknown"}}}}}]}]}))
+                            serde_json::from_value(json!({"id":{"provider":"codex","id":"thread"},"capabilities":{"activeSteering":true,"fork":false,"rename":false,"modelChange":false},"turns":[{"id":"before","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"before","phase":"unknown"}}}}}]}]}))
                             .unwrap(),
                         ),
                     )]

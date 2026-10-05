@@ -1139,7 +1139,7 @@ mod rendering_tests {
     fn completed_response_offers_fork_but_streaming_response_does_not(cx: &mut TestAppContext) {
         let _runtime = init(cx);
         for status in ["completed", "running"] {
-            let source = serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"fixture"},"capabilities":{"additionalInput":true,"fork":true,"rename":true,"modelChange":true},"turns":[{"id":"turn","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"Answer","phase":"final"}}}}}]}]}))
+            let source = serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"fixture"},"capabilities":{"activeSteering":true,"fork":true,"rename":true,"modelChange":true},"turns":[{"id":"turn","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"Answer","phase":"final"}}}}}]}]}))
             .unwrap();
             let (_, window) = cx.add_window_view(|window, cx| {
                 ConversationView::new(Snapshot::default(), source, window, cx)

@@ -136,12 +136,18 @@ private fun QueueRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        QueueMenu(message, enabled, action, edit)
+        QueueMenu(message, enabled, perform, action, edit)
     }
 }
 
 @Composable
-private fun QueueMenu(message: QueueMessage, enabled: Boolean, action: (QueueAction) -> Unit, edit: () -> Unit) {
+private fun QueueMenu(
+    message: QueueMessage,
+    enabled: Boolean,
+    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
+    action: (QueueAction) -> Unit,
+    edit: () -> Unit,
+) {
     var showing by remember(message.id) { mutableStateOf(false) }
     Box {
         IconButton(
@@ -152,6 +158,15 @@ private fun QueueMenu(message: QueueMessage, enabled: Boolean, action: (QueueAct
             Text("⋮")
         }
         DropdownMenu(expanded = showing, onDismissRequest = { showing = false }) {
+            message.steer?.let { steer ->
+                DropdownMenuItem(
+                    text = { Text("Steerへ昇格") },
+                    onClick = {
+                        showing = false
+                        perform(Intent.SteerQueued(steer)) {}
+                    },
+                )
+            }
             message.moveUp?.let { move ->
                 DropdownMenuItem(
                     text = { Text("上へ移動") },

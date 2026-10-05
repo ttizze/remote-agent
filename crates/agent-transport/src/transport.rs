@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 // Bump when shared Postcard types change incompatibly; enum indices and field
 // positions are part of the wire format, even when decoding still succeeds.
-const ALPN: &[u8] = b"remote-agent/streams/9";
+const ALPN: &[u8] = b"remote-agent/streams/10";
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
     #[error("iroh transport failed: {0}")]

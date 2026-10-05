@@ -9,20 +9,15 @@ pub(crate) enum SubmissionTarget {
     Queue,
     Start { cwd: String },
 }
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum RunningInput {
-    SteerOrQueue,
-    Queue,
-}
 pub(super) fn submission_target(
     status: SessionStatus,
     running_turn: Option<&str>,
-    running_input: RunningInput,
+    active_steering: bool,
     cwd: Option<&str>,
 ) -> Result<SubmissionTarget, &'static str> {
     if status == SessionStatus::Running {
-        if running_input == RunningInput::SteerOrQueue
-            && let Some(turn) = running_turn
+        if let Some(turn) =
+            agent_protocol::queue::steering_turn(status, running_turn, active_steering)
         {
             return Ok(SubmissionTarget::Steer(turn.into()));
         }
@@ -46,7 +41,7 @@ mod tests {
             SessionStatus::Unknown,
             SessionStatus::Unavailable,
         ] {
-            for mode in [RunningInput::SteerOrQueue, RunningInput::Queue] {
+            for mode in [true, false] {
                 assert_eq!(
                     submission_target(status, Some("historical"), mode, Some("/project")).unwrap(),
                     SubmissionTarget::Start {
@@ -57,14 +52,10 @@ mod tests {
             }
         }
         for (mode, turn, expected) in [
-            (
-                RunningInput::SteerOrQueue,
-                Some("live"),
-                SubmissionTarget::Steer("live".into()),
-            ),
-            (RunningInput::SteerOrQueue, None, SubmissionTarget::Queue),
-            (RunningInput::Queue, Some("live"), SubmissionTarget::Queue),
-            (RunningInput::Queue, None, SubmissionTarget::Queue),
+            (true, Some("live"), SubmissionTarget::Steer("live".into())),
+            (true, None, SubmissionTarget::Queue),
+            (false, Some("live"), SubmissionTarget::Queue),
+            (false, None, SubmissionTarget::Queue),
         ] {
             assert_eq!(
                 submission_target(SessionStatus::Running, turn, mode, None).unwrap(),
@@ -75,7 +66,7 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn additional_input_never_starts_a_second_running_turn(steer in proptest::bool::ANY, turn in proptest::option::of("[a-z]{1,24}")) {
-            let mode = if steer { RunningInput::SteerOrQueue } else { RunningInput::Queue };
+            let mode = steer;
             let route=submission_target(SessionStatus::Running,turn.as_deref(),mode,Some("/project"));
             match route {
                 Ok(SubmissionTarget::Steer(id))=>{proptest::prop_assert!(steer);proptest::prop_assert_eq!(Some(id.as_str()),turn.as_deref());},

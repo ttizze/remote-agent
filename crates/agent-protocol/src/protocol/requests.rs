@@ -77,6 +77,7 @@ contracts! {
     Submit, "host/session/submit" => (op::Submission, op::SubmissionReceipt) [clone],
     QueueInput, "host/session/queue/add" => (op::Submission, op::SubmissionReceipt),
     QueueControl, "host/session/queue/control" => (crate::queue::QueueControl, m::Empty) [clone],
+    SteerQueued, "host/session/queue/steer" => (crate::queue::SteerQueued, m::Empty) [clone],
     Interrupt, "host/session/interrupt" => (op::Interrupt, m::Empty) [clone],
     ReadPermissionSettings, "host/permissions/read" => (crate::permissions::ReadPermissionSettings, crate::permissions::PermissionSettings) [clone],
     UpdatePermissionSettings, "host/permissions/update" => (crate::permissions::UpdatePermissionSettings, crate::permissions::PermissionSettings) [clone],

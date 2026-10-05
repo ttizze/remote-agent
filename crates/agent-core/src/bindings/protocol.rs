@@ -2,7 +2,7 @@
 
 use crate::{models::*, session::*};
 use agent_protocol::permissions::*;
-use agent_protocol::queue::{QueueAction, QueueControl};
+use agent_protocol::queue::{QueueAction, QueueControl, SteerQueued};
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
 #[uniffi::remote(Enum)]
@@ -40,6 +40,12 @@ struct Submission {
 struct QueueControl {
     session: SessionRef,
     action: QueueAction,
+}
+#[uniffi::remote(Record)]
+struct SteerQueued {
+    session: SessionRef,
+    id: agent_protocol::ids::ClientInputId,
+    turn_id: agent_protocol::ids::TurnId,
 }
 #[uniffi::remote(Enum)]
 enum SubmissionDelivery {

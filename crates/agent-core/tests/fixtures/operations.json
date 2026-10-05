@@ -231,7 +231,7 @@
           "opaque": 42
         },
         "capabilities": {
-          "additionalInput": true,
+          "activeSteering": true,
           "fork": true,
           "rename": true,
           "modelChange": true

@@ -4,6 +4,80 @@ use agent_protocol::{
     session::{SubmissionDelivery, TextField},
 };
 
+#[test]
+fn selected_queue_claim_preserves_hold_order_receipts_and_restart_uncertainty() {
+    use agent_protocol::queue::QueueAction;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("history.sqlite");
+    let store = Conversations::open(&path).unwrap();
+    let target = store.bind(&native("selected"), "scope").unwrap();
+    let other = store.bind(&native("other"), "scope").unwrap();
+    first_page(&store, &target, vec![], None);
+    let entries = ["a", "b", "c"].map(|id| {
+        let mut submission = input(&target);
+        submission.client_user_message_id = id.into();
+        submission.input = vec![
+            agent_protocol::operations::Input::Text { text: id.into() },
+            agent_protocol::operations::Input::LocalImage {
+                path: format!("/isolated/{id}.png"),
+            },
+        ];
+        submission
+    });
+    for entry in &entries {
+        store.admit(entry, SubmissionDelivery::Queued).unwrap();
+    }
+    store.queue_control(&target, &QueueAction::Pause).unwrap();
+    assert!(store.claim_queued(&target, None).unwrap().is_none());
+    assert!(
+        store
+            .claim_queued(&target, Some(&"missing".into()))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .claim_queued(&other, Some(&"b".into()))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.claim_queued(&target, Some(&"b".into())).unwrap(),
+        Some(entries[1].clone())
+    );
+    assert!(
+        store
+            .claim_queued(&target, Some(&"b".into()))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store.queue_receipt(&target, &"b".into()).unwrap(),
+        Some(SubmissionDelivery::Sending)
+    );
+    assert_eq!(
+        store.queued(&target).unwrap(),
+        [entries[0].clone(), entries[2].clone()]
+    );
+    assert!(store.queue_held(&target).unwrap());
+    drop(store);
+    let store = Conversations::open(&path).unwrap();
+    assert_eq!(
+        store.queue_receipt(&target, &"b".into()).unwrap(),
+        Some(SubmissionDelivery::Unknown)
+    );
+    assert_eq!(
+        store.previous_command(&entries[1]).unwrap(),
+        Some(SubmissionDelivery::Unknown)
+    );
+    assert_eq!(store.queue_receipt(&other, &"b".into()).unwrap(), None);
+    assert_eq!(
+        store.queued(&target).unwrap(),
+        [entries[0].clone(), entries[2].clone()]
+    );
+    assert!(store.queue_held(&target).unwrap());
+}
+
 fn native(id: &str) -> SessionRef {
     SessionRef {
         provider: ProviderKind::Codex,
@@ -1121,7 +1195,7 @@ fn held_queue_keeps_edits_order_and_admission_identity_across_restart() {
             },
         )
         .unwrap();
-    assert!(store.claim_queued(&target).unwrap().is_none());
+    assert!(store.claim_queued(&target, None).unwrap().is_none());
     drop(store);
     let store = Conversations::open(&path).unwrap();
     let thread = store.open_thread(&target, 5, false).unwrap().thread;
@@ -1154,9 +1228,9 @@ fn held_queue_keeps_edits_order_and_admission_identity_across_restart() {
             .is_err(),
         "editing must not replace the deduplication fingerprint"
     );
-    assert!(store.claim_queued(&target).unwrap().is_none());
+    assert!(store.claim_queued(&target, None).unwrap().is_none());
     store.queue_control(&target, &QueueAction::Resume).unwrap();
-    let sent = store.claim_queued(&target).unwrap().unwrap();
+    let sent = store.claim_queued(&target, None).unwrap().unwrap();
     assert_eq!(sent.client_user_message_id.as_str(), "third");
     assert!(
         store
@@ -1319,7 +1393,7 @@ fn queue_mutations_are_atomic_and_cancellation_releases_only_the_selected_messag
             )
             .is_err()
     );
-    assert!(store.claim_queued(&target).is_err());
+    assert!(store.claim_queued(&target, None).is_err());
     assert_eq!(store.queued(&target).unwrap(), before);
     store
         .lock()
@@ -1339,7 +1413,7 @@ fn queue_mutations_are_atomic_and_cancellation_releases_only_the_selected_messag
     );
     let thread = store.open_thread(&target, 5, false).unwrap().thread;
     assert_eq!(thread.queued_inputs.len(), 1);
-    assert_eq!(store.claim_queued(&target).unwrap(), Some(second));
+    assert_eq!(store.claim_queued(&target, None).unwrap(), Some(second));
 }
 
 #[test]
@@ -1358,7 +1432,7 @@ fn queue_capacity_counts_waiting_inputs_and_releases_claimed_slots() {
     next.client_user_message_id = "next".into();
     assert!(store.admit(&next, SubmissionDelivery::Queued).is_err());
     assert!(store.previous_command(&next).unwrap().is_none());
-    let claimed = store.claim_queued(&target).unwrap().unwrap();
+    let claimed = store.claim_queued(&target, None).unwrap().unwrap();
     assert_eq!(claimed.client_user_message_id.as_str(), "0");
     store.admit(&next, SubmissionDelivery::Queued).unwrap();
     assert_eq!(store.queued(&target).unwrap().len(), 128);
@@ -1391,7 +1465,7 @@ fn queue_discard_never_turns_an_uncertain_write_into_a_safe_retry() {
         thread.submissions[&input.client_user_message_id],
         SubmissionDelivery::Queued
     );
-    store.claim_queued(&target).unwrap().unwrap();
+    store.claim_queued(&target, None).unwrap().unwrap();
     let cancel = QueueAction::Cancel {
         id: input.client_user_message_id.clone(),
     };
@@ -1488,7 +1562,10 @@ fn queue_edit_replaces_attachments_context_and_settings_without_changing_its_rec
         Some(SubmissionDelivery::Queued)
     );
     assert!(store.previous_command(&edited).is_err());
-    assert_eq!(store.claim_queued(&target).unwrap(), Some(edited.clone()));
+    assert_eq!(
+        store.claim_queued(&target, None).unwrap(),
+        Some(edited.clone())
+    );
     assert!(
         store
             .queue_control(&target, &QueueAction::Edit { submission: edited })

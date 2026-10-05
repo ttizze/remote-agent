@@ -145,9 +145,6 @@ impl Thread {
     pub fn title(&self) -> String {
         self.0.name.clone().unwrap_or_default()
     }
-    pub fn input_unavailable_reason(&self) -> Option<String> {
-        crate::session::input_unavailable_reason(&self.0)
-    }
     pub fn history_notice(&self) -> Option<String> {
         crate::presentation::conversation::history_notice(&self.0)
     }

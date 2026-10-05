@@ -24,9 +24,6 @@ struct ConversationPresentation: Sendable {
         }
         var next: [String: CachedTurn] = [:]
         var rows: [ThreadConversationRow] = []
-        if let notice = source.inputUnavailableReason() {
-            rows.append(.init(id: "input-capability", content: .historyNotice(notice)))
-        }
         if let notice = source.historyNotice() {
             rows.append(.init(id: "history-read-state", content: .historyNotice(notice)))
         }

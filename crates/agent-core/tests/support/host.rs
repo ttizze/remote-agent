@@ -239,7 +239,8 @@ impl Writer {
                     let subscription = uuid::Uuid::new_v4();
                     state.sessions.insert(target.clone(), subscription);
                     let mut response = response;
-                    response["thread"]["capabilities"] = json!({"additionalInput":true,"fork":true,"rename":true,"modelChange":true});
+                    response["thread"]["capabilities"] =
+                        json!({"activeSteering":true,"fork":true,"rename":true,"modelChange":true});
                     value["result"] =
                         json!({"session":target,"subscriptionId":subscription,"response":response});
                 }

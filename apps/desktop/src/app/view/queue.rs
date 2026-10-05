@@ -100,6 +100,19 @@ impl Desktop {
                         })),
                 );
             }
+            if let Some(steer) = &message.steer {
+                let steer = steer.clone();
+                controls = controls.child(
+                    Button::new(format!("queue-steer-{}", message.id))
+                        .label("Steerへ昇格")
+                        .xsmall()
+                        .ghost()
+                        .disabled(!enabled)
+                        .on_click(cx.listener(move |view, _, _, _| {
+                            view.dispatch(Intent::SteerQueued(steer.clone()))
+                        })),
+                );
+            }
             let mut row = v_flex()
                 .gap_1()
                 .p_2()

@@ -611,14 +611,10 @@ pub struct SessionUpdate {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
-    pub additional_input: bool,
+    pub active_steering: bool,
     pub fork: bool,
     pub rename: bool,
     pub model_change: bool,
-}
-pub fn input_unavailable_reason(thread: &Thread) -> Option<String> {
-    (!thread.capabilities.unwrap_or_default().additional_input && thread.turns.iter().flatten().any(|turn| turn.status == TurnStatus::Running))
-        .then(|| "このプロバイダは実行中の追加送信に対応していません。完了を待つか、停止してから送信してください。".into())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

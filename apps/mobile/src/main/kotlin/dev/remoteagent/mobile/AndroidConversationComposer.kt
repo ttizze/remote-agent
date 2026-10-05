@@ -64,7 +64,6 @@ internal fun ThreadComposer(
                 perform(Intent.QueueControl(dev.remoteagent.core.QueueControl(session, action))) {}
             }
         }
-        thread?.inputUnavailableReason()?.let { Text(it) }
         val cursor = draft.text.toByteArray(Charsets.UTF_8).size.toUInt()
         ComposerInvocationPicker(snapshot.composerSuggestions(draft.text, cursor)) { invocation ->
             insertInvocation(draft.text, cursor, invocation.kind, invocation.name)?.let {

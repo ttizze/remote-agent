@@ -105,7 +105,6 @@ pub(crate) trait Identity: Send + Sync {
 
 #[async_trait::async_trait]
 pub(crate) trait Agent: Identity {
-    fn running_input(&self) -> super::submission::RunningInput;
     fn capabilities(&self) -> Capabilities;
     fn availability(&self) -> Result<(), Failure>;
     /// Reject creation before the Host creates a workspace. Some adapters can

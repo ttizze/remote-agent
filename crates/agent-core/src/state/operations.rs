@@ -68,6 +68,9 @@ pub enum Intent {
     ListSessions(ListSessions),
     ImportHistory(ImportHistory),
     QueueControl(agent_protocol::queue::QueueControl),
+    SteerQueued(agent_protocol::queue::SteerQueued),
+    SteerOldestQueued,
+    EditLatestQueued,
     BeginQueueEdit {
         id: agent_protocol::ids::ClientInputId,
     },

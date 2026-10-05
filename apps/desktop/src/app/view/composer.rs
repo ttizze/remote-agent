@@ -218,12 +218,6 @@ impl Desktop {
         let mut body = v_flex().flex_1().min_w_0().h_full();
         if let Some(notice) = self
             .thread()
-            .and_then(|thread| agent_protocol::session::input_unavailable_reason(thread))
-        {
-            body = body.child(div().px_4().py_2().text_sm().child(notice));
-        }
-        if let Some(notice) = self
-            .thread()
             .and_then(|thread| agent_core::presentation::conversation::history_notice(thread))
         {
             body = body.child(div().px_4().py_2().text_sm().child(notice));
@@ -404,6 +398,38 @@ impl Desktop {
             .track_focus(&self.composer.read(cx).focus_handle(cx))
             .capture_key_down(cx.listener(|s, event: &KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
+                let primary = if cfg!(target_os = "macos") {
+                    modifiers.platform && !modifiers.control
+                } else {
+                    modifiers.control && !modifiers.platform
+                };
+                if event.keystroke.key == "enter" && primary && modifiers.shift && !modifiers.alt {
+                    let committed = s.composer.update(cx, |input, cx| {
+                        input.marked_text_range(window, cx).is_none()
+                    });
+                    if committed {
+                        s.dispatch(Intent::SteerOldestQueued);
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if event.keystroke.key == "up"
+                    && modifiers.alt
+                    && !modifiers.shift
+                    && !modifiers.control
+                    && !modifiers.platform
+                {
+                    let at_start = s.composer.update(cx, |input, cx| {
+                        input.cursor() == 0
+                            && input.selected_range().is_empty()
+                            && input.marked_text_range(window, cx).is_none()
+                    });
+                    if at_start {
+                        s.dispatch(Intent::EditLatestQueued);
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
                 if !(modifiers.shift || modifiers.control || modifiers.alt || modifiers.platform)
                     && s.completion_key(&event.keystroke.key, window, cx)
                 {

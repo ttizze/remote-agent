@@ -127,6 +127,7 @@ struct Running {
 
 pub(crate) struct Command {
     pub(crate) value: Value,
+    pub(crate) user: Option<Item>,
     pub(crate) delivered: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 }
 
@@ -598,7 +599,7 @@ impl Claude {
             (running.input.clone(), running.interrupt.clone())
         };
         if interrupt.borrow().is_none() {
-            input.send(Command { value: json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}), delivered: None }).await.map_err(|_| "Claude Code input is closed")?;
+            input.send(Command { value: json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}), user: None, delivered: None }).await.map_err(|_| "Claude Code input is closed")?;
         }
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
@@ -694,17 +695,7 @@ impl Claude {
             process
         };
         let turn_id: agent_protocol::ids::TurnId = params.client_user_message_id.as_str().into();
-        let user = Item {
-            id: params.client_user_message_id.as_str().into(),
-            status: ItemStatus::Unknown,
-            client_input_id: Some(params.client_user_message_id.clone()),
-            body: ItemContent::Inline {
-                body: Box::new(ItemBody::UserMessage {
-                    text: None,
-                    content: op::Input::message_parts(&params.input),
-                }),
-            },
-        };
+        let user = input_item(&params.client_user_message_id, &params.input);
         let turn = Turn {
             id: turn_id.clone(),
             status: TurnStatus::Running,
@@ -757,6 +748,67 @@ impl Claude {
         }
         workers.spawn(worker.run(process, receiver));
         Ok(turn_id)
+    }
+
+    async fn steer(
+        &self,
+        params: &op::Submission,
+        turn_id: &str,
+    ) -> Result<agent_protocol::ids::TurnId, Failure> {
+        let content = input_content(&params.input)
+            .await
+            .map_err(|error| Failure::new("invalid_input", error))?;
+        let record = self
+            .record(&params.thread_id.id)
+            .await
+            .map_err(|error| Failure::new("invalid_session", error))?;
+        let (input, session) = {
+            let state = record.lock().await;
+            let running = state
+                .running
+                .as_ref()
+                .filter(|running| running.turn_id.as_str() == turn_id)
+                .ok_or_else(|| {
+                    Failure::new(
+                        "steer_unavailable",
+                        "Claude's observed turn is no longer running",
+                    )
+                })?;
+            (running.input.clone(), state.session_id)
+        };
+        let (delivered, receipt) = tokio::sync::oneshot::channel();
+        input.send(Command {
+            value: json!({"type":"user","uuid":params.client_user_message_id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null,"priority":"now"}),
+            user: Some(input_item(&params.client_user_message_id, &params.input)),
+            delivered: Some(delivered),
+        }).await.map_err(|_| Failure::new("steer_not_sent", "Claude's active input is closed"))?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
+            .await
+            .map_err(|_| {
+                Failure::unknown("steer_delivery_unknown", "Claude steer write timed out")
+            })?
+            .map_err(|_| {
+                Failure::unknown(
+                    "steer_delivery_unknown",
+                    "Claude exited before confirming the steer write",
+                )
+            })?
+            .map_err(|error| Failure::unknown("steer_delivery_unknown", error))?;
+        Ok(turn_id.into())
+    }
+}
+
+fn input_item(id: &agent_protocol::ids::ClientInputId, input: &[op::Input]) -> Item {
+    Item {
+        id: id.as_str().into(),
+        status: ItemStatus::Unknown,
+        client_input_id: Some(id.clone()),
+        body: ItemContent::Inline {
+            body: Box::new(ItemBody::UserMessage {
+                text: None,
+                content: op::Input::message_parts(input),
+            }),
+        },
     }
 }
 
@@ -812,6 +864,7 @@ impl Worker {
             });
         });
         let mut interrupted = false;
+        let mut steered = false;
         let mut result_received = false;
         let mut idle = false;
         let outcome = async {
@@ -826,7 +879,16 @@ impl Worker {
                     }
                     command = input.recv() => {
                         let command = command.ok_or("Claude input queue is closed")?;
-                        let result = process.write(&command.value).await;
+                        let result = async {
+                            process.write(&command.value).await?;
+                            if let Some(user) = command.user {
+                                self.change(SessionChange::Item { turn_id: self.turn_id.clone(), item: Arc::new(user) }).await?;
+                                steered = true;
+                                result_received = false;
+                                idle = false;
+                            }
+                            Ok(())
+                        }.await;
                         if let Some(delivered) = command.delivered { let _ = delivered.send(result.clone()); }
                         result?;
                         continue;
@@ -839,6 +901,10 @@ impl Worker {
                         idle = message["state"] == "idle";
                     }
                     "result" => {
+                        if !interrupted && steered && matches!(message["terminal_reason"].as_str(), Some("aborted_streaming" | "aborted_tools")) {
+                            continue;
+                        }
+                        steered = false;
                         if message["is_error"] == true {
                             let mut error = execution_error(&message, false);
                             if matches!(error.category, ErrorCategory::Other | ErrorCategory::Provider(_))
@@ -1564,7 +1630,7 @@ impl crate::host_rpc::requests::AnswerSource for RequestSource {
             .map_err(|_| Failure::new("answer_not_sent", "agent input is closed"))?;
         Ok(async move {
             let (delivered, receipt) = tokio::sync::oneshot::channel();
-            permit.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}), delivered: Some(delivered) });
+            permit.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}), user: None, delivered: Some(delivered) });
             tokio::time::timeout(std::time::Duration::from_secs(15), receipt).await.map_err(|_| Failure::unknown("answer_delivery_unknown", "answer delivery timed out"))?
                 .map_err(|_| Failure::unknown("answer_delivery_unknown", "agent exited before confirming the answer write"))?
                 .map_err(|e| Failure::unknown("answer_delivery_unknown", e))
@@ -1574,12 +1640,9 @@ impl crate::host_rpc::requests::AnswerSource for RequestSource {
 
 #[async_trait::async_trait]
 impl Agent for Claude {
-    fn running_input(&self) -> crate::host_rpc::submission::RunningInput {
-        crate::host_rpc::submission::RunningInput::Queue
-    }
     fn capabilities(&self) -> agent_protocol::session::Capabilities {
         agent_protocol::session::Capabilities {
-            additional_input: true,
+            active_steering: true,
             fork: false,
             rename: false,
             model_change: true,
@@ -1707,12 +1770,7 @@ impl Agent for Claude {
     ) -> Result<op::SubmissionReceipt, Failure> {
         use crate::host_rpc::submission::SubmissionTarget;
         let turn_id = match route {
-            SubmissionTarget::Steer(_) => {
-                return Err(Failure::new(
-                    "unsupported_operation",
-                    "this provider accepts queued input",
-                ));
-            }
+            SubmissionTarget::Steer(turn) => Some(self.steer(input, &turn).await?),
             SubmissionTarget::Queue => {
                 return Err(Failure::new(
                     "invalid_execution_route",
@@ -1897,6 +1955,88 @@ impl Agent for Claude {
 #[cfg(test)]
 mod execution_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn steer_uses_priority_now_and_waits_for_the_active_owner_receipt() {
+        let root = tempfile::tempdir().unwrap();
+        let claude = Claude::load(
+            root.path().join("unused-cli"),
+            root.path().join("state"),
+            Some(root.path().join("native")),
+        )
+        .await
+        .unwrap();
+        let session = claude
+            .create(root.path().to_str().unwrap(), "model")
+            .await
+            .unwrap()
+            .thread
+            .id
+            .unwrap();
+        let record = claude.record(&session.id).await.unwrap();
+        let (input, mut receiver) = mpsc::channel(1);
+        let (_, interrupted) = watch::channel(None);
+        record.lock().await.running = Some(Running {
+            turn_id: "active".into(),
+            input,
+            interrupt: interrupted,
+        });
+        let params = op::Submission {
+            thread_id: session,
+            client_user_message_id: "follow-up".into(),
+            input: vec![
+                op::Input::Text {
+                    text: "change direction".into(),
+                },
+                op::Input::Mention {
+                    path: "/isolated/document".into(),
+                    name: "document".into(),
+                },
+            ],
+            model: None,
+            effort: None,
+            service_tier: None,
+        };
+        assert_eq!(
+            claude.steer(&params, "old-turn").await.unwrap_err().code,
+            "steer_unavailable"
+        );
+        assert!(receiver.try_recv().is_err());
+        let write = claude.steer(&params, "active");
+        tokio::pin!(write);
+        let command = tokio::select! {
+            result = &mut write => panic!("steer completed before its owner: {result:?}"),
+            command = receiver.recv() => command.unwrap(),
+        };
+        assert_eq!(command.value["priority"], "now");
+        assert_eq!(command.value["uuid"], "follow-up");
+        assert_eq!(command.value["session_id"], params.thread_id.id);
+        assert_eq!(command.value["parent_tool_use_id"], Value::Null);
+        let user = command.user.unwrap();
+        assert_eq!(
+            user.client_input_id.as_ref(),
+            Some(&params.client_user_message_id)
+        );
+        assert!(matches!(user.body(), ItemBody::UserMessage { content, .. } if content.len() == 2));
+        assert!(futures_util::poll!(&mut write).is_pending());
+        command.delivered.unwrap().send(Ok(())).unwrap();
+        assert_eq!(write.await.unwrap().as_str(), "active");
+
+        let write = claude.steer(&params, "active");
+        tokio::pin!(write);
+        let command = tokio::select! {
+            result = &mut write => panic!("steer completed before its owner: {result:?}"),
+            command = receiver.recv() => command.unwrap(),
+        };
+        drop(command);
+        assert_eq!(
+            write.await.unwrap_err().delivery,
+            agent_protocol::error::Delivery::Unknown
+        );
+        drop(receiver);
+        let failure = claude.steer(&params, "active").await.unwrap_err();
+        assert_eq!(failure.delivery, agent_protocol::error::Delivery::NotSent);
+    }
 
     #[test]
     fn final_blocks_match_content_kind_and_native_message_before_falling_back() {

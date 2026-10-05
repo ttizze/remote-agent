@@ -136,11 +136,11 @@ impl Snapshot {
             .get(key)
             .is_some_and(|draft| !draft.text.trim().is_empty() || !draft.attachments.is_empty());
         let available = self.connected && !busy && has_content;
-        let input_available = self.navigation.thread_id.as_ref().is_none_or(|session| {
-            self.conversations.get(session).is_some_and(|thread| {
-                agent_protocol::session::input_unavailable_reason(thread).is_none()
-            })
-        });
+        let input_available = self
+            .navigation
+            .thread_id
+            .as_ref()
+            .is_none_or(|session| self.conversations.contains_key(session));
         ComposerControls {
             editing,
             send_enabled: available && (editing || input_available),
@@ -154,9 +154,16 @@ impl Snapshot {
     pub fn queue_messages(&self) -> Vec<crate::presentation::conversation::QueueMessage> {
         let editing = self.editing_queue_id();
         self.conversation_thread().map_or_else(Vec::new, |thread| {
+            let active = thread.active_turn_id();
+            let target = thread.id.as_ref().zip(agent_protocol::queue::steering_turn(
+                thread.status,
+                active.as_deref(),
+                thread.capabilities.unwrap_or_default().active_steering,
+            ));
             crate::presentation::conversation::queue_messages(
                 &thread.queued_inputs,
                 editing.as_deref(),
+                target,
             )
         })
     }
@@ -347,6 +354,50 @@ mod tests {
             }),
         );
         (snapshot, session)
+    }
+
+    #[test]
+    fn queued_steering_requires_capability_and_an_active_target_and_preserves_drafts() {
+        use agent_protocol::execution::{SessionStatus, TurnStatus};
+        let (mut snapshot, session) = state("unsent draft");
+        snapshot.connected = true;
+        let ordinary = snapshot.drafts.clone();
+        let thread = shared_mut(&mut snapshot.conversations, &session).unwrap();
+        thread.status = SessionStatus::Running;
+        thread.turns = Some(vec![Arc::new(crate::models::Turn {
+            id: "active".into(),
+            status: TurnStatus::Running,
+            ..Default::default()
+        })]);
+        thread.capabilities = Some(crate::session::Capabilities {
+            active_steering: true,
+            ..Default::default()
+        });
+        let steer = snapshot.queue_messages()[0].steer.clone().unwrap();
+        assert_eq!(steer.session, session);
+        assert_eq!(steer.id.as_str(), "waiting");
+        assert_eq!(steer.turn_id.as_str(), "active");
+        let (mut next, effects) =
+            reduce(&snapshot, Event::Intent(Intent::SteerQueued(steer.clone())));
+        assert!(!effects.is_empty());
+        assert!(Arc::ptr_eq(&ordinary, &next.drafts));
+        assert_eq!(
+            next.conversations[&session].queued_inputs,
+            snapshot.conversations[&session].queued_inputs
+        );
+        assert!(steer.apply(&mut next, crate::models::Empty {}).len() == 1);
+        assert!(Arc::ptr_eq(&ordinary, &next.drafts));
+        let thread = shared_mut(&mut snapshot.conversations, &session).unwrap();
+        thread.capabilities.as_mut().unwrap().active_steering = false;
+        assert!(snapshot.queue_messages()[0].steer.is_none());
+        let thread = shared_mut(&mut snapshot.conversations, &session).unwrap();
+        thread.capabilities.as_mut().unwrap().active_steering = true;
+        thread.queued_inputs[0].delivery = SubmissionDelivery::Sending;
+        assert!(snapshot.queue_messages()[0].steer.is_none());
+        let thread = shared_mut(&mut snapshot.conversations, &session).unwrap();
+        thread.queued_inputs[0].delivery = SubmissionDelivery::Queued;
+        thread.status = SessionStatus::Idle;
+        assert!(snapshot.queue_messages()[0].steer.is_none());
     }
 
     #[test]
@@ -678,15 +729,15 @@ mod tests {
     #[rstest::rstest]
     #[case::ordinary(false, false, true, true, true, true)]
     #[case::editing(true, false, true, true, true, false)]
-    #[case::blocked_ordinary(false, false, true, false, false, true)]
-    #[case::blocked_editor(true, false, true, false, true, false)]
+    #[case::queue_only_ordinary(false, false, true, false, true, true)]
+    #[case::queue_only_editor(true, false, true, false, true, false)]
     #[case::busy_editor(true, true, true, true, false, false)]
     #[case::offline_editor(true, false, false, true, false, false)]
     fn composer_controls_keep_queue_saving_separate_from_native_execution(
         #[case] editing: bool,
         #[case] busy: bool,
         #[case] connected: bool,
-        #[case] additional_input: bool,
+        #[case] active_steering: bool,
         #[case] can_send: bool,
         #[case] can_queue: bool,
     ) {
@@ -699,7 +750,7 @@ mod tests {
             ..Default::default()
         })]);
         thread.capabilities = Some(crate::session::Capabilities {
-            additional_input,
+            active_steering,
             ..Default::default()
         });
         if editing {

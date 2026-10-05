@@ -428,7 +428,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
         RevokeDevice, ListFiles, ReadFile,
         SaveFile, ReviewWorkspace, ReadWorktreeSettings,
-        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListSessions, ImportHistory, QueueControl, AddProject, CreateSession,
+        UpdateWorktreeSettings, ListWorktrees, RemoveWorktree, ListSessions, ImportHistory, QueueControl, SteerQueued, AddProject, CreateSession,
         ReadThread, OpenRequest, ReadItem, ResizeTerminal,
         Interrupt,
         WriteTerminal, DownloadFile, LoadSessionImages, LoadVisualization,
@@ -469,6 +469,16 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         }
         Intent::BeginQueueEdit { id } => {
             queued_edit::begin(&mut next, id);
+        }
+        Intent::EditLatestQueued => {
+            if let Some(message) = previous.queue_messages().into_iter().rev().find(|message| message.editable) {
+                queued_edit::begin(&mut next, message.id);
+            }
+        }
+        Intent::SteerOldestQueued => {
+            if let Some(steer) = previous.queue_messages().into_iter().find_map(|message| message.steer) {
+                return prepare(previous, next, steer);
+            }
         }
         Intent::CancelQueueEdit => {
             let key = previous.composer_key().clone();
