@@ -204,6 +204,9 @@ impl CodexAdapter {
                         .as_ref()
                         .ok_or_else(|| error("provider thread missing"))?,
                 )?;
+                if state.terminal {
+                    return Err(crate::turn_completed());
+                }
                 let text = projection
                     .messages
                     .iter()
@@ -217,7 +220,12 @@ impl CodexAdapter {
                     .as_ref()
                     .and_then(|reference| reference.native_id.as_ref())
                     .ok_or_else(|| error("native turn missing"))?;
-                self.request("turn/steer",json!({"threadId":native,"expectedTurnId":turn_id,"input":[{"type":"text","text":text,"text_elements":[]}]})).await?;
+                if let Err(error) = self.request("turn/steer",json!({"threadId":native,"expectedTurnId":turn_id,"input":[{"type":"text","text":text,"text_elements":[]}]})).await {
+                    let completed = self.state(run.provider_thread_id.as_ref().expect("provider thread")).is_ok_and(|(_, state)| state.terminal)
+                        || error.message.to_ascii_lowercase().contains("turn completed")
+                        || error.message.to_ascii_lowercase().contains("no active turn");
+                    return Err(if completed { crate::turn_completed() } else { error });
+                }
                 Ok(())
             }
             EffectBody::Interrupt { run_id, .. } => {
@@ -624,6 +632,12 @@ async fn pump(
             event=events.recv()=>{let Some(adapter)=adapter.upgrade() else{break;};match event{
                 Ok(PeerEvent::Message(message))=>{match serde_json::from_str::<Value>(&message.value){Ok(value)=>{let method=value["method"].as_str().unwrap_or("");if let Err(error)=adapter.handle(method,&value["params"],value.get("id")).await{tracing::error!(operation="orchestration.codex.ingest",message=%error);}},Err(error)=>{tracing::error!(operation="orchestration.codex.decode",message=%error);}}}
                 Ok(PeerEvent::Response{..})=>{},
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count))=>{
+                    tracing::warn!(operation="orchestration.codex.lag", skipped=count);
+                    let natives:Vec<_>=adapter.states.lock().unwrap_or_else(|e|e.into_inner()).keys().cloned().collect();
+                    for native in natives { let _=adapter.disconnected(&native,"Codex notification stream lost events").await; }
+                    continue;
+                },
                 result=>{let message=match result{Ok(PeerEvent::Closed(message))=>message,Err(error)=>error.to_string(),_=>unreachable!()};let natives:Vec<_>=adapter.states.lock().unwrap_or_else(|e|e.into_inner()).keys().cloned().collect();for native in natives{let _=adapter.disconnected(&native,&message).await;}break;}
             }}
         }

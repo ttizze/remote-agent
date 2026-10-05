@@ -110,6 +110,13 @@ impl ClaudeAdapter {
                     .iter()
                     .find(|message| message.id == *message_id)
                     .ok_or_else(|| error("steer input missing"))?;
+                {
+                    let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                    if state.terminal {
+                        return Err(crate::turn_completed());
+                    }
+                    state.steered = true;
+                }
                 handle
                     .input
                     .send(user_frame(&handle.native_session, message, true))
@@ -359,6 +366,7 @@ impl ClaudeAdapter {
                     .map_err(|_| AdapterError {
                         message: "Claude process capacity is busy".into(),
                         retryable: true,
+                        turn_completed: false,
                     })?,
             )
         };

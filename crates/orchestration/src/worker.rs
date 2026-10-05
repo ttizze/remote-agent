@@ -14,6 +14,7 @@ use tokio::{sync::watch, task::JoinSet};
 pub struct AdapterError {
     pub message: String,
     pub retryable: bool,
+    pub turn_completed: bool,
 }
 #[async_trait::async_trait]
 pub trait ProviderAdapter: Send + Sync {
@@ -50,10 +51,16 @@ impl EffectWorker {
             }
             tokio::select! {
                 changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() {break;} }
-                result = jobs.join_next(), if !jobs.is_empty() => { if let Some(result) = result { result.map_err(|e| StoreError::InvalidEvent(e.to_string()))??; } }
+                result = jobs.join_next(), if !jobs.is_empty() => { if let Some(result) = result {
+                    match result { Ok(Ok(())) => {}, Ok(Err(error)) => tracing::error!(operation="effect.job", message=%error), Err(error) => tracing::error!(operation="effect.job", message=%error) }
+                } }
                 _ = tick.tick() => {
                     while jobs.len() < 4 {
-                        let Some(claim) = self.store.claim_effect(&self.owner, now_ms())? else {break;};
+                        let claim = match self.store.claim_effect(&self.owner, now_ms()) {
+                            Ok(Some(claim)) => claim,
+                            Ok(None) => break,
+                            Err(error) => { tracing::error!(operation="effect.claim", message=%error); break; }
+                        };
                         let store = self.store.clone(); let adapter = self.adapter.clone();
                         jobs.spawn(async move { execute(store, adapter, claim).await });
                     }
@@ -122,6 +129,11 @@ async fn execute(
             }
         }
         Err(error) => {
+            if error.turn_completed && matches!(claim.effect.body, EffectBody::Steer { .. }) {
+                store.steer_follow_up(&claim.effect, &timestamp)?;
+                store.finish_effect(&claim, None, now_ms())?;
+                return Ok(());
+            }
             let mut failed_claim = claim.clone();
             if !error.retryable {
                 failed_claim.attempt = 5;
@@ -152,6 +164,7 @@ async fn execute(
                 if let Some(run) = projection.runs.iter().find(|run| {
                     run.id == run_id
                         && run.status.is_blocking()
+                        && run.status != RunStatus::Waiting
                         && run.active_attempt_id == attempt_id
                 }) {
                     let events = crate::decider::failed_effect(
@@ -209,6 +222,7 @@ mod tests {
             Err(AdapterError {
                 message: "provider unavailable".into(),
                 retryable: false,
+                turn_completed: false,
             })
         }
     }
@@ -226,6 +240,60 @@ mod tests {
             )
             .unwrap();
         store
+    }
+    struct PanicOnce(std::sync::atomic::AtomicBool);
+    #[async_trait::async_trait]
+    impl ProviderAdapter for PanicOnce {
+        async fn execute(
+            &self,
+            effect: &Effect,
+            projection: ThreadProjection,
+        ) -> std::result::Result<Vec<DomainEvent>, AdapterError> {
+            if !self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                panic!("isolated effect failure");
+            }
+            Completion.execute(effect, projection).await
+        }
+    }
+    #[tokio::test]
+    async fn worker_survives_a_panicking_job_and_processes_another_thread() {
+        let store = setup();
+        let mut other = create();
+        other.thread_id = ThreadId::new("other").unwrap();
+        other.command_id = CommandId::new("other-create").unwrap();
+        store
+            .dispatch(&other, &now(), &turns(), Driver::Codex)
+            .unwrap();
+        let mut input = send("other-send", DispatchMode::StartImmediately);
+        input.thread_id = other.thread_id.clone();
+        store
+            .dispatch(&input, &now(), &turns(), Driver::Codex)
+            .unwrap();
+        let (stop, shutdown) = watch::channel(false);
+        let worker = tokio::spawn(
+            EffectWorker {
+                store: store.clone(),
+                adapter: Arc::new(PanicOnce(std::sync::atomic::AtomicBool::new(false))),
+                owner: "test".into(),
+            }
+            .run(shutdown),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if [create().thread_id, other.thread_id.clone()]
+                    .iter()
+                    .any(|id| store.projection(id).unwrap().runs[0].status == RunStatus::Completed)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!worker.is_finished());
+        stop.send(true).unwrap();
+        worker.await.unwrap().unwrap();
     }
     #[tokio::test]
     async fn worker_commits_provider_records_and_completes_the_lease() {

@@ -234,7 +234,10 @@ pub fn decide(
                     );
                 }
             }
-            if let Some(turn) = running_turn(projection, target) {
+            if let Some(turn) = projection.provider_turns.iter().find(|turn| {
+                turn.run_attempt_id == target.active_attempt_id
+                    && matches!(turn.status, TurnStatus::Pending | TurnStatus::Running)
+            }) {
                 effect(
                     &mut decision,
                     command,
@@ -531,8 +534,10 @@ pub fn decide(
                     next_ordinal(projection, Some(target)),
                 )),
             );
+            promote_next(&mut decision, command, &projection.runs, now, Some(run_id));
         }
         PreparedRunRetry { run_id } => {
+            require(active(&projection.runs).is_none(), "another run is active")?;
             let mut target = run(&projection.runs, run_id)?.clone();
             require(
                 target.status == RunStatus::Failed && target.workspace_preparation.is_some(),
@@ -774,6 +779,7 @@ pub fn decide(
                     let completed = projection
                         .runs
                         .iter()
+                        .filter(|run| run.completed_at.is_some())
                         .max_by_key(|run| run.ordinal)
                         .and_then(|run| run.completed_at.as_ref())
                         .ok_or_else(|| DecisionError("no completed run to mark unread".into()))?;
@@ -827,21 +833,19 @@ pub fn decide(
         &projection.checkpoint_scopes,
     );
     decision.events = capture.events;
-    decision.effects.extend(capture.effects);
+    // Capture must precede a promoted Start in the per-thread outbox.
+    decision.effects.splice(0..0, capture.effects);
     require(!decision.events.is_empty(), "command must produce an event")?;
     Ok(decision)
 }
 
-fn next_ordinal(projection: &ThreadProjection, target: Option<&Run>) -> u64 {
-    let band = target.map_or(0, |run| run.ordinal * 1_000_000);
+fn next_ordinal(projection: &ThreadProjection, _target: Option<&Run>) -> u64 {
     projection
         .turn_items
         .iter()
-        .filter(|item| target.is_none_or(|run| item.run_id.as_ref() == Some(&run.id)))
         .map(|item| item.ordinal)
         .max()
-        .unwrap_or(band)
-        .max(band)
+        .unwrap_or(0)
         + 1
 }
 fn running_turn<'a>(projection: &'a ThreadProjection, target: &Run) -> Option<&'a ProviderTurn> {
@@ -1729,14 +1733,18 @@ fn respond(
 }
 
 /// Startup recovery never silently runs a held queue or replays process-bound I/O.
-pub fn recover(projection: &ThreadProjection, now: &Timestamp) -> Vec<EventPayload> {
+pub fn recover(
+    projection: &ThreadProjection,
+    replayable_captures: &[RunId],
+    now: &Timestamp,
+) -> Vec<EventPayload> {
     let mut result = vec![];
     for run in &projection.runs {
         let mut run = run.clone();
         if run.status == RunStatus::Queued {
             run.queue_held = true;
             result.push(EventPayload::RunUpdated(run));
-        } else if run.status.is_blocking() {
+        } else if run.status.is_blocking() && !replayable_captures.contains(&run.id) {
             run.status = RunStatus::Interrupted;
             run.completed_at = Some(now.clone());
             result.push(EventPayload::RunUpdated(run));
@@ -1757,11 +1765,33 @@ pub fn recover(projection: &ThreadProjection, now: &Timestamp) -> Vec<EventPaylo
         if matches!(
             node.status,
             NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
-        ) {
+        ) && !node
+            .run_id
+            .as_ref()
+            .is_some_and(|id| replayable_captures.contains(id))
+        {
             let mut node = node.clone();
             node.status = NodeStatus::Interrupted;
             node.completed_at = Some(now.clone());
             result.push(EventPayload::NodeUpdated(node));
+        }
+    }
+    for item in &projection.turn_items {
+        if matches!(
+            item.status,
+            ItemStatus::Pending | ItemStatus::Running | ItemStatus::Waiting
+        ) {
+            result.push(EventPayload::TurnItemUpdated(
+                crate::projector::finished_item(item, ItemStatus::Interrupted, now),
+            ));
+        }
+    }
+    for message in &projection.messages {
+        if message.streaming {
+            let mut message = message.clone();
+            message.streaming = false;
+            message.updated_at = now.clone();
+            result.push(EventPayload::MessageUpdated(message));
         }
     }
     for request in &projection.runtime_requests {
@@ -1809,6 +1839,52 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use proptest::prelude::*;
+    #[test]
+    fn recovery_finishes_streaming_items_and_messages() {
+        let mut p = running();
+        let user = p.turn_items[0].clone();
+        let mut item = user.clone();
+        item.id = TurnItemId::new("reply").unwrap();
+        item.status = ItemStatus::Running;
+        item.body = TurnItemBody::AssistantMessage {
+            message_id: MessageId::new("reply-message").unwrap(),
+            text: "Partial".into(),
+            attachments: vec![],
+            streaming: true,
+        };
+        p.turn_items.push(item);
+        let mut message = p.messages[0].clone();
+        message.streaming = true;
+        p.messages.push(message);
+        let events = recover(&p, &[], &now());
+        assert!(events.iter().any(|event| matches!(event, EventPayload::TurnItemUpdated(item) if item.status == ItemStatus::Interrupted && matches!(item.body, TurnItemBody::AssistantMessage { streaming: false, .. }))));
+        assert!(events.iter().any(
+            |event| matches!(event, EventPayload::MessageUpdated(message) if !message.streaming)
+        ));
+    }
+    #[test]
+    fn unread_uses_latest_completed_run_even_when_newer_run_is_queued() {
+        let mut p = running();
+        p.runs[0].status = RunStatus::Completed;
+        p.runs[0].completed_at = Some(now());
+        let mut queued = p.runs[0].clone();
+        queued.id = RunId::new("queued").unwrap();
+        queued.ordinal += 1;
+        queued.status = RunStatus::Queued;
+        queued.completed_at = None;
+        p.runs.push(queued);
+        let decision = decide(
+            &command("unread", CommandBody::ThreadMarkUnread),
+            Some(&p),
+            &now(),
+            &turns(),
+            Driver::Codex,
+        )
+        .unwrap();
+        assert!(
+            matches!(&decision.events[0].payload, EventPayload::ThreadMarkedUnread(thread) if thread.last_visited_at.as_ref().unwrap().millis() == now().millis() - 1)
+        );
+    }
     #[test]
     fn maintenance_can_queue_but_cannot_be_steered_or_receive_steering() {
         let p = running();
@@ -1969,7 +2045,7 @@ mod tests {
     #[test]
     fn recovery_terminalizes_live_work_and_holds_queued_work() {
         let (projection, _) = apply(&running(), &send("queued", DispatchMode::QueueAfterActive));
-        let events = recover(&projection, &now());
+        let events = recover(&projection, &[], &now());
         assert!(events.iter().any(|event| matches!(event, EventPayload::RunUpdated(run) if run.status == RunStatus::Interrupted)));
         assert!(events.iter().any(|event| matches!(event, EventPayload::RunUpdated(run) if run.status == RunStatus::Queued && run.queue_held)));
         assert!(events.iter().any(|event| matches!(event, EventPayload::ProviderTurnUpdated(turn) if turn.status == TurnStatus::Interrupted)));

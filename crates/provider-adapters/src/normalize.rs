@@ -13,6 +13,8 @@ pub struct TurnState {
     pub items: BTreeMap<String, TurnItem>,
     pub requests: BTreeMap<RuntimeRequestId, NativeRequest>,
     pub interrupted: bool,
+    pub steered: bool,
+    pub claude_final_blocks: BTreeMap<String, u64>,
     pub terminal: bool,
     pub sequence: u64,
     pub claude_message_id: String,
@@ -62,6 +64,8 @@ impl TurnState {
             items: BTreeMap::new(),
             requests: BTreeMap::new(),
             interrupted: false,
+            steered: false,
+            claude_final_blocks: BTreeMap::new(),
             terminal: false,
             sequence: 0,
             claude_message_id: String::new(),
@@ -346,7 +350,7 @@ impl TurnState {
             return;
         }
         self.terminal = true;
-        let status = if self.interrupted && status == TurnStatus::Completed {
+        let status = if self.interrupted {
             TurnStatus::Interrupted
         } else {
             status
@@ -403,7 +407,7 @@ impl TurnState {
                 self.record_item(&key, item, now, payloads);
             }
         }
-        if let Some(failure) = failure {
+        if let Some(failure) = failure.filter(|_| !self.interrupted) {
             let item = self.item(
                 "terminal-error",
                 TurnItemBody::Error {
@@ -609,6 +613,13 @@ pub fn codex(
         }
         "item/started" | "item/completed" => {
             let value = &params["item"];
+            if value["type"] == "userMessage" {
+                return Translation {
+                    state: next,
+                    payloads,
+                    immediate_responses,
+                };
+            }
             let key = value["id"].as_str().unwrap_or("item");
             let completed = method == "item/completed";
             let status = if completed {
@@ -937,7 +948,7 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
     let mut next = state.clone();
     let mut payloads = vec![];
     let mut immediate_responses = vec![];
-    if next.terminal {
+    if next.terminal || frame["parent_tool_use_id"].as_str().is_some() {
         return Translation {
             state: next,
             payloads,
@@ -970,6 +981,7 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
                 "message_start" => {
                     next.claude_message_id =
                         event["message"]["id"].as_str().unwrap_or("stream").into();
+                    next.claude_blocks.clear();
                     if next.turn.status == TurnStatus::Pending {
                         next.started(None, now, &mut payloads);
                     }
@@ -1045,12 +1057,10 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
                 .as_str()
                 .or_else(|| frame["uuid"].as_str())
                 .unwrap_or("assistant");
-            for (index, block) in message["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .enumerate()
-            {
+            let mut final_index = *next.claude_final_blocks.get(native).unwrap_or(&0);
+            for block in message["content"].as_array().into_iter().flatten() {
+                let index = final_index;
+                final_index += 1;
                 let key = block["id"]
                     .as_str()
                     .map(str::to_owned)
@@ -1083,6 +1093,8 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
                 let item = next.item(&key, body, status, now);
                 next.record_item(&key, item, now, &mut payloads);
             }
+            next.claude_final_blocks
+                .insert(native.to_owned(), final_index);
             let usage = &message["usage"];
             if usage.is_object() {
                 let input = usage["input_tokens"].as_u64().unwrap_or(0);
@@ -1136,6 +1148,20 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
             }
         }
         "result" => {
+            if !next.interrupted
+                && next.steered
+                && matches!(
+                    frame["terminal_reason"].as_str(),
+                    Some("aborted_streaming" | "aborted_tools")
+                )
+            {
+                return Translation {
+                    state: next,
+                    payloads,
+                    immediate_responses,
+                };
+            }
+            next.steered = false;
             let failed =
                 frame["is_error"].as_bool().unwrap_or(false) || frame["subtype"] != "success";
             let detail = frame["result"]
@@ -1209,7 +1235,18 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
                         request_kind: kind,
                         prompt: Some(format!("{name}\n{}", input)),
                         app_name: None,
-                        options: vec![],
+                        options: vec![
+                            ApprovalOption {
+                                decision: ApprovalDecision::Accept,
+                                label: "Allow once".into(),
+                                warning: None,
+                            },
+                            ApprovalOption {
+                                decision: ApprovalDecision::Decline,
+                                label: "Decline".into(),
+                                warning: None,
+                            },
+                        ],
                     }
                 };
                 let item = next.item(&key, body, ItemStatus::Waiting, now);
@@ -1483,6 +1520,92 @@ mod tests {
             1,
             &now,
         )
+    }
+    #[test]
+    fn claude_approval_has_allow_and_decline_options() {
+        let translated = claude(
+            &state(Driver::Claude),
+            &json!({"type":"control_request","request_id":"approval","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"pwd"}}}),
+            &timestamp(),
+        );
+        let options = translated
+            .state
+            .items
+            .values()
+            .find_map(|item| match &item.body {
+                TurnItemBody::ApprovalRequest { options, .. } => Some(options),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            options.iter().map(|o| o.decision).collect::<Vec<_>>(),
+            vec![ApprovalDecision::Accept, ApprovalDecision::Decline]
+        );
+    }
+    #[test]
+    fn claude_steering_abort_does_not_finish_and_stop_failure_is_interrupted() {
+        let mut state = state(Driver::Claude);
+        state.steered = true;
+        let aborted = claude(
+            &state,
+            &json!({"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming"}),
+            &timestamp(),
+        );
+        assert!(!aborted.state.terminal);
+        let mut state = aborted.state;
+        state.interrupted = true;
+        let stopped = claude(
+            &state,
+            &json!({"type":"result","subtype":"error_during_execution","is_error":true}),
+            &timestamp(),
+        );
+        assert_eq!(stopped.state.run.status, RunStatus::Interrupted);
+        assert!(
+            !stopped
+                .state
+                .items
+                .values()
+                .any(|i| matches!(i.body, TurnItemBody::Error { .. }))
+        );
+    }
+    #[test]
+    fn claude_per_block_final_frames_preserve_reasoning_and_text_identity() {
+        let mut state = state(Driver::Claude);
+        for frame in [
+            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"native"}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"Thought"}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":"Answer"}}}),
+            json!({"type":"assistant","message":{"id":"native","content":[{"type":"thinking","thinking":"Thought"}]}}),
+            json!({"type":"assistant","message":{"id":"native","content":[{"type":"text","text":"Answer"}]}}),
+        ] {
+            state = claude(&state, &frame, &timestamp()).state;
+        }
+        assert_eq!(state.items.len(), 2);
+        assert!(matches!(
+            state.items["native:block-0"].body,
+            TurnItemBody::Reasoning { .. }
+        ));
+        assert!(matches!(
+            state.items["native:block-1"].body,
+            TurnItemBody::AssistantMessage { .. }
+        ));
+    }
+    #[test]
+    fn child_frames_and_codex_user_echo_do_not_create_root_tool_or_message_items() {
+        let child = claude(
+            &state(Driver::Claude),
+            &json!({"type":"assistant","parent_tool_use_id":"task","message":{"content":[{"type":"text","text":"Child"}]}}),
+            &timestamp(),
+        );
+        assert!(child.payloads.is_empty());
+        let echo = codex(
+            &state(Driver::Codex),
+            "item/started",
+            &json!({"item":{"id":"user","type":"userMessage"}}),
+            None,
+            &timestamp(),
+        );
+        assert!(echo.payloads.is_empty());
     }
     #[test]
     fn codex_deltas_finalize_one_message_and_ignore_late_events() {

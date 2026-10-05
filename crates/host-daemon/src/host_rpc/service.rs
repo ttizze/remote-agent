@@ -39,6 +39,7 @@ fn adapter_error(error: impl std::fmt::Display) -> AdapterError {
     AdapterError {
         message: error.to_string(),
         retryable: false,
+        turn_completed: false,
     }
 }
 #[derive(Debug, Clone, Serialize, thiserror::Error)]

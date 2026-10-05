@@ -111,6 +111,56 @@ impl Store {
         capabilities: &TurnCapabilities,
         driver: Driver,
     ) -> Result<Commit> {
+        self.dispatch_inner(command, now, capabilities, driver, None)
+    }
+    pub fn steer_follow_up(&self, effect: &Effect, now: &Timestamp) -> Result<Commit> {
+        let EffectBody::Steer { message_id, .. } = &effect.body else {
+            return Err(StoreError::InvalidEvent("not a steer effect".into()));
+        };
+        let projection = self.projection(&effect.thread_id)?;
+        let message = projection
+            .messages
+            .iter()
+            .find(|m| m.id == *message_id)
+            .ok_or(StoreError::InvalidEvent("steer message missing".into()))?;
+        let driver = projection
+            .provider_threads
+            .iter()
+            .find(|p| p.provider_instance_id == projection.thread.provider_instance_id)
+            .map_or(Driver::Codex, |p| p.driver);
+        let capabilities = projection
+            .provider_sessions
+            .iter()
+            .find(|s| s.driver == driver)
+            .map(|s| &s.capabilities.turns)
+            .ok_or_else(|| StoreError::InvalidEvent("steer provider session missing".into()))?;
+        let command = Command {
+            command_id: CommandId::new(format!("command:steer-follow-up:{}", effect.id))
+                .expect("derived id"),
+            thread_id: effect.thread_id.clone(),
+            body: CommandBody::MessageDispatch(MessageDispatch {
+                source_plan_ref: None,
+                created_by: message.created_by,
+                creation_source: message.creation_source,
+                message_id: message.id.clone(),
+                text: message.text.clone(),
+                context: message.context.clone(),
+                attachments: message.attachments.clone(),
+                model_selection: None,
+                delivery_intent: None,
+                dispatch_mode: DispatchMode::QueueAfterActive,
+            }),
+        };
+        self.dispatch_inner(&command, now, capabilities, driver, Some(message_id))
+    }
+    fn dispatch_inner(
+        &self,
+        command: &Command,
+        now: &Timestamp,
+        capabilities: &TurnCapabilities,
+        driver: Driver,
+        reused_message: Option<&MessageId>,
+    ) -> Result<Commit> {
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
         let receipt: Option<(String, u64, String, Option<String>)> = transaction.query_row(
@@ -137,7 +187,12 @@ impl Store {
                 replayed: true,
             });
         }
-        let projection = load_projection(&transaction, &command.thread_id)?;
+        let mut projection = load_projection(&transaction, &command.thread_id)?;
+        if let (Some(projection), Some(message_id)) = (&mut projection, reused_message) {
+            projection
+                .messages
+                .retain(|message| message.id != *message_id);
+        }
         let planned = if let CommandBody::ThreadFork {
             target_thread_id, ..
         }
@@ -437,11 +492,24 @@ impl Store {
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
         let mut events = vec![];
+        let unsettled = read_effects(&transaction)?;
         for id in thread_ids(&transaction)? {
             let projection =
                 load_projection(&transaction, &id)?.ok_or(StoreError::ThreadNotFound)?;
             let sequence = latest_sequence(&transaction, Some(&id))?;
-            for (index, payload) in decider::recover(&projection, now).into_iter().enumerate() {
+            let captures = unsettled
+                .iter()
+                .filter_map(|effect| match &effect.body {
+                    EffectBody::CaptureCheckpoint { run_id } if effect.thread_id == id => {
+                        Some(run_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for (index, payload) in decider::recover(&projection, &captures, now)
+                .into_iter()
+                .enumerate()
+            {
                 events.push(DomainEvent {
                     id: EventId::new(format!("event:runtime-reconcile:{id}:{sequence}:{index}"))
                         .map_err(|e| StoreError::InvalidEvent(e.to_string()))?,
@@ -451,7 +519,6 @@ impl Store {
                 });
             }
         }
-        let unsettled = read_effects(&transaction)?;
         for effect in unsettled {
             transaction.execute("UPDATE orchestration_v2_effect_outbox SET status=?2,lease_owner=NULL,lease_expires_at=NULL,updated_at=?3 WHERE effect_id=?1", params![effect.id, if effect.body.process_bound() {"cancelled"} else {"pending"}, now.as_str()])?;
         }
@@ -1039,21 +1106,11 @@ fn normalize_ordinal(
         item.ordinal = ordinal;
         return Ok(());
     }
-    let run_ordinal: u64 = match &item.run_id {
-        Some(id) => {
-            let json: String = connection.query_row("SELECT payload_json FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND run_id=?2", params![thread_id.as_str(), id.as_str()], |row| row.get(0))?;
-            serde_json::from_str::<Run>(&json)?.ordinal
-        }
-        None => 0,
-    };
-    let band = run_ordinal
-        .checked_mul(1_000_000)
+    let max: u64 = connection.query_row("SELECT COALESCE(MAX(ordinal),0) FROM orchestration_v2_turn_item_positions WHERE thread_id=?1", [thread_id.as_str()], |row| row.get(0))?;
+    item.ordinal = max
+        .checked_add(1)
+        .filter(|ordinal| *ordinal <= i64::MAX as u64)
         .ok_or_else(|| StoreError::InvalidEvent("turn ordinal overflow".into()))?;
-    let max: u64 = connection.query_row("SELECT COALESCE(MAX(ordinal),?2) FROM orchestration_v2_turn_item_positions WHERE thread_id=?1 AND ordinal>=?2 AND ordinal<?3", params![thread_id.as_str(), band, band + 1_000_000], |row| row.get(0))?;
-    item.ordinal = max + 1;
-    if item.ordinal >= band + 1_000_000 {
-        return Err(StoreError::InvalidEvent("turn item band exhausted".into()));
-    }
     connection.execute("INSERT INTO orchestration_v2_turn_item_positions(thread_id,turn_item_id,ordinal) VALUES(?1,?2,?3)", params![thread_id.as_str(), item.id.as_str(), item.ordinal])?;
     Ok(())
 }
@@ -1206,6 +1263,50 @@ mod tests {
         store
             .dispatch(command, &now(), &turns(), Driver::Codex)
             .unwrap()
+    }
+    #[test]
+    fn queued_message_does_not_hide_later_active_run_output_on_partial_clients() {
+        let store = setup();
+        dispatch(&store, &send("one", DispatchMode::StartImmediately));
+        dispatch(&store, &send("two", DispatchMode::QueueAfterActive));
+        let before = store.projection(&create().thread_id).unwrap();
+        let watermark = before.turn_items.iter().map(|item| item.ordinal).max();
+        let mut output = before.turn_items[0].clone();
+        output.id = TurnItemId::new("new-live-output").unwrap();
+        output.body = TurnItemBody::AssistantMessage {
+            message_id: MessageId::new("reply").unwrap(),
+            text: "Live".into(),
+            attachments: vec![],
+            streaming: true,
+        };
+        let commit = store
+            .ingest(
+                crate::events(
+                    &before.thread.id,
+                    "live",
+                    vec![EventPayload::TurnItemUpdated(output)],
+                    &now(),
+                ),
+                None,
+                &now(),
+            )
+            .unwrap();
+        let client = projector::apply(
+            Some(&before),
+            &commit.events[0].event,
+            projector::ProjectionOptions {
+                partial_timeline: true,
+                latest_local_turn_ordinal: watermark,
+            },
+        )
+        .unwrap();
+        assert!(
+            client
+                .turn_items
+                .iter()
+                .any(|item| item.id.as_str() == "new-live-output")
+        );
+        assert!(client.turn_items.last().unwrap().ordinal > watermark.unwrap());
     }
     #[test]
     fn new_proposal_supersedes_previous_active_proposal_under_the_run_guard() {
@@ -1692,7 +1793,7 @@ mod tests {
             )
             .unwrap();
         let projection = store.projection(&run.thread_id).unwrap();
-        assert_eq!(projection.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(projection.runs[0].status, RunStatus::Completed);
         assert_eq!(projection.runs[1].status, RunStatus::Queued);
         assert!(projection.runs[1].queue_held);
         let mut invalid = checkpoint(&run, CheckpointStatus::Ready);

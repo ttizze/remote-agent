@@ -109,7 +109,7 @@ pub fn thread(snapshot: &mut Snapshot, id: &ThreadId, item: ThreadStreamItem) {
                     Some(&cache.projection),
                     &stored.event,
                     projector::ProjectionOptions {
-                        partial_timeline: true,
+                        partial_timeline: cache.has_more_history,
                         latest_local_turn_ordinal: cache.latest_local_turn_ordinal,
                     },
                 )

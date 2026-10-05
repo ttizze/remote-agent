@@ -65,19 +65,18 @@ pub enum ContractError {
 pub struct Timestamp(String);
 impl Timestamp {
     pub fn parse(value: &str) -> Result<Self, ContractError> {
-        chrono::DateTime::parse_from_rfc3339(value)
-            .map(|time| {
-                Self(
-                    time.with_timezone(&chrono::Utc)
-                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                )
-            })
-            .map_err(|_| ContractError::InvalidTimestamp)
+        let time = chrono::DateTime::parse_from_rfc3339(value)
+            .map_err(|_| ContractError::InvalidTimestamp)?;
+        Self::from_millis(time.timestamp_millis())
     }
     pub fn from_millis(value: i64) -> Result<Self, ContractError> {
-        chrono::DateTime::from_timestamp_millis(value)
-            .map(|time| Self(time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)))
-            .ok_or(ContractError::InvalidTimestamp)
+        use chrono::Datelike;
+        let time = chrono::DateTime::from_timestamp_millis(value)
+            .filter(|time| (0..=9999).contains(&time.year()))
+            .ok_or(ContractError::InvalidTimestamp)?;
+        Ok(Self(
+            time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        ))
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -1427,6 +1426,14 @@ mod tests {
             now()
         );
         assert!(Timestamp::parse("invalid").is_err());
+        assert!(Timestamp::parse("9999-12-31T23:59:59-01:00").is_err());
+        assert!(Timestamp::parse("0000-01-01T00:00:00+01:00").is_err());
+        assert!(Timestamp::from_millis(253402300800000).is_err());
+        let edge = Timestamp::parse("9999-12-31T23:59:59Z").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Timestamp>(&serde_json::to_string(&edge).unwrap()).unwrap(),
+            edge
+        );
     }
     #[test]
     fn contracts_roundtrip_over_postcard_including_dynamic_json() {

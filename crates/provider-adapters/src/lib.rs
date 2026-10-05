@@ -29,6 +29,15 @@ pub(crate) fn error(message: impl std::fmt::Display) -> orchestration::worker::A
     orchestration::worker::AdapterError {
         message: message.to_string(),
         retryable: false,
+        turn_completed: false,
+    }
+}
+
+pub(crate) fn turn_completed() -> orchestration::worker::AdapterError {
+    orchestration::worker::AdapterError {
+        message: "turn completed".into(),
+        retryable: false,
+        turn_completed: true,
     }
 }
 

@@ -152,3 +152,5 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 - 2026-10-05: fork/merge back は source point と転送を一つの transaction で保存し、provider は最初の送信まで起動しない。同じ provider は Codex thread/fork または Claude --fork-session/--resume-session-at、それ以外や再開失敗は固定 T3 の16000-byte枠の intact message context を使う。戻った provider は lastRunOrdinal 以降の delta、merge back は fork の追加履歴を渡す。転送の消費は actual turn 開始イベントと同じ transaction に入れ、Claude init 自体では消費しない。mobile の fork/merge back は固定ソースにもあるため3クライアントへ公開する。
 
 - 2026-10-05: /compact は Codex thread/compact/start と Claude の native command を使う独立した maintenance turn とし、Git capture と steer を行わない。空会話の compact を拒否し、/logout は最後の native provider の account owner へ渡す。desktop の Implement/Refine は固定 T3 の PLEASE IMPLEMENT THIS PLAN と plan/default mode を使い、active source plan の完了と run の sourcePlanRef を同じ transaction に保存する。新しい案は前の未完了案を superseded にする。Implement in a new thread は source project/branch/worktree と現在の model を使う。mobile には Implement/Refine を増設せず /plan と /default を公開する。
+
+- 2026-10-05: ユーザー指示で M2/M3 を aacd3737 から中断し、M1 のレビュー87件への対応を先に行う。残った実装のテストと各不具合の再発テストを戻し、対応と非対応の理由を PR55_REVIEW.md に記録する。main は取り込まず、最後に全 unit-tests・clippy・fmt とブランチ push/PR 更新だけを行い、M2/M3 は再開しない。
