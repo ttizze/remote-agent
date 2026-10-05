@@ -37,6 +37,7 @@ ids!(
     RuntimeRequestId,
     PlanId,
     CheckpointId,
+    CheckpointScopeId,
     ContextTransferId,
     NodeId
 );

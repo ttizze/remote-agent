@@ -30,8 +30,13 @@ pub struct WorkReport {
     pub exit_code: Option<i64>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NotificationSource {
+    Native(BackgroundKind),
+    Delegated { task_ids: Vec<NodeId> },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notification {
-    pub source: BackgroundKind,
+    pub source: NotificationSource,
     pub child_thread: Option<ThreadId>,
     pub outcome: NotificationOutcome,
     pub summary: String,
@@ -156,11 +161,84 @@ pub fn background_notification(reports: &[WorkReport]) -> Option<Notification> {
         }
     };
     Some(Notification {
-        source,
+        source: NotificationSource::Native(source),
         child_thread,
         outcome,
         summary,
     })
+}
+pub fn delegated_notification(
+    task_ids: &[NodeId],
+    parent_run: &RunId,
+    tasks: &[Task],
+) -> Notification {
+    let selected = task_ids
+        .iter()
+        .map(|id| tasks.iter().find(|task| &task.id == id))
+        .collect::<Vec<_>>();
+    let outcome = combined_outcome(
+        selected
+            .iter()
+            .map(|task| task.map_or(NotificationOutcome::Unknown, |task| task.status.into())),
+    );
+    let verb = match outcome {
+        NotificationOutcome::Failed => "failed",
+        NotificationOutcome::Cancelled => "stopped",
+        _ => "finished",
+    };
+    let labels = selected
+        .iter()
+        .filter_map(|task| {
+            task.and_then(|task| {
+                label(Some(
+                    task.title
+                        .as_deref()
+                        .filter(|title| !title.trim().is_empty())
+                        .unwrap_or(&task.prompt),
+                ))
+            })
+        })
+        .collect::<Vec<_>>();
+    let (summary, child_thread) = if task_ids.len() == 1 {
+        (
+            format!(
+                "Delegated task{} {verb}",
+                labels
+                    .first()
+                    .map_or(String::new(), |label| format!(" \"{label}\""))
+            ),
+            selected[0].map(|task| task.child_thread.clone()),
+        )
+    } else {
+        let total = tasks
+            .iter()
+            .filter(|task| task.app_owned && task.run.as_ref() == Some(parent_run))
+            .count();
+        let count = if total > task_ids.len() {
+            format!("{} of {total}", task_ids.len())
+        } else {
+            task_ids.len().to_string()
+        };
+        (
+            format!(
+                "{count} delegated tasks {verb}{}",
+                if labels.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", labels.join(", "))
+                }
+            ),
+            None,
+        )
+    };
+    Notification {
+        source: NotificationSource::Delegated {
+            task_ids: task_ids.to_vec(),
+        },
+        child_thread,
+        outcome,
+        summary,
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -187,7 +265,7 @@ mod tests {
         assert_eq!(
             background_notification(&[subagent]),
             Some(Notification {
-                source: BackgroundKind::Subagent,
+                source: NotificationSource::Native(BackgroundKind::Subagent),
                 child_thread: Some(child.clone()),
                 outcome: NotificationOutcome::Completed,
                 summary: "Subagent \"Review src/math.ts\" finished".into()
@@ -228,7 +306,7 @@ mod tests {
             ])
             .unwrap(),
             Notification {
-                source: BackgroundKind::BackgroundTask,
+                source: NotificationSource::Native(BackgroundKind::BackgroundTask),
                 child_thread: None,
                 outcome: NotificationOutcome::Cancelled,
                 summary: "Subagent \"Agent B\" and command \"Sleep 60 seconds\" were stopped"

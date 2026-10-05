@@ -1107,3 +1107,11 @@ Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機�
 | --- | --- |
 | `provider/TurnTokenUsage.test.ts` | `agent-domain/src/usage.rs` と遅延 native usage の状態機械テスト。Codex 30/15/8、compaction 120/45/23、次ターン 4/1、Claude cached input 150 と thinking 20、ゼロの crash を unavailable とする期待値を維持。 |
 | `provider/CodexMcpElicitation.test.ts` | `agent-providers/src/elicitation.rs`。Safari の選択肢と wire response、nullable/boolean フォーム、未収集の required field と URL elicitation、実現できない persistence choices の全期待値を移植。 |
+
+`Notification.test.ts` の委任通知（`2 of 3 delegated tasks finished: Review src/math.ts, Write tests`、単独 task の child link）を domain の状態機械と activity projection に移植した。`DelegatedCompletionDelivery.test.ts` の配送 cancel/親 stop による dispose を cohort ごとの task IDs で確認し、別 cohort を巻き込む処理を取り除いた。
+
+`CheckpointCaptureService.ts` の scope・baseline 境界は domain の明示的 input/effect/result に移した。初回 scoped capture が waiting となること、不足 baseline で保存を確定しないこと、同じ保存の再送を無視すること、scope 変更後の結果と restore effect が元の cwd/ref を保つことを検証した。Git の materialize/capture、共有 scope の他 actor の稼働確認は段階 3 に属する。
+
+`provider/CodexThreadRevert.test.ts` のページ越し境界と循環 cursor の失敗を、保存済みの絶対 head を入力する protocol テストに移植した。削除境界 `boundary` とエラー文言の期待値を維持し、同じ effect の再送で追加の削除が起きないことも確認する。件数を数える内部 helper は新設計には不要。
+
+`ThreadFork.integration.test.ts` と `ThreadMergeBack.integration.test.ts` の native / prior-turn / continue / sibling / fork-local rollback、および Codex の rollback / after-restart / stopped-turn の transcript を `agent-providers/src/replay/graph.rs` に追加した。複数 actor への saga command、固定した fork 履歴、native fork の配送結果、rollback の可視項目、兄弟ごとの delta と source の recall を原本の文言・境界で検証する。fork の内部イベント表の順序は、固定 command の確定→native 成功→子 command の順序へ読み替える。

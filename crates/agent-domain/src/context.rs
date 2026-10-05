@@ -35,6 +35,7 @@ pub struct HistoricalContext {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextDeliveryStatus {
+    NativeFork,
     Pending,
     Injected,
     Inline,
@@ -291,6 +292,14 @@ pub fn prepare_history(state: &State, items: &[Item], boundary: u64) -> Historic
     let messages = items
         .iter()
         .filter_map(|item| {
+            if let ItemKind::UserMessage { message } = &item.kind
+                && state
+                    .messages
+                    .iter()
+                    .any(|candidate| &candidate.id == message && candidate.notification.is_some())
+            {
+                return None;
+            }
             let run = item
                 .run
                 .as_ref()
@@ -710,6 +719,7 @@ mod tests {
     }
     fn transfer(id: &str, messages: Vec<HistoricalMessage>) -> Transfer {
         Transfer {
+            native_fork: None,
             id: ContextTransferId::new(id).unwrap(),
             kind: TransferKind::ProviderHandoff,
             source: ThreadId::new("source").unwrap(),

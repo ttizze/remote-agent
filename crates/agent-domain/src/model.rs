@@ -151,6 +151,8 @@ pub struct Message {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
+    pub checkpoint_scope: Option<CheckpointScope>,
+    pub native_baseline_heads: BTreeMap<String, Option<String>>,
     pub id: RunId,
     pub ordinal: u64,
     pub message: MessageId,
@@ -199,6 +201,10 @@ pub struct ToolPresentation {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ItemKind {
+    Fork {
+        parent: ThreadId,
+        boundary: u64,
+    },
     UserMessage {
         message: MessageId,
     },
@@ -257,12 +263,8 @@ pub enum ItemKind {
     SystemNotice {
         message: String,
     },
-    BackgroundNotification {
-        message: MessageId,
-        child_thread: Option<ThreadId>,
-        summary: String,
-        outcome: NotificationOutcome,
-        source: BackgroundKind,
+    Notification {
+        notification: Notification,
     },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -380,7 +382,20 @@ pub struct PlanStep {
     pub status: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CheckpointScope {
+    pub id: CheckpointScopeId,
+    pub cwd: String,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CapturedBaseline {
+    pub checkpoint: CheckpointId,
+    pub ordinal: u64,
+    pub file_ref: String,
+    pub native_heads: BTreeMap<String, Option<String>>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoint {
+    pub scope: Option<CheckpointScope>,
     pub id: CheckpointId,
     pub run: Option<RunId>,
     pub run_ordinal: u64,
@@ -411,6 +426,7 @@ pub struct Task {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transfer {
+    pub native_fork: Option<String>,
     pub instance: String,
     pub delivery: Option<ContextDelivery>,
     pub id: ContextTransferId,
@@ -481,6 +497,7 @@ pub struct Receipt {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct State {
     pub thread: Option<Thread>,
+    pub checkpoint_scope: Option<CheckpointScope>,
     pub runs: Vec<Run>,
     pub attempts: Vec<Attempt>,
     pub messages: Vec<Message>,
@@ -561,6 +578,29 @@ impl State {
             .collect();
         items.sort_by_key(|i| (i.ordinal, &i.id));
         items
+    }
+    pub fn activity_items(&self) -> Vec<std::borrow::Cow<'_, Item>> {
+        self.visible_items()
+            .into_iter()
+            .map(|item| {
+                if let ItemKind::UserMessage { message } = &item.kind
+                    && let Some(notification) = self
+                        .messages
+                        .iter()
+                        .find(|candidate| &candidate.id == message)
+                        .and_then(|message| message.notification.as_ref())
+                {
+                    let mut item = item.clone();
+                    item.kind = ItemKind::Notification {
+                        notification: notification.clone(),
+                    };
+                    item.text.clear();
+                    std::borrow::Cow::Owned(item)
+                } else {
+                    std::borrow::Cow::Borrowed(item)
+                }
+            })
+            .collect()
     }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -694,6 +734,7 @@ pub enum Command {
         interaction_mode: InteractionMode,
         boundary: u64,
         history: Vec<Item>,
+        checkpoint_scope: Option<CheckpointScope>,
         context: HistoricalContext,
         native: Option<NativeBinding>,
     },
@@ -981,9 +1022,12 @@ pub enum EffectBody {
     },
     Provider(ProviderCommand),
     CaptureCheckpoint {
+        scope: CheckpointScope,
+        native_baseline_heads: BTreeMap<String, Option<String>>,
         run: RunId,
     },
     RestoreCheckpoint {
+        scope: Option<CheckpointScope>,
         checkpoint: CheckpointId,
         file_ref: String,
     },
@@ -1019,6 +1063,7 @@ pub enum EffectResult {
         turn_completed: bool,
     },
     CheckpointCaptured {
+        baselines: Vec<CapturedBaseline>,
         run: RunId,
         attempt: Option<RunAttemptId>,
         checkpoint: CheckpointId,
@@ -1044,6 +1089,11 @@ pub enum EffectResult {
 values! { ProviderOperation { Start, Steer, Interrupt, Respond, Compact, SetModel } }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Input {
+    CheckpointScope {
+        run: Option<RunId>,
+        attempt: Option<RunAttemptId>,
+        scope: Option<CheckpointScope>,
+    },
     HandoffPolicy {
         instance: String,
         model_window: Option<u64>,

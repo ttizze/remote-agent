@@ -9,6 +9,10 @@ pub struct Fact {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FactBody {
+    CheckpointScopeBound {
+        run: Option<RunId>,
+        scope: Option<CheckpointScope>,
+    },
     NativeContextUsageRecorded {
         usage: ContextUsage,
     },
@@ -203,6 +207,8 @@ pub enum FactBody {
         source_plan: Option<PlanId>,
     },
     RunStarted {
+        checkpoint_scope: Option<CheckpointScope>,
+        native_baseline_heads: BTreeMap<String, Option<String>>,
         id: RunId,
     },
     RunPrepared {
@@ -312,6 +318,7 @@ pub enum FactBody {
         run: RunId,
     },
     CheckpointCaptured {
+        scope: Option<CheckpointScope>,
         id: CheckpointId,
         run: Option<RunId>,
         run_ordinal: u64,
@@ -337,6 +344,7 @@ pub enum FactBody {
         history: Vec<Item>,
     },
     TransferOpened {
+        native_fork: Option<String>,
         id: ContextTransferId,
         kind: TransferKind,
         source: ThreadId,
@@ -423,6 +431,20 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
     let at = &fact.at;
     use FactBody::*;
     match &fact.body {
+        CheckpointScopeBound { run, scope } => {
+            if let Some(run) = run {
+                find_mut(&mut state.runs, "run", |candidate| &candidate.id == run)?
+                    .checkpoint_scope = scope.clone();
+            }
+            if run.as_ref().is_none_or(|id| {
+                state.active_run().is_some_and(|active| &active.id == id)
+                    || state.active_run().is_none()
+                        && state.runs.last().is_some_and(|latest| &latest.id == id)
+            }) {
+                state.checkpoint_scope = scope.clone();
+            }
+        }
+
         NativeContextUsageRecorded { usage } => state.native_context_usage = Some(usage.clone()),
         NativeTurnUsageRecorded { usage } => state.native_turn_usage = Some(usage.clone()),
         NativeUsageAdded { counters } => {
@@ -820,6 +842,8 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 return Err(FoldError::Conflict);
             }
             state.runs.push(Run {
+                checkpoint_scope: None,
+                native_baseline_heads: BTreeMap::new(),
                 id: id.clone(),
                 message: message.clone(),
                 ordinal: *ordinal,
@@ -836,8 +860,14 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 continuation: false,
             });
         }
-        RunStarted { id } => {
+        RunStarted {
+            id,
+            native_baseline_heads,
+            checkpoint_scope,
+        } => {
             let r = find_mut(&mut state.runs, "run", |r| &r.id == id)?;
+            r.checkpoint_scope = checkpoint_scope.clone();
+            r.native_baseline_heads = native_baseline_heads.clone();
             r.status = RunStatus::Starting;
             r.queue_position = None;
             r.queue_held = false;
@@ -1086,6 +1116,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             find_mut(&mut state.plans, "plan", |p| &p.id == id)?.implemented_by = Some(run.clone())
         }
         CheckpointCaptured {
+            scope,
             id,
             run,
             run_ordinal,
@@ -1093,6 +1124,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             file_ref,
         } => {
             state.checkpoints.push(Checkpoint {
+                scope: scope.clone(),
                 id: id.clone(),
                 run: run.clone(),
                 run_ordinal: *run_ordinal,
@@ -1162,6 +1194,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             state.inherited_items = history.clone();
         }
         TransferOpened {
+            native_fork,
             id,
             kind,
             source,
@@ -1181,6 +1214,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 }
             }
             state.transfers.push(Transfer {
+                native_fork: native_fork.clone(),
                 id: id.clone(),
                 kind: *kind,
                 source: source.clone(),

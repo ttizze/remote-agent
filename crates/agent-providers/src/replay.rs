@@ -77,6 +77,8 @@ struct Replay {
     owner: Option<RunAttemptId>,
     facts: Vec<Fact>,
     responses: Vec<Value>,
+    provider_commands: Vec<(ThreadId, ProviderCommand)>,
+    native_forks: Vec<(ThreadId, CommandId, ProviderCommand)>,
 }
 impl Replay {
     fn new(driver: Driver, rows: &[Value]) -> Self {
@@ -106,6 +108,8 @@ impl Replay {
             owner: None,
             facts: vec![],
             responses: vec![],
+            provider_commands: vec![],
+            native_forks: vec![],
         };
         replay.command(
             &root,
@@ -155,6 +159,16 @@ impl Replay {
             self.facts.extend(step.facts);
         }
         for effect in step.effects {
+            match &effect.body {
+                EffectBody::Provider(command) => self
+                    .provider_commands
+                    .push((thread.clone(), command.clone())),
+                EffectBody::ForkNative { command, provider } => {
+                    self.native_forks
+                        .push((thread.clone(), command.clone(), provider.clone()))
+                }
+                _ => {}
+            }
             match effect.body {
                 EffectBody::SendToThread { thread, command } => {
                     self.command(&thread, *command);
@@ -671,17 +685,20 @@ fn background_command_and_monitor_replays_keep_roster_notifications_and_wake_own
         assert!(replay.facts.iter().any(|f|matches!(&f.body,FactBody::BackgroundTaskStarted { kind:k,description:d,.. } if *k == kind && d == description)));
         let notifications = replay
             .state()
-            .items
-            .iter()
+            .activity_items()
+            .into_iter()
             .filter_map(|i| {
-                if let ItemKind::BackgroundNotification {
-                    summary,
-                    outcome,
-                    source,
-                    ..
+                if let ItemKind::Notification {
+                    notification:
+                        Notification {
+                            summary,
+                            outcome,
+                            source,
+                            ..
+                        },
                 } = &i.kind
                 {
-                    Some((summary.clone(), *outcome, *source))
+                    Some((summary.clone(), *outcome, source.clone()))
                 } else {
                     None
                 }
@@ -697,7 +714,7 @@ fn background_command_and_monitor_replays_keep_roster_notifications_and_wake_own
             vec![(
                 format!("{label} \"{description}\" finished"),
                 NotificationOutcome::Completed,
-                kind
+                NotificationSource::Native(kind)
             )]
         );
         if count == 3 {
@@ -1051,17 +1068,19 @@ fn background_subagent_replay_keeps_child_work_and_only_the_child_completion_wak
         );
         let notifications: Vec<_> = replay
             .state()
-            .items
-            .iter()
-            .filter(|i| matches!(i.kind, ItemKind::BackgroundNotification { .. }))
+            .activity_items()
+            .into_iter()
+            .filter(|i| matches!(i.kind, ItemKind::Notification { .. }))
             .collect();
         assert_eq!(notifications.len(), 1, "{scenario}");
         assert!(matches!(
             &notifications[0].kind,
-            ItemKind::BackgroundNotification {
-                source: BackgroundKind::Subagent,
-                child_thread: Some(_),
-                ..
+            ItemKind::Notification {
+                notification: Notification {
+                    source: NotificationSource::Native(BackgroundKind::Subagent),
+                    child_thread: Some(_),
+                    ..
+                }
             }
         ));
         assert_eq!(replay.state().tasks.len(), 1);
@@ -1203,22 +1222,25 @@ fn wake_before_queued_prompt_replays_preserve_echo_and_no_echo_assignment() {
             );
             let notifications: Vec<_> = replay
                 .state()
-                .items
-                .iter()
+                .activity_items()
+                .into_iter()
                 .filter_map(|i| match &i.kind {
-                    ItemKind::BackgroundNotification {
-                        summary, source, ..
-                    } => Some((summary.as_str(), *source)),
+                    ItemKind::Notification {
+                        notification:
+                            Notification {
+                                summary, source, ..
+                            },
+                    } => Some((summary.clone(), source.clone())),
                     _ => None,
                 })
                 .collect();
             assert_eq!(
                 notifications,
                 vec![
-                    ("Subagent \"Agent A\" finished", BackgroundKind::Subagent),
+                    ("Subagent \"Agent A\" finished".to_string(), NotificationSource::Native(BackgroundKind::Subagent)),
                     (
-                        "Subagent \"Agent B\" and command \"Sleep 60 seconds then echo B_DONE\" were stopped",
-                        BackgroundKind::BackgroundTask
+                        "Subagent \"Agent B\" and command \"Sleep 60 seconds then echo B_DONE\" were stopped".to_string(),
+                        NotificationSource::Native(BackgroundKind::BackgroundTask)
                     )
                 ]
             );
@@ -1260,3 +1282,31 @@ fn idle_and_restart_replays_preserve_completed_turns_and_native_resume_identity(
         );
     }
 }
+
+#[test]
+fn native_subagent_threads_refuse_messages_with_the_reference_error_and_no_projection_change() {
+    for driver in [Driver::Codex, Driver::Claude] {
+        let mut replay = Replay::run("subagent", driver);
+        let child = replay.state().tasks[0].child_thread.clone();
+        let before = replay.states[&child].clone();
+        let reply = replay.command(
+            &child,
+            Command::Send(SendMessage {
+                created_by: MessageAuthor::User,
+                creation_source: "web".into(),
+                id: MessageId::new("message-native-child").unwrap(),
+                text: "Also check the tests.".into(),
+                attachments: vec![],
+                selection: None,
+                mode: DispatchMode::StartImmediately,
+                intent: None,
+                source_plan: None,
+            }),
+        );
+        assert_eq!(reply,Reply::Rejected {reason:"This subagent is run by its provider and cannot take messages. Message the parent thread instead.".into()});
+        assert_eq!(replay.states[&child], before);
+        assert!(replay.states[&child].runs.is_empty());
+    }
+}
+
+mod graph;

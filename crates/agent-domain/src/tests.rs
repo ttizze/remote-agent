@@ -433,10 +433,61 @@ fn prepared_failure_promotes_queue_and_retry_cannot_overlap_it() {
 }
 fn checkpoint(s: &mut State, run: &RunId, attempt: &RunAttemptId, key: &str) -> CheckpointId {
     let id = CheckpointId::new(key).unwrap();
+    let scope = s
+        .runs
+        .iter()
+        .find(|candidate| &candidate.id == run)
+        .unwrap()
+        .checkpoint_scope
+        .clone()
+        .unwrap_or(CheckpointScope {
+            id: CheckpointScopeId::new("workspace").unwrap(),
+            cwd: "/workspace".into(),
+        });
+    let step = ThreadMachine::step(
+        s,
+        &InputEnvelope {
+            at: at(),
+            key: format!("scope-{key}"),
+            input: Input::CheckpointScope {
+                run: Some(run.clone()),
+                attempt: Some(attempt.clone()),
+                scope: Some(scope.clone()),
+            },
+        },
+    );
+    *s = fold(s, &step.facts).unwrap();
+    let ordinal = s
+        .runs
+        .iter()
+        .find(|candidate| &candidate.id == run)
+        .unwrap()
+        .ordinal;
+    let baselines = [0, ordinal - 1]
+        .into_iter()
+        .filter(|ordinal| {
+            !s.checkpoints.iter().any(|checkpoint| {
+                checkpoint.scope.as_ref() == Some(&scope) && checkpoint.run_ordinal == *ordinal
+            })
+        })
+        .map(|ordinal| CapturedBaseline {
+            checkpoint: CheckpointId::new(format!("{key}-baseline-{ordinal}")).unwrap(),
+            ordinal,
+            file_ref: format!("baseline-{ordinal}"),
+            native_heads: s
+                .runs
+                .iter()
+                .find(|candidate| &candidate.id == run)
+                .unwrap()
+                .native_baseline_heads
+                .clone(),
+        })
+        .collect();
     result(
         s,
         key,
         EffectResult::CheckpointCaptured {
+            baselines,
             run: run.clone(),
             attempt: Some(attempt.clone()),
             checkpoint: id.clone(),
@@ -1647,4 +1698,243 @@ fn late_native_usage_moves_the_baseline_without_billing_the_live_turn() {
     assert_eq!(usage.status, UsageStatus::Complete);
     assert_eq!(usage.input, Some(4));
     assert_eq!(usage.output, Some(1));
+}
+
+#[test]
+fn delegated_notifications_report_the_original_count_labels_and_child_links() {
+    let mut s = state();
+    let (run, a) = running(&mut s, "parent");
+    let ids = ["a", "b", "c"].map(|id| NodeId::new(id).unwrap());
+    for (index, prompt) in ["Review src/math.ts", "Write tests", "Update docs"]
+        .into_iter()
+        .enumerate()
+    {
+        command(
+            &mut s,
+            &format!("delegate-{index}"),
+            Command::Delegate {
+                task: ids[index].clone(),
+                child: ThreadId::new(format!("thread:{}", ids[index])).unwrap(),
+                prompt: prompt.into(),
+                selection: selection(),
+                wake: CompletionWake::Always,
+            },
+        );
+    }
+    for task in &ids[..2] {
+        command(
+            &mut s,
+            &format!("finish-{task}"),
+            Command::TaskResult {
+                task: task.clone(),
+                status: ItemStatus::Completed,
+                result: "Done".into(),
+            },
+        );
+    }
+    let notification = delegated_notification(&ids[..2], &run, &s.tasks);
+    assert_eq!(
+        notification.summary,
+        "2 of 3 delegated tasks finished: Review src/math.ts, Write tests"
+    );
+    assert_eq!(
+        notification.source,
+        NotificationSource::Delegated {
+            task_ids: ids[..2].to_vec()
+        }
+    );
+    let only = delegated_notification(&ids[..1], &run, &s.tasks);
+    assert_eq!(
+        only.summary,
+        "Delegated task \"Review src/math.ts\" finished"
+    );
+    assert_eq!(only.child_thread, Some(ThreadId::new("thread:a").unwrap()));
+    let Reply::Run(delivery) = command(
+        &mut s,
+        "wake",
+        Command::AcceptTaskWake {
+            task_ids: ids[..2].to_vec(),
+        },
+    )
+    .reply
+    else {
+        panic!()
+    };
+    let message = &s.messages[s.messages.len() - 1];
+    assert_eq!(
+        message.text,
+        "Delegated tasks a, b reached terminal states. Use task_status with each taskId to read the results."
+    );
+    assert_eq!(message.notification, Some(notification.clone()));
+    finish(&mut s, &a);
+    assert_eq!(s.active_run().unwrap().id, delivery);
+    assert!(s.activity_items().iter().any(|item|matches!(&item.kind,ItemKind::Notification {notification:recorded} if recorded==&notification)));
+    assert!(
+        s.items
+            .iter()
+            .all(|item| !matches!(item.kind, ItemKind::Notification { .. }))
+    );
+}
+
+#[test]
+fn cancelling_one_delegated_delivery_disposes_only_its_cohort_and_parent_stop_disposes_the_rest() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "parent");
+    let mut deliveries = vec![];
+    for id in ["a", "b"] {
+        let task = NodeId::new(id).unwrap();
+        command(
+            &mut s,
+            &format!("delegate-{id}"),
+            Command::Delegate {
+                task: task.clone(),
+                child: ThreadId::new(format!("child-{id}")).unwrap(),
+                prompt: id.into(),
+                selection: selection(),
+                wake: CompletionWake::Always,
+            },
+        );
+        command(
+            &mut s,
+            &format!("finish-{id}"),
+            Command::TaskResult {
+                task: task.clone(),
+                status: ItemStatus::Completed,
+                result: "Done".into(),
+            },
+        );
+        let Reply::Run(delivery) = command(
+            &mut s,
+            &format!("wake-{id}"),
+            Command::AcceptTaskWake {
+                task_ids: vec![task],
+            },
+        )
+        .reply
+        else {
+            panic!()
+        };
+        deliveries.push(delivery);
+    }
+    command(
+        &mut s,
+        "cancel-one",
+        Command::CancelQueued {
+            run: deliveries[0].clone(),
+        },
+    );
+    assert_eq!(s.tasks[0].delivery, DeliveryState::Disposed);
+    assert_eq!(s.tasks[1].delivery, DeliveryState::Claimed);
+    command(&mut s, "stop", Command::Stop);
+    assert_eq!(s.tasks[1].delivery, DeliveryState::Disposed);
+    assert_eq!(s.tasks[1].status, ItemStatus::Completed);
+    assert_eq!(
+        s.runs
+            .iter()
+            .find(|run| run.id == deliveries[1])
+            .unwrap()
+            .status,
+        RunStatus::Cancelled
+    );
+    finish(&mut s, &a);
+    let step = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "timer".into(),
+            input: Input::Timer,
+        },
+    );
+    assert!(step.effects.is_empty());
+}
+
+#[test]
+fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_scope() {
+    let mut s = state();
+    let scope = CheckpointScope {
+        id: CheckpointScopeId::new("scope-one").unwrap(),
+        cwd: "/workspace/one".into(),
+    };
+    let step = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "scope".into(),
+            input: Input::CheckpointScope {
+                run: None,
+                attempt: None,
+                scope: Some(scope.clone()),
+            },
+        },
+    );
+    s = fold(&s, &step.facts).unwrap();
+    let (run, a) = running(&mut s, "first");
+    let done = provider(
+        &mut s,
+        "finished",
+        &a,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Completed,
+            native_head: Some("native-head".into()),
+        },
+    );
+    assert_eq!(s.runs[0].status, RunStatus::Waiting);
+    assert!(done.effects.iter().any(|effect|matches!(&effect.body,EffectBody::CaptureCheckpoint {scope:captured,native_baseline_heads,..} if captured==&scope && native_baseline_heads.is_empty())));
+    let missing = EffectResult::CheckpointCaptured {
+        run: run.clone(),
+        attempt: Some(a.clone()),
+        checkpoint: CheckpointId::new("captured").unwrap(),
+        file_ref: "after".into(),
+        baselines: vec![],
+    };
+    assert_eq!(
+        result(&mut s, "missing", missing.clone()).reply,
+        Reply::Rejected {
+            reason: "incomplete-checkpoint-baseline".into()
+        }
+    );
+    assert!(s.captures.contains_key(&run));
+    let next_scope = CheckpointScope {
+        id: CheckpointScopeId::new("scope-two").unwrap(),
+        cwd: "/workspace/two".into(),
+    };
+    let step = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "move".into(),
+            input: Input::CheckpointScope {
+                run: None,
+                attempt: None,
+                scope: Some(next_scope.clone()),
+            },
+        },
+    );
+    s = fold(&s, &step.facts).unwrap();
+    let mut captured = missing;
+    if let EffectResult::CheckpointCaptured { baselines, .. } = &mut captured {
+        baselines.push(CapturedBaseline {
+            checkpoint: CheckpointId::new("initial").unwrap(),
+            ordinal: 0,
+            file_ref: "before".into(),
+            native_heads: BTreeMap::new(),
+        });
+    }
+    result(&mut s, "captured", captured.clone());
+    assert_eq!(s.runs[0].status, RunStatus::Completed);
+    assert_eq!(s.checkpoints[0].run_ordinal, 0);
+    assert_eq!(s.checkpoints[1].scope, Some(scope));
+    assert_eq!(s.checkpoint_scope, Some(next_scope));
+    let original = s.clone();
+    assert_eq!(result(&mut s, "duplicate", captured).reply, Reply::Ignored);
+    assert_eq!(s, original);
+    let rollback = command(
+        &mut s,
+        "rollback",
+        Command::Rollback {
+            checkpoint: CheckpointId::new("initial").unwrap(),
+            restore_files: true,
+        },
+    );
+    assert!(rollback.effects.iter().any(|effect|matches!(&effect.body,EffectBody::RestoreCheckpoint {scope:Some(scope),file_ref,..} if scope.cwd=="/workspace/one" && file_ref=="before")));
 }

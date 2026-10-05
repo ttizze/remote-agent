@@ -49,9 +49,10 @@ fn form(payload: &Value) -> Option<&Value> {
                     options.iter().all(|option| {
                         option["const"].is_string() && nullable_string(option.get("title"))
                     })
-                }) {
-                    return None;
-                }
+                })
+            {
+                return None;
+            }
         }
     }
     Some(form)

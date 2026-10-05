@@ -135,24 +135,8 @@ impl Decision {
             Some(run.clone()),
             None,
             message.to_string(),
-            if let Some(notification) = self
-                .state
-                .messages
-                .iter()
-                .find(|m| &m.id == message)
-                .and_then(|m| m.notification.as_ref())
-            {
-                ItemKind::BackgroundNotification {
-                    message: message.clone(),
-                    summary: notification.summary.clone(),
-                    source: notification.source,
-                    child_thread: notification.child_thread.clone(),
-                    outcome: notification.outcome,
-                }
-            } else {
-                ItemKind::UserMessage {
-                    message: message.clone(),
-                }
+            ItemKind::UserMessage {
+                message: message.clone(),
             },
         );
         let text = self
@@ -174,14 +158,27 @@ impl Decision {
         });
     }
     fn start_run(&mut self, id: &RunId) {
-        let run = self
+        let checkpoint_scope = self
             .state
             .runs
             .iter()
             .find(|r| &r.id == id)
             .unwrap()
+            .checkpoint_scope
+            .clone()
+            .or(self.state.checkpoint_scope.clone());
+        self.fact(FactBody::RunStarted {
+            id: id.clone(),
+            checkpoint_scope,
+            native_baseline_heads: self.state.native_heads.clone(),
+        });
+        let run = self
+            .state
+            .runs
+            .iter()
+            .find(|run| &run.id == id)
+            .unwrap()
             .clone();
-        self.fact(FactBody::RunStarted { id: id.clone() });
         self.user_item(&run.message, id);
         let ordinal = self
             .state
@@ -231,6 +228,36 @@ impl Decision {
             .native_sessions
             .get(&run.selection.instance)
             .cloned();
+        let native_forks = self
+            .state
+            .transfers
+            .iter()
+            .filter(|transfer| {
+                !transfer.superseded
+                    && transfer.instance == run.selection.instance
+                    && transfer.native_fork.is_some()
+                    && transfer.native_fork == native_thread
+                    && transfer.delivery.is_none()
+            })
+            .map(|transfer| (transfer.id.clone(), transfer.history.clone()))
+            .collect::<Vec<_>>();
+        for (id, history) in native_forks {
+            self.fact(FactBody::TransferDeliveryChanged {
+                id,
+                delivery: ContextDelivery {
+                    attempt: attempt.clone(),
+                    run: run.id.clone(),
+                    native_thread: native_thread.clone(),
+                    status: ContextDeliveryStatus::NativeFork,
+                    item_ids: history
+                        .messages
+                        .iter()
+                        .map(|message| message.item.clone())
+                        .collect(),
+                    omitted_item_ids: history.omitted_item_ids,
+                },
+            });
+        }
         // Native compaction defers portable context until the next ordinary input.
         if message.text.trim() == "/compact" {
             self.effect(
@@ -531,26 +558,44 @@ impl Decision {
             .state
             .tasks
             .iter()
-            .filter(|t| &t.attempt == attempt && !t.status.terminal())
+            .filter(|task| {
+                &task.attempt == attempt
+                    && (!task.status.terminal()
+                        || task.app_owned
+                            && matches!(
+                                task.delivery,
+                                DeliveryState::Pending | DeliveryState::Claimed
+                            ))
+            })
             .cloned()
             .collect::<Vec<_>>();
+        let task_ids = tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
         for task in tasks {
-            self.fact(FactBody::TaskFinished {
-                id: task.id.clone(),
-                status,
-                result: String::new(),
-            });
+            if !task.status.terminal() {
+                self.fact(FactBody::TaskFinished {
+                    id: task.id.clone(),
+                    status,
+                    result: String::new(),
+                });
+                self.effect(
+                    Some(attempt.clone()),
+                    EffectBody::SendToThread {
+                        thread: task.child_thread,
+                        command: Box::new(Command::Stop),
+                    },
+                );
+            }
             self.fact(FactBody::TaskDeliveryChanged {
                 id: task.id,
                 state: DeliveryState::Disposed,
             });
-            self.effect(
-                Some(attempt.clone()),
-                EffectBody::SendToThread {
-                    thread: task.child_thread,
-                    command: Box::new(Command::Stop),
-                },
-            );
+        }
+        let queued=self.state.runs.iter().filter(|run|run.status==RunStatus::Queued && self.state.messages.iter().find(|message|message.id==run.message).and_then(|message|message.notification.as_ref()).is_some_and(|notification| matches!(&notification.source,NotificationSource::Delegated {task_ids:cohort} if cohort.iter().any(|id| task_ids.contains(id))))).map(|run|run.id.clone()).collect::<Vec<_>>();
+        for id in queued {
+            self.fact(FactBody::RunFinished {
+                id,
+                status: RunStatus::Cancelled,
+            });
         }
     }
     fn finish_task(&mut self, id: &NodeId, status: ItemStatus, result: &str) {
@@ -702,20 +747,18 @@ impl Decision {
                 self.interrupt_item(attempt, run, Some(i));
             }
         }
-        if capture
-            && self
-                .state
-                .checkpoints
-                .iter()
-                .any(|c| c.run_ordinal < r.ordinal)
-        {
+        if let Some(scope) = r.checkpoint_scope.filter(|_| capture) {
             self.fact(FactBody::RunWaitingForCapture {
                 id: run.clone(),
                 terminal: status,
             });
             self.effect(
                 r.attempt,
-                EffectBody::CaptureCheckpoint { run: run.clone() },
+                EffectBody::CaptureCheckpoint {
+                    run: run.clone(),
+                    scope,
+                    native_baseline_heads: r.native_baseline_heads,
+                },
             );
         } else {
             self.fact(FactBody::RunFinished {
@@ -726,6 +769,11 @@ impl Decision {
         }
     }
     fn create_run(&mut self, message: &SendMessage) -> Reply {
+        if self.state.native_owner.is_some() {
+            return reject(
+                "This subagent is run by its provider and cannot take messages. Message the parent thread instead.",
+            );
+        }
         let Some(thread) = self.state.thread.as_ref() else {
             return reject("thread-not-found");
         };
@@ -1138,6 +1186,7 @@ impl Decision {
                     && !self.state.visible_items().is_empty()
                 {
                     self.fact(FactBody::TransferOpened {
+                        native_fork: None,
                         id: ContextTransferId::new(self.key("transfer", id.as_str())).unwrap(),
                         kind: TransferKind::ProviderHandoff,
                         source: t.id.clone(),
@@ -1317,25 +1366,22 @@ impl Decision {
                 else {
                     return reject("queued-run-not-found");
                 };
-                if self
+                let ids = self
                     .state
                     .messages
                     .iter()
-                    .any(|m| m.id == r.message && m.created_by == MessageAuthor::Agent)
-                {
-                    let ids = self
-                        .state
-                        .tasks
-                        .iter()
-                        .filter(|t| t.delivery == DeliveryState::Claimed)
-                        .map(|t| t.id.clone())
-                        .collect::<Vec<_>>();
-                    for id in ids {
-                        self.fact(FactBody::TaskDeliveryChanged {
-                            id,
-                            state: DeliveryState::Disposed,
-                        });
-                    }
+                    .find(|message| message.id == r.message)
+                    .and_then(|message| message.notification.as_ref())
+                    .and_then(|notification| match &notification.source {
+                        NotificationSource::Delegated { task_ids } => Some(task_ids.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                for id in ids {
+                    self.fact(FactBody::TaskDeliveryChanged {
+                        id,
+                        state: DeliveryState::Disposed,
+                    });
                 }
                 self.fact(FactBody::RunFinished {
                     id: run.clone(),
@@ -1569,6 +1615,7 @@ impl Decision {
                         EffectBody::RestoreCheckpoint {
                             checkpoint: checkpoint.clone(),
                             file_ref: cp.file_ref,
+                            scope: cp.scope,
                         },
                     );
                 }
@@ -1602,7 +1649,7 @@ impl Decision {
                 let thread = self.state.thread.as_ref().unwrap().clone();
                 let history = self
                     .state
-                    .visible_items()
+                    .activity_items()
                     .into_iter()
                     .filter(|i| {
                         i.run.as_ref().is_none_or(|id| {
@@ -1612,7 +1659,7 @@ impl Decision {
                                 .any(|r| &r.id == id && r.ordinal <= run.ordinal)
                         })
                     })
-                    .cloned()
+                    .map(|item| item.into_owned())
                     .collect::<Vec<_>>();
                 let context = prepare_history(&self.state, &history, run.ordinal);
                 let child_command = Box::new(AcceptFork {
@@ -1627,6 +1674,7 @@ impl Decision {
                     interaction_mode: thread.interaction_mode,
                     boundary: run.ordinal,
                     history,
+                    checkpoint_scope: self.state.checkpoint_scope.clone(),
                     context,
                     native: None,
                 });
@@ -1678,6 +1726,7 @@ impl Decision {
                 interaction_mode,
                 boundary,
                 history,
+                checkpoint_scope,
                 context,
                 native,
             } => {
@@ -1692,26 +1741,45 @@ impl Decision {
                     runtime_mode: *runtime_mode,
                     interaction_mode: *interaction_mode,
                 });
+                self.fact(FactBody::CheckpointScopeBound {
+                    run: None,
+                    scope: checkpoint_scope.clone(),
+                });
                 self.fact(FactBody::ForkAccepted {
                     parent: parent.clone(),
                     boundary: *boundary,
                     history: history.clone(),
+                });
+                let marker = TurnItemId::new(self.key("fork", thread.as_str())).unwrap();
+                self.item_start(
+                    marker.clone(),
+                    None,
+                    None,
+                    String::new(),
+                    ItemKind::Fork {
+                        parent: parent.clone(),
+                        boundary: *boundary,
+                    },
+                );
+                self.fact(FactBody::ItemCompleted {
+                    id: marker,
+                    status: ItemStatus::Completed,
+                });
+                self.fact(FactBody::TransferOpened {
+                    native_fork: native.as_ref().map(|binding| binding.thread.clone()),
+                    id: ContextTransferId::new(self.key("transfer", id.as_str())).unwrap(),
+                    kind: TransferKind::Fork,
+                    source: parent.clone(),
+                    target: thread.clone(),
+                    boundary: *boundary,
+                    instance: selection.instance.clone(),
+                    history: context.clone(),
                 });
                 if let Some(native) = native {
                     self.fact(FactBody::NativeSessionBound {
                         instance: native.instance.clone(),
                         native_thread: native.thread.clone(),
                         head: native.head.clone(),
-                    });
-                } else {
-                    self.fact(FactBody::TransferOpened {
-                        id: ContextTransferId::new(self.key("transfer", id.as_str())).unwrap(),
-                        kind: TransferKind::Fork,
-                        source: parent.clone(),
-                        target: thread.clone(),
-                        boundary: *boundary,
-                        instance: selection.instance.clone(),
-                        history: context.clone(),
                     });
                 }
                 Reply::Thread(thread.clone())
@@ -1777,6 +1845,7 @@ impl Decision {
                     return Reply::Accepted;
                 }
                 self.fact(FactBody::TransferOpened {
+                    native_fork: None,
                     id: id.clone(),
                     kind: *kind,
                     source: source.clone(),
@@ -1922,14 +1991,33 @@ impl Decision {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                if tasks.len() != task_ids.len() {
+                if tasks.is_empty()
+                    || tasks.len() != task_ids.len()
+                    || tasks
+                        .iter()
+                        .any(|task| !task.app_owned || task.run != tasks[0].run)
+                {
                     return reject("invalid-completion-cohort");
                 }
-                let text = tasks
+                let notification = delegated_notification(
+                    task_ids,
+                    tasks[0].run.as_ref().unwrap(),
+                    &self.state.tasks,
+                );
+                let list = task_ids
                     .iter()
-                    .map(|t| format!("Task {}: {}", t.id, t.result.as_deref().unwrap_or("")))
+                    .map(ToString::to_string)
                     .collect::<Vec<_>>()
-                    .join("\n");
+                    .join(", ");
+                let text = if task_ids.len() == 1 {
+                    format!(
+                        "Delegated task {list} reached a terminal state. Use task_status with taskId {list} to read the result."
+                    )
+                } else {
+                    format!(
+                        "Delegated tasks {list} reached terminal states. Use task_status with each taskId to read the results."
+                    )
+                };
                 let message = SendMessage {
                     created_by: MessageAuthor::Agent,
                     creation_source: "server".into(),
@@ -1943,6 +2031,10 @@ impl Decision {
                 };
                 let reply = self.create_run(&message);
                 if !matches!(reply, Reply::Rejected { .. }) {
+                    self.fact(FactBody::MessageNotificationAssigned {
+                        id: message.id.clone(),
+                        notification,
+                    });
                     for t in tasks {
                         self.fact(FactBody::TaskDeliveryChanged {
                             id: t.id,
@@ -1961,28 +2053,32 @@ impl Decision {
         if thread.archived_at.is_some() || thread.deleted_at.is_some() {
             return;
         }
-        let task_ids = self
-            .state
-            .tasks
-            .iter()
-            .filter(|t| {
-                t.app_owned
-                    && t.status.terminal()
-                    && t.delivery == DeliveryState::Pending
-                    && (t.wake == CompletionWake::Always || self.state.active_run().is_none())
-            })
-            .map(|t| t.id.clone())
-            .collect::<Vec<_>>();
-        if !task_ids.is_empty() {
+        let thread = thread.id.clone();
+        let mut cohorts = BTreeMap::<RunId, Vec<NodeId>>::new();
+        for task in &self.state.tasks {
+            if task.app_owned
+                && task.status.terminal()
+                && task.delivery == DeliveryState::Pending
+                && (task.wake == CompletionWake::Always || self.state.active_run().is_none())
+                && let Some(run) = &task.run
+            {
+                cohorts
+                    .entry(run.clone())
+                    .or_default()
+                    .push(task.id.clone());
+            }
+        }
+        for task_ids in cohorts.into_values() {
             self.effect(
                 None,
                 EffectBody::SendToThread {
-                    thread: thread.id.clone(),
+                    thread: thread.clone(),
                     command: Box::new(Command::AcceptTaskWake { task_ids }),
                 },
             );
         }
     }
+
     fn error_item(&mut self, run: &RunId, message: &str) {
         let id = TurnItemId::new(self.key("error", run.as_str())).unwrap();
         let attempt = self
@@ -2451,12 +2547,24 @@ impl Decision {
                         false,
                     );
                     if let Some((parent, task)) = self.state.native_parent.clone() {
-                        let result = context_text(
-                            self.state
-                                .items
-                                .iter()
-                                .filter(|i| matches!(i.kind, ItemKind::AssistantMessage { .. })),
-                        );
+                        let boundary = self
+                            .state
+                            .items
+                            .iter()
+                            .rev()
+                            .find(|item| matches!(item.kind, ItemKind::UserMessage { .. }))
+                            .map_or(0, |item| item.ordinal);
+                        let result = self
+                            .state
+                            .items
+                            .iter()
+                            .filter(|item| {
+                                item.ordinal > boundary
+                                    && matches!(item.kind, ItemKind::AssistantMessage { .. })
+                            })
+                            .map(|item| item.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
                         self.effect(
                             Some(attempt.clone()),
                             EffectBody::SendToThread {
@@ -3303,6 +3411,7 @@ impl Decision {
                 }
             }
             EffectResult::CheckpointCaptured {
+                baselines,
                 run,
                 attempt,
                 checkpoint,
@@ -3318,36 +3427,80 @@ impl Decision {
                     return Reply::Ignored;
                 };
                 if r.status == RunStatus::RolledBack
+                    || r.checkpoint.is_some()
                     || self.state.checkpoints.iter().any(|c| &c.id == checkpoint)
                 {
                     return Reply::Ignored;
                 }
+                if r.checkpoint_scope.is_some()
+                    && [0, r.ordinal - 1].iter().any(|ordinal| {
+                        !self.state.checkpoints.iter().any(|checkpoint| {
+                            checkpoint.scope == r.checkpoint_scope
+                                && checkpoint.run_ordinal == *ordinal
+                        }) && !baselines
+                            .iter()
+                            .any(|baseline| baseline.ordinal == *ordinal)
+                    })
+                {
+                    return reject("incomplete-checkpoint-baseline");
+                }
+                if baselines
+                    .iter()
+                    .any(|baseline| baseline.ordinal >= r.ordinal)
+                {
+                    return reject("invalid-checkpoint-baseline");
+                }
+                for baseline in baselines {
+                    if !self.state.checkpoints.iter().any(|checkpoint| {
+                        checkpoint.id == baseline.checkpoint
+                            || checkpoint.scope == r.checkpoint_scope
+                                && checkpoint.run_ordinal == baseline.ordinal
+                    }) {
+                        self.fact(FactBody::CheckpointCaptured {
+                            id: baseline.checkpoint.clone(),
+                            scope: r.checkpoint_scope.clone(),
+                            run: None,
+                            run_ordinal: baseline.ordinal,
+                            native_heads: baseline.native_heads.clone(),
+                            file_ref: baseline.file_ref.clone(),
+                        });
+                    }
+                }
                 self.fact(FactBody::CheckpointCaptured {
+                    scope: r.checkpoint_scope.clone(),
                     id: checkpoint.clone(),
                     run: Some(run.clone()),
                     run_ordinal: r.ordinal,
-                    native_heads: self
-                        .state
-                        .runs
-                        .iter()
-                        .filter(|candidate| {
-                            candidate.ordinal <= r.ordinal
-                                && candidate.status != RunStatus::RolledBack
-                        })
-                        .filter_map(|candidate| {
-                            candidate
-                                .attempt
-                                .as_ref()
-                                .and_then(|id| {
-                                    self.state.attempts.iter().find(|attempt| &attempt.id == id)
+                    native_heads: r
+                        .native_baseline_heads
+                        .clone()
+                        .into_iter()
+                        .chain(
+                            self.state
+                                .runs
+                                .iter()
+                                .filter(|candidate| {
+                                    candidate.ordinal <= r.ordinal
+                                        && candidate.status != RunStatus::RolledBack
                                 })
-                                .map(|attempt| {
-                                    (
-                                        candidate.selection.instance.clone(),
-                                        attempt.native_head.clone(),
-                                    )
-                                })
-                        })
+                                .filter_map(|candidate| {
+                                    candidate
+                                        .attempt
+                                        .as_ref()
+                                        .and_then(|id| {
+                                            self.state
+                                                .attempts
+                                                .iter()
+                                                .find(|attempt| &attempt.id == id)
+                                        })
+                                        .map(|attempt| {
+                                            (
+                                                candidate.selection.instance.clone(),
+                                                attempt.native_head.clone(),
+                                            )
+                                        })
+                                }),
+                        )
                         .collect(),
                     file_ref: file_ref.clone(),
                 });
@@ -3508,20 +3661,6 @@ fn reject(reason: &str) -> Reply {
         reason: reason.into(),
     }
 }
-fn context_text<'a>(items: impl Iterator<Item = &'a Item>) -> String {
-    items
-        .filter(|i| {
-            matches!(
-                i.kind,
-                ItemKind::UserMessage { .. }
-                    | ItemKind::AssistantMessage { .. }
-                    | ItemKind::ProposedPlan { .. }
-            )
-        })
-        .map(|i| i.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
 pub struct ThreadMachine;
 impl ThreadMachine {
     pub fn step(state: &State, envelope: &InputEnvelope) -> Step {
@@ -3667,6 +3806,32 @@ impl ThreadMachine {
                     reply: reply.clone(),
                 });
                 reply
+            }
+            Input::CheckpointScope {
+                run,
+                attempt,
+                scope,
+            } => {
+                if run.as_ref().is_some_and(|id| {
+                    !decision.state.runs.iter().any(|run| {
+                        &run.id == id
+                            && &run.attempt == attempt
+                            && run.status != RunStatus::RolledBack
+                            && (run.checkpoint_scope.is_none() || run.checkpoint_scope == *scope)
+                    })
+                }) {
+                    Reply::Ignored
+                } else if scope.as_ref().is_some_and(|scope| {
+                    scope.cwd.trim().is_empty() || scope.cwd.trim() != scope.cwd
+                }) {
+                    reject("invalid-checkpoint-scope")
+                } else {
+                    decision.fact(FactBody::CheckpointScopeBound {
+                        run: run.clone(),
+                        scope: scope.clone(),
+                    });
+                    Reply::Accepted
+                }
             }
             Input::HandoffPolicy {
                 instance,

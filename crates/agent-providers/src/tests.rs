@@ -43,22 +43,6 @@ fn resume_dialog_control_has_the_original_question_choices_and_result() {
         json!({"behavior":"completed","result":"compact"})
     );
 }
-#[test]
-fn absolute_rollback_requires_the_recorded_native_head() {
-    use serde_json::json;
-    let turns = vec![
-        json!({"id":"one"}),
-        json!({"id":"two"}),
-        json!({"id":"three"}),
-    ];
-    assert_eq!(absolute_revert_count(&turns, Some("two")).unwrap(), 1);
-    assert_eq!(absolute_revert_count(&turns, Some("three")).unwrap(), 0);
-    assert_eq!(absolute_revert_count(&turns, None).unwrap(), 3);
-    assert_eq!(
-        absolute_revert_count(&turns, Some("missing")),
-        Err(ProtocolError::MissingBoundary("missing".into()))
-    );
-}
 #[tokio::test]
 async fn json_lines_continue_after_invalid_frames_and_preserve_large_unicode_output() {
     use serde_json::json;
@@ -384,5 +368,151 @@ fn mcp_metadata_trims_names_limits_utf16_and_accepts_only_web_icons() {
         if title.starts_with("  ") {
             assert_eq!(presentation.source.as_ref().unwrap().0["name"], "GitHub");
         }
+    }
+}
+
+#[test]
+fn rollback_resolves_an_absolute_boundary_across_pages_and_is_safe_to_repeat() {
+    let mut protocol = CodexProtocol::default();
+    let command = ProviderCommand::Rollback {
+        native_thread: "thread".into(),
+        absolute_head: Some("kept".into()),
+    };
+    let read = protocol
+        .command(&command, &wire_context())
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        read["params"],
+        json!({"threadId":"thread","includeTurns":false})
+    );
+    let page = protocol.receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"notLoaded"}}}})).unwrap().outbound.remove(0);
+    assert_eq!(page["method"], "thread/resume");
+    assert_eq!(
+        page["params"],
+        json!({"threadId":"thread","excludeTurns":true})
+    );
+    let page = protocol
+        .receive(&json!({"id":page["id"],"result":{"thread":{"id":"thread"}}}))
+        .unwrap()
+        .outbound
+        .remove(0);
+    assert_eq!(
+        page["params"],
+        json!({"threadId":"thread","cursor":null,"limit":100,"sortDirection":"desc","itemsView":"summary"})
+    );
+    let next = protocol.receive(&json!({"id":page["id"],"result":{"data":[{"id":"newest"},{"id":"middle"}],"nextCursor":"older"}})).unwrap().outbound.remove(0);
+    assert_eq!(next["params"]["cursor"], "older");
+    let revert = protocol.receive(&json!({"id":next["id"],"result":{"data":[{"id":"boundary"},{"id":"kept"}],"nextCursor":null}})).unwrap().outbound.remove(0);
+    assert_eq!(
+        revert["params"],
+        json!({"threadId":"thread","beforeTurnId":"boundary"})
+    );
+    protocol
+        .receive(&json!({"id":revert["id"],"result":{"thread":{"id":"thread"}}}))
+        .unwrap();
+    let read = protocol
+        .command(&command, &wire_context())
+        .unwrap()
+        .remove(0);
+    let page = protocol.receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}})).unwrap().outbound.remove(0);
+    assert!(
+        protocol
+            .receive(&json!({"id":page["id"],"result":{"data":[{"id":"kept"}],"nextCursor":null}}))
+            .unwrap()
+            .outbound
+            .is_empty()
+    );
+}
+
+#[test]
+fn rollback_rejects_repeated_cursors_and_missing_heads_without_reverting_partial_history() {
+    for missing in [false, true] {
+        let mut protocol = CodexProtocol::default();
+        let read = protocol
+            .command(
+                &ProviderCommand::Rollback {
+                    native_thread: "thread".into(),
+                    absolute_head: Some("kept".into()),
+                },
+                &wire_context(),
+            )
+            .unwrap()
+            .remove(0);
+        let page = protocol
+            .receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated"}}}))
+            .unwrap()
+            .outbound
+            .remove(0);
+        let next = protocol
+            .receive(
+                &json!({"id":page["id"],"result":{"data":[{"id":"newest"}],"nextCursor":"again"}}),
+            )
+            .unwrap()
+            .outbound
+            .remove(0);
+        let error = protocol.receive(&json!({"id":next["id"],"result":{"data":[],"nextCursor":if missing {Value::Null} else {json!("again")}}})).unwrap_err();
+        assert_eq!(
+            error,
+            if missing {
+                ProtocolError::MissingBoundary("kept".into())
+            } else {
+                ProtocolError::Invalid("Thread history pagination repeated a cursor.".into())
+            }
+        );
+    }
+}
+
+#[test]
+fn codex_reasoning_omits_empty_native_items_and_keeps_summary_and_content_parts_separate() {
+    let mut protocol = CodexProtocol::default();
+    assert!(protocol.receive(&json!({"method":"item/started","params":{"turnId":"turn","item":{"type":"reasoning","id":"reason","summary":[],"content":[]}}})).unwrap().events.is_empty());
+    assert!(protocol.receive(&json!({"method":"item/completed","params":{"turnId":"turn","item":{"type":"reasoning","id":"empty","summary":[""],"content":[]}}})).unwrap().events.is_empty());
+    let mut keys = vec![];
+    for (method, index_key, index, text) in [
+        (
+            "item/reasoning/summaryTextDelta",
+            "summaryIndex",
+            0,
+            "Summary one",
+        ),
+        (
+            "item/reasoning/summaryTextDelta",
+            "summaryIndex",
+            1,
+            "Summary two",
+        ),
+        (
+            "item/reasoning/textDelta",
+            "contentIndex",
+            0,
+            "Raw reasoning",
+        ),
+    ] {
+        let mut frame =
+            json!({"method":method,"params":{"turnId":"turn","itemId":"reason","delta":text}});
+        frame["params"][index_key] = json!(index);
+        let output = protocol.receive(&frame).unwrap();
+        let ProviderEvent::TextDelta {
+            key, text: actual, ..
+        } = &output.events[0]
+        else {
+            panic!()
+        };
+        assert_eq!(actual, text);
+        keys.push(key.clone());
+    }
+    assert_eq!(
+        keys.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        3
+    );
+    let output=protocol.receive(&json!({"method":"item/completed","params":{"turnId":"turn","item":{"type":"reasoning","id":"reason","summary":["Summary one","Summary two"],"content":["Raw reasoning"]}}})).unwrap();
+    assert_eq!(output.events.len(), 3);
+    for event in output.events {
+        let ProviderEvent::ItemFinished { key, status, .. } = event else {
+            panic!()
+        };
+        assert!(keys.contains(&key));
+        assert_eq!(status, ItemStatus::Completed);
     }
 }

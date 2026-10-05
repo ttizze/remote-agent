@@ -23,6 +23,16 @@ enum Pending {
         thread: String,
         head: Option<String>,
     },
+    RevertResume {
+        thread: String,
+        head: Option<String>,
+    },
+    RevertPage {
+        thread: String,
+        head: Option<String>,
+        before: Option<String>,
+        visited: BTreeSet<Option<String>>,
+    },
     Operation(String),
 }
 /// One native app-server session's RPC correlation, with no application entities.
@@ -32,6 +42,7 @@ pub struct CodexProtocol {
     pending: BTreeMap<u64, Pending>,
     thread: Option<String>,
     turns: BTreeMap<String, String>,
+    reasoning_parts: BTreeMap<String, BTreeMap<(String, u64), String>>,
     processes: BTreeMap<String, BTreeSet<String>>,
     interrupt_pending: BTreeSet<String>,
     stop_before_thread: bool,
@@ -186,7 +197,7 @@ impl CodexProtocol {
                 absolute_head,
             } => self.request(
                 "thread/read",
-                json!({"threadId":native_thread,"includeTurns":true}),
+                json!({"threadId":native_thread,"includeTurns":false}),
                 Pending::RevertRead {
                     thread: native_thread.clone(),
                     head: absolute_head.clone(),
@@ -225,6 +236,21 @@ impl CodexProtocol {
             }
         };
         Ok(vec![frame])
+    }
+    fn revert_page(
+        &mut self,
+        thread: String,
+        head: Option<String>,
+        before: Option<String>,
+        cursor: Option<String>,
+        mut visited: BTreeSet<Option<String>>,
+    ) -> Result<Value, ProtocolError> {
+        if !visited.insert(cursor.clone()) {
+            return Err(ProtocolError::Invalid(
+                "Thread history pagination repeated a cursor.".into(),
+            ));
+        }
+        Ok(self.request("thread/turns/list",json!({"threadId":thread,"cursor":cursor,"limit":100,"sortDirection":"desc","itemsView":"summary"}),Pending::RevertPage {thread,head,before,visited}))
     }
     fn start_or_inject(&mut self, start: Value, history: Option<HistoricalContext>) -> Value {
         if let Some(history) = history {
@@ -279,6 +305,8 @@ impl CodexProtocol {
                     Pending::Thread { .. } => "thread/start".into(),
                     Pending::Inject { .. } => "thread/inject_items".into(),
                     Pending::RevertRead { .. } => "thread/read".into(),
+                    Pending::RevertResume { .. } => "thread/resume".into(),
+                    Pending::RevertPage { .. } => "thread/turns/list".into(),
                     Pending::Operation(operation) => operation,
                 };
                 return Err(ProtocolError::Remote {
@@ -295,6 +323,8 @@ impl CodexProtocol {
                     Pending::Thread { .. } => "thread/start".into(),
                     Pending::Inject { .. } => "thread/inject_items".into(),
                     Pending::RevertRead { .. } => "thread/read".into(),
+                    Pending::RevertResume { .. } => "thread/resume".into(),
+                    Pending::RevertPage { .. } => "thread/turns/list".into(),
                     Pending::Operation(operation) => operation.clone(),
                 },
                 result: Json(result.clone()),
@@ -324,14 +354,73 @@ impl CodexProtocol {
                     }
                 }
                 Pending::RevertRead { thread, head } => {
-                    let turns = result["thread"]["turns"].as_array().ok_or_else(|| {
+                    if result["thread"]["historyMode"] != "paginated" {
+                        return Err(ProtocolError::Invalid(format!(
+                            "Cannot roll back Codex thread {thread}: the thread uses legacy history, which Codex 0.156 cannot revert."
+                        )));
+                    }
+                    if result["thread"]["status"]["type"] == "notLoaded" {
+                        output.outbound.push(self.request(
+                            "thread/resume",
+                            json!({"threadId":thread,"excludeTurns":true}),
+                            Pending::RevertResume { thread, head },
+                        ));
+                    } else {
+                        output.outbound.push(self.revert_page(
+                            thread,
+                            head,
+                            None,
+                            None,
+                            BTreeSet::new(),
+                        )?);
+                    }
+                }
+                Pending::RevertResume { thread, head } => {
+                    output.outbound.push(self.revert_page(
+                        thread,
+                        head,
+                        None,
+                        None,
+                        BTreeSet::new(),
+                    )?);
+                }
+                Pending::RevertPage {
+                    thread,
+                    head,
+                    mut before,
+                    visited,
+                } => {
+                    let turns = result["data"].as_array().ok_or_else(|| {
                         ProtocolError::Invalid("missing native turn history".into())
                     })?;
-                    let after = absolute_revert_count(turns, head.as_deref())?;
-                    if after > 0 {
+                    for turn in turns {
+                        let id = required(turn, "id")?;
+                        if head.as_ref() == Some(&id) {
+                            if let Some(before) = before {
+                                output.outbound.push(self.request(
+                                    "thread/revert",
+                                    json!({"threadId":thread,"beforeTurnId":before}),
+                                    Pending::Operation("thread/revert".into()),
+                                ));
+                            }
+                            return Ok(output);
+                        }
+                        before = Some(id);
+                    }
+                    if let Some(cursor) = optional(result, "nextCursor") {
+                        output.outbound.push(self.revert_page(
+                            thread,
+                            head,
+                            before,
+                            Some(cursor),
+                            visited,
+                        )?);
+                    } else if let Some(head) = head {
+                        return Err(ProtocolError::MissingBoundary(head));
+                    } else if let Some(before) = before {
                         output.outbound.push(self.request(
                             "thread/revert",
-                            json!({"threadId":thread,"numTurns":after}),
+                            json!({"threadId":thread,"beforeTurnId":before}),
                             Pending::Operation("thread/revert".into()),
                         ));
                     }
@@ -395,11 +484,25 @@ impl CodexProtocol {
                 text: string(p, "delta"),
             }),
             "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
-                events.push(ProviderEvent::TextDelta {
-                    key: required(p, "itemId")?,
-                    kind: ProviderItem::Reasoning,
-                    text: string(p, "delta"),
-                })
+                let delta = string(p, "delta");
+                if !delta.is_empty() {
+                    let native = required(p, "itemId")?;
+                    let (stream, index) = if method.ends_with("summaryTextDelta") {
+                        ("summary", p["summaryIndex"].as_u64().unwrap_or(0))
+                    } else {
+                        ("content", p["contentIndex"].as_u64().unwrap_or(0))
+                    };
+                    let key = json!([string(p, "turnId"), native, stream, index]).to_string();
+                    self.reasoning_parts
+                        .entry(native)
+                        .or_default()
+                        .insert((stream.into(), index), key.clone());
+                    events.push(ProviderEvent::TextDelta {
+                        key,
+                        kind: ProviderItem::Reasoning,
+                        text: delta,
+                    });
+                }
             }
             "item/commandExecution/outputDelta" => events.push(ProviderEvent::TextDelta {
                 key: required(p, "itemId")?,
@@ -483,6 +586,37 @@ impl CodexProtocol {
                     }
                 }
                 match string(item, "type").as_str() {
+                    "reasoning" => {
+                        if completed {
+                            let mut parts = self.reasoning_parts.remove(&key).unwrap_or_default();
+                            for stream in ["summary", "content"] {
+                                for (index, text) in
+                                    item[stream].as_array().into_iter().flatten().enumerate()
+                                {
+                                    if text.as_str().is_some_and(|text| !text.is_empty()) {
+                                        parts.entry((stream.into(), index as u64)).or_insert_with(
+                                            || {
+                                                json!([string(p, "turnId"), key, stream, index])
+                                                    .to_string()
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                            for ((stream, index), key) in parts {
+                                events.push(ProviderEvent::ItemFinished {
+                                    key,
+                                    kind: ProviderItem::Reasoning,
+                                    text: item[stream][index as usize]
+                                        .as_str()
+                                        .filter(|text| !text.is_empty())
+                                        .map(str::to_owned),
+                                    status: ItemStatus::Completed,
+                                });
+                            }
+                        }
+                    }
+
                     "userMessage" => {
                         if completed {
                             events.push(ProviderEvent::UserMessage {
@@ -745,18 +879,6 @@ fn codex_runtime(mode: RuntimeMode) -> (&'static str, &'static str, &'static str
 fn codex_item(kind: &str, item: &Value) -> Option<(ProviderItem, Option<String>)> {
     Some(match kind {
         "agentMessage" => (ProviderItem::Text, optional(item, "text")),
-        "reasoning" => (
-            ProviderItem::Reasoning,
-            item["summary"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .filter(|text| !text.is_empty()),
-        ),
         "commandExecution" => (
             ProviderItem::Command {
                 command: string(item, "command"),
@@ -804,11 +926,14 @@ fn codex_item(kind: &str, item: &Value) -> Option<(ProviderItem, Option<String>)
 #[cfg(test)]
 impl CodexProtocol {
     pub(crate) fn replay_outbound(&mut self, frame: &Value) {
+        if frame["method"] == "turn/start" {
+            self.thread = optional(&frame["params"], "threadId");
+        }
         if let Some(id) = frame["id"].as_u64() {
             let method = string(frame, "method");
             let pending = match method.as_str() {
                 "initialize" => Pending::Initialize,
-                "thread/start" | "thread/resume" | "thread/fork" => Pending::Thread {
+                "thread/start" | "thread/resume" => Pending::Thread {
                     start: Value::Null,
                     history: None,
                 },
@@ -829,19 +954,6 @@ pub fn completed_steer_error(message: &str) -> bool {
     ]
     .iter()
     .any(|phrase| message.contains(phrase))
-}
-/// Compute a relative wire operation from an absolute desired head and a fresh
-/// native read. Never skip a missing head or count application-only turns.
-pub fn absolute_revert_count(turns: &[Value], head: Option<&str>) -> Result<usize, ProtocolError> {
-    if let Some(head) = head {
-        let index = turns
-            .iter()
-            .position(|turn| turn["id"].as_str() == Some(head))
-            .ok_or_else(|| ProtocolError::MissingBoundary(head.into()))?;
-        Ok(turns.len() - index - 1)
-    } else {
-        Ok(turns.len())
-    }
 }
 pub fn native_image_mime(mime: &str) -> bool {
     matches!(
