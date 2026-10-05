@@ -532,6 +532,7 @@ pub struct State {
     pub tasks: Vec<Task>,
     pub transfers: Vec<Transfer>,
     pub inherited_items: Vec<Item>,
+    pub inherited_messages: Vec<Message>,
     pub rollback: Option<PendingRollback>,
     /// Captures that can be replayed after process loss, including their terminal status.
     pub captures: BTreeMap<RunId, RunStatus>,
@@ -560,6 +561,13 @@ pub struct State {
     pub usage_baselines: BTreeMap<String, UsageCounters>,
 }
 impl State {
+    /// A local message, or one referenced by an inherited fork item.
+    pub fn message(&self, id: &MessageId) -> Option<&Message> {
+        self.messages
+            .iter()
+            .chain(&self.inherited_messages)
+            .find(|message| &message.id == id)
+    }
     pub fn active_run(&self) -> Option<&Run> {
         self.runs
             .iter()
@@ -762,12 +770,15 @@ pub enum Command {
         interaction_mode: InteractionMode,
         boundary: u64,
         history: Vec<Item>,
+        messages: Vec<Message>,
         checkpoint_scope: Option<CheckpointScope>,
         context: HistoricalContext,
         native: Option<NativeBinding>,
     },
+    /// Without `through_run`, the latest completed run is the boundary.
     MergeBack {
         target: ThreadId,
+        through_run: Option<RunId>,
     },
     AcceptTransfer {
         id: ContextTransferId,

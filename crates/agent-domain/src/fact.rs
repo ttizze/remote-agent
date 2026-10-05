@@ -352,6 +352,7 @@ pub enum FactBody {
         parent: ThreadId,
         boundary: u64,
         history: Vec<Item>,
+        messages: Vec<Message>,
     },
     TransferOpened {
         native_fork: Option<String>,
@@ -1243,11 +1244,13 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             parent,
             boundary,
             history,
+            messages,
         } => {
             let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
             t.parent = Some(parent.clone());
             t.fork_boundary = Some(*boundary);
             state.inherited_items = history.clone();
+            state.inherited_messages = messages.clone();
         }
         TransferOpened {
             native_fork,

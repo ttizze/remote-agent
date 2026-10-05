@@ -1174,6 +1174,7 @@ fn merge_back_supersedes_pending_delta_and_excludes_inherited_history() {
         "merge",
         Command::MergeBack {
             target: ThreadId::new("thread").unwrap(),
+            through_run: None,
         },
     );
     let EffectBody::SendToThread {
@@ -3282,4 +3283,270 @@ fn native_occupancy_estimate_counts_inputs_and_attachments_that_reached_the_sess
     };
     assert!(outcome(0));
     assert!(!outcome(6));
+}
+fn accept_child(step: &Step) -> State {
+    let accept = step
+        .effects
+        .iter()
+        .find_map(|effect| match &effect.body {
+            EffectBody::SendToThread { command, .. }
+                if matches!(command.as_ref(), Command::AcceptFork { .. }) =>
+            {
+                Some(command.as_ref().clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let mut child = State::default();
+    command(&mut child, "accept", accept);
+    child
+}
+// T3 ProjectionStore.ts: a fork of a fork keeps the inherited prefix and its message fields.
+#[test]
+fn forking_a_fork_keeps_the_ancestor_conversation_and_its_messages() {
+    let mut s = state();
+    let mut send = send_message("ancestor request", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut send {
+        message.attachments = vec![captured_image()];
+    }
+    command(&mut s, "ancestor request", send);
+    let a = s.active_run().unwrap().attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "started",
+        &a,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &a);
+    let run = s.runs[0].id.clone();
+    let fork = command(
+        &mut s,
+        "fork",
+        Command::Fork {
+            target: ThreadId::new("fork").unwrap(),
+            through_run: run,
+            title: None,
+        },
+    );
+    let mut child = accept_child(&fork);
+    let (child_run, b) = running(&mut child, "child request");
+    finish(&mut child, &b);
+    let grandchild = command(
+        &mut child,
+        "fork-again",
+        Command::Fork {
+            target: ThreadId::new("grandchild").unwrap(),
+            through_run: child_run,
+            title: None,
+        },
+    );
+    let EffectBody::ForkNative { .. } = &grandchild.effects[0].body else {
+        panic!("{:?}", grandchild.effects)
+    };
+    let forked = result(
+        &mut child,
+        "forked",
+        EffectResult::NativeForked {
+            command: CommandId::new("fork-again").unwrap(),
+            native_thread: "grandchild-native".into(),
+        },
+    );
+    let grandchild = accept_child(&forked);
+    let texts = grandchild
+        .visible_items()
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::UserMessage { .. }))
+        .map(|item| item.text.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["ancestor request", "child request"]);
+    assert_eq!(
+        grandchild
+            .visible_items()
+            .iter()
+            .filter(|item| matches!(item.kind, ItemKind::Fork { .. }))
+            .count(),
+        2
+    );
+    let ItemKind::UserMessage { message } = &grandchild.inherited_items[0].kind else {
+        panic!()
+    };
+    let message = grandchild.message(message).unwrap();
+    assert_eq!(message.attachments, vec![captured_image()]);
+    assert_eq!(message.intent, InputIntent::TurnStart);
+    assert_eq!(message.created_by, MessageAuthor::User);
+    let Some(Transfer { history, .. }) = grandchild.transfers.first() else {
+        panic!()
+    };
+    assert!(render_history(history).contains("ancestor request"));
+}
+// T3 CommandPolicy.ts: unsuccessful sources fork from bounded portable history; T3 ThreadForkService.ts statuses.
+#[test]
+fn unsuccessful_and_cancelled_runs_fork_from_bounded_portable_history() {
+    let mut s = state();
+    let (failed, a) = running(&mut s, "failed request");
+    provider(
+        &mut s,
+        "failed",
+        &a,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Failed,
+            native_head: None,
+        },
+    );
+    let (_, b) = running(&mut s, "later answer");
+    finish(&mut s, &b);
+    let (_, c) = running(&mut s, "still running");
+    let fork = command(
+        &mut s,
+        "fork",
+        Command::Fork {
+            target: ThreadId::new("fork").unwrap(),
+            through_run: failed,
+            title: None,
+        },
+    );
+    assert!(
+        !fork
+            .effects
+            .iter()
+            .any(|effect| matches!(effect.body, EffectBody::ForkNative { .. }))
+    );
+    let child = accept_child(&fork);
+    let history = render_history(&child.transfers[0].history);
+    assert!(history.contains("failed request") && !history.contains("later answer"));
+    assert_eq!(child.transfers[0].native_fork, None);
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    let queued = s.runs[3].id.clone();
+    command(
+        &mut s,
+        "cancel",
+        Command::CancelQueued {
+            run: queued.clone(),
+        },
+    );
+    let _ = c;
+    assert!(matches!(
+        command(
+            &mut s,
+            "fork-cancelled",
+            Command::Fork {
+                target: ThreadId::new("fork-cancelled").unwrap(),
+                through_run: queued,
+                title: None,
+            },
+        )
+        .reply,
+        Reply::Thread(_)
+    ));
+}
+#[test]
+fn a_failed_native_fork_still_creates_the_fork_with_portable_history() {
+    let mut s = state();
+    let (run, a) = running(&mut s, "source");
+    finish(&mut s, &a);
+    command(
+        &mut s,
+        "fork",
+        Command::Fork {
+            target: ThreadId::new("fork").unwrap(),
+            through_run: run,
+            title: None,
+        },
+    );
+    recover(&mut s);
+    assert!(!s.pending_forks.is_empty());
+    let failed = result(
+        &mut s,
+        "fork-failed",
+        EffectResult::ForkFailed {
+            command: CommandId::new("fork").unwrap(),
+            message: "transcript unavailable".into(),
+        },
+    );
+    assert!(s.pending_forks.is_empty());
+    let child = accept_child(&failed);
+    assert_eq!(child.transfers[0].native_fork, None);
+    assert!(child.native_sessions.is_empty());
+    assert!(render_history(&child.transfers[0].history).contains("source"));
+    assert!(
+        result(
+            &mut s,
+            "late-success",
+            EffectResult::NativeForked {
+                command: CommandId::new("fork").unwrap(),
+                native_thread: "late".into(),
+            },
+        )
+        .effects
+        .is_empty()
+    );
+}
+// T3 Orchestrator.ts merge-back admission.
+#[test]
+fn merge_back_requires_a_fork_of_the_target_and_a_finished_source() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "plain");
+    finish(&mut s, &a);
+    assert_eq!(
+        command(
+            &mut s,
+            "merge",
+            Command::MergeBack {
+                target: ThreadId::new("other").unwrap(),
+                through_run: None,
+            },
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "not-a-fork-of-target".into()
+        }
+    );
+    let run = s.runs[0].id.clone();
+    let fork = command(
+        &mut s,
+        "fork",
+        Command::Fork {
+            target: ThreadId::new("fork").unwrap(),
+            through_run: run,
+            title: None,
+        },
+    );
+    let forked = result(
+        &mut s,
+        "forked",
+        EffectResult::NativeForked {
+            command: CommandId::new("fork").unwrap(),
+            native_thread: "fork-native".into(),
+        },
+    );
+    let _ = fork;
+    let mut child = accept_child(&forked);
+    let merge = |child: &mut State, key: &str, through_run| {
+        command(
+            child,
+            key,
+            Command::MergeBack {
+                target: ThreadId::new("thread").unwrap(),
+                through_run,
+            },
+        )
+        .reply
+    };
+    assert_eq!(
+        merge(&mut child, "empty", None),
+        Reply::Rejected {
+            reason: "no-stable-source-run".into()
+        }
+    );
+    let (running_run, _) = running(&mut child, "unfinished");
+    assert_eq!(
+        merge(&mut child, "running", Some(running_run)),
+        Reply::Rejected {
+            reason: "merge-back-source-not-finished".into()
+        }
+    );
 }

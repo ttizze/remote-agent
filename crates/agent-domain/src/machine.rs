@@ -2031,11 +2031,6 @@ impl Decision {
                 through_run,
                 title,
             } => {
-                if self.state.active_run().is_some()
-                    || self.state.tasks.iter().any(|t| !t.status.terminal())
-                {
-                    return reject("provider-work-active");
-                }
                 let Some(run) = self
                     .state
                     .runs
@@ -2044,7 +2039,11 @@ impl Decision {
                         &r.id == through_run
                             && matches!(
                                 r.status,
-                                RunStatus::Completed | RunStatus::Interrupted | RunStatus::Failed
+                                RunStatus::Completed
+                                    | RunStatus::Waiting
+                                    | RunStatus::Interrupted
+                                    | RunStatus::Failed
+                                    | RunStatus::Cancelled
                             )
                     })
                     .cloned()
@@ -2052,21 +2051,39 @@ impl Decision {
                     return reject("fork-source-not-ready");
                 };
                 let thread = self.state.thread.as_ref().unwrap().clone();
+                let inherited = self
+                    .state
+                    .inherited_items
+                    .iter()
+                    .map(|item| &item.id)
+                    .collect::<std::collections::BTreeSet<_>>();
                 let history = self
                     .state
                     .activity_items()
                     .into_iter()
                     .filter(|i| {
-                        i.run.as_ref().is_none_or(|id| {
-                            self.state
-                                .runs
-                                .iter()
-                                .any(|r| &r.id == id && r.ordinal <= run.ordinal)
-                        })
+                        inherited.contains(&i.id)
+                            || i.run.as_ref().is_none_or(|id| {
+                                self.state
+                                    .runs
+                                    .iter()
+                                    .any(|r| &r.id == id && r.ordinal <= run.ordinal)
+                            })
                     })
                     .map(|item| item.into_owned())
                     .collect::<Vec<_>>();
+                let messages = history
+                    .iter()
+                    .filter_map(|item| match &item.kind {
+                        ItemKind::UserMessage { message }
+                        | ItemKind::AssistantMessage { message } => {
+                            self.state.message(message).cloned()
+                        }
+                        _ => None,
+                    })
+                    .collect();
                 let context = prepare_history(&self.state, &history, run.ordinal);
+                let fork_instance = thread.selection.instance.clone();
                 let child_command = Box::new(AcceptFork {
                     thread: target.clone(),
                     parent: thread.id,
@@ -2079,17 +2096,35 @@ impl Decision {
                     interaction_mode: thread.interaction_mode,
                     boundary: run.ordinal,
                     history,
+                    messages,
                     checkpoint_scope: self.state.checkpoint_scope.clone(),
                     context,
                     native: None,
                 });
+                // Only a provider-finished run has a stable native boundary.
                 let native = run
                     .attempt
                     .as_ref()
                     .and_then(|id| self.state.attempts.iter().find(|a| &a.id == id))
+                    .filter(|_| {
+                        matches!(run.status, RunStatus::Completed | RunStatus::Waiting)
+                            && run.selection.instance == fork_instance
+                    })
                     .and_then(|a| {
+                        let latest = !self.state.runs.iter().any(|later| {
+                            later.ordinal > run.ordinal
+                                && later.selection.instance == run.selection.instance
+                                && later.attempt.as_ref().is_some_and(|id| {
+                                    self.state.attempts.iter().any(|attempt| {
+                                        &attempt.id == id
+                                            && attempt.accepted
+                                            && attempt.native_thread == a.native_thread
+                                    })
+                                })
+                        });
                         a.native_thread
                             .clone()
+                            .filter(|_| latest || a.native_head.is_some())
                             .map(|thread| (thread, a.native_head.clone()))
                     });
                 if let Some((native_thread, head)) = native {
@@ -2131,6 +2166,7 @@ impl Decision {
                 interaction_mode,
                 boundary,
                 history,
+                messages,
                 checkpoint_scope,
                 context,
                 native,
@@ -2154,6 +2190,7 @@ impl Decision {
                     parent: parent.clone(),
                     boundary: *boundary,
                     history: history.clone(),
+                    messages: messages.clone(),
                 });
                 let marker = TurnItemId::new(self.key("fork", thread.as_str())).unwrap();
                 self.item_start(
@@ -2189,28 +2226,49 @@ impl Decision {
                 }
                 Reply::Thread(thread.clone())
             }
-            MergeBack { target } => {
+            MergeBack {
+                target,
+                through_run,
+            } => {
                 let thread = self.state.thread.as_ref().unwrap();
-                let boundary = self
-                    .state
-                    .runs
-                    .iter()
-                    .filter(|r| r.status != RunStatus::RolledBack)
-                    .map(|r| r.ordinal)
-                    .max()
-                    .unwrap_or(0);
+                if thread.parent.as_ref() != Some(target) || thread.fork_boundary.is_none() {
+                    return reject("not-a-fork-of-target");
+                }
+                let source = match through_run {
+                    Some(id) => self.state.runs.iter().find(|run| &run.id == id),
+                    None => self
+                        .state
+                        .runs
+                        .iter()
+                        .filter(|run| run.status == RunStatus::Completed)
+                        .max_by_key(|run| run.ordinal),
+                };
+                let Some(source) = source else {
+                    return reject("no-stable-source-run");
+                };
+                if !matches!(source.status, RunStatus::Completed | RunStatus::Waiting) {
+                    return reject("merge-back-source-not-finished");
+                }
+                if !self.state.transfers.iter().any(|transfer| {
+                    transfer.kind == TransferKind::Fork
+                        && &transfer.source == target
+                        && transfer.target == thread.id
+                }) {
+                    return reject("no-fork-transfer");
+                }
+                let boundary = source.ordinal;
                 let history = prepare_history(
                     &self.state,
                     &self
                         .state
-                        .items
-                        .iter()
+                        .visible_items()
+                        .into_iter()
                         .filter(|i| {
-                            i.run.as_ref().is_none_or(|id| {
+                            i.run.as_ref().is_some_and(|id| {
                                 self.state
                                     .runs
                                     .iter()
-                                    .any(|r| &r.id == id && r.status != RunStatus::RolledBack)
+                                    .any(|r| &r.id == id && r.ordinal <= boundary)
                             })
                         })
                         .cloned()
@@ -3898,14 +3956,21 @@ impl Decision {
                 );
                 return Reply::Accepted;
             }
-            EffectResult::ForkFailed { command, message } => {
-                if !self.state.pending_forks.contains_key(command) {
+            EffectResult::ForkFailed { command, .. } => {
+                let Some(pending) = self.state.pending_forks.get(command).cloned() else {
                     return Reply::Ignored;
-                }
+                };
+                // The fork keeps its fixed history as portable context.
                 self.fact(FactBody::ForkResolved {
                     command: command.clone(),
                 });
-                return reject(message);
+                self.effect(
+                    None,
+                    EffectBody::SendToThread {
+                        thread: pending.target,
+                        command: pending.child_command,
+                    },
+                );
             }
             EffectResult::ProviderFailed {
                 attempt,

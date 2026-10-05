@@ -298,7 +298,8 @@ impl GraphReplay {
                     self.replay.command(
                         &source,
                         Command::MergeBack {
-                            target: thread.clone()
+                            target: thread.clone(),
+                            through_run: None,
                         }
                     ),
                     Reply::Accepted
