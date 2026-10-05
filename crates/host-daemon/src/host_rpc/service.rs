@@ -1365,6 +1365,30 @@ impl HostResources {
         {
             return Ok(projection);
         }
+        let retry = orchestration::context::retry_unconsumed(
+            &projection.context_transfers,
+            &projection.runs,
+            &projection.context_handoffs,
+            &now(),
+        );
+        if !retry.is_empty() {
+            self.orchestration
+                .ingest(
+                    orchestration::events(
+                        &projection.thread.id,
+                        &format!("context:{}:retry", run.id),
+                        retry,
+                        &now(),
+                    ),
+                    Some((&run.id, run.active_attempt_id.as_ref())),
+                    &now(),
+                )
+                .map_err(adapter_error)?;
+            projection = self
+                .orchestration
+                .projection(&projection.thread.id)
+                .map_err(adapter_error)?;
+        }
         let pending: Vec<_> = projection
             .context_transfers
             .iter()
@@ -1436,50 +1460,46 @@ impl HostResources {
                     &run,
                     Some(transfer),
                     strategy,
-                    1,
+                    if transfer.kind == TransferKind::MergeBack {
+                        orchestration::context::merge_from(
+                            &source.runs,
+                            &projection.context_transfers,
+                            &source.thread.id,
+                        )
+                    } else {
+                        1
+                    },
                     ordinal,
                     &now(),
                 ));
             }
         }
-        let previous = projection
-            .runs
-            .iter()
-            .filter(|r| {
-                r.ordinal < run.ordinal
-                    && r.started_at.is_some()
-                    && r.status != RunStatus::RolledBack
-            })
-            .max_by_key(|r| r.ordinal);
-        let missed = previous.map_or(0, |r| r.ordinal);
-        let seen = provider.last_run_ordinal.unwrap_or(0);
         let lost_native_context = provider.native_thread_ref.is_none()
             && projection.visible_turn_items.iter().any(|row| {
                 row.visibility == Visibility::Inherited
                     || matches!(&row.item.body, TurnItemBody::AssistantMessage { .. })
             });
         if pending.is_empty()
-            && (previous.is_some_and(|r| r.provider_thread_id.as_ref() != Some(&provider.id))
-                || lost_native_context)
-            && (seen < missed || lost_native_context)
             && !projection
                 .context_handoffs
                 .iter()
                 .any(|h| h.target_run_id == run.id)
+            && let Some((from, to, strategy)) = orchestration::context::missed_provider_context(
+                &projection.runs,
+                run.ordinal,
+                &provider.id,
+                provider.last_run_ordinal.unwrap_or(0),
+                lost_native_context,
+            )
         {
-            let strategy = if seen > 0 {
-                HandoffStrategy::DeltaSinceTargetLastSeen
-            } else {
-                HandoffStrategy::FullThreadSummary
-            };
             payloads.extend(orchestration::context::portable(
                 &projection,
                 &projection,
                 &run,
                 None,
                 strategy,
-                seen + 1,
-                missed,
+                from,
+                to,
                 &now(),
             ));
         }
@@ -1592,7 +1612,11 @@ impl ProviderAdapter for HostResources {
                 }
             };
             if let Some(files) = files {
-                files.commit().map_err(adapter_error)?;
+                files.commit().map_err(|error| AdapterError {
+                    message: error.to_string(),
+                    retryable: true,
+                    turn_completed: false,
+                })?;
             }
             let stale = orchestration::rollback::stale_checkpoints(&projection, checkpoint);
             self.checkpoints

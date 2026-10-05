@@ -282,6 +282,45 @@ mod tests {
     }
 
     #[test]
+    fn rewind_invalidates_other_provider_native_history_without_activating_it() {
+        let mut projection = running();
+        projection.runs[0].status = RunStatus::Completed;
+        let active = projection.provider_threads[0].clone();
+        projection.thread.active_provider_thread_id = Some(active.id.clone());
+        let mut other = active.clone();
+        other.id = ProviderThreadId::new("other-provider").unwrap();
+        other.last_run_ordinal = Some(1);
+        other.native_thread_ref = Some(ProviderRef {
+            driver: Driver::Claude,
+            native_id: Some("stale-native".into()),
+            strength: Strength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        });
+        other.native_conversation_head_ref = other.native_thread_ref.clone();
+        projection.provider_threads.push(other.clone());
+        let mut baseline = checkpoint(&projection.runs[0], CheckpointStatus::Ready);
+        baseline.app_run_ordinal = Some(0);
+        for event in finish(
+            &projection.clone(),
+            &baseline,
+            active.clone(),
+            &CommandId::new("rewind").unwrap(),
+            &now(),
+        ) {
+            projection = projector::apply(Some(&projection), &event, Default::default()).unwrap();
+        }
+        let invalidated = projection
+            .provider_threads
+            .iter()
+            .find(|p| p.id == other.id)
+            .unwrap();
+        assert!(invalidated.native_thread_ref.is_none());
+        assert!(invalidated.native_conversation_head_ref.is_none());
+        assert_eq!(invalidated.status, ProviderThreadStatus::Closed);
+        assert_eq!(projection.thread.active_provider_thread_id, Some(active.id));
+    }
+    #[test]
     fn missing_stale_or_foreign_scope_is_rejected_before_provider_work() {
         let mut projection = running();
         let checkpoint = checkpoint(&projection.runs[0], CheckpointStatus::Ready);

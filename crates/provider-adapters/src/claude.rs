@@ -20,10 +20,134 @@ pub struct ClaudeConfig {
     pub program: PathBuf,
     pub config_home: PathBuf,
 }
+enum ProcessInput {
+    Frame(Value),
+    Prompt {
+        run_id: RunId,
+        frame: Value,
+        steer: bool,
+        acknowledged: tokio::sync::oneshot::Sender<Result<(), AdapterError>>,
+    },
+}
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum EchoMode {
+    #[default]
+    Unknown,
+    Early,
+    ResultOnly,
+    Acknowledged,
+}
+#[derive(Default)]
+struct PromptGate {
+    mode: EchoMode,
+    prompt: Option<String>,
+    confirmed: bool,
+    frames_before_echo: usize,
+    held: Vec<Value>,
+}
+impl PromptGate {
+    fn begin(&mut self, uuid: String) {
+        self.prompt = Some(uuid);
+        self.confirmed = false;
+        self.frames_before_echo = 0;
+        self.held.clear();
+    }
+    fn route(&mut self, frame: Value) -> Vec<Value> {
+        let Some(uuid) = self.prompt.as_deref().filter(|_| !self.confirmed) else {
+            return vec![frame];
+        };
+        let echoed: Vec<&str> = if let Some(array) = frame["user_message_uuids"].as_array() {
+            array.iter().filter_map(Value::as_str).collect()
+        } else {
+            frame["user_message_uuid"].as_str().into_iter().collect()
+        };
+        if echoed.contains(&uuid) {
+            if matches!(self.mode, EchoMode::Unknown | EchoMode::Acknowledged) {
+                self.mode = if frame["type"] != "result" && self.frames_before_echo == 0 {
+                    EchoMode::Early
+                } else {
+                    EchoMode::ResultOnly
+                };
+            }
+            self.confirmed = true;
+            let mut frames = std::mem::take(&mut self.held);
+            frames.push(frame);
+            return frames;
+        }
+        if self.mode == EchoMode::Unknown
+            && frame["type"] == "command_lifecycle"
+            && frame["command_uuid"].as_str() == Some(uuid)
+        {
+            self.mode = EchoMode::Acknowledged;
+        }
+        let root = match frame["type"].as_str() {
+            Some("assistant" | "stream_event" | "user") => frame["parent_tool_use_id"].is_null(),
+            Some("result") => true,
+            _ => false,
+        };
+        if !root {
+            return vec![frame];
+        }
+        self.frames_before_echo += 1;
+        if frame["type"] == "result"
+            && (!echoed.is_empty()
+                || self.mode != EchoMode::Unknown
+                    && !frame["origin"].is_null()
+                    && frame["origin"]["kind"] != "human")
+        {
+            if frame["num_turns"] != 0 {
+                self.held.clear();
+            }
+            self.frames_before_echo = 0;
+            return vec![];
+        }
+        if self.mode == EchoMode::Early && frame["type"] != "result" {
+            self.held.push(frame);
+            return vec![];
+        }
+        let mut frames = std::mem::take(&mut self.held);
+        frames.push(frame);
+        frames
+    }
+}
+fn admit_prompt(
+    current_run: &RunId,
+    requested_run: &RunId,
+    terminal: bool,
+    interrupted: bool,
+    stopping: bool,
+) -> Result<(), AdapterError> {
+    if current_run != requested_run || interrupted || stopping {
+        Err(error("Claude prompt cancelled"))
+    } else if terminal {
+        Err(crate::turn_completed())
+    } else {
+        Ok(())
+    }
+}
+async fn send_prompt(
+    handle: &ProcessHandle,
+    run_id: &RunId,
+    frame: Value,
+    steer: bool,
+) -> Result<(), AdapterError> {
+    let (acknowledged, receipt) = tokio::sync::oneshot::channel();
+    handle
+        .input
+        .send(ProcessInput::Prompt {
+            run_id: run_id.clone(),
+            frame,
+            steer,
+            acknowledged,
+        })
+        .await
+        .map_err(error)?;
+    receipt.await.map_err(error)?
+}
 struct ProcessHandle {
     native_session: String,
     state: Arc<Mutex<TurnState>>,
-    input: mpsc::Sender<Value>,
+    input: mpsc::Sender<ProcessInput>,
     stop: watch::Sender<bool>,
     ready: watch::Receiver<Option<Result<(), String>>>,
     done: watch::Receiver<bool>,
@@ -142,18 +266,13 @@ impl ClaudeAdapter {
                     .iter()
                     .find(|message| message.id == *message_id)
                     .ok_or_else(|| error("steer input missing"))?;
-                {
-                    let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.terminal {
-                        return Err(crate::turn_completed());
-                    }
-                    state.steered = true;
-                }
-                handle
-                    .input
-                    .send(user_frame(&handle.native_session, message, true))
-                    .await
-                    .map_err(error)
+                send_prompt(
+                    &handle,
+                    run_id,
+                    user_frame(&handle.native_session, message, true),
+                    true,
+                )
+                .await
             }
             EffectBody::Interrupt { run_id, .. } => {
                 let handle = self.for_run(projection, run_id).await?;
@@ -164,7 +283,7 @@ impl ClaudeAdapter {
                     }
                     state.interrupted = true;
                 }
-                handle.input.send(json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}})).await.map_err(error)?;
+                handle.input.send(ProcessInput::Frame(json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}))).await.map_err(error)?;
                 let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                     loop {
                         let changed = handle.changed.notified();
@@ -238,7 +357,7 @@ impl ClaudeAdapter {
         }
         .ok_or_else(|| error("Claude callback is no longer live"))?;
         let response = normalize::claude_response(&request, decision, answers);
-        handle.input.send(json!({"type":"control_response","response":{"subtype":"success","request_id":request.id,"response":response}})).await.map_err(error)
+        handle.input.send(ProcessInput::Frame(json!({"type":"control_response","response":{"subtype":"success","request_id":request.id,"response":response}}))).await.map_err(error)
     }
     pub async fn detach(
         &self,
@@ -558,11 +677,13 @@ impl ClaudeAdapter {
             .ok_or_else(|| error("run input missing"))?;
         let mut message = message.clone();
         message.text = orchestration::context::input_text(projection, &run, &message.text);
-        handle
-            .input
-            .send(user_frame(&handle.native_session, &message, false))
-            .await
-            .map_err(error)
+        send_prompt(
+            &handle,
+            run_id,
+            user_frame(&handle.native_session, &message, false),
+            false,
+        )
+        .await
     }
     async fn evict_idle(&self) -> Result<(), AdapterError> {
         if self.capacity.available_permits() > 0 {
@@ -760,7 +881,7 @@ fn spawn(
         .stdout
         .take()
         .ok_or_else(|| error("Claude stdout missing"))?;
-    let (input_sender, mut commands) = mpsc::channel::<Value>(256);
+    let (input_sender, mut commands) = mpsc::channel::<ProcessInput>(256);
     let (stop, mut shutdown) = watch::channel(false);
     let (ready, ready_receiver) = watch::channel(None);
     let (done, done_receiver) = watch::channel(false);
@@ -784,6 +905,7 @@ fn spawn(
         let _permit = permit;
         let mut writer = JsonlWriter::new(input);
         let mut reader = JsonlReader::new(stdout);
+        let mut gate = PromptGate::default();
         let mut buffer = crate::stream_buffer::DeltaBuffer::default();
         let mut flush = tokio::time::interval(crate::stream_buffer::WINDOW);
         flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -792,10 +914,29 @@ fn spawn(
             loop{tokio::select!{
                 stopped=shutdown.changed()=>{if stopped.is_err()||*shutdown.borrow(){break;}}
                 _=flush.tick()=>{if let Some(frame)=buffer.flush(){ingest_claude_frame(&state,&output,&mut writer,frame).await?;changed.notify_waiters();}}
-                command=commands.recv()=>{let Some(command)=command else{break;};writer.write_line(&command.to_string()).await.map_err(error)?;}
+                command=commands.recv()=>{let Some(command)=command else{break;}; match command {
+                    ProcessInput::Frame(frame) => writer.write_line(&frame.to_string()).await.map_err(error)?,
+                    ProcessInput::Prompt { run_id, frame, steer, acknowledged } => {
+                        if let Some(buffered) = buffer.flush() { ingest_claude_frame(&state, &output, &mut writer, buffered).await?; }
+                        let admission = {
+                            let mut current = state.lock().unwrap_or_else(|e| e.into_inner());
+                            let admission = admit_prompt(&current.run.id, &run_id, current.terminal, current.interrupted, *shutdown.borrow());
+                            if admission.is_ok() { current.steered = steer; }
+                            admission
+                        };
+                        if let Err(error) = admission { let _ = acknowledged.send(Err(error)); continue; }
+                        gate.begin(frame["uuid"].as_str().unwrap_or_default().into());
+                        let written = writer.write_line(&frame.to_string()).await.map_err(error);
+                        let failed = written.is_err();
+                        let _ = acknowledged.send(written);
+                        if failed { return Err(error("Claude prompt write failed")); }
+                    }
+                }}
                 line=reader.read_line()=>{let Some(line)=line.map_err(error)?else{break;};let frame:Value=serde_json::from_str(&line).map_err(error)?;
                     if frame["type"]=="control_response"&&frame["response"]["request_id"]=="initialize" {ready.send_replace(Some(if frame["response"]["subtype"]=="success"{Ok(())}else{Err("Claude initialization rejected".into())}));continue;}
-                    for frame in buffer.push(frame) { ingest_claude_frame(&state, &output, &mut writer, frame).await?; }
+                    for routed in gate.route(frame) {
+                        for frame in buffer.push(routed) { ingest_claude_frame(&state, &output, &mut writer, frame).await?; }
+                    }
                     changed.notify_waiters();
                 }
             }}Ok(())
@@ -858,7 +999,7 @@ async fn ingest_claude_frame<W: tokio::io::AsyncWrite + Unpin>(
     let timestamp = now();
     let (batch, responses) = {
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-        let translated = normalize::claude(&state, &frame, &timestamp);
+        let translated = normalize::claude(state.take_owned(), &frame, &timestamp);
         *state = translated.state;
         let batch = state.batch(translated.payloads, &timestamp);
         (batch, translated.immediate_responses)
@@ -875,6 +1016,98 @@ async fn ingest_claude_frame<W: tokio::io::AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn supervisor_admission_distinguishes_completion_from_stop_and_stale_run() {
+        let run = RunId::new("run").unwrap();
+        let other = RunId::new("other").unwrap();
+        assert!(
+            admit_prompt(&run, &run, true, false, false)
+                .unwrap_err()
+                .turn_completed
+        );
+        assert!(
+            !admit_prompt(&run, &run, true, true, false)
+                .unwrap_err()
+                .turn_completed
+        );
+        assert!(
+            !admit_prompt(&run, &run, false, false, true)
+                .unwrap_err()
+                .turn_completed
+        );
+        assert!(
+            !admit_prompt(&run, &other, false, false, false)
+                .unwrap_err()
+                .turn_completed
+        );
+        assert!(admit_prompt(&run, &run, false, false, false).is_ok());
+    }
+    #[test]
+    fn prompt_echo_releases_only_current_turn_and_keeps_process_echo_mode() {
+        let mut gate = PromptGate::default();
+        gate.begin("first".into());
+        assert_eq!(
+            gate.route(
+                json!({"type":"stream_event","parent_tool_use_id":null,"user_message_uuid":"first"})
+            )
+            .len(),
+            1
+        );
+        assert!(gate.mode == EchoMode::Early);
+        gate.begin("second".into());
+        assert!(gate.route(json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":"previous output"}})).is_empty());
+        assert!(
+            gate.route(json!({"type":"result","user_message_uuids":["first"],"num_turns":1}))
+                .is_empty()
+        );
+        assert!(gate.held.is_empty());
+        assert!(gate.route(json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":"current output"}})).is_empty());
+        let released = gate.route(
+            json!({"type":"stream_event","parent_tool_use_id":null,"user_message_uuid":"second"}),
+        );
+        assert_eq!(released.len(), 2);
+        assert_eq!(released[0]["message"]["content"], "current output");
+        assert_eq!(
+            gate.route(json!({"type":"result","user_message_uuid":"second"}))
+                .len(),
+            1
+        );
+    }
+    #[test]
+    fn result_only_and_legacy_clis_stream_without_waiting_but_foreign_results_do_not_finish() {
+        let mut gate = PromptGate::default();
+        gate.begin("prompt".into());
+        assert_eq!(
+            gate.route(json!({"type":"assistant","parent_tool_use_id":null}))
+                .len(),
+            1
+        );
+        assert!(
+            gate.route(json!({"type":"result","user_message_uuid":"other"}))
+                .is_empty()
+        );
+        assert_eq!(
+            gate.route(json!({"type":"result","user_message_uuid":"prompt"}))
+                .len(),
+            1
+        );
+        assert!(gate.mode == EchoMode::ResultOnly);
+        gate.begin("next".into());
+        assert_eq!(
+            gate.route(json!({"type":"assistant","parent_tool_use_id":null}))
+                .len(),
+            1
+        );
+        assert!(
+            gate.route(json!({"type":"result","origin":{"kind":"task_notification"}}))
+                .is_empty()
+        );
+        assert_eq!(
+            gate.route(json!({"type":"result","subtype":"success"}))
+                .len(),
+            1
+        );
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn failed_initialization_releases_the_process_and_does_not_terminalize_resume_fallback() {

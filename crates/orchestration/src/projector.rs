@@ -101,6 +101,23 @@ pub fn apply(
         MessageUpdated(value) => upsert!(messages, value),
         PlanUpdated(value) => upsert!(plans, value),
         TurnItemUpdated(value) => upsert!(turn_items, value),
+        TurnItemTextDelta(delta) => {
+            if let Some(item) = next.turn_items.iter_mut().find(|item| {
+                item.id == delta.item_id && item.run_id.as_ref() == Some(&delta.run_id)
+            }) && append_text_delta(
+                item,
+                &mut next.messages,
+                &mut next.plans,
+                delta,
+                &event.occurred_at,
+            ) && let Some(row) = next
+                .visible_turn_items
+                .iter_mut()
+                .find(|row| row.visibility == Visibility::Local && row.source_item_id == item.id)
+            {
+                row.item = item.clone();
+            }
+        }
         CheckpointScopeCreated(value) => upsert!(checkpoint_scopes, value),
         CheckpointCaptured(value) => upsert!(checkpoints, value),
         CheckpointRollbackRequested(_) => {}
@@ -117,9 +134,68 @@ pub fn apply(
             | RunAttemptUpdated(_)
             | TurnItemUpdated(_)
     ) {
-        next.visible_turn_items = visible_items(&next);
+        next.visible_turn_items = visible_items(&next).into();
     }
     Some(next)
+}
+
+/// Offsets make replayed chunks harmless and reject gaps without corrupting Unicode.
+pub fn append_text_delta(
+    item: &mut TurnItem,
+    messages: &mut [ConversationMessage],
+    plans: &mut [PlanArtifact],
+    delta: &TurnItemTextDelta,
+    now: &Timestamp,
+) -> bool {
+    if item.status != ItemStatus::Running || item.run_id.as_ref() != Some(&delta.run_id) {
+        return false;
+    }
+    let plan_id = match &item.body {
+        TurnItemBody::ProposedPlan { plan_id, .. } => Some(plan_id.clone()),
+        _ => None,
+    };
+    let (text, message_id) = match &mut item.body {
+        TurnItemBody::AssistantMessage {
+            text,
+            message_id,
+            streaming: true,
+            ..
+        } => (text, Some(message_id)),
+        TurnItemBody::Reasoning {
+            text,
+            streaming: true,
+        } => (text, None),
+        TurnItemBody::ProposedPlan {
+            markdown,
+            streaming: true,
+            ..
+        } => (markdown, None),
+        TurnItemBody::CommandExecution {
+            output: Some(output),
+            ..
+        } => (output, None),
+        _ => return false,
+    };
+    if text.len() != delta.offset {
+        return false;
+    }
+    text.push_str(&delta.text);
+    item.updated_at = now.clone();
+    if let Some(id) = message_id
+        && let Some(message) = messages.iter_mut().find(|message| &message.id == id)
+        && message.text.len() == delta.offset
+    {
+        message.text.push_str(&delta.text);
+        message.updated_at = now.clone();
+    }
+    if let Some(id) = plan_id
+        && let Some(plan) = plans.iter_mut().find(|plan| plan.id == id)
+        && let PlanBody::ProposedPlan { markdown } = &mut plan.body
+        && markdown.len() == delta.offset
+    {
+        markdown.push_str(&delta.text);
+    }
+    true
 }
 
 /// Finalize the visible item and its streaming body together.
@@ -301,7 +377,7 @@ pub fn shell(projection: &ThreadProjection) -> ThreadShell {
         latest_visible_message: latest_message.map(|message| VisibleMessage {
             id: message.id.clone(),
             role: message.role,
-            text: message.text.clone(),
+            text: message.text.chars().take(400).collect(),
             updated_at: message.updated_at.clone(),
         }),
         latest_user_message_at: projection
@@ -346,6 +422,132 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use proptest::prelude::*;
+    #[test]
+    fn streamed_offsets_are_idempotent_and_share_unchanged_projection_collections() {
+        let (mut p, _) = crate::test_support::apply(
+            &projection(),
+            &send("start", DispatchMode::StartImmediately),
+        );
+        let run = p.runs[0].id.clone();
+        let mut item = p.turn_items[0].clone();
+        item.id = TurnItemId::new("stream").unwrap();
+        item.ordinal = 100;
+        item.body = TurnItemBody::Reasoning {
+            text: "日本".into(),
+            streaming: true,
+        };
+        item.run_id = Some(run.clone());
+        item.status = ItemStatus::Running;
+        let event = DomainEvent {
+            id: EventId::new("initial-stream").unwrap(),
+            thread_id: p.thread.id.clone(),
+            occurred_at: now(),
+            payload: EventPayload::TurnItemUpdated(item.clone()),
+        };
+        p = super::apply(Some(&p), &event, Default::default()).unwrap();
+        let delta = DomainEvent {
+            id: EventId::new("delta").unwrap(),
+            payload: EventPayload::TurnItemTextDelta(TurnItemTextDelta {
+                item_id: item.id.clone(),
+                run_id: run,
+                offset: "日本".len(),
+                text: "語".into(),
+            }),
+            ..event
+        };
+        let next = super::apply(
+            Some(&p),
+            &delta,
+            ProjectionOptions {
+                partial_timeline: true,
+                latest_local_turn_ordinal: Some(100),
+            },
+        )
+        .unwrap();
+        assert!(p.runs.shares_storage(&next.runs));
+        assert!(p.nodes.shares_storage(&next.nodes));
+        assert!(p.checkpoints.shares_storage(&next.checkpoints));
+        let replay = super::apply(Some(&next), &delta, Default::default()).unwrap();
+        assert_eq!(next, replay);
+        assert!(
+            matches!(&next.turn_items.iter().find(|i| i.id == item.id).unwrap().body, TurnItemBody::Reasoning { text, .. } if text == "日本語")
+        );
+        assert!(
+            matches!(&next.visible_turn_items.iter().find(|i| i.item.id == item.id).unwrap().item.body, TurnItemBody::Reasoning { text, .. } if text == "日本語")
+        );
+        assert!(
+            matches!(&p.turn_items.iter().find(|i| i.id == item.id).unwrap().body, TurnItemBody::Reasoning { text, .. } if text == "日本")
+        );
+    }
+    #[test]
+    fn plan_and_command_deltas_preserve_detail_and_ignore_replays() {
+        let (p, _) = crate::test_support::apply(
+            &projection(),
+            &send("start", DispatchMode::StartImmediately),
+        );
+        let plan_id = PlanId::new("plan").unwrap();
+        for body in [
+            TurnItemBody::ProposedPlan {
+                plan_id: plan_id.clone(),
+                markdown: "日".into(),
+                streaming: true,
+            },
+            TurnItemBody::CommandExecution {
+                input: "test".into(),
+                output: Some("日".into()),
+                output_omitted: false,
+                output_indicates_failure: false,
+                exit_code: None,
+            },
+        ] {
+            let mut item = p.turn_items[0].clone();
+            item.status = ItemStatus::Running;
+            item.body = body;
+            let mut plans = vec![PlanArtifact {
+                id: plan_id.clone(),
+                thread_id: p.thread.id.clone(),
+                run_id: item.run_id.clone(),
+                node_id: item.node_id.clone().unwrap(),
+                status: PlanStatus::Draft,
+                detail_in_turn_item: true,
+                body: PlanBody::ProposedPlan {
+                    markdown: "日".into(),
+                },
+            }];
+            let delta = TurnItemTextDelta {
+                item_id: item.id.clone(),
+                run_id: item.run_id.clone().unwrap(),
+                offset: "日".len(),
+                text: "本語".into(),
+            };
+            assert!(append_text_delta(
+                &mut item,
+                &mut [],
+                &mut plans,
+                &delta,
+                &now()
+            ));
+            assert!(!append_text_delta(
+                &mut item,
+                &mut [],
+                &mut plans,
+                &delta,
+                &now()
+            ));
+            match &item.body {
+                TurnItemBody::ProposedPlan { markdown, .. } => {
+                    assert_eq!(markdown, "日本語");
+                    assert!(
+                        matches!(&plans[0].body, PlanBody::ProposedPlan { markdown } if markdown == "日本語")
+                    );
+                }
+                TurnItemBody::CommandExecution { output, .. } => {
+                    assert_eq!(output.as_deref(), Some("日本語"))
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
     #[test]
     fn native_delivery_activates_provider_thread_but_queued_placeholder_does_not() {
         let (projection, _) = crate::test_support::apply(

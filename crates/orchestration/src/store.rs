@@ -164,7 +164,7 @@ impl Store {
                 created_by: message.created_by,
                 creation_source: message.creation_source,
                 message_id: message.id.clone(),
-                text: message.text.clone(),
+                text: message.text.chars().take(400).collect(),
                 context: message.context.clone(),
                 attachments: message.attachments.clone(),
                 model_selection: None,
@@ -913,7 +913,8 @@ fn streaming_shell(
         || events.iter().any(|event| {
             !matches!(
                 &event.event.payload,
-                EventPayload::MessageUpdated(_)
+                EventPayload::TurnItemTextDelta(_)
+                    | EventPayload::MessageUpdated(_)
                     | EventPayload::TurnItemUpdated(TurnItem {
                         body: TurnItemBody::AssistantMessage { .. }
                             | TurnItemBody::Reasoning { .. }
@@ -953,7 +954,7 @@ fn streaming_shell(
                 shell.latest_visible_message = Some(VisibleMessage {
                     id: message.id,
                     role: message.role,
-                    text: message.text,
+                    text: message.text.chars().take(400).collect(),
                     updated_at: message.updated_at,
                 });
             }
@@ -1025,21 +1026,21 @@ fn load_projection(
     let mut projection = ThreadProjection::empty(serde_json::from_str(&json)?);
     projection.updated_at =
         Timestamp::parse(&updated_at).map_err(|e| StoreError::InvalidEvent(e.to_string()))?;
-    projection.runs = records(connection, "runs", thread_id)?;
-    projection.attempts = records(connection, "run_attempts", thread_id)?;
-    projection.nodes = records(connection, "nodes", thread_id)?;
-    projection.subagents = records(connection, "subagents", thread_id)?;
-    projection.provider_sessions = records(connection, "provider_sessions", thread_id)?;
-    projection.provider_threads = records(connection, "provider_threads", thread_id)?;
-    projection.provider_turns = records(connection, "provider_turns", thread_id)?;
-    projection.runtime_requests = records(connection, "runtime_requests", thread_id)?;
-    projection.messages = records(connection, "messages", thread_id)?;
-    projection.plans = records(connection, "plans", thread_id)?;
-    projection.turn_items = records(connection, "turn_items", thread_id)?;
-    projection.checkpoint_scopes = records(connection, "checkpoint_scopes", thread_id)?;
-    projection.checkpoints = records(connection, "checkpoints", thread_id)?;
-    projection.context_handoffs = records(connection, "context_handoffs", thread_id)?;
-    projection.context_transfers = records(connection, "context_transfers", thread_id)?;
+    projection.runs = records(connection, "runs", thread_id)?.into();
+    projection.attempts = records(connection, "run_attempts", thread_id)?.into();
+    projection.nodes = records(connection, "nodes", thread_id)?.into();
+    projection.subagents = records(connection, "subagents", thread_id)?.into();
+    projection.provider_sessions = records(connection, "provider_sessions", thread_id)?.into();
+    projection.provider_threads = records(connection, "provider_threads", thread_id)?.into();
+    projection.provider_turns = records(connection, "provider_turns", thread_id)?.into();
+    projection.runtime_requests = records(connection, "runtime_requests", thread_id)?.into();
+    projection.messages = records(connection, "messages", thread_id)?.into();
+    projection.plans = records(connection, "plans", thread_id)?.into();
+    projection.turn_items = records(connection, "turn_items", thread_id)?.into();
+    projection.checkpoint_scopes = records(connection, "checkpoint_scopes", thread_id)?.into();
+    projection.checkpoints = records(connection, "checkpoints", thread_id)?.into();
+    projection.context_handoffs = records(connection, "context_handoffs", thread_id)?.into();
+    projection.context_transfers = records(connection, "context_transfers", thread_id)?.into();
     let inherited: Option<String> = connection
         .query_row(
             "SELECT payload_json FROM orchestration_v2_projection_fork_history WHERE thread_id=?1",
@@ -1050,7 +1051,7 @@ fn load_projection(
     if let Some(json) = inherited {
         projection.visible_turn_items = serde_json::from_str(&json)?;
     }
-    projection.visible_turn_items = projector::visible_items(&projection);
+    projection.visible_turn_items = projector::visible_items(&projection).into();
     Ok(Some(projection))
 }
 fn upsert<T: Serialize>(
@@ -1152,6 +1153,44 @@ fn persist_event(connection: &Connection, event: &DomainEvent) -> Result<()> {
         RuntimeRequestUpdated(value) => record!("runtime_requests", "runtime_request_id", value),
         MessageUpdated(value) => record!("messages", "message_id", value),
         TurnItemUpdated(value) => record!("turn_items", "turn_item_id", value),
+        TurnItemTextDelta(delta) => {
+            let json: String = connection.query_row("SELECT payload_json FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND turn_item_id=?2", params![thread_id.as_str(), delta.item_id.as_str()], |row| row.get(0))?;
+            let mut item: TurnItem = serde_json::from_str(&json)?;
+            let mut messages = if let TurnItemBody::AssistantMessage { message_id, .. } = &item.body
+            {
+                let json: Option<String> = connection.query_row("SELECT payload_json FROM orchestration_v2_projection_messages WHERE thread_id=?1 AND message_id=?2", params![thread_id.as_str(), message_id.as_str()], |row| row.get(0)).optional()?;
+                json.map(|value| serde_json::from_str(&value))
+                    .transpose()?
+                    .into_iter()
+                    .collect::<Vec<ConversationMessage>>()
+            } else {
+                vec![]
+            };
+            let mut plans = if let TurnItemBody::ProposedPlan { plan_id, .. } = &item.body {
+                let json: Option<String> = connection.query_row("SELECT payload_json FROM orchestration_v2_projection_plans WHERE thread_id=?1 AND plan_id=?2", params![thread_id.as_str(), plan_id.as_str()], |row| row.get(0)).optional()?;
+                json.map(|value| serde_json::from_str(&value))
+                    .transpose()?
+                    .into_iter()
+                    .collect::<Vec<PlanArtifact>>()
+            } else {
+                vec![]
+            };
+            if projector::append_text_delta(
+                &mut item,
+                &mut messages,
+                &mut plans,
+                delta,
+                &event.occurred_at,
+            ) {
+                record!("turn_items", "turn_item_id", &item);
+                for message in messages {
+                    record!("messages", "message_id", &message);
+                }
+                for plan in plans {
+                    record!("plans", "plan_id", &plan);
+                }
+            }
+        }
         PlanUpdated(value) => record!("plans", "plan_id", value),
         CheckpointScopeCreated(value) => record!("checkpoint_scopes", "scope_id", value),
         CheckpointCaptured(value) => record!("checkpoints", "checkpoint_id", value),
@@ -1200,6 +1239,7 @@ fn validate_event(event: &DomainEvent) -> Result<()> {
         ProviderThreadUpdated(value) => value.app_thread_id.as_ref(),
         MessageUpdated(value) => Some(&value.thread_id),
         TurnItemUpdated(value) => Some(&value.thread_id),
+        TurnItemTextDelta(_) => None,
         PlanUpdated(value) => Some(&value.thread_id),
         CheckpointScopeCreated(value) => Some(&value.thread_id),
         CheckpointCaptured(value) => Some(&value.thread_id),
@@ -1373,9 +1413,8 @@ fn bounded_projection(
         .max();
     let more = projection.visible_turn_items.len() > limit;
     if more {
-        projection
-            .visible_turn_items
-            .drain(..projection.visible_turn_items.len() - limit);
+        let excess = projection.visible_turn_items.len() - limit;
+        projection.visible_turn_items.drain(..excess);
         let ids: BTreeSet<_> = projection
             .visible_turn_items
             .iter()

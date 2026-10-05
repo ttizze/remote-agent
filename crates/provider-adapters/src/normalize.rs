@@ -72,6 +72,17 @@ impl TurnState {
             claude_blocks: BTreeMap::new(),
         }
     }
+    pub fn take_owned(&mut self) -> Self {
+        let replacement = Self::prepare(
+            self.run.clone(),
+            self.attempt.clone(),
+            self.provider_thread.clone(),
+            self.session.clone(),
+            self.turn.ordinal,
+            &self.run.requested_at,
+        );
+        std::mem::replace(self, replacement)
+    }
     pub fn batch(&mut self, payloads: Vec<EventPayload>, now: &Timestamp) -> crate::ProviderBatch {
         let events = payloads
             .into_iter()
@@ -171,6 +182,26 @@ impl TurnState {
     ) {
         if item.title.is_none() {
             item.title = title(&item.body);
+        }
+        if let Some(previous) = self.items.get(key)
+            && item.status == ItemStatus::Running
+            && previous.status == item.status
+            && std::mem::discriminant(&previous.body) == std::mem::discriminant(&item.body)
+            && let (Some(before), Some(after)) =
+                (streaming_text(&previous.body), streaming_text(&item.body))
+            && after.starts_with(before)
+        {
+            let delta = TurnItemTextDelta {
+                item_id: item.id.clone(),
+                run_id: self.run.id.clone(),
+                offset: before.len(),
+                text: after[before.len()..].into(),
+            };
+            self.items.insert(key.into(), item);
+            if !delta.text.is_empty() {
+                payloads.push(EventPayload::TurnItemTextDelta(delta));
+            }
+            return;
         }
         let node_id = item.node_id.clone().expect("adapter item has node");
         let kind = match item.body {
@@ -500,6 +531,29 @@ fn failure(message: &str, class: FailureClass) -> ProviderFailure {
         reset_at: None,
     }
 }
+fn streaming_text(body: &TurnItemBody) -> Option<&str> {
+    match body {
+        TurnItemBody::AssistantMessage {
+            text,
+            streaming: true,
+            ..
+        }
+        | TurnItemBody::Reasoning {
+            text,
+            streaming: true,
+        } => Some(text),
+        TurnItemBody::ProposedPlan {
+            markdown,
+            streaming: true,
+            ..
+        } => Some(markdown),
+        TurnItemBody::CommandExecution {
+            output: Some(output),
+            ..
+        } => Some(output),
+        _ => None,
+    }
+}
 fn questions(value: &Value) -> Vec<UserInputQuestion> {
     value
         .as_array()
@@ -530,13 +584,13 @@ fn questions(value: &Value) -> Vec<UserInputQuestion> {
 }
 
 pub fn codex(
-    state: &TurnState,
+    state: TurnState,
     method: &str,
     params: &Value,
     request_id: Option<&Value>,
     now: &Timestamp,
 ) -> Translation {
-    let mut next = state.clone();
+    let mut next = state;
     let mut payloads = vec![];
     let immediate_responses = vec![];
     if next.terminal {
@@ -944,8 +998,8 @@ pub fn codex_response(
     }
 }
 
-pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation {
-    let mut next = state.clone();
+pub fn claude(state: TurnState, frame: &Value, now: &Timestamp) -> Translation {
+    let mut next = state;
     let mut payloads = vec![];
     let mut immediate_responses = vec![];
     if next.terminal || frame["parent_tool_use_id"].as_str().is_some() {
@@ -1539,7 +1593,7 @@ pub(crate) mod tests {
     #[test]
     fn claude_approval_has_allow_and_decline_options() {
         let translated = claude(
-            &state(Driver::Claude),
+            state(Driver::Claude),
             &json!({"type":"control_request","request_id":"approval","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"pwd"}}}),
             &timestamp(),
         );
@@ -1562,7 +1616,7 @@ pub(crate) mod tests {
         let mut state = state(Driver::Claude);
         state.steered = true;
         let aborted = claude(
-            &state,
+            state.clone(),
             &json!({"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming"}),
             &timestamp(),
         );
@@ -1570,7 +1624,7 @@ pub(crate) mod tests {
         let mut state = aborted.state;
         state.interrupted = true;
         let stopped = claude(
-            &state,
+            state.clone(),
             &json!({"type":"result","subtype":"error_during_execution","is_error":true}),
             &timestamp(),
         );
@@ -1593,7 +1647,7 @@ pub(crate) mod tests {
             json!({"type":"assistant","message":{"id":"native","content":[{"type":"thinking","thinking":"Thought"}]}}),
             json!({"type":"assistant","message":{"id":"native","content":[{"type":"text","text":"Answer"}]}}),
         ] {
-            state = claude(&state, &frame, &timestamp()).state;
+            state = claude(state.clone(), &frame, &timestamp()).state;
         }
         assert_eq!(state.items.len(), 2);
         assert!(matches!(
@@ -1608,13 +1662,13 @@ pub(crate) mod tests {
     #[test]
     fn child_frames_and_codex_user_echo_do_not_create_root_tool_or_message_items() {
         let child = claude(
-            &state(Driver::Claude),
+            state(Driver::Claude),
             &json!({"type":"assistant","parent_tool_use_id":"task","message":{"content":[{"type":"text","text":"Child"}]}}),
             &timestamp(),
         );
         assert!(child.payloads.is_empty());
         let echo = codex(
-            &state(Driver::Codex),
+            state(Driver::Codex),
             "item/started",
             &json!({"item":{"id":"user","type":"userMessage"}}),
             None,
@@ -1627,7 +1681,7 @@ pub(crate) mod tests {
         let state = state(Driver::Codex);
         let now = timestamp();
         let delta = codex(
-            &state,
+            state.clone(),
             "item/agentMessage/delta",
             &json!({"itemId":"text","delta":"Hi"}),
             None,
@@ -1635,7 +1689,7 @@ pub(crate) mod tests {
         );
         assert!(state.items.is_empty());
         let result = codex(
-            &delta.state,
+            delta.state.clone(),
             "item/completed",
             &json!({"item":{"type":"agentMessage","id":"text","text":"Hi!"}}),
             None,
@@ -1646,7 +1700,7 @@ pub(crate) mod tests {
             matches!(&result.state.items["text"].body,TurnItemBody::AssistantMessage {text,streaming:false,..} if text=="Hi!")
         );
         let done = codex(
-            &result.state,
+            result.state.clone(),
             "turn/completed",
             &json!({"turn":{"status":"completed"}}),
             None,
@@ -1655,7 +1709,7 @@ pub(crate) mod tests {
         assert_eq!(done.state.run.status, RunStatus::Completed);
         assert!(
             codex(
-                &done.state,
+                done.state.clone(),
                 "item/agentMessage/delta",
                 &json!({"itemId":"late","delta":"late"}),
                 None,
@@ -1673,7 +1727,7 @@ pub(crate) mod tests {
         let initial = state(Driver::Codex);
         let now = timestamp();
         let approval = codex(
-            &initial,
+            initial.clone(),
             "item/commandExecution/requestApproval",
             &json!({"command":"pwd"}),
             Some(&json!(4)),
@@ -1701,7 +1755,7 @@ pub(crate) mod tests {
         );
         assert!(
             codex(
-                &initial,
+                initial.clone(),
                 "account/chatgptAuthTokens/refresh",
                 &json!({}),
                 Some(&json!(5)),
@@ -1722,7 +1776,7 @@ pub(crate) mod tests {
             ordinal: None,
         });
         let done = claude(
-            &initial,
+            initial.clone(),
             &json!({"type":"result","subtype":"success","result":"continued"}),
             &timestamp(),
         );
@@ -1739,7 +1793,7 @@ pub(crate) mod tests {
     fn unsupported_claude_blocks_and_healthy_rate_limits_do_not_create_notices() {
         let initial = state(Driver::Claude);
         let unsupported = claude(
-            &initial,
+            initial.clone(),
             &json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"future_block"}}}),
             &timestamp(),
         );
@@ -1748,7 +1802,7 @@ pub(crate) mod tests {
         for status in ["allowed", "allowed_warning"] {
             assert!(
                 claude(
-                    &initial,
+                    initial.clone(),
                     &json!({"type":"rate_limit_event","rate_limit_info":{"status":status}}),
                     &timestamp()
                 )
@@ -1758,7 +1812,7 @@ pub(crate) mod tests {
         }
         assert!(
             !claude(
-                &initial,
+                initial.clone(),
                 &json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}),
                 &timestamp()
             )
@@ -1770,14 +1824,14 @@ pub(crate) mod tests {
     fn claude_initialization_does_not_consume_pending_context() {
         let initial = state(Driver::Claude);
         let result = claude(
-            &initial,
+            initial.clone(),
             &json!({"type":"system","subtype":"init"}),
             &timestamp(),
         );
         assert_eq!(result.state.turn.status, TurnStatus::Pending);
         assert!(result.payloads.is_empty());
         let started = claude(
-            &result.state,
+            result.state.clone(),
             &json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"message"}}}),
             &timestamp(),
         );
@@ -1792,9 +1846,14 @@ pub(crate) mod tests {
             json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
             json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}),
         ] {
-            state = claude(&state, &json!({"type":"stream_event","event":event}), &now).state;
+            state = claude(
+                state.clone(),
+                &json!({"type":"stream_event","event":event}),
+                &now,
+            )
+            .state;
         }
-        state=claude(&state,&json!({"type":"assistant","message":{"id":"msg-1","content":[{"type":"text","text":"Hi!"}]}}),&now).state;
+        state=claude(state.clone(),&json!({"type":"assistant","message":{"id":"msg-1","content":[{"type":"text","text":"Hi!"}]}}),&now).state;
         assert_eq!(state.items.len(), 1);
 
         assert!(
@@ -1802,7 +1861,7 @@ pub(crate) mod tests {
         );
         state.interrupted = true;
         let result = claude(
-            &state,
+            state.clone(),
             &json!({"type":"result","subtype":"success","result":"Hi!"}),
             &now,
         );
@@ -1813,7 +1872,7 @@ pub(crate) mod tests {
         let initial = state(Driver::Claude);
         let now = timestamp();
         let result = claude(
-            &initial,
+            initial.clone(),
             &json!({"type":"control_request","request_id":"plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"  # Plan\nDo it  "}}}),
             &now,
         );
@@ -1823,7 +1882,7 @@ pub(crate) mod tests {
             matches!(&result.state.items["proposed-plan"].body,TurnItemBody::ProposedPlan{markdown,..} if markdown=="# Plan\nDo it")
         );
         let empty = claude(
-            &initial,
+            initial.clone(),
             &json!({"type":"control_request","request_id":"plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{}}}),
             &now,
         );
@@ -1833,7 +1892,7 @@ pub(crate) mod tests {
     #[test]
     fn structured_claude_answers_are_joined_and_required_is_preserved() {
         let result = claude(
-            &state(Driver::Claude),
+            state(Driver::Claude),
             &json!({"type":"control_request","request_id":"q","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which?","required":false,"multiSelect":true}]}}}),
             &timestamp(),
         );
@@ -1851,7 +1910,7 @@ pub(crate) mod tests {
         #[test]
         fn codex_streaming_is_pure_and_accumulates_exactly(parts in proptest::collection::vec("[a-z]{0,20}",0..30)) {
             let original=state(Driver::Codex);let now=timestamp();let mut current=original.clone();
-            for part in &parts {current=codex(&current,"item/agentMessage/delta",&json!({"itemId":"text","delta":part}),None,&now).state;}
+            for part in &parts {current=codex(current.clone(),"item/agentMessage/delta",&json!({"itemId":"text","delta":part}),None,&now).state;}
             proptest::prop_assert!(original.items.is_empty());
             if let Some(item)=current.items.get("text") {let TurnItemBody::AssistantMessage{text,..}=&item.body else {unreachable!()};proptest::prop_assert_eq!(text, &parts.concat());}
         }

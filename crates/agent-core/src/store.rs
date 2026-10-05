@@ -51,11 +51,12 @@ enum OwnerEvent {
         host_name: String,
         ticket: transport::Ticket,
         session: transport::Session,
-        events: Updates,
+        events: Box<Updates>,
         complete: oneshot::Sender<()>,
     },
     Shell(u64, ShellStreamItem),
     Thread(u64, ThreadId, ThreadStreamItem),
+    SubscriptionFailed(u64, Option<ThreadId>),
     Notification(u64, protocol::Notification),
     Disconnected(u64, String),
     Finished(u64, Box<JobResult>),
@@ -131,6 +132,13 @@ struct PendingJob {
     sent: Option<(String, Draft)>,
     launched: Option<ThreadId>,
 }
+fn delivery_id(call: &Call) -> Option<&CommandId> {
+    match call {
+        Call::DispatchCommand(c) => Some(&c.command_id),
+        Call::LaunchThread(l) => Some(&l.create.command_id),
+        _ => None,
+    }
+}
 fn mutation_thread(call: &Call) -> Option<ThreadId> {
     match call {
         Call::DispatchCommand(command) => Some(command.thread_id.clone()),
@@ -148,6 +156,7 @@ struct Owner {
     visited: BTreeMap<ThreadId, Timestamp>,
     rollback_receipts: BTreeMap<CommandId, u64>,
     dictations: BTreeMap<String, CancellationToken>,
+    delivery_cancellations: BTreeMap<CommandId, CancellationToken>,
 }
 
 fn invalid(error: impl std::fmt::Display) -> PeerError {
@@ -249,6 +258,7 @@ impl Store {
             visited: BTreeMap::new(),
             rollback_receipts: BTreeMap::new(),
             dictations: BTreeMap::new(),
+            delivery_cancellations: BTreeMap::new(),
         };
         let stopped = stop.clone();
         tokio::spawn(async move {
@@ -316,7 +326,7 @@ impl Store {
                 host_name,
                 ticket: ticket.clone(),
                 session,
-                events,
+                events: Box::new(events),
                 complete,
             })
             .await
@@ -446,14 +456,28 @@ impl Owner {
                             .messages
                             .iter()
                             .find(|m| m.id == run.user_message_id)
+                            .map(|m| m.text.as_str())
+                            .or_else(|| {
+                                projection
+                                    .turn_items
+                                    .iter()
+                                    .find_map(|item| match &item.body {
+                                        TurnItemBody::UserMessage {
+                                            message_id, text, ..
+                                        } if *message_id == run.user_message_id => {
+                                            Some(text.as_str())
+                                        }
+                                        _ => None,
+                                    })
+                            })
                     })
                 });
-                if let Some(message) = restored {
+                if let Some(text) = restored {
                     let mut draft = self.state.draft_for_thread(&command.thread_id);
-                    if !draft.text.is_empty() && !message.text.is_empty() {
+                    if !draft.text.is_empty() && !text.is_empty() {
                         draft.text.push_str("\n\n");
                     }
-                    draft.text.push_str(&message.text);
+                    draft.text.push_str(text);
                     self.state
                         .drafts
                         .insert(command.thread_id.to_string(), draft);
@@ -581,28 +605,35 @@ impl Owner {
         let epoch = network.epoch;
         let peer = network.peer.clone();
         let sender = self.sender.clone();
-        let cancellation = match &call {
-            Call::Transcribe(params) => params
-                .preparation
-                .as_ref()
-                .and_then(|id| self.dictations.get(id))
-                .cloned(),
-            _ => None,
-        }
-        .unwrap_or_default();
+        let cancellation = if let Some(id) = delivery_id(&call) {
+            let token = CancellationToken::new();
+            self.delivery_cancellations
+                .insert(id.clone(), token.clone());
+            token
+        } else {
+            match &call {
+                Call::Transcribe(params) => params
+                    .preparation
+                    .as_ref()
+                    .and_then(|id| self.dictations.get(id))
+                    .cloned(),
+                _ => None,
+            }
+            .unwrap_or_default()
+        };
         let task = tokio::spawn(async move {
             let mut delay = Duration::from_millis(250);
             let result = loop {
                 let result = tokio::select! {
                     biased;
-                    _ = cancellation.cancelled() => Err(invalid("Dictation cancelled")),
+                    _ = cancellation.cancelled() => Err(invalid("Request cancelled")),
                     result = execute(&peer, &call) => result,
                 };
                 if mutation_thread(&call).is_some()
                     && matches!(result, Err(PeerError::RequestTimeout { .. }))
                     && !peer.is_closed()
                 {
-                    tokio::time::sleep(delay).await;
+                    tokio::select! { _ = cancellation.cancelled() => break Err(invalid("Request cancelled")), _ = tokio::time::sleep(delay) => {} }
                     delay = (delay * 2).min(Duration::from_secs(5));
                     continue;
                 }
@@ -674,6 +705,9 @@ impl Owner {
                         peer.close().await;
                     });
                 }
+                for (_, token) in std::mem::take(&mut self.delivery_cancellations) {
+                    token.cancel();
+                }
                 self.epoch += 1;
                 self.state.connected = true;
                 self.state.host_name = Some(host_name);
@@ -688,7 +722,7 @@ impl Owner {
                         self.sender.clone(),
                     ))),
                     AbortOnDropHandle::new(tokio::spawn(notifications(
-                        events,
+                        *events,
                         epoch,
                         self.sender.clone(),
                     ))),
@@ -839,6 +873,17 @@ impl Owner {
                         })));
                 } else {
                     let _ = complete.send(Err(invalid("Connect to the Host")));
+                }
+            }
+            OwnerEvent::SubscriptionFailed(epoch, thread) => {
+                if self
+                    .network
+                    .as_ref()
+                    .is_some_and(|network| network.epoch == epoch)
+                    && (thread.is_none() || thread.as_ref() == self.state.selected_thread.as_ref())
+                {
+                    self.state.error = Some("This conversation is too large to load.".into());
+                    self.publish();
                 }
             }
             OwnerEvent::Dictation(id, cancel) => {
@@ -1104,6 +1149,9 @@ impl Owner {
             Intent::DiscardPending { command_id } => {
                 let id = CommandId::new(command_id).map_err(invalid)?;
                 if self.state.uncertain_commands.remove(&id) {
+                    if let Some(token) = self.delivery_cancellations.get(&id) {
+                        token.cancel();
+                    }
                     self.state
                         .pending_commands
                         .retain(|command| command.command_id != id);
@@ -1193,7 +1241,8 @@ impl Owner {
                         self.state.current_draft().text,
                     );
                 }
-                self.state.drafts.insert(self.state.draft_key(), draft);
+                let draft_key = self.state.draft_key();
+                self.state.drafts.insert(draft_key, draft);
                 None
             }
             Intent::Send { behavior } => {
@@ -1378,7 +1427,8 @@ impl Owner {
                         None,
                         None,
                     )?;
-                    if let Some(d) = self.state.drafts.get_mut(&self.state.draft_key()) {
+                    let key = self.state.draft_key();
+                    if let Some(d) = self.state.drafts.get_mut(&key) {
                         d.interaction_mode = mode.as_str().into();
                     }
                     body = Some(CommandBody::MessageDispatch(input));
@@ -1503,7 +1553,8 @@ impl Owner {
                         let mut draft = self.state.current_draft();
                         draft.text = text;
                         self.state.editing_run = Some(id);
-                        self.state.drafts.insert(self.state.draft_key(), draft);
+                        let draft_key = self.state.draft_key();
+                        self.state.drafts.insert(draft_key, draft);
                     }
                     QueueAction::SaveEdit => {
                         if self.state.draft_pending() {
@@ -1523,7 +1574,8 @@ impl Owner {
                         sent = Some((self.state.draft_key(), draft));
                     }
                     QueueAction::CancelEdit => {
-                        self.state.drafts.remove(&self.state.draft_key());
+                        let key = self.state.draft_key();
+                        self.state.drafts.remove(&key);
                         self.state.editing_run = None;
                     }
                     QueueAction::Reorder { run_ids } => {
@@ -1586,7 +1638,8 @@ impl Owner {
                 let selection = draft.selection().map_err(invalid)?;
                 self.state.default_draft = draft.clone();
                 self.state.default_draft.text.clear();
-                self.state.drafts.insert(self.state.draft_key(), draft);
+                let draft_key = self.state.draft_key();
+                self.state.drafts.insert(draft_key, draft);
                 if target.is_some() {
                     body = Some(if switched {
                         CommandBody::ProviderSwitch {
@@ -1604,7 +1657,8 @@ impl Owner {
                 let runtime_mode = crate::commands::runtime_mode(&mode).map_err(invalid)?;
                 let mut draft = self.state.current_draft();
                 draft.runtime_mode = runtime_mode.as_str().into();
-                self.state.drafts.insert(self.state.draft_key(), draft);
+                let draft_key = self.state.draft_key();
+                self.state.drafts.insert(draft_key, draft);
                 if target.is_some() {
                     body = Some(CommandBody::ThreadRuntimeModeSet { runtime_mode });
                 }
@@ -1614,7 +1668,8 @@ impl Owner {
                 let interaction_mode = crate::commands::interaction_mode(&mode).map_err(invalid)?;
                 let mut draft = self.state.current_draft();
                 draft.interaction_mode = interaction_mode.as_str().into();
-                self.state.drafts.insert(self.state.draft_key(), draft);
+                let draft_key = self.state.draft_key();
+                self.state.drafts.insert(draft_key, draft);
                 if target.is_some() {
                     body = Some(CommandBody::ThreadInteractionModeSet { interaction_mode });
                 }
@@ -1779,6 +1834,7 @@ impl Owner {
                         phase: TerminalPhase::Starting,
                         output,
                         sequence,
+                        output_bytes: previous.map_or(0, |t| t.output_bytes),
                     },
                 );
                 Some(Call::StartTerminal(op::StartTerminal { handle, cwd, size }))
@@ -1861,6 +1917,12 @@ impl Owner {
             launched,
         } = result;
         let mutation = mutation_thread(&call);
+        let edit_accepted = sent.as_ref().is_some_and(|(key, draft)| {
+            self.state
+                .drafts
+                .get(key)
+                .is_none_or(|current| current.text == draft.text)
+        });
         let should_navigate = sent
             .as_ref()
             .is_some_and(|(key, _)| self.state.draft_key() == *key);
@@ -1868,17 +1930,21 @@ impl Owner {
             Ok(Reply::Remote(host)) => Some(host.id.clone()),
             _ => None,
         };
-        let cancelled = if let Call::Transcribe(params) = &call {
-            params
-                .preparation
-                .as_ref()
-                .and_then(|id| self.dictations.remove(id))
-                .is_some_and(|token| token.is_cancelled())
-        } else {
-            false
-        };
+        let delivery_cancelled = delivery_id(&call)
+            .and_then(|id| self.delivery_cancellations.remove(id))
+            .is_some_and(|token| token.is_cancelled());
+        let cancelled = delivery_cancelled
+            || if let Call::Transcribe(params) = &call {
+                params
+                    .preparation
+                    .as_ref()
+                    .and_then(|id| self.dictations.remove(id))
+                    .is_some_and(|token| token.is_cancelled())
+            } else {
+                false
+            };
         let result = if cancelled {
-            Err(invalid("Dictation cancelled"))
+            Err(invalid("Operation cancelled"))
         } else {
             result
         };
@@ -1892,11 +1958,7 @@ impl Owner {
                         &error.to_string(),
                     ));
                 }
-                if let Some(id) = match &call {
-                    Call::DispatchCommand(c) => Some(&c.command_id),
-                    Call::LaunchThread(l) => Some(&l.create.command_id),
-                    _ => None,
-                } {
+                if !delivery_cancelled && let Some(id) = delivery_id(&call) {
                     if !matches!(
                         error,
                         PeerError::Remote {
@@ -1945,11 +2007,7 @@ impl Owner {
                 }
                 match reply {
                     Reply::Receipt(receipt) => {
-                        if let Some(id) = match &call {
-                            Call::DispatchCommand(c) => Some(&c.command_id),
-                            Call::LaunchThread(l) => Some(&l.create.command_id),
-                            _ => None,
-                        } {
+                        if let Some(id) = delivery_id(&call) {
                             self.state.uncertain_commands.remove(id);
                         }
                         if let Call::DispatchCommand(command) = &call {
@@ -2009,6 +2067,7 @@ impl Owner {
                                 ..
                             }) = &call
                                 && self.state.editing_run.as_ref() == Some(run_id)
+                                && edit_accepted
                             {
                                 self.state.editing_run = None;
                             }
@@ -2304,15 +2363,16 @@ impl Owner {
             t.sequence += 1;
             if reset_size.is_some() {
                 t.output.clear();
+                t.output_bytes = 0;
             }
-            t.output.push(Arc::new(TerminalOutput {
+            t.output_bytes += data.len();
+            t.output.push_back(Arc::new(TerminalOutput {
                 sequence: t.sequence,
                 data,
                 reset_size,
             }));
-            let mut bytes = t.output.iter().map(|o| o.data.len()).sum::<usize>();
-            while bytes > 8 * 1024 * 1024 && t.output.len() > 1 {
-                bytes -= t.output.remove(0).data.len();
+            while t.output_bytes > 8 * 1024 * 1024 && t.output.len() > 1 {
+                t.output_bytes -= t.output.pop_front().expect("nonempty output").data.len();
             }
         }
     }
@@ -2395,6 +2455,14 @@ async fn notifications(mut events: Updates, epoch: u64, sender: mpsc::Sender<Own
         }
     }
 }
+fn oversized_subscription(error: &PeerError) -> bool {
+    if let PeerError::Remote { error, .. } = error {
+        serde_json::from_str::<agent_protocol::error::RpcFailure>(error)
+            .is_ok_and(|failure| failure.code == "response_too_large")
+    } else {
+        false
+    }
+}
 async fn shell_stream(
     peer: Arc<Client>,
     epoch: u64,
@@ -2412,6 +2480,12 @@ async fn shell_stream(
                 after_sequence: after,
             }))
             .await;
+        if stream.as_ref().is_err_and(oversized_subscription) {
+            let _ = sender
+                .send(OwnerEvent::SubscriptionFailed(epoch, None))
+                .await;
+            return;
+        }
         if let Ok((first, mut stream)) = stream {
             if sender.send(OwnerEvent::Shell(epoch, first)).await.is_err() {
                 return;
@@ -2443,6 +2517,12 @@ async fn thread_stream(
                 after_sequence: after,
             }))
             .await;
+        if stream.as_ref().is_err_and(oversized_subscription) {
+            let _ = sender
+                .send(OwnerEvent::SubscriptionFailed(epoch, Some(id.clone())))
+                .await;
+            return;
+        }
         if let Ok((first, mut stream)) = stream {
             if sender
                 .send(OwnerEvent::Thread(epoch, id.clone(), first))
@@ -2488,6 +2568,12 @@ mod tests {
             owner.network = Some(Network { peer: client.clone(), session: session.clone(), ticket: ticket.clone(), epoch: 0, tasks: vec![], thread: None, mutations: BTreeMap::new(), running_mutations: BTreeSet::new() });
             let (sender, mut receiver) = mpsc::channel(8);
             owner.sender = sender;
+            let (complete, timed_out) = oneshot::channel();
+            owner.handle(OwnerEvent::Resume { endpoint: endpoint.clone(), ticket: ticket.clone(), complete }).await;
+            let IncomingRequest::Call(unanswered) = incoming.accept_request().await.unwrap() else { panic!("health probe") };
+            assert!(matches!(unanswered.call, Call::HostStatus(_)));
+            assert!(timed_out.await.unwrap().is_none(), "open transport flags do not prove liveness");
+            drop(unanswered);
             let (complete, answer) = oneshot::channel();
             owner.handle(OwnerEvent::Resume { endpoint: endpoint.clone(), ticket, complete }).await;
             let IncomingRequest::Call(mut probe) = incoming.accept_request().await.unwrap() else { panic!("health probe") };
@@ -2544,6 +2630,7 @@ mod tests {
             visited: BTreeMap::new(),
             rollback_receipts: BTreeMap::new(),
             dictations: BTreeMap::new(),
+            delivery_cancellations: BTreeMap::new(),
         }
     }
     fn queued_state() -> Snapshot {
@@ -2625,6 +2712,24 @@ mod tests {
         state
     }
     #[test]
+    fn an_oversized_subscription_is_permanent_only_with_typed_evidence() {
+        let remote = |code: &str| PeerError::Remote {
+            error: serde_json::to_string(&agent_protocol::error::RpcFailure {
+                code: code.into(),
+                message: "fixture".into(),
+                delivery: agent_protocol::error::Delivery::NotSent,
+            })
+            .unwrap(),
+            delivery: agent_protocol::error::Delivery::NotSent,
+            sequence: None,
+        };
+        assert!(oversized_subscription(&remote("response_too_large")));
+        assert!(!oversized_subscription(&remote("temporarily_unavailable")));
+        assert!(!oversized_subscription(&PeerError::ConnectionClosed(
+            "response_too_large".into()
+        )));
+    }
+    #[test]
     fn search_respects_server_limits_and_clear_remains_local() {
         let mut owner = owner(Snapshot::default());
         owner.state.connected = true;
@@ -2654,10 +2759,11 @@ mod tests {
         let mut owner = owner(queued_state());
         let mut draft = owner.state.current_draft();
         draft.text = "Unsent main draft".into();
-        owner
-            .state
-            .drafts
-            .insert(owner.state.draft_key(), draft.clone());
+        {
+            let draft_key = owner.state.draft_key();
+            let draft_value = draft.clone();
+            owner.state.drafts.insert(draft_key, draft_value)
+        };
         let run = owner
             .state
             .projection()
@@ -2722,11 +2828,60 @@ mod tests {
         assert_eq!(owner.state.current_draft(), draft);
     }
     #[test]
+    fn typing_during_queue_save_remains_in_the_queue_editor() {
+        let mut owner = owner(queued_state());
+        let run = owner
+            .state
+            .projection()
+            .unwrap()
+            .runs
+            .iter()
+            .find(|r| r.status == RunStatus::Queued)
+            .unwrap()
+            .id
+            .clone();
+        owner
+            .prepare(Intent::Queue {
+                action: QueueAction::Edit {
+                    run_id: run.to_string(),
+                },
+            })
+            .unwrap();
+        let (call, sent, _) = owner
+            .prepare(Intent::Queue {
+                action: QueueAction::SaveEdit,
+            })
+            .unwrap();
+        owner
+            .prepare(Intent::EditDraft {
+                text: "newer queue edit".into(),
+                base_text: None,
+            })
+            .unwrap();
+        owner.finished(JobResult {
+            call: call.unwrap(),
+            result: Ok(Reply::Receipt(rpc::DispatchReceipt {
+                thread_id: owner.state.selected_thread.clone().unwrap(),
+                sequence: 2,
+                replayed: false,
+            })),
+            complete: None,
+            sent,
+            launched: None,
+        });
+        assert_eq!(owner.state.editing_run, Some(run));
+        assert_eq!(owner.state.current_draft().text, "newer queue edit");
+    }
+    #[test]
     fn awaiting_message_cannot_be_submitted_twice() {
         let mut owner = owner(queued_state());
         let mut draft = owner.state.current_draft();
         draft.text = "Send me once".into();
-        owner.state.drafts.insert(owner.state.draft_key(), draft);
+        {
+            let draft_key = owner.state.draft_key();
+            let draft_value = draft;
+            owner.state.drafts.insert(draft_key, draft_value)
+        };
         let (call, _, _) = owner
             .prepare(Intent::Send {
                 behavior: SendBehavior::Default,
@@ -2760,10 +2915,11 @@ mod tests {
             text: "before".into(),
             ..owner.state.current_draft()
         };
-        owner
-            .state
-            .drafts
-            .insert(owner.state.draft_key(), draft.clone());
+        {
+            let draft_key = owner.state.draft_key();
+            let draft_value = draft.clone();
+            owner.state.drafts.insert(draft_key, draft_value)
+        };
         owner
             .prepare(Intent::EditDraft {
                 text: "after".into(),
@@ -3093,15 +3249,62 @@ mod tests {
         second.close().await.unwrap();
     }
     #[test]
+    fn discarded_delivery_cancels_retry_and_ignores_late_receipts() {
+        let mut owner = owner(queued_state());
+        let run = owner.state.projection().unwrap().runs[0].id.to_string();
+        let (call, sent, launched) = owner
+            .prepare(Intent::Fork {
+                source_thread_id: "thread".into(),
+                run_id: run,
+            })
+            .unwrap();
+        let call = call.unwrap();
+        let id = delivery_id(&call).unwrap().clone();
+        let token = CancellationToken::new();
+        owner
+            .delivery_cancellations
+            .insert(id.clone(), token.clone());
+        let Call::DispatchCommand(command) = &call else {
+            unreachable!()
+        };
+        owner.state.pending_commands.push(command.clone());
+        owner.state.uncertain_commands.insert(id.clone());
+        owner
+            .prepare(Intent::DiscardPending {
+                command_id: id.to_string(),
+            })
+            .unwrap();
+        assert!(token.is_cancelled());
+        owner.finished(JobResult {
+            call,
+            result: Ok(Reply::Receipt(rpc::DispatchReceipt {
+                thread_id: ThreadId::new("thread").unwrap(),
+                sequence: 10,
+                replayed: false,
+            })),
+            complete: None,
+            sent,
+            launched,
+        });
+        assert_eq!(
+            owner.state.selected_thread.as_ref().unwrap().as_str(),
+            "thread"
+        );
+        assert!(owner.state.pending_commands.is_empty());
+        assert!(owner.state.uncertain_commands.is_empty());
+        assert!(owner.delivery_cancellations.is_empty());
+    }
+    #[test]
     fn unknown_delivery_can_stop_retrying_without_erasing_the_draft() {
         let mut owner = owner(queued_state());
-        owner.state.drafts.insert(
-            owner.state.draft_key(),
-            Draft {
+        {
+            let draft_key = owner.state.draft_key();
+            let draft_value = Draft {
                 text: "unsent".into(),
                 ..owner.state.current_draft()
-            },
-        );
+            };
+            owner.state.drafts.insert(draft_key, draft_value)
+        };
         let command = command(
             owner.state.selected_thread.clone().unwrap(),
             CommandBody::ThreadMarkUnread,
@@ -3148,29 +3351,88 @@ mod tests {
     #[tokio::test]
     async fn mobile_cold_start_keeps_drafts_without_visiting_saved_selection() {
         let mut state = queued_state();
-        state.drafts.insert(
-            "thread".into(),
-            Draft {
+        {
+            let draft_key = "thread".into();
+            let draft_value = Draft {
                 text: "keep me".into(),
                 ..state.current_draft()
-            },
-        );
+            };
+            state.drafts.insert(draft_key, draft_value)
+        };
         let store = Store::offline_for(state, CreationSource::Mobile);
         assert!(store.snapshot().selected_thread.is_none());
         assert_eq!(store.snapshot().drafts["thread"].text, "keep me");
         store.close().await.unwrap();
     }
     #[test]
+    fn terminal_snapshots_share_output_and_retained_bytes_stay_bounded() {
+        let mut owner = owner(queued_state());
+        owner
+            .prepare(Intent::StartTerminal {
+                handle: "terminal".into(),
+                cwd: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+            })
+            .unwrap();
+        for _ in 0..10 {
+            owner.terminal_output("terminal", vec![1; 1024 * 1024], None);
+        }
+        let old = owner.state.clone();
+        let output = &old.terminals["terminal"].output;
+        assert_eq!(old.terminals["terminal"].output_bytes, 8 * 1024 * 1024);
+        assert!(output.shares_storage(&owner.state.terminals["terminal"].output));
+        assert!(old.drafts.shares_storage(&owner.state.drafts));
+        assert!(
+            old.pending_commands
+                .shares_storage(&owner.state.pending_commands)
+        );
+        owner.terminal_output(
+            "terminal",
+            b"reset".to_vec(),
+            Some(op::TerminalSize { cols: 80, rows: 24 }),
+        );
+        assert_eq!(owner.state.terminals["terminal"].output_bytes, 5);
+        assert_eq!(owner.state.terminals["terminal"].output.len(), 1);
+        assert_eq!(old.terminals["terminal"].output.len(), 8);
+    }
+    #[test]
+    fn dictation_preparation_uses_the_lossless_intent_queue_when_stream_events_are_full() {
+        let (sender, _receiver) = mpsc::channel(1);
+        sender
+            .try_send(OwnerEvent::Performance(Default::default()))
+            .unwrap_or_else(|_| panic!("empty channel"));
+        let (intents, mut input) = mpsc::unbounded_channel();
+        let (_, snapshots) = watch::channel(Arc::new(Snapshot::default()));
+        let store = Store {
+            inner: Arc::new(Inner {
+                sender,
+                intents,
+                snapshots,
+                stop: CancellationToken::new(),
+            }),
+        };
+        let preparation = store.prepare_dictation();
+        let OwnerEvent::Dictation(id, token) = input.try_recv().unwrap() else {
+            panic!("preparation")
+        };
+        assert_eq!(id, preparation.id());
+        assert!(!token.is_cancelled());
+        drop(preparation);
+        assert!(token.is_cancelled());
+    }
+    #[test]
     fn cancelled_dictation_cannot_append_a_late_transcript() {
         let mut owner = owner(queued_state());
         let key = owner.state.draft_key();
-        owner.state.drafts.insert(
-            key.clone(),
-            Draft {
+        {
+            let draft_key = key.clone();
+            let draft_value = Draft {
                 text: "keep".into(),
                 ..owner.state.current_draft()
-            },
-        );
+            };
+            owner.state.drafts.insert(draft_key, draft_value)
+        };
         let token = CancellationToken::new();
         owner.dictations.insert("recording".into(), token.clone());
         token.cancel();
@@ -3193,7 +3455,11 @@ mod tests {
         let mut owner = owner(queued_state());
         let mut draft = owner.state.current_draft();
         draft.instance_id = "claude".into();
-        owner.state.drafts.insert(owner.state.draft_key(), draft);
+        {
+            let draft_key = owner.state.draft_key();
+            let draft_value = draft;
+            owner.state.drafts.insert(draft_key, draft_value)
+        };
         let (call, _, _) = owner
             .prepare(Intent::SetModel {
                 instance_id: "claude".into(),
@@ -3368,10 +3634,11 @@ mod tests {
             text: "keep my draft".into(),
             ..owner.state.current_draft()
         };
-        owner
-            .state
-            .drafts
-            .insert(owner.state.draft_key(), draft.clone());
+        {
+            let draft_key = owner.state.draft_key();
+            let draft_value = draft.clone();
+            owner.state.drafts.insert(draft_key, draft_value)
+        };
         let run = owner
             .state
             .projection()

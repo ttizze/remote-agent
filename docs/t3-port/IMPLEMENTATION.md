@@ -9,7 +9,7 @@
 | M3 | 未着手 | T3 相当の周辺機能の拡張 |
 
 M1 は `af584c44` で完成し、同じ commit の Host・GPUI・iOS・Android
-のビルドを確認済み。新しい会話 RPC の ALPN は `remote-agent/streams/7`。
+のビルドを確認済み。新しい会話 RPC の ALPN は `remote-agent/streams/8`。
 旧形式の互換性・移行は設けない。iroh、QR ペアリング、provider プロセス管理、
 terminal・files・browser・dictation・accounts・既存 worktree 機能は維持する。
 

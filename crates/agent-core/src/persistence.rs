@@ -14,12 +14,12 @@ struct LocalState {
 }
 pub fn encode(snapshot: &Snapshot) -> Result<Vec<u8>, serde_json::Error> {
     serde_json::to_vec(&LocalState {
-        drafts: snapshot.drafts.clone(),
+        drafts: (*snapshot.drafts).clone(),
         default_draft: snapshot.default_draft.clone(),
         selected_thread: snapshot.selected_thread.clone(),
         selected_project: snapshot.selected_project.clone(),
-        pending_commands: snapshot.pending_commands.clone(),
-        pending_launches: snapshot.pending_launches.clone(),
+        pending_commands: (*snapshot.pending_commands).clone(),
+        pending_launches: (*snapshot.pending_launches).clone(),
     })
 }
 pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
@@ -29,12 +29,12 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
         serde_json::from_slice(bytes)?
     };
     Ok(Snapshot {
-        drafts: local.drafts,
+        drafts: local.drafts.into(),
         default_draft: local.default_draft,
         selected_thread: local.selected_thread,
         selected_project: local.selected_project,
-        pending_commands: local.pending_commands,
-        pending_launches: local.pending_launches,
+        pending_commands: local.pending_commands.into(),
+        pending_launches: local.pending_launches.into(),
         ..Snapshot::default()
     })
 }

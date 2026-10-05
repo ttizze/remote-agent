@@ -303,6 +303,101 @@ pub fn input_text(projection: &ThreadProjection, run: &Run, text: &str) -> Strin
     }
 }
 
+/// The previous executed run determines a provider return; queued placeholders never do.
+pub fn missed_provider_context(
+    runs: &[Run],
+    current_ordinal: u64,
+    target_provider: &ProviderThreadId,
+    last_seen: u64,
+    lost_context: bool,
+) -> Option<(u64, u64, HandoffStrategy)> {
+    let previous = runs
+        .iter()
+        .filter(|r| {
+            r.ordinal < current_ordinal
+                && r.started_at.is_some()
+                && r.status != RunStatus::RolledBack
+        })
+        .max_by_key(|r| r.ordinal);
+    let missed = previous.map_or(0, |r| r.ordinal);
+    if (previous.is_some_and(|r| r.provider_thread_id.as_ref() != Some(target_provider))
+        || lost_context)
+        && (last_seen < missed || lost_context)
+    {
+        Some((
+            last_seen + 1,
+            missed,
+            if last_seen > 0 {
+                HandoffStrategy::DeltaSinceTargetLastSeen
+            } else {
+                HandoffStrategy::FullThreadSummary
+            },
+        ))
+    } else {
+        None
+    }
+}
+/// A failed start did not consume portable/native coverage; bind it to the next run.
+pub fn retry_unconsumed(
+    transfers: &[ContextTransfer],
+    runs: &[Run],
+    handoffs: &[ContextHandoff],
+    now: &Timestamp,
+) -> Vec<EventPayload> {
+    let mut events = vec![];
+    for transfer in transfers.iter().filter(|t| {
+        matches!(
+            t.status,
+            TransferStatus::ResolvedNative | TransferStatus::ResolvedPortable
+        ) && t.target_run_id.as_ref().is_some_and(|id| {
+            runs.iter().any(|r| {
+                &r.id == id
+                    && r.started_at.is_none()
+                    && matches!(
+                        r.status,
+                        RunStatus::Failed | RunStatus::Cancelled | RunStatus::Interrupted
+                    )
+            })
+        })
+    }) {
+        let mut transfer = transfer.clone();
+        for handoff in handoffs.iter().filter(|h| {
+            h.transfer_id.as_ref() == Some(&transfer.id) && h.status == HandoffStatus::Ready
+        }) {
+            let mut handoff = handoff.clone();
+            handoff.status = HandoffStatus::Superseded;
+            handoff.updated_at = now.clone();
+            events.push(EventPayload::ContextHandoffUpdated(handoff));
+        }
+        transfer.status = TransferStatus::Pending;
+        transfer.target_run_id = None;
+        transfer.resolution = None;
+        transfer.error = None;
+        transfer.updated_at = now.clone();
+        events.push(EventPayload::ContextTransferUpdated(transfer));
+    }
+    events
+}
+/// Merge only the source's contribution since the last consumed merge from that fork.
+pub fn merge_from(
+    source_runs: &[Run],
+    consumed_transfers: &[ContextTransfer],
+    source_id: &ThreadId,
+) -> u64 {
+    consumed_transfers
+        .iter()
+        .filter(|t| {
+            t.kind == TransferKind::MergeBack
+                && t.source_thread_id == *source_id
+                && t.status == TransferStatus::Consumed
+        })
+        .filter_map(|t| t.source_point.run_id.as_ref())
+        .filter_map(|id| source_runs.iter().find(|r| &r.id == id))
+        .map(|r| r.ordinal + 1)
+        .max()
+        .unwrap_or(1)
+}
+
 /// Portable material for a fresh provider or for the delta a returning provider has missed.
 #[expect(
     clippy::too_many_arguments,
@@ -331,7 +426,10 @@ pub fn portable(
     .expect("derived id");
     let handoff = ContextHandoff {
         id: id.clone(),
-        transfer_id: transfer.map(|t| t.id.clone()),
+        transfer_id: Some(transfer.map_or_else(
+            || ContextTransferId::new(format!("transfer:{}:provider", run.id)).expect("derived id"),
+            |t| t.id.clone(),
+        )),
         thread_id: target.thread.id.clone(),
         target_run_id: run.id.clone(),
         from_provider_thread_ids: source
@@ -522,6 +620,76 @@ mod tests {
                 creation_source: CreationSource::Desktop,
             },
         )
+    }
+    #[test]
+    fn returning_provider_handoff_ignores_placeholders_and_recovers_fork_baseline() {
+        let p = finished().projection(&create().thread_id).unwrap();
+        let mut old = p.runs[0].clone();
+        old.ordinal = 1;
+        old.started_at = Some(now());
+        let target = old.provider_thread_id.clone().unwrap();
+        let mut away = old.clone();
+        away.ordinal = 2;
+        away.provider_thread_id = Some(ProviderThreadId::new("away").unwrap());
+        let mut placeholder = old.clone();
+        placeholder.ordinal = 3;
+        placeholder.started_at = None;
+        assert_eq!(
+            missed_provider_context(&[old, away, placeholder], 4, &target, 1, false),
+            Some((2, 2, HandoffStrategy::DeltaSinceTargetLastSeen))
+        );
+        assert_eq!(
+            missed_provider_context(&[], 1, &target, 0, true),
+            Some((1, 0, HandoffStrategy::FullThreadSummary))
+        );
+    }
+    #[test]
+    fn failed_start_rebinds_unconsumed_transfer_and_merge_coverage_is_incremental() {
+        let mut p = finished().projection(&create().thread_id).unwrap();
+        let run = p.runs[0].clone();
+        let mut events = portable(
+            &p,
+            &p,
+            &run,
+            None,
+            HandoffStrategy::FullThreadSummary,
+            1,
+            run.ordinal,
+            &now(),
+        );
+        let transfer = events
+            .iter()
+            .find_map(|e| {
+                if let EventPayload::ContextTransferUpdated(t) = e {
+                    Some(t.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        let handoff = events
+            .iter()
+            .find_map(|e| {
+                if let EventPayload::ContextHandoffUpdated(h) = e {
+                    Some(h.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        p.runs[0].status = RunStatus::Failed;
+        p.runs[0].started_at = None;
+        events = retry_unconsumed(std::slice::from_ref(&transfer), &p.runs, &[handoff], &now());
+        assert!(events.iter().any(|e| matches!(e, EventPayload::ContextTransferUpdated(t) if t.status == TransferStatus::Pending && t.target_run_id.is_none() && t.resolution.is_none())));
+        assert!(events.iter().any(|e| matches!(e, EventPayload::ContextHandoffUpdated(h) if h.status == HandoffStatus::Superseded)));
+        let mut consumed = transfer;
+        consumed.status = TransferStatus::Consumed;
+        consumed.kind = TransferKind::MergeBack;
+        assert!(retry_unconsumed(std::slice::from_ref(&consumed), &p.runs, &[], &now()).is_empty());
+        assert_eq!(
+            merge_from(&p.runs, &[consumed], &p.thread.id),
+            run.ordinal + 1
+        );
     }
     #[test]
     fn merge_uses_the_latest_provider_finished_run_and_waits_for_newer_active_work() {

@@ -956,22 +956,22 @@ pub struct ContextHandoff {
 #[serde(rename_all = "camelCase")]
 pub struct ThreadProjection {
     pub thread: AppThread,
-    pub runs: Vec<Run>,
-    pub attempts: Vec<RunAttempt>,
-    pub nodes: Vec<ExecutionNode>,
-    pub subagents: Vec<Subagent>,
-    pub provider_sessions: Vec<ProviderSession>,
-    pub provider_threads: Vec<ProviderThread>,
-    pub provider_turns: Vec<ProviderTurn>,
-    pub runtime_requests: Vec<RuntimeRequest>,
-    pub messages: Vec<ConversationMessage>,
-    pub plans: Vec<PlanArtifact>,
-    pub turn_items: Vec<TurnItem>,
-    pub checkpoint_scopes: Vec<CheckpointScope>,
-    pub checkpoints: Vec<Checkpoint>,
-    pub context_handoffs: Vec<ContextHandoff>,
-    pub context_transfers: Vec<ContextTransfer>,
-    pub visible_turn_items: Vec<ProjectedTurnItem>,
+    pub runs: crate::Shared<Vec<Run>>,
+    pub attempts: crate::Shared<Vec<RunAttempt>>,
+    pub nodes: crate::Shared<Vec<ExecutionNode>>,
+    pub subagents: crate::Shared<Vec<Subagent>>,
+    pub provider_sessions: crate::Shared<Vec<ProviderSession>>,
+    pub provider_threads: crate::Shared<Vec<ProviderThread>>,
+    pub provider_turns: crate::Shared<Vec<ProviderTurn>>,
+    pub runtime_requests: crate::Shared<Vec<RuntimeRequest>>,
+    pub messages: crate::Shared<Vec<ConversationMessage>>,
+    pub plans: crate::Shared<Vec<PlanArtifact>>,
+    pub turn_items: crate::Shared<Vec<TurnItem>>,
+    pub checkpoint_scopes: crate::Shared<Vec<CheckpointScope>>,
+    pub checkpoints: crate::Shared<Vec<Checkpoint>>,
+    pub context_handoffs: crate::Shared<Vec<ContextHandoff>>,
+    pub context_transfers: crate::Shared<Vec<ContextTransfer>>,
+    pub visible_turn_items: crate::Shared<Vec<ProjectedTurnItem>>,
     pub updated_at: Timestamp,
 }
 impl ThreadProjection {
@@ -979,22 +979,22 @@ impl ThreadProjection {
         Self {
             updated_at: thread.updated_at.clone(),
             thread,
-            runs: vec![],
-            attempts: vec![],
-            nodes: vec![],
-            subagents: vec![],
-            provider_sessions: vec![],
-            provider_threads: vec![],
-            provider_turns: vec![],
-            runtime_requests: vec![],
-            messages: vec![],
-            plans: vec![],
-            turn_items: vec![],
-            checkpoint_scopes: vec![],
-            checkpoints: vec![],
-            context_handoffs: vec![],
-            context_transfers: vec![],
-            visible_turn_items: vec![],
+            runs: vec![].into(),
+            attempts: vec![].into(),
+            nodes: vec![].into(),
+            subagents: vec![].into(),
+            provider_sessions: vec![].into(),
+            provider_threads: vec![].into(),
+            provider_turns: vec![].into(),
+            runtime_requests: vec![].into(),
+            messages: vec![].into(),
+            plans: vec![].into(),
+            turn_items: vec![].into(),
+            checkpoint_scopes: vec![].into(),
+            checkpoints: vec![].into(),
+            context_handoffs: vec![].into(),
+            context_transfers: vec![].into(),
+            visible_turn_items: vec![].into(),
         }
     }
 }
@@ -1041,10 +1041,19 @@ events! {
     ProviderSessionDetached(ProviderSessionId) => "provider-session.detached", ProviderThreadUpdated(ProviderThread) => "provider-thread.updated",
     ProviderTurnUpdated(ProviderTurn) => "provider-turn.updated", RuntimeRequestUpdated(RuntimeRequest) => "runtime-request.updated",
     MessageUpdated(ConversationMessage) => "message.updated", TurnItemUpdated(TurnItem) => "turn-item.updated",
+    TurnItemTextDelta(TurnItemTextDelta) => "turn-item.text-delta",
     PlanUpdated(PlanArtifact) => "plan.updated", CheckpointScopeCreated(CheckpointScope) => "checkpoint-scope.created",
     CheckpointCaptured(Checkpoint) => "checkpoint.captured", CheckpointRollbackRequested(CheckpointRollbackRequest) => "checkpoint.rollback-requested",
     ContextHandoffUpdated(ContextHandoff) => "context-handoff.updated", ContextTransferCreated(ContextTransfer) => "context-transfer.created",
     ContextTransferUpdated(ContextTransfer) => "context-transfer.updated"
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnItemTextDelta {
+    pub item_id: TurnItemId,
+    pub run_id: RunId,
+    pub offset: usize,
+    pub text: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

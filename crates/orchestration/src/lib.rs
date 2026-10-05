@@ -47,3 +47,6 @@ pub fn native_maintenance(text: &str, has_attachments: bool) -> bool {
             "/compact" | "/logout"
         )
 }
+
+mod shared;
+pub use shared::Shared;

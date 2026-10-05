@@ -187,6 +187,7 @@ pub struct QueueRow {
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerView {
     pub pending_deliveries: Vec<String>,
+    pub provider_kind: crate::provider::ProviderKind,
     pub draft: Draft,
     pub send_label: String,
     pub plan_follow_up: bool,
@@ -871,8 +872,20 @@ pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
             })
         })
     });
-    let can_steer = live_turn && turns.is_some_and(|t| t.supports_active_steering);
-    let can_restart = live_turn && turns.is_some_and(|t| t.supports_steering_by_interrupt_restart);
+    let maintenance = active.is_some_and(|run| {
+        projection.is_some_and(|p| {
+            p.messages
+                .iter()
+                .find(|m| m.id == run.user_message_id)
+                .is_some_and(|m| {
+                    orchestration::native_maintenance(&m.text, !m.attachments.is_empty())
+                })
+        })
+    });
+    let can_steer = live_turn && !maintenance && turns.is_some_and(|t| t.supports_active_steering);
+    let can_restart = live_turn
+        && !maintenance
+        && turns.is_some_and(|t| t.supports_steering_by_interrupt_restart);
     let mut queued: Vec<_> = projection
         .map(|p| {
             p.runs
@@ -906,6 +919,7 @@ pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
     let editing = snapshot.editing_run.is_some();
     let creating = snapshot.selected_thread.is_none() && snapshot.pending_launches.iter().any(|launch|matches!(&launch.create.body,CommandBody::ThreadCreate{project_id,..} if project_id.as_str()==snapshot.selected_project.as_deref().unwrap_or("bex:chats")));
     let composer = ComposerView {
+        provider_kind: provider_kind(&draft.instance_id),
         pending_deliveries: snapshot
             .uncertain_commands
             .iter()
@@ -1087,6 +1101,42 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     #[test]
+    fn expired_header_snooze_matches_the_sidebar() {
+        let mut p = projection();
+        p.thread.snoozed_until = Some(now());
+        p.thread.snoozed_at = Some(now());
+        let id = p.thread.id.clone();
+        let mut snapshot = Snapshot {
+            selected_thread: Some(id.clone()),
+            shell: Some(std::sync::Arc::new(ShellSnapshot {
+                schema_version: 2,
+                snapshot_sequence: 1,
+                threads: vec![projector::shell(&p)],
+                archived_threads: vec![],
+            })),
+            ..Default::default()
+        };
+        crate::sync::thread(
+            &mut snapshot,
+            &id,
+            ThreadStreamItem::Snapshot {
+                snapshot_sequence: 1,
+                projection: Box::new(p),
+                history_cursor: None,
+                has_more_history: false,
+                latest_local_turn_ordinal: None,
+            },
+        );
+        assert!(!conversation(&snapshot, &now()).snoozed);
+    }
+    #[test]
+    fn asynchronous_markdown_growth_preserves_following_but_does_not_pull_a_reader_down() {
+        assert!(follow_stream_resize(true, false, 100., 500.));
+        assert!(follow_stream_resize(false, true, 100., 500.));
+        assert!(!follow_stream_resize(false, false, 100., 500.));
+        assert!(!follow_stream_resize(true, false, 500., 500.));
+    }
+    #[test]
     fn only_pending_requests_use_the_composer_drawer_and_resolved_requests_join_work_log() {
         let mut p = projection();
         let request = RuntimeRequest {
@@ -1115,7 +1165,7 @@ mod tests {
         );
         p.runtime_requests.push(request);
         p.turn_items.push(approval);
-        p.visible_turn_items = projector::visible_items(&p);
+        p.visible_turn_items = projector::visible_items(&p).into();
         let id = p.thread.id.clone();
         let mut state = Snapshot {
             selected_thread: Some(id.clone()),
@@ -1325,7 +1375,8 @@ mod tests {
                     streaming: false,
                 },
             ),
-        ];
+        ]
+        .into();
         let rows = timeline(&p);
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[1].work.len(), 2);
@@ -1447,6 +1498,15 @@ pub fn runtime_mode_choices() -> Vec<RuntimeModeChoice> {
         label: label.into(),
     })
     .collect()
+}
+#[cfg_attr(feature = "bindings", uniffi::export)]
+pub fn follow_stream_resize(
+    was_following: bool,
+    initial: bool,
+    previous_height: f64,
+    next_height: f64,
+) -> bool {
+    next_height != previous_height && (was_following || initial)
 }
 #[cfg_attr(feature = "bindings", uniffi::export)]
 pub fn interaction_mode_choices() -> Vec<RuntimeModeChoice> {

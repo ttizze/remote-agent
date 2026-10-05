@@ -237,7 +237,8 @@ impl AgentStore {
         }
         trace.activate();
         let snapshot = crate::persistence::decode(&persisted).map_err(error)?;
-        let store = crate::store::Store::offline(snapshot);
+        let store =
+            crate::store::Store::offline_for(snapshot, orchestration::CreationSource::Mobile);
         trace.record(
             ConnectionPhase::StoreRestored,
             0,

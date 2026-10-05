@@ -562,7 +562,13 @@ impl CodexAdapter {
             {
                 return Ok(());
             }
-            let translated = normalize::codex(state, method, params, request_id, &timestamp);
+            let translated = normalize::codex(
+                states.remove(native).expect("validated live turn"),
+                method,
+                params,
+                request_id,
+                &timestamp,
+            );
             let mut state = translated.state;
             let batch = state.batch(translated.payloads, &timestamp);
             states.insert(native.into(), state);
@@ -708,13 +714,11 @@ async fn pump(
                         let natives: Vec<_> = adapter.states.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
                         for native in natives {
                             let state = adapter.states.lock().unwrap_or_else(|e| e.into_inner()).get(&native).cloned();
-                            if let Some(state) = state {
-                                if !state.terminal && let Some(turn) = state.turn.native_turn_ref.as_ref().and_then(|r| r.native_id.as_ref()) {
-                                    if adapter.request("turn/interrupt", json!({"threadId":native,"turnId":turn})).await.is_err() {
+                            if let Some(state) = state
+                                && !state.terminal && let Some(turn) = state.turn.native_turn_ref.as_ref().and_then(|r| r.native_id.as_ref())
+                                    && adapter.request("turn/interrupt", json!({"threadId":native,"turnId":turn})).await.is_err() {
                                         adapter.server.shutdown().await.ok();
                                     }
-                                }
-                            }
                             let _ = adapter.disconnected(&native, "Codex notification stream lost events").await;
                         }
                     }
@@ -793,7 +797,7 @@ for line in sys.stdin:
             ordinal: None,
         });
         p.thread.active_provider_thread_id = Some(provider.id.clone());
-        p.provider_threads = vec![provider];
+        p.provider_threads = vec![provider].into();
         p.provider_sessions.push(state.session);
         p.runs[0].status = RunStatus::Completed;
         let mut second = p.runs[0].clone();
@@ -824,7 +828,7 @@ for line in sys.stdin:
         failed_before_input.native_turn_ref = None;
         p.runs.push(second);
         p.attempts.push(attempt);
-        p.provider_turns = vec![first_turn, second_turn, failed_before_input];
+        p.provider_turns = vec![first_turn, second_turn, failed_before_input].into();
         let scope = CheckpointScope {
             id: CheckpointScopeId::new("scope").unwrap(),
             thread_id: p.thread.id.clone(),
@@ -888,8 +892,8 @@ for line in sys.stdin:
                 &state.provider_thread.id,
                 Some(1),
                 &[accepted.clone(), never_started],
-                &[state.attempt.clone()],
-                &[state.run.clone()]
+                std::slice::from_ref(&state.attempt),
+                std::slice::from_ref(&state.run)
             ),
             Some("accepted-turn")
         );
@@ -900,7 +904,7 @@ for line in sys.stdin:
                 &state.provider_thread.id,
                 Some(1),
                 &[accepted.clone()],
-                &[state.attempt.clone()],
+                std::slice::from_ref(&state.attempt),
                 &[removed]
             ),
             None
@@ -915,6 +919,69 @@ for line in sys.stdin:
             ),
             None
         );
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lag_interrupts_the_native_turn_before_failing_its_app_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("fixture-provider");
+        let calls = directory.path().join("interrupts.jsonl");
+        std::fs::write(&program, format!(r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request: continue
+    method = request["method"]
+    if method == "turn/interrupt":
+        with open({calls:?}, "a") as log: log.write(json.dumps(request["params"]) + "\n")
+    print(json.dumps({{"id":request["id"],"result":{{"userAgent":"fixture","codexHome":"/tmp"}} if method == "initialize" else {{}}}}), flush=True)
+"#)).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let server = Arc::new(
+            CodexAppServer::spawn(codex_app_server::AppServerConfig {
+                program,
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let (output, mut batches) = mpsc::channel(16);
+        let (shutdown, receiver) = watch::channel(false);
+        let mut state = crate::normalize::tests::state(Driver::Codex);
+        state.turn.status = TurnStatus::Running;
+        state.turn.native_turn_ref = Some(ProviderRef {
+            driver: Driver::Codex,
+            native_id: Some("live-turn".into()),
+            strength: Strength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        });
+        let adapter = Arc::new(CodexAdapter {
+            server: server.clone(),
+            states: Mutex::new(BTreeMap::from([("native".into(), state)])),
+            output,
+            changed: Notify::new(),
+            shutdown,
+        });
+        let (events, incoming) = tokio::sync::broadcast::channel(2);
+        for _ in 0..6 {
+            events.send(PeerEvent::Response { sequence: 0 }).unwrap();
+        }
+        let task = tokio::spawn(pump(Arc::downgrade(&adapter), incoming, receiver));
+        let batch = tokio::time::timeout(std::time::Duration::from_secs(3), batches.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(batch.events.iter().any(|e| matches!(e.payload, EventPayload::RunUpdated(ref r) if r.status == RunStatus::Failed)));
+        let params: Value =
+            serde_json::from_str(std::fs::read_to_string(calls).unwrap().trim()).unwrap();
+        assert_eq!(params["threadId"], "native");
+        assert_eq!(params["turnId"], "live-turn");
+        assert!(!task.is_finished());
+        adapter.shutdown.send(true).unwrap();
+        task.await.unwrap();
+        server.shutdown().await.unwrap();
     }
     #[cfg(unix)]
     #[tokio::test]

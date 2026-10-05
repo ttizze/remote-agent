@@ -83,6 +83,59 @@ impl DeltaBuffer {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[tokio::test]
+    async fn timer_flushes_store_text_linearly_even_for_a_steady_stream() {
+        for method in [
+            "item/agentMessage/delta",
+            "item/plan/delta",
+            "item/commandExecution/outputDelta",
+        ] {
+            let mut state = crate::normalize::tests::state(orchestration::Driver::Codex);
+            if method == "item/commandExecution/outputDelta" {
+                state = crate::normalize::codex(state, "item/started", &json!({"item":{"id":"text", "type":"commandExecution", "command":"test", "aggregatedOutput":""}}), None, &crate::now()).state;
+            }
+            let mut buffer = DeltaBuffer::default();
+            let mut timer = tokio::time::interval(WINDOW);
+            timer.tick().await;
+            let text = "日本語 streaming ".repeat(64);
+            let mut bytes = 0;
+            let mut deltas = 0;
+            for _ in 0..24 {
+                assert!(
+                    buffer
+                        .push(json!({"method":method,"params":{"itemId":"text","delta":text}}))
+                        .is_empty()
+                );
+                timer.tick().await;
+                let frame = buffer.flush().expect("timer flush");
+                let translated =
+                    crate::normalize::codex(state, method, &frame["params"], None, &crate::now());
+                bytes += serde_json::to_vec(&translated.payloads).unwrap().len();
+                deltas += translated
+                    .payloads
+                    .iter()
+                    .filter(|p| matches!(p, orchestration::EventPayload::TurnItemTextDelta(_)))
+                    .count();
+                state = translated.state;
+            }
+            let final_size = text.len() * 24;
+            assert!(deltas >= 23, "{method}: {deltas} deltas");
+            assert!(
+                bytes < final_size * 3,
+                "{method}: stored {bytes} for {final_size} bytes"
+            );
+            let actual = match &state.items["text"].body {
+                orchestration::TurnItemBody::AssistantMessage { text, .. } => text,
+                orchestration::TurnItemBody::ProposedPlan { markdown, .. } => markdown,
+                orchestration::TurnItemBody::CommandExecution {
+                    output: Some(output),
+                    ..
+                } => output,
+                _ => panic!("streaming item"),
+            };
+            assert_eq!(actual, &text.repeat(24));
+        }
+    }
     #[test]
     fn megabyte_burst_is_exact_and_does_not_persist_ten_thousand_snapshots() {
         for method in [
