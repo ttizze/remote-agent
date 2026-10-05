@@ -108,10 +108,60 @@ pub fn search_snippet(text: &str, query: &str) -> String {
     )
 }
 
+type SearchRowData = (String, String, String, String, String);
+
+/// The best match per thread, ordered and limited in SQL like T3 `ThreadSearch.ts`:
+/// user messages outrank assistant ones, then the newest wins; threads order by
+/// match kind, then the thread's activity time, which visits do not change.
+pub(crate) fn search_rows(
+    c: &rusqlite::Connection,
+    pattern: &str,
+    projects: &[String],
+    limit: usize,
+) -> Result<Vec<SearchRowData>, StoreError> {
+    let mut statement = c.prepare_cached(
+        "WITH candidate AS (
+             SELECT m.thread_id, s.project, m.role, m.text, m.created_at, m.message_id,
+                    json_extract(s.payload, '$.updated_at') AS thread_updated_at
+             FROM search_messages AS m
+             JOIN thread_shells AS s ON s.thread_id = m.thread_id
+             WHERE s.deleted = 0 AND s.archived = 0
+               AND s.project IN (SELECT value FROM json_each(?2))
+               AND m.role IN ('user', 'assistant')
+               AND m.text LIKE ?1 ESCAPE '!'
+         ),
+         ranked AS (
+             SELECT *, CASE role WHEN 'user' THEN 0 ELSE 1 END AS match_rank,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY thread_id
+                        ORDER BY CASE role WHEN 'user' THEN 0 ELSE 1 END,
+                                 created_at DESC, message_id
+                    ) AS thread_rank
+             FROM candidate
+         )
+         SELECT thread_id, project, role, text, created_at FROM ranked
+         WHERE thread_rank = 1
+         ORDER BY match_rank, thread_updated_at DESC, thread_id
+         LIMIT ?3",
+    )?;
+    let rows = statement.query_map(
+        params![pattern, serde_json::to_string(projects)?, limit as i64],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        },
+    )?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 impl Store {
-    /// Finished user and assistant messages of live threads in live projects. One
-    /// match per thread: user messages outrank assistant ones, then the newest wins.
-    /// Threads order by match kind, then recent activity.
+    /// Finished user and assistant messages of live threads in live projects, one
+    /// match per thread.
     pub fn search(
         &self,
         query: &str,
@@ -125,67 +175,32 @@ impl Store {
         {
             return Err(QueryError::InvalidSearch);
         }
+        let live: Vec<String> = projects
+            .projects()
+            .into_iter()
+            .map(|project| project.id)
+            .collect();
         let rows = self
-            .read(|c| {
-                let mut statement = c.prepare_cached(
-                    "WITH candidate AS (
-                         SELECT m.thread_id, s.project, m.role, m.text, m.created_at,
-                                m.message_id, t.last_global_seq
-                         FROM search_messages AS m
-                         JOIN thread_shells AS s ON s.thread_id = m.thread_id
-                         JOIN threads AS t ON t.thread_id = m.thread_id
-                         WHERE s.deleted = 0 AND s.archived = 0
-                           AND m.role IN ('user', 'assistant')
-                           AND m.text LIKE ?1 ESCAPE '!'
-                     ),
-                     ranked AS (
-                         SELECT *, CASE role WHEN 'user' THEN 0 ELSE 1 END AS match_rank,
-                                ROW_NUMBER() OVER (
-                                    PARTITION BY thread_id
-                                    ORDER BY CASE role WHEN 'user' THEN 0 ELSE 1 END,
-                                             created_at DESC, message_id
-                                ) AS thread_rank
-                         FROM candidate
-                     )
-                     SELECT thread_id, project, role, text, created_at FROM ranked
-                     WHERE thread_rank = 1
-                     ORDER BY match_rank, last_global_seq DESC, thread_id",
-                )?;
-                let rows = statement.query_map(params![like_pattern(query)], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                })?;
-                Ok(rows.collect::<Result<Vec<_>, _>>()?)
-            })
+            .read(|c| search_rows(c, &like_pattern(query), &live, limit))
             .map_err(|_: StoreError| QueryError::Search { operation: "query" })?;
         let decode = QueryError::Search {
             operation: "decode",
         };
-        let mut matches = Vec::new();
-        for (thread, project, role, text, created_at) in rows {
-            if matches.len() == limit {
-                break;
-            }
-            if projects.project(&project).is_none() {
-                continue;
-            }
-            matches.push(SearchMatch {
-                thread: ThreadId::new(thread).map_err(|_| decode.clone())?,
-                project,
-                source: match role.as_str() {
-                    "user" => SearchSource::User,
-                    _ => SearchSource::Assistant,
-                },
-                snippet: search_snippet(&text, query),
-                message_created_at: Timestamp::parse(&created_at).map_err(|_| decode.clone())?,
-            });
-        }
-        Ok(matches)
+        rows.into_iter()
+            .map(|(thread, project, role, text, created_at)| {
+                Ok(SearchMatch {
+                    thread: ThreadId::new(thread).map_err(|_| decode.clone())?,
+                    project,
+                    source: match role.as_str() {
+                        "user" => SearchSource::User,
+                        _ => SearchSource::Assistant,
+                    },
+                    snippet: search_snippet(&text, query),
+                    message_created_at: Timestamp::parse(&created_at)
+                        .map_err(|_| decode.clone())?,
+                })
+            })
+            .collect()
     }
 }
 

@@ -215,6 +215,68 @@ async fn returns_one_finished_user_or_assistant_match_per_active_thread() {
     assert_eq!(store.search("ne%le", None, &projects).unwrap(), []);
 }
 
+#[tokio::test]
+async fn limits_matches_in_sql_after_leaving_out_removed_projects() {
+    let (_dir, store) = temp_store();
+    let project = "project:search-limit";
+    let mut removed = Writer::create(&store, "thread:removed", "project:removed").await;
+    removed
+        .message("removed", Role::User, "needle removed", 9, true)
+        .await;
+    for (index, thread) in ["thread:limit-a", "thread:limit-b", "thread:limit-c"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut writer = Writer::create(&store, thread, project).await;
+        writer
+            .message(thread, Role::User, "needle kept", index as u32 + 1, true)
+            .await;
+    }
+
+    let rows = store
+        .read(|c| search_rows(c, &like_pattern("needle"), &[project.to_owned()], 2))
+        .unwrap();
+    let threads: Vec<_> = rows.iter().map(|row| row.0.as_str()).collect();
+    assert_eq!(threads, ["thread:limit-c", "thread:limit-b"]);
+    let result = store
+        .search("needle", Some(2), &Projects(vec![project]))
+        .unwrap();
+    assert_eq!(
+        result.iter().map(|m| m.thread.as_str()).collect::<Vec<_>>(),
+        ["thread:limit-c", "thread:limit-b"]
+    );
+}
+
+// T3 Orchestrator.ts keeps visits from changing activity; search sorts by activity.
+#[tokio::test]
+async fn orders_matching_threads_by_activity_not_by_their_latest_fact() {
+    let (_dir, store) = temp_store();
+    let project = "project:search-activity";
+    let mut older = Writer::create(&store, "thread:older-activity", project).await;
+    older
+        .message("older", Role::User, "needle older", 1, true)
+        .await;
+    let mut newer = Writer::create(&store, "thread:newer-activity", project).await;
+    newer
+        .message("newer", Role::User, "needle newer", 5, true)
+        .await;
+    older
+        .commit(10, FactBody::ThreadVisited { at: at(10) })
+        .await;
+    assert!(
+        store.thread_head(&older.thread).unwrap().global_seq
+            > store.thread_head(&newer.thread).unwrap().global_seq
+    );
+
+    let result = store
+        .search("needle", None, &Projects(vec![project]))
+        .unwrap();
+    assert_eq!(
+        result.iter().map(|m| m.thread.as_str()).collect::<Vec<_>>(),
+        ["thread:newer-activity", "thread:older-activity"]
+    );
+}
+
 /// A corrupt timestamp stands in for T3's non-text payload, which a STRICT table rejects.
 #[tokio::test]
 async fn reports_an_unreadable_match_as_a_decode_failure() {
