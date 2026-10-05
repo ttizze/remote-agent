@@ -113,19 +113,40 @@
         },
         {
           "name": "Send while the agent is working",
-          "state": "designed",
+          "state": "implemented",
           "implementation": [
             "crates/host-daemon/src/host_rpc/conversations.rs",
             "crates/host-daemon/src/host_rpc/service.rs",
             "crates/agent-core/src/presentation/conversation.rs",
             "apps/desktop/src/app/view/queue.rs",
             "apps/mobile/iosApp/Bex/ConversationQueue.swift",
-            "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt"
+            "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt",
+            "crates/agent-core/src/state/composer_dispatch.rs",
+            "crates/agent-core/src/store/client_preferences.rs",
+            "apps/desktop/src/preferences.rs",
+            "apps/desktop/src/app/view/settings.rs",
+            "apps/mobile/iosApp/Bex/ConversationComposer.swift",
+            "apps/mobile/iosApp/Bex/WorktreeSettings.swift",
+            "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationComposer.kt",
+            "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidClientSettings.kt"
           ],
           "remaining": [
-            "per-client follow-up setting",
-            "opposite-action shortcut and mobile long press"
-          ]
+            "native keyboard and long-press acceptance",
+            "visual comparison"
+          ],
+          "clients": [
+            "desktop",
+            "ios",
+            "android"
+          ],
+          "acceptance": "Device default Queue; supported active turn offers preferred and opposite actions; idle sends and queue editing saves; unsupported or invalid active turn offers Queue alone. Shared desktop preferences propagate across windows without sharing drafts or allowing stale window flushes to overwrite preferences. Queue admission receipts retain newer delivery evidence.",
+          "verification": {
+            "unit_tests": "488 passed, 3 existing skips; Markdown regressions passed",
+            "native_compile": "Rust workspace Clippy with all targets, iOS app/UI test bundle build-for-testing and Android Kotlin compile passed",
+            "native_acceptance": "pending",
+            "visual_comparison": "pending",
+            "mutation_audit": "follow-up decision: 5/5 caught; queue admission receipt: 1/1 caught; shared window preference owner: 6/6 caught; no misses or timeouts"
+          }
         },
         {
           "name": "Queue messages offline on mobile",

@@ -167,6 +167,10 @@ pub enum Intent {
     Submit {
         thread_id: Option<crate::session::SessionRef>,
         client_user_message_id: agent_protocol::ids::ClientInputId,
+        alternate: bool,
+    },
+    SetFollowUpBehavior {
+        behavior: FollowUpBehavior,
     },
     Queue {
         thread_id: crate::session::SessionRef,

@@ -20,7 +20,7 @@ fn device_model_defaults_apply_across_hosts_without_replacing_their_user_work() 
         defaults.clone(),
     )]
     .into();
-    let preferences = persistence::encode_model_preferences(&Snapshot {
+    let preferences = persistence::encode_client_preferences(&Snapshot {
         model_defaults: defaults.clone(),
         scoped_model_defaults: Arc::new(scoped),
         ..Default::default()
@@ -41,7 +41,7 @@ fn device_model_defaults_apply_across_hosts_without_replacing_their_user_work() 
         );
         let saved = persistence::encode(&snapshot).unwrap();
         let restored = persistence::decode(
-            &persistence::apply_model_preferences(&saved, &preferences).unwrap(),
+            &persistence::apply_client_preferences(&saved, &preferences).unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -59,19 +59,19 @@ fn device_model_defaults_apply_across_hosts_without_replacing_their_user_work() 
             }
         );
         assert_eq!(
-            persistence::decode(&persistence::apply_model_preferences(&saved, &[]).unwrap())
+            persistence::decode(&persistence::apply_client_preferences(&saved, &[]).unwrap())
                 .unwrap(),
             snapshot
         );
     }
     assert_eq!(
-        persistence::decode(&persistence::apply_model_preferences(&[], &preferences).unwrap())
+        persistence::decode(&persistence::apply_client_preferences(&[], &preferences).unwrap())
             .unwrap()
             .model_defaults,
         defaults
     );
-    assert!(persistence::apply_model_preferences(b"{}", &preferences).is_err());
-    assert!(persistence::apply_model_preferences(&[], b"invalid").is_err());
+    assert!(persistence::apply_client_preferences(b"{}", &preferences).is_err());
+    assert!(persistence::apply_client_preferences(&[], b"invalid").is_err());
 }
 
 #[test]
@@ -104,6 +104,7 @@ fn missing_or_invalid_user_work_is_not_silently_discarded() {
     let saved: serde_json::Value =
         serde_json::from_slice(&persistence::encode(&Snapshot::default()).unwrap()).unwrap();
     for field in [
+        "follow_up_behavior",
         "model_defaults",
         "scoped_model_defaults",
         "storage_scope",

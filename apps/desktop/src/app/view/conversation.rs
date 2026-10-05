@@ -1102,6 +1102,7 @@ mod rendering_tests {
                 connections: Arc::new(crate::platform::Connections::default()),
                 closing: tokio_util::task::TaskTracker::new(),
                 logging_error: None,
+                preferences: Arc::default(),
             });
         });
         runtime

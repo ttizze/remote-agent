@@ -63,8 +63,8 @@ impl Snapshot {
     pub fn serialize_local_state(&self) -> Result<Vec<u8>, AgentError> {
         crate::persistence::encode(self).map_err(error)
     }
-    pub fn serialize_model_preferences(&self) -> Result<Vec<u8>, AgentError> {
-        crate::persistence::encode_model_preferences(self).map_err(error)
+    pub fn serialize_client_preferences(&self) -> Result<Vec<u8>, AgentError> {
+        crate::persistence::encode_client_preferences(self).map_err(error)
     }
     pub fn connected(&self) -> bool {
         self.connected

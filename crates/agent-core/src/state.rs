@@ -11,6 +11,8 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
 };
+mod composer_dispatch;
+pub use composer_dispatch::{ComposerAction, FollowUpBehavior, composer_action_label};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -210,6 +212,7 @@ pub struct TerminalView {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
+    pub follow_up_behavior: FollowUpBehavior,
     #[serde(skip)]
     pub operations: Arc<BTreeMap<operations::OperationKey, operations::OperationState>>,
     #[serde(skip)]
@@ -487,6 +490,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
         Intent::Submit {
             thread_id,
             client_user_message_id,
+            alternate,
         } => {
             let thread_id = thread_id.or_else(|| previous.navigation.thread_id.clone());
             let draft_key = if thread_id == previous.navigation.thread_id {
@@ -495,6 +499,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 thread_id.clone().map(DraftKey::from).unwrap_or_else(|| previous.navigation.draft_key.clone())
             };
             let draft = previous.drafts.get(&draft_key).cloned().unwrap_or_default();
+            let force_queue = previous.submission_action(thread_id.as_ref(), alternate, false) == ComposerAction::Queue;
             return submission(
                 previous,
                 thread_id,
@@ -502,8 +507,11 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 draft,
                 client_user_message_id,
                 None,
-                false,
+                force_queue,
             );
+        }
+        Intent::SetFollowUpBehavior { behavior } => {
+            next.follow_up_behavior = behavior;
         }
         Intent::Queue { thread_id, client_user_message_id } => {
             let draft_key = if previous.navigation.thread_id.as_ref() == Some(&thread_id) {

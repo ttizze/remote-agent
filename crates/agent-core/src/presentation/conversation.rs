@@ -1286,6 +1286,7 @@ mod tests {
                 snapshot = reduce(
                     &snapshot,
                     Event::Intent(Intent::Submit {
+                        alternate: false,
                         thread_id: Some(agent_protocol::session::SessionRef {
                             provider: agent_protocol::session::ProviderKind::Codex,
                             id: "thread".into(),
@@ -1360,6 +1361,7 @@ mod tests {
             snapshot = reduce(
                 &snapshot,
                 Event::Intent(Intent::Submit {
+                    alternate: false,
                     thread_id: Some(agent_protocol::session::SessionRef {
                         provider: agent_protocol::session::ProviderKind::Codex,
                         id: "thread".into(),

@@ -139,10 +139,11 @@ extension BexAppViewModel {
         perform(.readOlder(threadId: id))
     }
 
-    func send() {
+    func send(alternate: Bool = false) {
         perform(.submit(
             threadId: snapshot.navigation().threadId,
-            clientUserMessageId: UUID().uuidString
+            clientUserMessageId: UUID().uuidString,
+            alternate: alternate
         )) { [weak self] _ in
             self?.persist()
         }
@@ -180,6 +181,7 @@ extension BexAppViewModel {
             preparation: preparation?.id(),
             audio: audio,
             send: sendImmediately,
+            alternate: false,
             clientUserMessageId: UUID().uuidString
         ))) { [weak self] _ in
             withExtendedLifetime(preparation) {

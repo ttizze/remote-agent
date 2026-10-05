@@ -73,6 +73,7 @@ async fn dictation_preparation_failure_does_not_block_complete_recording_transcr
     writer.reply(&cancel, json!({"result":{}})).await.unwrap();
     assert!(store.snapshot().error.is_none());
     let operation = store.dispatch(Intent::Transcribe(op::Dictate {
+        alternate: false,
         draft_key: DraftKey::from("/fixture"),
         preparation: Some(preparation.id()),
         audio: vec![1, 0, 255, 127],
@@ -109,6 +110,7 @@ async fn saturated_dictation_preparations_leave_complete_recording_transcription
     }
     let overflow = store.prepare_dictation();
     let transcription = store.dispatch(Intent::Transcribe(op::Dictate {
+        alternate: false,
         draft_key: DraftKey::from("/fixture"),
         preparation: Some(overflow.id()),
         audio: vec![1, 0, 255, 127],
@@ -972,6 +974,7 @@ async fn new_conversation_moves_draft_to_pending_before_creation_reply() {
         .await
         .unwrap();
     let sending = store.dispatch(Intent::Submit {
+        alternate: false,
         thread_id: None,
         client_user_message_id: "client".into(),
     });
@@ -1053,6 +1056,7 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
             .await
             .unwrap();
         let sending = store.dispatch(Intent::Submit {
+            alternate: false,
             thread_id: Some(SessionRef {
                 provider: ProviderKind::Codex,
                 id: "thread".into(),
@@ -1136,6 +1140,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
             async move {
                 store
                     .dispatch(Intent::Submit {
+                        alternate: false,
                         thread_id: None,
                         client_user_message_id: "client".into(),
                     })
@@ -1233,6 +1238,7 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
             async move {
                 store
                     .dispatch(Intent::Submit {
+                        alternate: false,
                         thread_id: None,
                         client_user_message_id: "client".into(),
                     })
@@ -1268,6 +1274,7 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
             async move {
                 store
                     .dispatch(Intent::Submit {
+                        alternate: false,
                         thread_id: None,
                         client_user_message_id: "retry".into(),
                     })
@@ -1357,6 +1364,7 @@ async fn transcription_preserves_newer_input_and_restores_audio_text_on_send_fai
             async move {
                 store
                     .dispatch(Intent::Transcribe(op::Dictate {
+                        alternate: false,
                         draft_key: SessionRef {
                             provider: ProviderKind::Codex,
                             id: "thread".into(),
@@ -1446,6 +1454,7 @@ async fn new_chat_dictation_preserves_text_and_images_for_draft_and_direct_send(
             .await
             .unwrap();
         let transcribing = store.dispatch(Intent::Transcribe(op::Dictate {
+            alternate: false,
             draft_key: key.clone(),
             preparation: None,
             audio: vec![0, 0],
@@ -1467,6 +1476,7 @@ async fn new_chat_dictation_preserves_text_and_images_for_draft_and_direct_send(
             assert_eq!(draft.attachments, vec![attachment]);
             assert!(store.snapshot().navigation.thread_id.is_none());
             store.dispatch(Intent::Submit {
+                alternate: false,
                 thread_id: None,
                 client_user_message_id: "dictation".into(),
             })
@@ -1540,6 +1550,7 @@ async fn navigation_cancels_dictation_send_but_keeps_the_transcript_in_its_draft
         async move {
             store
                 .dispatch(Intent::Transcribe(op::Dictate {
+                    alternate: false,
                     draft_key: "/fixture".into(),
                     preparation: None,
                     audio: vec![0, 0],
@@ -1604,6 +1615,7 @@ async fn silent_dictation_preserves_drafts_and_navigation_without_sending() {
         );
         let (store, mut reader, mut writer) = setup(initial).await;
         let operation = store.dispatch(Intent::Transcribe(op::Dictate {
+            alternate: false,
             draft_key: key.clone(),
             preparation: None,
             audio: vec![0, 0],
@@ -2022,6 +2034,7 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
         async move {
             store
                 .dispatch(Intent::Submit {
+                    alternate: false,
                     thread_id: Some(SessionRef {
                         provider: ProviderKind::Codex,
                         id: "thread".into(),
@@ -2292,6 +2305,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
         .unwrap();
     store
         .dispatch(Intent::Submit {
+            alternate: false,
             thread_id: None,
             client_user_message_id: "client".into(),
         })
@@ -2714,6 +2728,7 @@ async fn disconnected_store_keeps_editing_and_persisting_drafts() {
     assert!(
         store
             .dispatch(Intent::Submit {
+                alternate: false,
                 thread_id: None,
                 client_user_message_id: "offline".into()
             })
@@ -3109,6 +3124,7 @@ async fn close_keeps_the_last_enqueued_draft_and_unconfirmed_send() {
         .await
         .unwrap();
     drop(store.dispatch(Intent::Submit {
+        alternate: false,
         thread_id: Some(SessionRef {
             provider: ProviderKind::Codex,
             id: "thread".into(),
@@ -4102,6 +4118,7 @@ async fn selected_invocations_reach_submission_and_return_after_failure() {
         .await
         .unwrap();
     let sending = store.dispatch(Intent::Submit {
+        alternate: false,
         thread_id: None,
         client_user_message_id: "invocation".into(),
     });

@@ -71,6 +71,7 @@ enum Tab {
 }
 #[derive(Clone, Copy, PartialEq)]
 enum SettingsPage {
+    General,
     Models,
     Agents,
     Connections,
@@ -508,7 +509,7 @@ impl Desktop {
             expanded_items: HashSet::new(),
             expanded_work: HashMap::new(),
             tab: Tab::Chat,
-            settings_page: SettingsPage::Agents,
+            settings_page: SettingsPage::General,
             sidebar: true,
             panel_open: false,
             panel: Panel::Home,
@@ -534,10 +535,10 @@ impl Desktop {
             markdown_cache: HashMap::new(),
             _subscriptions: subscriptions,
         };
-        view.connect(None);
+        view.connect();
         view
     }
-    fn connect(&mut self, preferences: Option<Vec<u8>>) {
+    fn connect(&mut self) {
         self.epoch += 1;
         self.connecting = true;
         self.busy = 0;
@@ -580,25 +581,18 @@ impl Desktop {
                     }
                     Err(error) => return Err(error.to_string()),
                 };
-                let preferences = match preferences {
-                    Some(preferences) => Some(preferences),
-                    None => {
-                        match tokio::fs::read(path.with_file_name("model-preferences.json")).await {
-                            Ok(bytes) => Some(bytes),
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                            Err(error) => return Err(error.to_string()),
-                        }
-                    }
-                };
-                if let Some(preferences) = preferences {
-                    let saved = agent_core::persistence::encode(&snapshot)
-                        .map_err(|error| error.to_string())?;
-                    snapshot = agent_core::persistence::decode(
-                        &agent_core::persistence::apply_model_preferences(&saved, &preferences)
-                            .map_err(|error| error.to_string())?,
-                    )
+                let preferences = runtime
+                    .preferences
+                    .get_or_try_init(|| async {
+                        crate::preferences::Preferences::load(
+                            path.with_file_name("client-preferences.json"),
+                        )
+                        .await
+                        .map(Arc::new)
+                    })
+                    .await
                     .map_err(|error| error.to_string())?;
-                }
+                preferences.owner.capture().apply(&mut snapshot);
                 let initial_cwd = initial_cwd.or_else(|| {
                     snapshot
                         .navigation
@@ -1299,20 +1293,6 @@ impl Desktop {
         }
         self.cancel_recording();
         self.dictation = None;
-        let preferences = self
-            .session
-            .as_ref()
-            .map(|session| {
-                agent_core::persistence::encode_model_preferences(&session.store.snapshot())
-            })
-            .transpose();
-        let preferences = match preferences {
-            Ok(preferences) => preferences,
-            Err(error) => {
-                self.error = error.to_string();
-                return;
-            }
-        };
         self.session.take();
         self.remote = remote;
         self.settings_model_scope = ModelDefaultsScope::Global;
@@ -1338,15 +1318,15 @@ impl Desktop {
         self.composer_value = "".into();
         self.composer
             .update(cx, |input, cx| input.set_value("", window, cx));
-        self.connect(preferences);
+        self.connect();
     }
-    fn send(&mut self, cx: &Context<Self>) {
+    fn send(&mut self, alternate: bool, cx: &Context<Self>) {
         if !self.snapshot.connected || self.busy > 0 {
             return;
         }
         if let Some(dictation) = &self.dictation {
             if dictation.phase == Phase::Recording {
-                self.finish_dictation(true);
+                self.finish_dictation(true, alternate);
             }
             return;
         }
@@ -1356,6 +1336,7 @@ impl Desktop {
         self.busy += 1;
         self.perform(
             Intent::Submit {
+                alternate,
                 thread_id: None,
                 client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
             },
@@ -1408,6 +1389,7 @@ impl Desktop {
                     .map_err(|error| error.to_string())?;
                 store
                     .dispatch(Intent::Submit {
+                        alternate: false,
                         thread_id: Some(id),
                         client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
                     })
@@ -1531,7 +1513,7 @@ impl Desktop {
         });
         if submit && self.snapshot.connected && self.busy == 0 {
             cx.stop_propagation();
-            self.send(cx);
+            self.send(false, cx);
         }
     }
     fn paste_image(
@@ -1927,6 +1909,7 @@ mod completion_tests {
                 connections: Arc::new(crate::platform::Connections::default()),
                 closing: tokio_util::task::TaskTracker::new(),
                 logging_error: None,
+                preferences: Arc::default(),
             });
         });
         let view = cx.add_window(|window, cx| {

@@ -706,6 +706,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
         assert!(
             store
                 .dispatch(Intent::Submit {
+                    alternate: false,
                     thread_id: None,
                     client_user_message_id: "offline".into()
                 })
@@ -724,6 +725,7 @@ async fn new_live_conversation_avoids_unmaterialized_history_and_survives_reconn
             .unwrap();
         store
             .dispatch(Intent::Submit {
+                alternate: false,
                 thread_id: None,
                 client_user_message_id: "sent".into(),
             })
@@ -905,7 +907,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                             let blocked = root.join("bex-chats");
                             std::fs::write(&blocked, "not a directory").unwrap();
                             let before = store.snapshot();
-                            let failed = store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "failed-chat".into() }).await;
+                            let failed = store.dispatch(Intent::Submit { alternate: false, thread_id: None, client_user_message_id: "failed-chat".into() }).await;
                             assert!(failed.is_err(), "an unavailable chat directory must fail before creating a conversation");
                             let after = store.snapshot();
                             assert!(after.navigation.thread_id.is_none());
@@ -919,7 +921,7 @@ async fn submissions_complete_across_saved_worktree_settings_and_chat_scopes() {
                             store.disconnect().await.unwrap();
                             store.reconnect(&endpoint, &fixture.ticket, None).await.unwrap();
                         }
-                        let sent = store.dispatch(Intent::Submit { thread_id: thread_id.clone(), client_user_message_id: format!("client-{number}").into() }).await;
+                        let sent = store.dispatch(Intent::Submit { alternate: false, thread_id: thread_id.clone(), client_user_message_id: format!("client-{number}").into() }).await;
                         assert!(matches!(sent.unwrap_or_else(|error| panic!("{prompt}: {error}")), Outcome::Submitted { .. }));
                         let id = store.snapshot().navigation.thread_id.clone().unwrap();
                         if let Some(previous) = &thread_id { assert_eq!(&id, previous); }
@@ -1253,6 +1255,7 @@ async fn repeated_turn_history_preserves_both_responses_after_reopening_and_rest
             .unwrap();
         store
             .dispatch(Intent::Submit {
+                alternate: false,
                 thread_id: None,
                 client_user_message_id: "duplicate-message".into(),
             })
@@ -2472,6 +2475,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
                 .unwrap();
             mobile
                 .dispatch(Intent::Submit {
+                    alternate: false,
                     thread_id: previous_id,
                     client_user_message_id: format!("shared-{index}").into(),
                 })
@@ -2641,7 +2645,7 @@ async fn completed_conversations_refresh_the_sidebar_without_manual_reload() {
                 store.dispatch(Intent::NewChat { cwd: if scoped { project.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
                 let key = store.snapshot().navigation.draft_key.clone();
                 store.dispatch(Intent::SetDraftText { thread_id: key, text: "[success] list automatically".into() }).await.unwrap();
-                store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "sidebar-message".into() }).await.unwrap();
+                store.dispatch(Intent::Submit { alternate: false, thread_id: None, client_user_message_id: "sidebar-message".into() }).await.unwrap();
                 let id = store.snapshot().navigation.thread_id.clone().unwrap();
                 let mut updates = store.subscribe();
                 let reflected = tokio::time::timeout(Duration::from_secs(3), async {
@@ -2701,7 +2705,7 @@ async fn worktree_management_preserves_conversations_and_recreates_deleted_check
         store.dispatch(Intent::NewChat { cwd: project.to_str().unwrap().into() }).await.unwrap();
         let key = store.snapshot().navigation.draft_key.clone();
         store.dispatch(Intent::SetDraftText { thread_id: key, text: "[success] [delayed-input] keep running".into() }).await.unwrap();
-        store.dispatch(Intent::Submit { thread_id: None, client_user_message_id: "managed".into() }).await.unwrap();
+        store.dispatch(Intent::Submit { alternate: false, thread_id: None, client_user_message_id: "managed".into() }).await.unwrap();
         let id = store.snapshot().navigation.thread_id.clone().unwrap();
         let path = store.snapshot().navigation.cwd.clone();
         let mut updates = store.subscribe();
@@ -3045,6 +3049,7 @@ async fn visualization_reaches_store_and_reopens_after_source_removal() {
             .unwrap();
         store
             .dispatch(Intent::Submit {
+                alternate: false,
                 thread_id: None,
                 client_user_message_id: "visualize".into(),
             })

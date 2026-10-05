@@ -544,5 +544,6 @@ pub struct Submission {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmissionReceipt {
+    /// None confirms Host queue admission. Native execution returns its turn ID.
     pub turn_id: Option<crate::ids::TurnId>,
 }

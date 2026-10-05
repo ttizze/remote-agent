@@ -164,6 +164,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
                 .await?;
             let Outcome::Submitted { turn_id: id } = store
                 .dispatch(Intent::Submit {
+                    alternate: false,
                     thread_id: Some(thread_id),
                     client_user_message_id: client_message_id.into(),
                 })

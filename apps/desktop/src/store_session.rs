@@ -45,6 +45,9 @@ impl StoreSession {
                 return;
             }
         };
+        if let Some(preferences) = runtime.preferences.get() {
+            preferences.owner.attach(&store);
+        }
         let mut snapshots = store.subscribe();
         let session = Self {
             store,
@@ -72,8 +75,12 @@ impl StoreSession {
         failure: impl Fn(String) -> E + Send + 'static,
     ) {
         let (send, mut receive) = watch::channel(self.store.snapshot());
-        let mut preferences =
-            agent_core::persistence::ModelPreferences::capture(&self.store.snapshot());
+        let preferences = self
+            .runtime
+            .preferences
+            .get()
+            .expect("device preferences loaded")
+            .clone();
         self.persistence = Some(send);
         self.persistence_task = Some(self.runtime.closing.spawn_on(
             async move {
@@ -81,28 +88,17 @@ impl StoreSession {
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                     let snapshot = receive.borrow_and_update().clone();
                     let path = path.clone();
-                    let next_preferences =
-                        agent_core::persistence::ModelPreferences::capture(&snapshot);
-                    let preferences_changed = preferences != next_preferences;
-                    let saved_preferences = next_preferences.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        if preferences_changed {
+                    let result = async {
+                        preferences.save().await?;
+                        tokio::task::spawn_blocking(move || {
                             host_daemon::platform::save_private_json(
-                                &path.with_file_name("model-preferences.json"),
-                                &saved_preferences,
-                            )?;
-                        }
-                        host_daemon::platform::save_private_json(
-                            &path,
-                            &agent_core::persistence::PersistedState::capture(&snapshot),
-                        )
-                    })
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .and_then(|result| result);
-                    if result.is_ok() {
-                        preferences = next_preferences;
+                                &path,
+                                &agent_core::persistence::PersistedState::capture(&snapshot),
+                            )
+                        })
+                        .await?
                     }
+                    .await;
                     if let Err(error) = result {
                         let _ = updates.send(failure(format!("{error:#}"))).await;
                     }
@@ -156,12 +152,17 @@ mod tests {
         Snapshot,
         Error,
     }
-    fn runtime() -> Runtime {
+    async fn runtime(directory: &std::path::Path) -> Runtime {
+        let preferences =
+            crate::preferences::Preferences::load(directory.join("client-preferences.json"))
+                .await
+                .unwrap();
         Runtime {
             handle: tokio::runtime::Handle::current(),
             connections: Arc::default(),
             closing: tokio_util::task::TaskTracker::new(),
             logging_error: None,
+            preferences: Arc::new(tokio::sync::OnceCell::new_with(Some(Arc::new(preferences)))),
         }
     }
 
@@ -170,7 +171,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("snapshot.json");
-            let runtime = runtime();
+            let runtime = runtime(directory.path()).await;
             let store = Arc::new(Store::offline(Snapshot::default()));
             let (updates, incoming) = async_channel::unbounded();
             let publish = tokio::spawn(StoreSession::publish(
@@ -184,6 +185,12 @@ mod tests {
                 panic!("missing session")
             };
             session.persist(path.clone(), updates, |_| Update::Error);
+            store
+                .dispatch(Intent::SetFollowUpBehavior {
+                    behavior: agent_core::state::FollowUpBehavior::Steer,
+                })
+                .await
+                .unwrap();
             store
                 .dispatch(Intent::SelectDefaultEffort {
                     scope: agent_core::state::ModelDefaultsScope::Environment { id: "vm".into() },
@@ -211,12 +218,16 @@ mod tests {
             );
             assert!(store.dispatch(Intent::ShowThreadList).await.is_err());
             let preferences =
-                std::fs::read(directory.path().join("model-preferences.json")).unwrap();
+                std::fs::read(directory.path().join("client-preferences.json")).unwrap();
             let other = agent_core::persistence::decode(
-                &agent_core::persistence::apply_model_preferences(&[], &preferences).unwrap(),
+                &agent_core::persistence::apply_client_preferences(&[], &preferences).unwrap(),
             )
             .unwrap();
             assert_eq!(other.scoped_model_defaults, restored.scoped_model_defaults);
+            assert_eq!(
+                other.follow_up_behavior,
+                agent_core::state::FollowUpBehavior::Steer
+            );
             assert!(other.drafts.is_empty());
         })
         .await
@@ -229,7 +240,7 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("snapshot.json");
             std::fs::create_dir(&path).unwrap();
-            let runtime = runtime();
+            let runtime = runtime(directory.path()).await;
             let store = Arc::new(Store::offline(Snapshot::default()));
             let (updates, incoming) = async_channel::unbounded();
             let publish = tokio::spawn(StoreSession::publish(
@@ -272,7 +283,8 @@ mod tests {
     #[tokio::test]
     async fn failed_connection_is_delivered_and_undelivered_session_closes_its_store() {
         tokio::time::timeout(Duration::from_secs(5), async {
-            let runtime = runtime();
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(directory.path()).await;
             let store = Arc::new(Store::offline(Snapshot::default()));
             let (updates, incoming) = async_channel::unbounded();
             StoreSession::publish(

@@ -15,6 +15,7 @@ pub(super) struct Dictation {
     generation: u64,
     pub(super) phase: Phase,
     send: bool,
+    alternate: bool,
     control: Option<platform::Recording>,
     preparation: Option<agent_core::client::DictationPreparation>,
     pub(super) levels: std::collections::VecDeque<f32>,
@@ -77,7 +78,7 @@ impl Desktop {
                     Icon::default().path("bex/stop.svg"),
                     "録音を終了して文字起こし",
                     cx,
-                    |s, _, _| s.finish_dictation(false),
+                    |s, _, _| s.finish_dictation(false, false),
                 )
                 .disabled(!recording),
             )
@@ -87,7 +88,7 @@ impl Desktop {
                     IconName::ArrowUp,
                     "文字起こしして送信",
                     cx,
-                    |s, _, cx| s.send(cx),
+                    |s, _, cx| s.send(false, cx),
                 )
                 .primary()
                 .large()
@@ -125,6 +126,7 @@ impl Desktop {
                     generation: self.snapshot.epoch,
                     phase: Phase::Preparing,
                     send: false,
+                    alternate: false,
                     control: Some(control),
                     preparation: None,
                     levels: std::collections::VecDeque::from([0.; 40]),
@@ -134,7 +136,7 @@ impl Desktop {
             Err(error) => self.set_error(error),
         }
     }
-    pub(super) fn finish_dictation(&mut self, send: bool) {
+    pub(super) fn finish_dictation(&mut self, send: bool, alternate: bool) {
         let Some(state) = self
             .dictation
             .as_mut()
@@ -149,6 +151,7 @@ impl Desktop {
         }
         state.phase = Phase::Transcribing;
         state.send = send;
+        state.alternate = alternate;
     }
     pub(super) fn cancel_recording(&mut self) {
         if let Some(state) = self.dictation.as_mut() {
@@ -188,6 +191,7 @@ impl Desktop {
             platform::RecordingEvent::Finished(Ok(audio)) => {
                 state.control = None;
                 let intent = Intent::Transcribe(op::Dictate {
+                    alternate: state.alternate,
                     draft_key: state.key.clone(),
                     preparation: state
                         .preparation

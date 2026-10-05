@@ -134,7 +134,7 @@ extension ThreadScreen {
                         ProgressView().frame(height: 40)
                     }
                     Spacer(minLength: 0)
-                    if queueControls.editing {
+                    if queueControls.action == .save {
                         Button("キャンセル") { model.perform(.cancelQueueEdit) }
                             .disabled(model.sending || model.transcribing || dictation.isRecording || model
                                 .transferring || preparingMedia)
@@ -224,7 +224,7 @@ extension ThreadScreen {
                         .transferring || preparingMedia)
                     .accessibilityLabel(dictation.isRecording ? "録音を終了して文字起こし" : "音声をCodexで文字起こし")
                     .accessibilityIdentifier("dictation.toggle")
-                    if !queueControls.editing, let threadId = model.selectedThreadId,
+                    if queueControls.action != .save, let threadId = model.selectedThreadId,
                        let runningTurnId = model.snapshot.conversation(id: threadId)?.activeTurnId(),
                        !dictation.isRecording, !dictation.requestingPermission, !model.transcribing,
                        model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, attachments
@@ -232,7 +232,7 @@ extension ThreadScreen {
                         Button { model.interrupt(runningTurnId) } label: {
                             Image(systemName: "stop.fill").font(.system(size: 15))
                         }
-                        .buttonStyle(ComposerSendButtonStyle())
+                        .buttonStyle(ComposerSendButtonStyle(danger: true))
                         .disabled(model.interruptingTurnId == runningTurnId)
                         .accessibilityLabel(model.interruptingTurnId == runningTurnId ? "停止中" : "停止")
                         .accessibilityIdentifier("turn.interrupt.\(runningTurnId)")
@@ -253,15 +253,18 @@ extension ThreadScreen {
                                 model.send()
                             }
                         } label: {
-                            Image(systemName: queueControls.editing ? "checkmark" : "arrow.up")
-                                .font(.system(
-                                    size: 20,
-                                    weight: .semibold
-                                ))
+                            Image(systemName: composerSymbol(queueControls.action))
+                                .font(.system(size: 18, weight: .semibold))
                         }
                         .buttonStyle(ComposerSendButtonStyle())
-                        .accessibilityLabel(queueControls.editing ? "変更を保存" : dictation
-                            .isRecording ? "文字起こしして送信" : "送信")
+                        .accessibilityLabel(dictation.isRecording ? "文字起こしして送信" :
+                            composerActionLabel(action: queueControls.action))
+                        .contextMenu {
+                            if !dictation.isRecording, let alternate = queueControls.alternateAction {
+                                Button(composerActionLabel(action: queueControls.action)) { model.send() }
+                                Button(composerActionLabel(action: alternate)) { model.send(alternate: true) }
+                            }
+                        }
                         .disabled(!model.isConnected || (!model.isNewThread && conversation == nil) || model
                             .sending || model.transferring || preparingMedia || dictation.requestingPermission || model
                             .transcribing || (!dictation.isRecording && !queueControls.sendEnabled))
@@ -348,19 +351,40 @@ extension ThreadScreen {
                     .lineLimit(1 ... 6)
                     .focused($composerFocused)
                     .accessibilityIdentifier("task.message")
+                    .onKeyPress(keys: [.return], phases: .down) { press in
+                        guard press.modifiers == .command,
+                              model.snapshot.composerControls(busy: model.sending || model.transferring).sendEnabled
+                        else { return .ignored }
+                        model.send(alternate: true)
+                        return .handled
+                    }
             }
         }
         .id(model.draftKey)
     }
 }
 
+private func composerSymbol(_ action: ComposerAction) -> String {
+    switch action {
+    case .send: "arrow.up"
+    case .queue: "list.number"
+    case .steer: "arrow.turn.left.up"
+    case .save: "checkmark"
+    }
+}
+
 private struct ComposerSendButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.colorScheme) private var colorScheme
+    var danger = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundColor(.accentColor)
-            .opacity(isEnabled ? (configuration.isPressed ? 0.7 : 1) : 0.3)
+            .foregroundColor(.white)
+            .frame(width: 30, height: 30)
+            .background(Color(paletteRGB: danger ? colorScheme.nativePalette.error : colorScheme.nativePalette.primary)
+                .opacity(isEnabled ? 1 : 0.15), in: Circle())
+            .opacity(configuration.isPressed ? 0.7 : 1)
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
     }

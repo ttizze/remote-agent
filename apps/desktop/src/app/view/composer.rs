@@ -350,7 +350,7 @@ impl Desktop {
         let empty = self.composer.read(cx).value().trim().is_empty() && attachments.is_empty();
         let phase = self.dictation.as_ref().map(|d| d.phase);
         let controls = self.snapshot.composer_controls(self.busy > 0);
-        let editing = controls.editing;
+        let editing = controls.action == agent_core::state::ComposerAction::Save;
         let send = if let Some(id) = running.filter(|_| empty && !editing) {
             Self::icon_button(
                 "stop",
@@ -368,14 +368,19 @@ impl Desktop {
         } else {
             Self::icon_button(
                 "send",
-                if editing {
-                    IconName::Check
-                } else {
-                    IconName::ArrowUp
+                match controls.action {
+                    agent_core::state::ComposerAction::Save => Icon::from(IconName::Check),
+                    agent_core::state::ComposerAction::Queue => {
+                        Icon::default().path("bex/queue.svg")
+                    }
+                    agent_core::state::ComposerAction::Steer => {
+                        Icon::default().path("bex/steer.svg")
+                    }
+                    agent_core::state::ComposerAction::Send => Icon::from(IconName::ArrowUp),
                 },
-                if editing { "変更を保存" } else { "送信" },
+                agent_core::state::composer_action_label(controls.action),
                 cx,
-                |s, _, cx| s.send(cx),
+                |s, _, cx| s.send(false, cx),
             )
             .disabled(!controls.send_enabled || empty)
         };
@@ -409,6 +414,16 @@ impl Desktop {
                     });
                     if committed {
                         s.dispatch(Intent::SteerOldestQueued);
+                        cx.stop_propagation();
+                    }
+                    return;
+                }
+                if event.keystroke.key == "enter" && primary && !modifiers.shift && !modifiers.alt {
+                    let committed = s.composer.update(cx, |input, cx| {
+                        input.marked_text_range(window, cx).is_none()
+                    });
+                    if committed {
+                        s.send(true, cx);
                         cx.stop_propagation();
                     }
                     return;

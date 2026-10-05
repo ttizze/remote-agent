@@ -11,6 +11,7 @@ pub struct Dictate {
     pub preparation: Option<String>,
     pub audio: Vec<u8>,
     pub send: bool,
+    pub alternate: bool,
     pub client_user_message_id: agent_protocol::ids::ClientInputId,
 }
 
@@ -64,6 +65,7 @@ impl Operation for Dictate {
         let Self {
             draft_key,
             client_user_message_id,
+            alternate,
             ..
         } = self;
         let clear_draft = draft.clone();
@@ -75,7 +77,8 @@ impl Operation for Dictate {
             draft,
             client_user_message_id,
             Some(clear_draft),
-            false,
+            snapshot.submission_action(snapshot.navigation.thread_id.as_ref(), alternate, false)
+                == ComposerAction::Queue,
         );
         *snapshot = next;
         effects
@@ -321,10 +324,19 @@ impl Operation for SendSubmission {
         } = self;
 
         if let Some(thread) = shared_mut(&mut snapshot.conversations, &thread_id) {
-            thread.submissions.insert(
-                client_user_message_id,
-                crate::session::SubmissionDelivery::Accepted { turn_id },
-            );
+            // A queued receipt can arrive after the worker's Sending/Accepted
+            // notification. Keep that later Host state instead of regressing it.
+            if turn_id.is_some() {
+                thread.submissions.insert(
+                    client_user_message_id,
+                    crate::session::SubmissionDelivery::Accepted { turn_id },
+                );
+            } else {
+                thread
+                    .submissions
+                    .entry(client_user_message_id)
+                    .or_insert(crate::session::SubmissionDelivery::Queued);
+            }
         }
         reconcile_pending(snapshot, &thread_id);
 
@@ -476,5 +488,80 @@ impl Operation for UploadAttachment {
         self.attachment.path = path;
         add_attachment(snapshot, self.draft_key, self.attachment);
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_protocol::session::{ProviderKind, SubmissionDelivery};
+
+    #[test]
+    fn queued_receipt_preserves_later_host_progress_and_keeps_the_input_editable_until_claimed() {
+        let session = crate::session::SessionRef {
+            provider: ProviderKind::Codex,
+            id: "owned".into(),
+        };
+        let draft = Arc::new(Draft {
+            text: "waiting message".into(),
+            ..Default::default()
+        });
+        for current in [
+            None,
+            Some(SubmissionDelivery::Queued),
+            Some(SubmissionDelivery::Sending),
+            Some(SubmissionDelivery::Accepted {
+                turn_id: Some("active".into()),
+            }),
+            Some(SubmissionDelivery::Unknown),
+            Some(SubmissionDelivery::Rejected),
+        ] {
+            let mut thread = Thread {
+                id: Some(session.clone()),
+                ..Default::default()
+            };
+            thread
+                .queued_inputs
+                .push(agent_protocol::queue::QueueEntry {
+                    submission: draft.submission(session.clone(), "message".into()),
+                    delivery: SubmissionDelivery::Queued,
+                });
+            if let Some(current) = &current {
+                thread.submissions.insert("message".into(), current.clone());
+            }
+            let mut snapshot = Snapshot {
+                navigation: Arc::new(Navigation {
+                    thread_id: Some(session.clone()),
+                    draft_key: session.clone().into(),
+                    ..Default::default()
+                }),
+                conversations: Arc::new([(session.clone(), Arc::new(thread))].into()),
+                ..Default::default()
+            };
+            let original = snapshot.drafts.clone();
+            SendSubmission {
+                thread_id: session.clone(),
+                client_user_message_id: "message".into(),
+                draft: draft.clone(),
+                force_queue: true,
+            }
+            .apply(&mut snapshot, SubmissionProgress::Sent(None));
+            let expected = current.unwrap_or(SubmissionDelivery::Queued);
+            assert_eq!(
+                snapshot.conversations[&session].submissions["message"],
+                expected
+            );
+            assert!(Arc::ptr_eq(&original, &snapshot.drafts));
+            let (editing, _) = reduce(
+                &snapshot,
+                Event::Intent(Intent::BeginQueueEdit {
+                    id: "message".into(),
+                }),
+            );
+            assert_eq!(
+                editing.editing_queue_id().is_some(),
+                expected == SubmissionDelivery::Queued
+            );
+        }
     }
 }

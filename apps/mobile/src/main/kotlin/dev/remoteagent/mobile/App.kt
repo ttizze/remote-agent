@@ -20,6 +20,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -57,7 +58,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
@@ -70,6 +70,7 @@ internal enum class Screen {
     Pairing,
     Threads,
     Conversation,
+    Settings,
 }
 
 /** One core Snapshot feeds Compose; all business changes are queued typed intents. */
@@ -102,17 +103,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private var connection: Job? = null
     private var observation: Job? = null
     private var persistence: Job? = null
-    private val writes = Channel<Pair<String, Snapshot>>(Channel.UNLIMITED)
-    private val writer =
-        scope.launch(Dispatchers.IO) {
-            for ((id, current) in writes) {
-                try {
-                    repository.save(id, current.serializeLocalState())
-                } catch (error: IOException) {
-                    withContext(Dispatchers.Main) { notice = error.message }
-                }
-            }
-        }
+
+    private val storage = AndroidSnapshotStorage(repository, scope) { notice = it }
     private val operations = mutableSetOf<Deferred<Outcome>>()
     private val flushes = mutableSetOf<Job>()
     private val pending = ArrayDeque<Pair<Intent, (Result<Outcome>) -> Unit>>()
@@ -125,7 +117,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     init {
         try {
             profiles = repository.profiles()
-            repository.selected?.takeIf { id -> profiles.any { it.id == id } }?.let(::selectProfile)
+            val selected = repository.selected?.takeIf { id -> profiles.any { it.id == id } }
+            if (selected == null) initialize(null) else selectProfile(selected)
         } catch (error: SerializationException) {
             notice = error.message
         }
@@ -159,10 +152,15 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
     fun selectProfile(id: String) {
         screen = Screen.Threads
+        initialize(id)
+    }
+
+    private fun initialize(id: String?) {
         if (profileId == id && owner != null) {
             connect()
             return
         }
+        persistence?.cancel()
         persist()
         initialization?.cancel()
         observation?.cancel()
@@ -174,37 +172,37 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         repository.selected = id
         busy = false
         initialization = scope.launch {
-            old?.shutdown()
-            try {
-                val bytes = withContext(Dispatchers.IO) { repository.load(id) }
-                val store = AgentStore.offline(bytes, repository.diagnosticsDirectory(id))
-                if (profileId != id || !isActive) {
-                    store.shutdown()
-                    return@launch
+            val failure =
+                try {
+                    old?.shutdown()
+                    flushes.toList().joinAll()
+                    val bytes = storage.load(id)
+                    val store = AgentStore.offline(bytes, repository.diagnosticsDirectory(id ?: "device"))
+                    if (profileId != id || !isActive) {
+                        store.shutdown()
+                        return@launch
+                    }
+                    owner = store
+                    initialization = null
+                    publish(store.snapshot())
+                    perform(Intent.ShowThreadList)
+                    while (pending.isNotEmpty()) {
+                        val (intent, complete) = pending.removeFirst()
+                        perform(intent, complete)
+                    }
+                    observe(store, id)
+                    connect()
+                    null
+                } catch (error: IOException) {
+                    error
+                } catch (error: AgentException) {
+                    error
                 }
-                owner = store
+            if (failure != null && profileId == id) {
                 initialization = null
-                publish(store.snapshot())
-                perform(Intent.ShowThreadList)
-                while (pending.isNotEmpty()) {
-                    val (intent, complete) = pending.removeFirst()
-                    perform(intent, complete)
-                }
-                observe(store, id)
-                connect()
-            } catch (error: IOException) {
-                failInitialization(id, error)
-            } catch (error: AgentException) {
-                failInitialization(id, error)
+                notice = failure.message
+                while (pending.isNotEmpty()) pending.removeFirst().second(Result.failure(failure))
             }
-        }
-    }
-
-    private fun failInitialization(id: String, error: Exception) {
-        if (profileId == id) {
-            initialization = null
-            notice = error.message
-            while (pending.isNotEmpty()) pending.removeFirst().second(Result.failure(error))
         }
     }
 
@@ -214,16 +212,20 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         notice = null
         connection = scope.launch {
             try {
+                initialization?.join()
                 val invitation =
                     parseInvitation(contents, System.currentTimeMillis().milliseconds.inWholeSeconds.toULong())
                 val id = ticketIdentity(invitation.endpoint)
                 val identity =
                     withContext(Dispatchers.IO) { AndroidCredentialStore(context, id).loadOrCreate(::generateIdentity) }
+                persist()
+                flushes.toList().joinAll()
+                val persisted = storage.load(id)
                 val store =
                     try {
                         AgentStore.connect(
                             Connection(invitation.endpoint, identity, invitation.invitation, true),
-                            byteArrayOf(),
+                            persisted,
                             repository.diagnosticsDirectory(id),
                         )
                     } finally {
@@ -292,7 +294,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun observe(store: AgentStore, id: String) {
+    private fun observe(store: AgentStore, id: String?) {
         val initial = snapshot
         observation = scope.launch {
             var previous = initial
@@ -356,16 +358,15 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     fun persist() {
-        val id = profileId ?: return
-        val store = owner
-        val current = snapshot
+        val id = profileId
+        val store = owner ?: return
         val receipts = operations.toList()
         lateinit var flush: Job
         flush =
             scope.launch(start = CoroutineStart.LAZY) {
                 try {
                     for (receipt in receipts) runCatching { receipt.await() }
-                    writes.send(id to (store?.snapshot() ?: current))
+                    storage.save(id, store.snapshot())
                 } finally {
                     flushes.remove(flush)
                 }
@@ -386,10 +387,9 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             val store = owner
             if (store != null) {
                 runCatching { store.shutdown() }
-                profileId?.let { writes.send(it to store.snapshot()) }
+                storage.save(profileId, store.snapshot())
             }
-            writes.close()
-            writer.join()
+            storage.close()
             scope.cancel()
         }
     }
@@ -435,7 +435,16 @@ internal fun RemoteAgentApp(
         if (model.screen == Screen.Conversation) model.showThreads() else model.showHosts()
     }
     NativeTheme {
-        Scaffold(topBar = { TopAppBar(title = { Text("Bex") }) }) { padding ->
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("Bex") },
+                    actions = {
+                        TextButton(onClick = { model.screen = Screen.Settings }, enabled = !model.busy) { Text("設定") }
+                    },
+                )
+            }
+        ) { padding ->
             Column(Modifier.padding(padding)) {
                 ConnectionStatus(
                     model.notice ?: model.snapshot.error(),
@@ -444,7 +453,7 @@ internal fun RemoteAgentApp(
                     model::connect,
                 )
                 when {
-                    model.screen == Screen.Pairing || model.profiles.isEmpty() ->
+                    model.screen == Screen.Pairing || (model.profiles.isEmpty() && model.screen != Screen.Settings) ->
                         PairingScreen(model.busy, model::pair, model::showHosts, requestQrScan)
                     model.screen == Screen.Hosts ->
                         ProfilesScreen(model.profiles, model::selectProfile) { model.screen = Screen.Pairing }
@@ -460,6 +469,7 @@ internal fun RemoteAgentApp(
                             },
                             Modifier.weight(1f),
                         )
+                    model.screen == Screen.Settings -> ClientSettings(model.snapshot) { model.perform(it) }
                     else -> ConversationPane(model)
                 }
             }

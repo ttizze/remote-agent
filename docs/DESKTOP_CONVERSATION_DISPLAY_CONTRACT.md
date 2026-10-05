@@ -671,6 +671,18 @@ Editing a queued message uses the normal composer and highlights the original qu
 
 Promoting queued input to Steer preserves the ordinary draft and the remaining queue's order and hold state. Core exposes this action only for a queued input and an observed running turn whose native adapter supports steering. The Host rechecks the exact turn before claiming that input and owns the write after the requesting client disconnects. A repeated completed command can acknowledge its recorded target; an uncertain write cannot be retried automatically. Codex uses app-server's steer request, and Claude offers a stream-json user message with priority `now`, retains the active turn, and ignores that steering operation's intermediate aborted result. Cmd/Ctrl+Shift+Enter promotes the oldest queued input, and Option/Alt+Up at the composer's start opens the latest queued input in the ordinary composer. IME composition does not trigger either shortcut. These interactions follow the pinned T3 composer contract.
 
+The device's Follow-ups setting defaults to Queue. During a running turn, the
+ordinary send action follows that setting; Cmd/Ctrl+Enter selects the opposite
+action on desktop and Android, and Cmd+Enter does so on iOS. Mobile long press
+offers both actions. An idle conversation sends normally, queue editing saves,
+and a missing active turn or unsupported adapter offers Queue alone. Core owns
+this decision and its labels. Desktop windows share one device preference owner
+and one file writer, while their drafts and navigation remain independent.
+Host switching and client restart preserve the device setting. A queue admission
+receipt cannot replace a newer Sending or Accepted event or make a queued row
+uneditable. These changes follow the pinned T3 composer contract; native keyboard,
+long-press and visual acceptance remain to be executed.
+
 Queued input belongs to the Host, remains separate from executed turns, and is durable before its receipt is returned. Pause/resume, edit, reorder and removal operate on that queue. Restart preserves order and edits and holds undelivered input. A claimed write becomes Unknown after a restart; removing its visible queue row does not change that outcome or make resending the same input safe.
 
 A successful stop holds waiting inputs before another queue entry can be claimed.

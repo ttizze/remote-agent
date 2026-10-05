@@ -4,7 +4,7 @@ use super::*;
 impl Desktop {
     pub(super) fn open_settings(&mut self) {
         self.tab = Tab::Settings;
-        self.settings_page = SettingsPage::Agents;
+        self.settings_page = SettingsPage::General;
         if self.snapshot.account.login.is_none() {
             self.model_provider = None;
         }
@@ -18,6 +18,7 @@ impl Desktop {
     pub(super) fn settings_sidebar(&self, cx: &Context<Self>) -> Sidebar<SidebarSection> {
         let mut navigation = SidebarMenu::new().gap_1();
         for (label, icon, page) in [
+            ("一般", IconName::Settings, SettingsPage::General),
             ("モデル", IconName::Settings, SettingsPage::Models),
             ("エージェント", IconName::User, SettingsPage::Agents),
             ("端末と接続", IconName::Network, SettingsPage::Connections),
@@ -52,6 +53,10 @@ impl Desktop {
 
     pub(super) fn settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let (projects, environment) = match self.settings_page {
+            SettingsPage::General => (
+                div().child("この端末").into_any_element(),
+                div().child("クライアント設定").into_any_element(),
+            ),
             SettingsPage::Models => (
                 self.model_scope_menu(
                     "settings-scope-projects",
@@ -91,6 +96,7 @@ impl Desktop {
             ),
         };
         let (title, subtitle) = match self.settings_page {
+            SettingsPage::General => ("一般", "この端末で使う入力動作を設定します。"),
             SettingsPage::Models => ("モデル", "新しい会話で使うモデルの初期値を設定します。"),
             SettingsPage::Agents => (
                 "エージェント",
@@ -136,6 +142,7 @@ impl Desktop {
         }
         body =
             match self.settings_page {
+                SettingsPage::General => body.child(self.follow_up_settings(cx)),
                 SettingsPage::Models => body.child(self.default_model_settings(cx)),
                 SettingsPage::Agents => body.child(self.account_controls(true, cx)).child(
                     Button::new("import-history")
@@ -203,6 +210,7 @@ impl Desktop {
             .child(
                 div()
                     .id(match self.settings_page {
+                        SettingsPage::General => "settings-general-scroll",
                         SettingsPage::Models => "settings-models-scroll",
                         SettingsPage::Agents => "settings-agents-scroll",
                         SettingsPage::Connections => "settings-connections-scroll",
@@ -213,6 +221,40 @@ impl Desktop {
                     .overflow_y_scroll()
                     .child(div().pt_6().px_8().pb_8().child(body)),
             )
+            .into_any_element()
+    }
+
+    fn follow_up_settings(&self, cx: &Context<Self>) -> AnyElement {
+        let mut choices = h_flex().gap_2();
+        for (label, behavior) in [
+            ("Queue", agent_core::state::FollowUpBehavior::Queue),
+            ("Steer", agent_core::state::FollowUpBehavior::Steer),
+        ] {
+            choices = choices.child(
+                self.button(
+                    format!("follow-up-{label}"),
+                    label,
+                    cx,
+                    move |view, _, _| {
+                        view.dispatch(Intent::SetFollowUpBehavior { behavior });
+                    },
+                )
+                .selected(self.snapshot.follow_up_behavior == behavior),
+            );
+        }
+        v_flex()
+            .gap_3()
+            .child(
+                div()
+                    .text_lg()
+                    .font_semibold()
+                    .child("実行中の追加メッセージ"),
+            )
+            .child("Queueは次のターンまで待機し、Steerは実行中のターンへ送ります。")
+            .child(choices)
+            .child(div().text_sm().text_color(rgb(0x949ca8)).child(
+                "Cmd/Ctrl+Enterで反対の動作を使えます。設定はこの端末の全Hostに適用されます。",
+            ))
             .into_any_element()
     }
 

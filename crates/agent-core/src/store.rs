@@ -24,6 +24,9 @@ const MAX_ITEM_READS: usize = 132;
 const MAX_ITEM_TRANSFERS: usize = 4;
 const MAX_WAITERS: usize = 128;
 
+mod client_preferences;
+pub use client_preferences::DevicePreferences;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Outcome {
@@ -268,6 +271,7 @@ pub struct Store {
     stop: CancellationToken,
     _close_on_drop: DropGuard,
     finished: watch::Receiver<bool>,
+    preferences: Mutex<Option<Arc<DevicePreferences>>>,
 }
 impl Store {
     pub fn new(peer: (Client, Updates), snapshot: Snapshot) -> Self {
@@ -324,6 +328,7 @@ impl Store {
             _close_on_drop: stop.clone().drop_guard(),
             stop,
             finished,
+            preferences: Mutex::new(None),
         }
     }
     #[cfg(all(test, feature = "bindings"))]
@@ -595,6 +600,10 @@ impl Store {
         &self,
         intent: Intent,
     ) -> impl Future<Output = Result<Outcome, PeerError>> + Send + use<> {
+        // A shared device owner orders preference changes across independent
+        // windows. Host results never modify device preferences.
+        let preferences = self.preferences.lock().unwrap().clone();
+        let mut device = preferences.as_ref().map(|owner| owner.lock());
         let mut receipt = Err(PeerError::ConnectionClosed("store is closed".into()));
         let publications = self.publications.lock().unwrap().clone();
         if let Some(publications) = publications {
@@ -621,6 +630,13 @@ impl Store {
                 *current = candidate;
                 changed
             });
+        }
+        if receipt.is_ok()
+            && let Some(device) = &mut device
+        {
+            device.publish(crate::persistence::ClientPreferences::capture(
+                &self.snapshot(),
+            ));
         }
         async move {
             match receipt? {
@@ -706,6 +722,7 @@ fn apply_locked(current: &mut Arc<Snapshot>, event: Event) -> (Vec<Scheduled>, b
 fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
     // No `..`: adding a Snapshot field must update the publication contract.
     let Snapshot {
+        follow_up_behavior,
         operations,
         operation_sequence,
         model_defaults,
@@ -741,6 +758,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         _ => false,
     };
     if Arc::ptr_eq(&current.operations, operations)
+        && current.follow_up_behavior == *follow_up_behavior
         && current.operation_sequence == *operation_sequence
         && current.model_defaults == *model_defaults
         && Arc::ptr_eq(&current.scoped_model_defaults, scoped_model_defaults)
@@ -1456,6 +1474,7 @@ mod tests {
         let before = store.snapshot();
         let result = store
             .dispatch(Intent::Submit {
+                alternate: false,
                 thread_id: None,
                 client_user_message_id: "input".into(),
             })
@@ -1472,6 +1491,9 @@ mod tests {
     fn every_snapshot_field_notifies_subscribers_independently() {
         type Change = fn(&mut Snapshot);
         let changes: &[(&str, Change)] = &[
+            ("follow_up_behavior", |snapshot| {
+                snapshot.follow_up_behavior = crate::state::FollowUpBehavior::Steer;
+            }),
             ("operations", |snapshot| {
                 snapshot.operations = Arc::default()
             }),

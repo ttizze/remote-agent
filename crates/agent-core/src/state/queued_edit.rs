@@ -113,9 +113,10 @@ impl Snapshot {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ComposerControls {
-    pub editing: bool,
     pub send_enabled: bool,
     pub queue_enabled: bool,
+    pub action: ComposerAction,
+    pub alternate_action: Option<ComposerAction>,
 }
 
 #[cfg_attr(feature = "bindings", uniffi::export)]
@@ -141,11 +142,18 @@ impl Snapshot {
             .thread_id
             .as_ref()
             .is_none_or(|session| self.conversations.contains_key(session));
+        let action = self.submission_action(self.navigation.thread_id.as_ref(), false, editing);
+        let alternate = self.submission_action(self.navigation.thread_id.as_ref(), true, editing);
         ComposerControls {
-            editing,
             send_enabled: available && (editing || input_available),
             queue_enabled: available && !editing && self.navigation.thread_id.is_some(),
+            action,
+            alternate_action: (alternate != action).then_some(alternate),
         }
+    }
+
+    pub fn follow_up_behavior(&self) -> FollowUpBehavior {
+        self.follow_up_behavior
     }
 
     pub fn composer_draft_key(&self) -> DraftKey {
@@ -467,6 +475,7 @@ mod tests {
         let (mut snapshot, effects) = reduce(
             &snapshot,
             Event::Intent(Intent::Submit {
+                alternate: false,
                 thread_id: None,
                 client_user_message_id: "must-not-create-another-message".into(),
             }),
@@ -757,7 +766,7 @@ mod tests {
             begin(&mut snapshot, "waiting".into());
         }
         let controls = snapshot.composer_controls(busy);
-        assert_eq!(controls.editing, editing);
+        assert_eq!(controls.action == ComposerAction::Save, editing);
         assert_eq!(controls.send_enabled, can_send);
         assert_eq!(controls.queue_enabled, can_queue);
         let key = snapshot.composer_draft_key();
@@ -784,6 +793,7 @@ mod tests {
         };
         let uploading = upload.capture(&snapshot).unwrap();
         let dictate = op::Dictate {
+            alternate: false,
             draft_key: key.clone(),
             preparation: None,
             audio: vec![],

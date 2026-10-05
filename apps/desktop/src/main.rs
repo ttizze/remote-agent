@@ -2,6 +2,7 @@ mod app;
 mod browser;
 mod diff;
 mod platform;
+mod preferences;
 mod store_session;
 mod terminal;
 mod theme;
@@ -14,6 +15,8 @@ pub(crate) struct Runtime {
     pub(crate) connections: std::sync::Arc<platform::Connections>,
     pub(crate) closing: tokio_util::task::TaskTracker,
     pub(crate) logging_error: Option<String>,
+    pub(crate) preferences:
+        std::sync::Arc<tokio::sync::OnceCell<std::sync::Arc<preferences::Preferences>>>,
 }
 impl Global for Runtime {}
 struct DesktopAssets;
@@ -45,6 +48,8 @@ impl DesktopAssets {
         ),
         ("bex/stop.svg", include_bytes!("../assets/stop.svg")),
         ("bex/pencil.svg", include_bytes!("../assets/pencil.svg")),
+        ("bex/queue.svg", include_bytes!("../assets/queue.svg")),
+        ("bex/steer.svg", include_bytes!("../assets/steer.svg")),
         ("bex/download.svg", include_bytes!("../assets/download.svg")),
         (
             "bex/square-pen.svg",
@@ -109,6 +114,7 @@ fn main() {
                 closing,
                 logging_error,
                 connections: std::sync::Arc::new(platform::Connections::default()),
+                preferences: std::sync::Arc::default(),
             });
             cx.on_app_quit(|cx| {
                 tracing::info!(target: "bex", operation = "shutdown", "Bex shutting down");

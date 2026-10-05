@@ -8,6 +8,18 @@ struct SettingsSheet: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Follow-ups · この端末") {
+                    Picker("実行中の追加メッセージ", selection: Binding(
+                        get: { model.snapshot.followUpBehavior() },
+                        set: { model.perform(.setFollowUpBehavior(behavior: $0)) }
+                    )) {
+                        Text("Queue").tag(FollowUpBehavior.queue)
+                        Text("Steer").tag(FollowUpBehavior.steer)
+                    }
+                    .accessibilityIdentifier("settings.follow-ups")
+                    Text("Queueは次のターンまで待機し、Steerは実行中のターンへ送ります。送信ボタンの長押しで、今回だけ動作を選べます。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Section {
                     NavigationLink {
                         ModelSettingsScreen(model: model, scope: .global, close: { dismiss() })

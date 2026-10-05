@@ -219,7 +219,7 @@ impl Desktop {
                                         if view.snapshot.connected {
                                             view.refresh_accounts_and_models();
                                         } else {
-                                            view.connect(None);
+                                            view.connect();
                                         }
                                         if let Some(hosts) = &view.hosts {
                                             hosts.update(cx, |hosts, _| hosts.refresh());
@@ -267,6 +267,7 @@ mod tests {
             connections: Arc::default(),
             closing: tokio_util::task::TaskTracker::new(),
             logging_error: None,
+            preferences: Arc::default(),
         };
         let session = runtime.block_on(async {
             let (send, receive) = async_channel::unbounded();

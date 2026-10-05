@@ -76,6 +76,7 @@ async fn send(store: &Store, text: &str, client_id: &str) -> agent_protocol::ses
     draft(store, text).await;
     let outcome = store
         .dispatch(Intent::Submit {
+            alternate: false,
             thread_id: store.snapshot().navigation.thread_id.clone(),
             client_user_message_id: client_id.into(),
         })
@@ -697,6 +698,7 @@ async fn provider_selection_cannot_redirect_an_existing_conversation() {
             assert!(
                 store
                     .dispatch(Intent::Submit {
+                        alternate: false,
                         thread_id: Some(id.clone()),
                         client_user_message_id: format!("{}-mismatch", original.id).into(),
                     })
@@ -1084,6 +1086,7 @@ async fn claude_authentication_and_inference_failures_are_visible_and_retry_pres
         assert!(
             store
                 .dispatch(Intent::Submit {
+                    alternate: false,
                     thread_id: None,
                     client_user_message_id: "auth-failure".into()
                 })
@@ -1109,6 +1112,7 @@ async fn claude_authentication_and_inference_failures_are_visible_and_retry_pres
         assert!(
             store
                 .dispatch(Intent::Submit {
+                    alternate: false,
                     thread_id: Some(id.clone()),
                     client_user_message_id: "init-failure".into()
                 })

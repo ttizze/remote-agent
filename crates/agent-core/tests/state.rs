@@ -193,6 +193,7 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
         let (pending, _) = reduce(
             &previous,
             Event::Intent(Intent::Submit {
+                alternate: false,
                 thread_id: Some(SessionRef {
                     provider: ProviderKind::Codex,
                     id: "thread".into(),
@@ -242,6 +243,7 @@ fn submission_acknowledgement_moves_to_the_returned_turn() {
     let (mut pending, _) = reduce(
         &previous,
         Event::Intent(Intent::Submit {
+            alternate: false,
             thread_id: Some(SessionRef {
                 provider: ProviderKind::Codex,
                 id: "thread".into(),
@@ -1088,6 +1090,7 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
     let (mut snapshot, _) = reduce(
         &snapshot,
         Event::Intent(Intent::Submit {
+            alternate: false,
             thread_id: Some(SessionRef {
                 provider: ProviderKind::Codex,
                 id: "thread".into(),
@@ -1383,6 +1386,7 @@ fn host_delivery_replay_resolves_unknown_input_without_overwriting_new_draft() {
         let (pending, _) = reduce(
             &original,
             Event::Intent(Intent::Submit {
+                alternate: false,
                 thread_id: Some(SessionRef {
                     provider: ProviderKind::Codex,
                     id: "thread".into(),
