@@ -26,6 +26,16 @@
       });
       devShells = forEachSystem (pkgs:
         let
+          # Queue validation is not released yet: https://github.com/rhysd/actionlint/pull/654
+          workflowLinter = pkgs.actionlint.overrideAttrs (old: {
+            patches = (old.patches or [ ]) ++ [ (pkgs.fetchurl {
+              url = "https://github.com/rhysd/actionlint/commit/644076a59742c2d1540ebd4686eab3c308f0e562.patch";
+              hash = "sha256-H2y2MlM35dnlSmt7DFYRKVOzDRYzJ2Tw8hWR5nUnwak=";
+            }) ];
+            postCheck = (old.postCheck or "") + ''
+              go test . -run '^TestLinterLint(OK|Error)$'
+            '';
+          });
           rustToolchain = pkgs.rust-bin.stable.latest.minimal.override {
             extensions = [ "clippy" "rustfmt" "rust-analyzer" "rust-src" ];
             targets = [
@@ -68,7 +78,7 @@
           };
           native = pkgs.mkShell {
             RUST_TOOLCHAIN_VERSION = rustToolchain.version;
-            packages = with pkgs; [ rustToolchain sccache cargo-mutants cargo-nextest just jq git pkg-config cmake clang actionlint nodejs ]
+            packages = with pkgs; [ rustToolchain sccache cargo-mutants cargo-nextest just jq git pkg-config cmake clang workflowLinter nodejs ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 lsof
                 alsa-lib fontconfig freetype libxkbcommon wayland libGL vulkan-loader
@@ -92,7 +102,7 @@
               just
               jq
               shellcheck
-              actionlint
+              workflowLinter
               nodejs
               rustToolchain
               sccache

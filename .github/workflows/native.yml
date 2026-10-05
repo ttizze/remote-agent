@@ -105,10 +105,13 @@ jobs:
           retention-days: 7
   macos:
     name: ${{ matrix.client }}
+    concurrency:
+      # Optional PRs share one Apple slot; main and manual clients stay parallel.
+      group: native-apple-${{ github.event_name == 'pull_request' && 'pr' || format('{0}-{1}', github.run_id, matrix.client) }}
+      cancel-in-progress: false
+      queue: max
     strategy:
       fail-fast: false
-      # Optional PRs retain every check without occupying all five Apple slots.
-      max-parallel: ${{ github.event_name == 'pull_request' && 1 || 5 }}
       matrix:
         include:
           - client: Mac

@@ -178,8 +178,9 @@ transfer server just to delete that check would reverse A14.
   Require successful CI checks for the current commit and a clean working tree
   before claiming full verification. Manual check commands remain for
   debugging. Apple CI uses five Apple Silicon `macos-26` runners with Xcode 26.6.
-  Main and manual runs may use all five Apple slots; optional PRs run one Apple
-  job at a time so they do not occupy every slot while main is waiting.
+  Main and manual runs may use all five Apple slots. Optional PR Apple jobs share
+  one repository-wide concurrency queue, retaining up to 100 pending checks
+  without cancellation so several PRs cannot occupy every Apple slot together.
   It selects the image's preinstalled Xcode directly.
   The Mac runner uses `nix develop . --command just quality rust` for Rust
   contracts and Mac Browser E2E. Four iPhone runners use
