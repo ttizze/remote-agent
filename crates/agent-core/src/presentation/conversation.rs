@@ -167,6 +167,7 @@ pub struct TimelineRow {
     pub actionable: bool,
     pub run_id: Option<String>,
     pub rollback_checkpoint_id: Option<String>,
+    pub fork_source_thread_id: Option<String>,
     pub duration_ms: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -212,6 +213,7 @@ pub struct ConversationView {
     pub settled: bool,
     pub snoozed: bool,
     pub auto_settle: bool,
+    pub can_merge_back: bool,
 }
 
 pub fn working(shell: &ThreadShell) -> bool {
@@ -617,6 +619,18 @@ pub fn timeline(projection: &ThreadProjection) -> Vec<TimelineRow> {
             response_mode_message: false,
             actionable,
             run_id: item.run_id.as_ref().map(ToString::to_string),
+            fork_source_thread_id: item
+                .run_id
+                .as_ref()
+                .filter(|id| {
+                    projection
+                        .runs
+                        .iter()
+                        .find(|r| &r.id == *id)
+                        .is_some_and(|r| orchestration::context::forkable(r.status))
+                        || projected.visibility == Visibility::Inherited
+                })
+                .map(|_| projected.source_thread_id.to_string()),
             rollback_checkpoint_id: item
                 .run_id
                 .as_ref()
@@ -923,6 +937,12 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
         settled: thread.is_some_and(|t| t.settled_override == Some(SettledOverride::Settled)),
         snoozed: thread.is_some_and(|t| t.snoozed_until.is_some()),
         auto_settle: thread.is_none_or(|t| t.auto_settle_disabled_at.is_none()),
+        can_merge_back: projection.is_some_and(|p| {
+            p.thread.lineage.relationship_to_parent == Some(Relationship::Fork)
+                && p.runs
+                    .iter()
+                    .any(|r| matches!(r.status, RunStatus::Completed | RunStatus::Waiting))
+        }),
     }
 }
 impl Snapshot {

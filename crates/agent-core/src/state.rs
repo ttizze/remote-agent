@@ -312,6 +312,11 @@ pub enum Intent {
         behavior: SendBehavior,
     },
     Stop,
+    Fork {
+        source_thread_id: String,
+        run_id: String,
+    },
+    MergeBack,
     Rollback {
         checkpoint_id: String,
         restore_files: bool,

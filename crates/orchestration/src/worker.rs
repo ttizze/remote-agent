@@ -137,7 +137,7 @@ async fn execute(
                 thread.rollback_failure = Some(error.message.clone());
                 thread.updated_at = timestamp.clone();
                 store.ingest_rollback(
-                    crate::rollback::events(
+                    crate::events(
                         &claim.effect.thread_id,
                         &format!("rollback-failed:{request_id}"),
                         vec![EventPayload::ThreadMetadataUpdated(thread)],

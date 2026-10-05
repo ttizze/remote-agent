@@ -142,6 +142,21 @@ impl Checkpoints {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
+            let mut parent = path.parent();
+            while let Some(directory) = parent.filter(|p| *p != root && p.starts_with(&root)) {
+                match std::fs::remove_dir(directory) {
+                    Ok(()) => parent = directory.parent(),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
         }
         git(&root, &["checkout-index", "--all", "--force"], Some(&index)).await?;
         Ok(())

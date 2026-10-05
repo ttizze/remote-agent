@@ -25,8 +25,13 @@ struct ConversationRow: View {
                 }
                 if !row
                     .streaming {
-                    Button { UIPasteboard.general.string = row.text } label: { Image(systemName: "doc.on.doc") }
-                        .font(T3.font(12)).foregroundStyle(T3.color("textMuted"))
+                    HStack(spacing: 16) {
+                        Button { UIPasteboard.general.string = row.text } label: { Image(systemName: "doc.on.doc") }
+                        if let source = row.forkSourceThreadId, let run = row.runId {
+                            Button { model.perform(.fork(sourceThreadId: source, runId: run)) } label: { Image(systemName: "arrow.triangle.branch") }
+                                .accessibilityLabel("Fork from here")
+                        }
+                    }.font(T3.font(12)).foregroundStyle(T3.color("textMuted"))
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         case .approval, .question:

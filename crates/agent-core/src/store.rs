@@ -964,6 +964,46 @@ impl Owner {
                     })))
                 }
             }
+            Intent::Fork {
+                source_thread_id,
+                run_id,
+            } => {
+                target = Some(ThreadId::new(source_thread_id).map_err(invalid)?);
+                let child =
+                    ThreadId::new(format!("thread:{}", uuid::Uuid::new_v4())).map_err(invalid)?;
+                body = Some(CommandBody::ThreadFork {
+                    target_thread_id: child.clone(),
+                    source_point: ForkPoint::Run {
+                        run_id: RunId::new(run_id).map_err(invalid)?,
+                    },
+                    title: None,
+                    created_by: CreatedBy::User,
+                    creation_source: self.source,
+                });
+                sent = Some((self.state.draft_key(), self.state.current_draft()));
+                launched = Some(child);
+                None
+            }
+            Intent::MergeBack => {
+                let projection = self
+                    .state
+                    .projection()
+                    .ok_or_else(|| invalid("Thread not loaded"))?;
+                let parent = projection
+                    .thread
+                    .lineage
+                    .parent_thread_id
+                    .clone()
+                    .ok_or_else(|| invalid("Thread is not a fork"))?;
+                sent = Some((self.state.draft_key(), self.state.current_draft()));
+                launched = Some(parent.clone());
+                body = Some(CommandBody::ThreadMergeBack {
+                    target_thread_id: parent,
+                    source_point: ForkPoint::LatestStable,
+                    created_by: CreatedBy::User,
+                });
+                None
+            }
             Intent::Rollback {
                 checkpoint_id,
                 restore_files,
@@ -1441,7 +1481,14 @@ impl Owner {
                             draft.text.clear();
                         }
                         if let Some((key, draft)) = sent {
-                            if self
+                            if !matches!(
+                                &call,
+                                Call::DispatchCommand(Command {
+                                    body: CommandBody::ThreadFork { .. }
+                                        | CommandBody::ThreadMergeBack { .. },
+                                    ..
+                                })
+                            ) && self
                                 .state
                                 .drafts
                                 .get(&key)
@@ -1484,8 +1531,13 @@ impl Owner {
                             if let Some(old) = p.turn_items.iter_mut().find(|old| old.id == item.id)
                             {
                                 *old = *item;
-                            } else {
+                            } else if item.thread_id == id {
                                 p.turn_items.push(*item);
+                            } else if let Some(row) = p.visible_turn_items.iter_mut().find(|row| {
+                                row.source_thread_id == item.thread_id
+                                    && row.source_item_id == item.id
+                            }) {
+                                row.item = *item;
                             }
                         }
                     }

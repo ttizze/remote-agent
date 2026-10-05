@@ -280,11 +280,15 @@ impl ClaudeAdapter {
             .as_ref()
             .and_then(|reference| reference.native_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let resume = provider_thread
-            .native_thread_ref
-            .as_ref()
-            .and_then(|reference| reference.native_id.as_ref())
-            .is_some();
+        let native_fork = projection.context_transfers.iter().any(|t| {
+            t.target_run_id.as_ref() == Some(&run.id) && t.status == TransferStatus::ResolvedNative
+        });
+        let resume = !native_fork
+            && provider_thread
+                .native_thread_ref
+                .as_ref()
+                .and_then(|reference| reference.native_id.as_ref())
+                .is_some();
         let timestamp = now();
         let session = ProviderSession {
             id: ProviderSessionId::new(format!("provider-session:claude:{}", provider_thread.id))
@@ -315,6 +319,15 @@ impl ClaudeAdapter {
             fingerprint: None,
             ordinal: None,
         });
+        for handoff in projection
+            .context_handoffs
+            .iter()
+            .filter(|h| h.target_run_id == run.id && h.status == HandoffStatus::Ready)
+        {
+            if !provider_thread.handoff_ids.contains(&handoff.id) {
+                provider_thread.handoff_ids.push(handoff.id.clone());
+            }
+        }
         provider_thread.first_run_ordinal.get_or_insert(run.ordinal);
         provider_thread.last_run_ordinal = Some(run.ordinal);
         provider_thread.updated_at = timestamp.clone();
@@ -370,10 +383,30 @@ impl ClaudeAdapter {
                 &run.model_selection,
                 projection.thread.runtime_mode,
                 projection.thread.interaction_mode,
-                browser,
+                browser.clone(),
             )?;
             let mut command = command;
-            if let Some(cursor) = state
+            if let Some(transfer) = projection.context_transfers.iter().find(|t| {
+                t.target_run_id.as_ref() == Some(&run.id)
+                    && t.status == TransferStatus::ResolvedNative
+            }) {
+                if let Some(source) = transfer
+                    .source_point
+                    .provider_thread_ref
+                    .as_ref()
+                    .and_then(|r| r.native_id.as_ref())
+                {
+                    command.args(["--resume", source, "--fork-session"]);
+                    if let Some(cursor) = transfer
+                        .source_point
+                        .provider_turn_ref
+                        .as_ref()
+                        .and_then(|r| r.native_id.as_ref())
+                    {
+                        command.args(["--resume-session-at", cursor]);
+                    }
+                }
+            } else if let Some(cursor) = state
                 .provider_thread
                 .native_conversation_head_ref
                 .as_ref()
@@ -399,7 +432,7 @@ impl ClaudeAdapter {
             .await
             .insert(provider_thread_id, handle.clone());
         let mut ready = handle.ready.clone();
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let initialized = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 if let Some(result) = ready.borrow().clone() {
                     return result.map_err(error);
@@ -408,15 +441,34 @@ impl ClaudeAdapter {
             }
         })
         .await
-        .map_err(|_| error("Claude initialization timed out"))??;
+        .map_err(|_| error("Claude initialization timed out"))?;
+        if let Err(initial) = initialized {
+            let provider_id = handle
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .provider_thread
+                .id
+                .clone();
+            self.processes.lock().await.remove(&provider_id);
+            let _ = handle.stop.send(true);
+            wait_done(&handle).await?;
+            if resume || native_fork {
+                let fresh = crate::portable_fallback(&self.output, projection, &run).await?;
+                return Box::pin(self.start(&fresh, run_id, cwd, browser, credentials_home)).await;
+            }
+            return Err(initial);
+        }
         let message = projection
             .messages
             .iter()
             .find(|message| message.id == run.user_message_id)
             .ok_or_else(|| error("run input missing"))?;
+        let mut message = message.clone();
+        message.text = orchestration::context::input_text(projection, &run, &message.text);
         handle
             .input
-            .send(user_frame(&handle.native_session, message, false))
+            .send(user_frame(&handle.native_session, &message, false))
             .await
             .map_err(error)
     }

@@ -129,24 +129,6 @@ pub fn request(
     })
 }
 
-pub fn events(
-    thread: &ThreadId,
-    key: &str,
-    payloads: Vec<EventPayload>,
-    now: &Timestamp,
-) -> Vec<DomainEvent> {
-    payloads
-        .into_iter()
-        .enumerate()
-        .map(|(i, payload)| DomainEvent {
-            id: EventId::new(format!("event:{key}:{i}")).expect("derived id"),
-            thread_id: thread.clone(),
-            occurred_at: now.clone(),
-            payload,
-        })
-        .collect()
-}
-
 pub fn finish(
     projection: &ThreadProjection,
     checkpoint: &Checkpoint,

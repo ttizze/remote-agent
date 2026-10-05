@@ -138,13 +138,19 @@ impl Store {
             });
         }
         let projection = load_projection(&transaction, &command.thread_id)?;
-        let decision = match decider::decide(
-            command,
-            projection.as_ref(),
-            now,
-            capabilities,
-            driver,
-        ) {
+        let planned = if let CommandBody::ThreadFork {
+            target_thread_id, ..
+        }
+        | CommandBody::ThreadMergeBack {
+            target_thread_id, ..
+        } = &command.body
+        {
+            let target = load_projection(&transaction, target_thread_id)?;
+            crate::context::plan(command, projection.as_ref(), target.as_ref(), now)
+        } else {
+            decider::decide(command, projection.as_ref(), now, capabilities, driver)
+        };
+        let decision = match planned {
             Ok(decision) => decision,
             Err(error) => {
                 transaction.execute("INSERT INTO orchestration_command_receipts(command_id,aggregate_kind,aggregate_id,accepted_at,result_sequence,status,error,command_type) VALUES(?1,'thread',?2,?3,0,'rejected',?4,?5)", params![command.command_id.as_str(), command.thread_id.as_str(), now.as_str(), error.to_string(), kind_name(&command.body)?])?;
@@ -271,6 +277,11 @@ impl Store {
                     events: vec![],
                     replayed: false,
                 });
+            }
+            if events.iter().any(|e| matches!(&e.payload, EventPayload::ProviderTurnUpdated(t) if t.status == TurnStatus::Running)) {
+                let payloads = crate::context::consumed(&projection.context_transfers, run_id, now);
+                let trigger = events.first().expect("guarded events").id.to_string();
+                events.extend(crate::events(&thread_id, &format!("{trigger}:consume"), payloads, now));
             }
             if checkpoint_capture {
                 let run = projection
@@ -497,8 +508,15 @@ impl Store {
     pub fn turn_item(&self, id: &ThreadId, item_id: &TurnItemId) -> Result<Option<TurnItem>> {
         let connection = self.lock()?;
         let json: Option<String> = connection.query_row("SELECT payload_json FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND turn_item_id=?2", params![id.as_str(), item_id.as_str()], |row| row.get(0)).optional()?;
-        json.map(|json| serde_json::from_str(&json).map_err(Into::into))
-            .transpose()
+        if let Some(json) = json {
+            return Ok(Some(serde_json::from_str(&json)?));
+        }
+        Ok(load_projection(&connection, id)?.and_then(|p| {
+            p.visible_turn_items
+                .into_iter()
+                .find(|row| row.source_item_id == *item_id)
+                .map(|row| row.item)
+        }))
     }
     pub fn history(
         &self,
@@ -514,19 +532,14 @@ impl Store {
         let candidates: Vec<_> = projection
             .visible_turn_items
             .into_iter()
-            .filter(|row| {
-                cursor.is_none_or(|cursor| {
-                    (row.item.ordinal, &row.item.id) < (cursor.ordinal, &cursor.item_id)
-                })
-            })
+            .filter(|row| cursor.is_none_or(|cursor| row.position < cursor.position))
             .collect();
         let has_more = candidates.len() > limit;
         let start = candidates.len().saturating_sub(limit);
         let items: Vec<_> = candidates.into_iter().skip(start).collect();
         let next_cursor = if has_more {
             items.first().map(|row| HistoryCursor {
-                ordinal: row.item.ordinal,
-                item_id: row.item.id.clone(),
+                position: row.position,
             })
         } else {
             None
@@ -675,6 +688,16 @@ fn load_projection(
     connection: &Connection,
     thread_id: &ThreadId,
 ) -> Result<Option<ThreadProjection>> {
+    load_projection_inner(connection, thread_id, &mut BTreeSet::new())
+}
+fn load_projection_inner(
+    connection: &Connection,
+    thread_id: &ThreadId,
+    visited: &mut BTreeSet<ThreadId>,
+) -> Result<Option<ThreadProjection>> {
+    if !visited.insert(thread_id.clone()) {
+        return Err(StoreError::InvalidEvent("fork lineage cycle".into()));
+    }
     let row: Option<(String, String)> = connection.query_row("SELECT payload_json,projection_updated_at FROM orchestration_v2_projection_threads WHERE thread_id=?1", [thread_id.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
     let Some((json, updated_at)) = row else {
         return Ok(None);
@@ -697,7 +720,41 @@ fn load_projection(
     projection.checkpoints = records(connection, "checkpoints", thread_id)?;
     projection.context_handoffs = records(connection, "context_handoffs", thread_id)?;
     projection.context_transfers = records(connection, "context_transfers", thread_id)?;
+    if let Some(transfer) = projection
+        .context_transfers
+        .iter()
+        .find(|t| t.kind == TransferKind::Fork && t.target_thread_id == *thread_id)
+        && let Some(source) =
+            load_projection_inner(connection, &transfer.source_thread_id, visited)?
+    {
+        let ordinal = transfer
+            .source_point
+            .run_id
+            .as_ref()
+            .and_then(|id| source.runs.iter().find(|r| &r.id == id))
+            .map(|r| r.ordinal)
+            .unwrap_or(0);
+        projection.visible_turn_items = source
+            .visible_turn_items
+            .iter()
+            .filter(|row| {
+                row.visibility == Visibility::Inherited
+                    || row.item.run_id.as_ref().is_none_or(|id| {
+                        source
+                            .runs
+                            .iter()
+                            .any(|r| &r.id == id && r.ordinal <= ordinal)
+                    })
+            })
+            .cloned()
+            .map(|mut row| {
+                row.visibility = Visibility::Inherited;
+                row
+            })
+            .collect();
+    }
     projection.visible_turn_items = projector::visible_items(&projection);
+    visited.remove(thread_id);
     Ok(Some(projection))
 }
 fn upsert<T: Serialize>(
@@ -1057,8 +1114,7 @@ fn bounded_projection(
             .visible_turn_items
             .first()
             .map(|row| HistoryCursor {
-                ordinal: row.item.ordinal,
-                item_id: row.source_item_id.clone(),
+                position: row.position,
             })
     } else {
         None

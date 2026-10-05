@@ -65,6 +65,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
                 TextButton(onClick = { actions = true }) { Text("•••") }
                 DropdownMenu(actions, { actions = false }) {
                     conversation.threadId?.let { id ->
+                        if (conversation.canMergeBack) DropdownMenuItem(text = { Text("Merge back to source") }, onClick = { actions = false; model.perform(Intent.MergeBack) })
                         ThreadActionItems(model, id, conversation.pinned, conversation.archived, conversation.settled) {
                             actions = false
                         }
@@ -167,7 +168,12 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 ConversationBody(row.text)
                 if (row.streaming) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.dp)
-                else CopyButton(row.text)
+                else Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    CopyButton(row.text)
+                    val source = row.forkSourceThreadId
+                    val run = row.runId
+                    if (source != null && run != null) TextButton(onClick = { model.perform(Intent.Fork(source, run)) }) { Text("Fork") }
+                }
             }
         RowKind.APPROVAL,
         RowKind.QUESTION -> RequestCard(model, row)

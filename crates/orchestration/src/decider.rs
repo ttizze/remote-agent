@@ -166,6 +166,11 @@ pub fn decide(
     use CommandBody::*;
     match &command.body {
         ThreadCreate { .. } => unreachable!(),
+        ThreadFork { .. } | ThreadMergeBack { .. } => {
+            return Err(DecisionError(
+                "cross-thread command requires related projection".into(),
+            ));
+        }
         CheckpointRollback {
             scope_id,
             checkpoint_id,
@@ -1124,6 +1129,14 @@ fn dispatch(
         "invalid context",
     )?;
     let active = active(&projection.runs);
+    require(
+        active.is_none()
+            || !projection
+                .context_transfers
+                .iter()
+                .any(|t| t.kind == TransferKind::MergeBack && t.status == TransferStatus::Pending),
+        "wait for the active run before consuming merge back",
+    )?;
     let mode = resolve_dispatch_mode(
         &message.dispatch_mode,
         message.delivery_intent,

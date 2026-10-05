@@ -1208,12 +1208,164 @@ impl HostResources {
         Ok(())
     }
 }
+impl HostResources {
+    async fn resolve_context(
+        &self,
+        mut projection: ThreadProjection,
+        run_id: &RunId,
+        cwd: &Path,
+    ) -> Result<ThreadProjection, AdapterError> {
+        let run = projection
+            .runs
+            .iter()
+            .find(|r| r.id == *run_id)
+            .ok_or_else(|| adapter_error("run missing"))?
+            .clone();
+        let provider = projection
+            .provider_threads
+            .iter()
+            .find(|p| Some(&p.id) == run.provider_thread_id.as_ref())
+            .ok_or_else(|| adapter_error("provider missing"))?
+            .clone();
+        if !run.status.is_blocking() {
+            return Ok(projection);
+        }
+        let pending: Vec<_> = projection
+            .context_transfers
+            .iter()
+            .filter(|t| t.status == TransferStatus::Pending)
+            .cloned()
+            .collect();
+        let mut payloads = vec![];
+        for transfer in &pending {
+            let source = self
+                .orchestration
+                .projection(&transfer.source_thread_id)
+                .map_err(adapter_error)?;
+            let ordinal = transfer
+                .source_point
+                .run_id
+                .as_ref()
+                .and_then(|id| source.runs.iter().find(|r| &r.id == id))
+                .map_or(0, |r| r.ordinal);
+            let native = transfer.kind == TransferKind::Fork
+                && provider.native_thread_ref.is_none()
+                && transfer.source_provider_instance_id.as_ref() == Some(&run.provider_instance_id)
+                && transfer
+                    .source_point
+                    .provider_thread_ref
+                    .as_ref()
+                    .is_some_and(|r| r.strength == Strength::Strong && r.native_id.is_some())
+                && transfer
+                    .source_point
+                    .provider_turn_ref
+                    .as_ref()
+                    .is_some_and(|r| r.native_id.is_some());
+            let reference = if native {
+                match provider.driver {
+                    Driver::Codex => self
+                        .codex_adapter
+                        .as_ref()
+                        .ok_or_else(|| adapter_error("Codex unavailable"))?
+                        .fork(&transfer.source_point, cwd, &run.model_selection.model)
+                        .await
+                        .ok(),
+                    Driver::Claude => Some(ProviderRef {
+                        driver: Driver::Claude,
+                        native_id: Some(uuid::Uuid::new_v4().to_string()),
+                        strength: Strength::Strong,
+                        fingerprint: None,
+                        ordinal: None,
+                    }),
+                }
+            } else {
+                None
+            };
+            if let Some(reference) = reference {
+                payloads.extend(orchestration::context::native(
+                    transfer,
+                    &run,
+                    provider.clone(),
+                    reference,
+                    &now(),
+                ));
+            } else {
+                let strategy = if transfer.kind == TransferKind::MergeBack {
+                    HandoffStrategy::ForkDeltaSummary
+                } else {
+                    HandoffStrategy::FullThreadSummary
+                };
+                payloads.extend(orchestration::context::portable(
+                    &source,
+                    &projection,
+                    &run,
+                    Some(transfer),
+                    strategy,
+                    1,
+                    ordinal,
+                    &now(),
+                ));
+            }
+        }
+        let previous = projection.thread.active_provider_thread_id.as_ref();
+        let missed = run.ordinal.saturating_sub(1);
+        let seen = provider.last_run_ordinal.unwrap_or(0);
+        if pending.is_empty()
+            && previous.is_some_and(|id| *id != provider.id)
+            && seen < missed
+            && !projection
+                .context_handoffs
+                .iter()
+                .any(|h| h.target_run_id == run.id)
+        {
+            let strategy = if seen > 0 {
+                HandoffStrategy::DeltaSinceTargetLastSeen
+            } else {
+                HandoffStrategy::FullThreadSummary
+            };
+            payloads.extend(orchestration::context::portable(
+                &projection,
+                &projection,
+                &run,
+                None,
+                strategy,
+                seen + 1,
+                missed,
+                &now(),
+            ));
+        }
+        if !payloads.is_empty() {
+            let events = orchestration::events(
+                &projection.thread.id,
+                &format!("context:{}", run.id),
+                payloads,
+                &now(),
+            );
+            let commit = self
+                .orchestration
+                .ingest(
+                    events,
+                    Some((&run.id, run.active_attempt_id.as_ref())),
+                    &now(),
+                )
+                .map_err(adapter_error)?;
+            if commit.events.is_empty() {
+                return Err(adapter_error("context transfer superseded"));
+            }
+            projection = self
+                .orchestration
+                .projection(&projection.thread.id)
+                .map_err(adapter_error)?;
+        }
+        Ok(projection)
+    }
+}
 #[async_trait::async_trait]
 impl ProviderAdapter for HostResources {
     async fn execute(
         &self,
         effect: &Effect,
-        projection: ThreadProjection,
+        mut projection: ThreadProjection,
     ) -> Result<Vec<DomainEvent>, AdapterError> {
         if let EffectBody::Rollback {
             request_id,
@@ -1292,7 +1444,7 @@ impl ProviderAdapter for HostResources {
                 .checkpoints
                 .capture(scope, run_id, node_id, run.ordinal, &now())
                 .await;
-            return Ok(checkpoint_events(
+            return Ok(orchestration::events(
                 &effect.thread_id,
                 &effect.id,
                 vec![EventPayload::CheckpointCaptured(checkpoint)],
@@ -1408,6 +1560,7 @@ impl ProviderAdapter for HostResources {
             .transpose()
             .map_err(adapter_error)?;
         if let EffectBody::Start { run_id } | EffectBody::Restart { run_id, .. } = &effect.body {
+            projection = self.resolve_context(projection, run_id, &cwd).await?;
             let run = projection
                 .runs
                 .iter()
@@ -1458,7 +1611,7 @@ impl ProviderAdapter for HostResources {
                             .active_attempt_id
                             .clone()
                             .ok_or_else(|| adapter_error("attempt missing"))?,
-                        events: checkpoint_events(
+                        events: orchestration::events(
                             &effect.thread_id,
                             &format!("{}:baseline", effect.id),
                             payloads,
@@ -1497,24 +1650,6 @@ impl ProviderAdapter for HostResources {
         }
         Ok(vec![])
     }
-}
-
-fn checkpoint_events(
-    thread_id: &ThreadId,
-    effect_id: &str,
-    payloads: Vec<EventPayload>,
-    now: &Timestamp,
-) -> Vec<DomainEvent> {
-    payloads
-        .into_iter()
-        .enumerate()
-        .map(|(index, payload)| DomainEvent {
-            id: EventId::new(format!("event:{effect_id}:{index}")).expect("derived id"),
-            thread_id: thread_id.clone(),
-            occurred_at: now.clone(),
-            payload,
-        })
-        .collect()
 }
 
 #[cfg(test)]

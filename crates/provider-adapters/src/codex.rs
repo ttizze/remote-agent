@@ -24,6 +24,37 @@ pub struct CodexAdapter {
     shutdown: watch::Sender<bool>,
 }
 impl CodexAdapter {
+    pub async fn fork(
+        &self,
+        point: &ContextSourcePoint,
+        cwd: &Path,
+        model: &str,
+    ) -> Result<ProviderRef, AdapterError> {
+        let native = point
+            .provider_thread_ref
+            .as_ref()
+            .and_then(|r| r.native_id.as_ref())
+            .ok_or_else(|| error("fork source native thread missing"))?;
+        let mut params = json!({"threadId":native,"cwd":cwd,"model":model});
+        if let Some(turn) = point
+            .provider_turn_ref
+            .as_ref()
+            .and_then(|r| r.native_id.as_ref())
+        {
+            params["lastTurnId"] = json!(turn);
+        }
+        let result = self.request("thread/fork", params).await?;
+        let id = result["thread"]["id"]
+            .as_str()
+            .ok_or_else(|| error("Codex fork returned no thread"))?;
+        Ok(ProviderRef {
+            driver: Driver::Codex,
+            native_id: Some(id.into()),
+            strength: Strength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        })
+    }
     pub async fn rollback(
         &self,
         projection: &ThreadProjection,
@@ -311,31 +342,51 @@ impl CodexAdapter {
             .find(|thread| Some(&thread.id) == run.provider_thread_id.as_ref())
             .ok_or_else(|| error("provider thread missing"))?
             .clone();
+        let mut projection = projection.clone();
         let mut params = json!({"cwd":cwd,"model":run.model_selection.model});
         if let Some(browser) = browser {
             params["config"] = json!({"mcp_servers":{"bex_browser":browser}});
         }
-        let native = if let Some(native) = provider_thread
+        let resume_native = provider_thread
             .native_thread_ref
             .as_ref()
-            .and_then(|reference| reference.native_id.clone())
-        {
+            .and_then(|r| r.native_id.clone());
+        let native = if let Some(native) = resume_native {
             params["threadId"] = json!(native);
             params["excludeTurns"] = json!(true);
-            match self.request("thread/resume", params.clone()).await {
-                Ok(_) => {}
-                Err(initial) => {
+            let resumed = match self.request("thread/resume", params.clone()).await {
+                Ok(_) => true,
+                Err(_) => {
                     self.request("thread/unarchive", json!({"threadId":native}))
                         .await
-                        .map_err(|_| initial)?;
-                    self.request("thread/resume", params).await?;
+                        .is_ok()
+                        && self.request("thread/resume", params.clone()).await.is_ok()
                 }
+            };
+            if resumed {
+                native
+            } else {
+                projection = crate::portable_fallback(&self.output, &projection, &run).await?;
+                provider_thread = projection
+                    .provider_threads
+                    .iter()
+                    .find(|p| p.id == provider_thread.id)
+                    .expect("provider retained")
+                    .clone();
+                params.as_object_mut().expect("object").remove("threadId");
+                params
+                    .as_object_mut()
+                    .expect("object")
+                    .remove("excludeTurns");
+                self.request("thread/start", params).await?["thread"]["id"]
+                    .as_str()
+                    .ok_or_else(|| error("native thread missing"))?
+                    .to_owned()
             }
-            native
         } else {
             self.request("thread/start", params).await?["thread"]["id"]
                 .as_str()
-                .ok_or_else(|| error("Codex returned no native thread id"))?
+                .ok_or_else(|| error("native thread missing"))?
                 .to_owned()
         };
         let timestamp = now();
@@ -368,6 +419,15 @@ impl CodexAdapter {
             fingerprint: None,
             ordinal: None,
         });
+        for handoff in projection
+            .context_handoffs
+            .iter()
+            .filter(|h| h.target_run_id == run.id && h.status == HandoffStatus::Ready)
+        {
+            if !provider_thread.handoff_ids.contains(&handoff.id) {
+                provider_thread.handoff_ids.push(handoff.id.clone());
+            }
+        }
         provider_thread.first_run_ordinal.get_or_insert(run.ordinal);
         provider_thread.last_run_ordinal = Some(run.ordinal);
         provider_thread.updated_at = timestamp.clone();
@@ -410,7 +470,7 @@ impl CodexAdapter {
             .ok_or_else(|| error("run input missing"))?;
         let params = turn_start_params(
             &native,
-            &message.text,
+            &orchestration::context::input_text(&projection, &run, &message.text),
             &run.model_selection,
             projection.thread.runtime_mode,
             projection.thread.interaction_mode,

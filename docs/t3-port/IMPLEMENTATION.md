@@ -5,7 +5,7 @@
 | 段階 | 状況 | 実装範囲 |
 | --- | --- | --- |
 | M1 | 完了 | 新しい orchestration crate、全 M1 コマンド、SQLite/outbox、Codex/Claude adapter、Host RPC、native 履歴取り込み、共通 client runtime、GPUI・SwiftUI・Compose、旧会話管理と旧テスト・fixture・runner・文書の削除 |
-| M2 | 一部実装 | root checkpoint、rollback、停止・再起動時の capture、getTurnDiff、3 クライアントのターン差分選択 |
+| M2 | 一部実装 | root checkpoint、rollback、fork/merge back、provider handoff、停止・再起動時の capture、getTurnDiff、3 クライアントのターン差分選択 |
 | M3 | 未着手 | T3 相当の周辺機能の拡張 |
 
 M1 は `af584c44` で完成し、同じ commit の Host・GPUI・iOS・Android
@@ -31,7 +31,7 @@ workspace・個別ターン・全ターンの差分を表示する。
 
 ## 残り
 
-- M2: fork、merge back、provider handoff、compaction、app-owned
+- M2: compaction、app-owned
   subagent/委任、計画の Implement/Refine、画像・ファイル添付、nested checkpoint
   scope、非 cone sparse checkpoint。provider の既存 tool/plan 通知は M1 で表示する。
 - M3: T3 の Git/worktree 操作、GitHub PR 連携、scheduled tasks、usage の拡張、
@@ -80,3 +80,14 @@ T3 mobile にない rollback UI は追加しない。
 変更 crate の171単体/property test が通過（既存2件 skip）、同じ crate の
 全 target clippy と fmt が通過。Git 復元で index/HEAD、ignored file の保持と
 untracked file の削除・復元を検証した。
+
+## M2 fork / context transfer
+
+fork は監査履歴を source に残し、source point までを inherited timeline として表示する。
+merge back は fork の親への転送だけを許す。native fork、portable full/delta context、
+再開失敗時の fresh session、実際の開始時の転送消費を run/attempt guard で保存する。
+3クライアントの fork/merge back は共通 core の判断を使う。
+
+変更 crate の176単体/property test が通過（既存2件 skip）。開始判定、fork の
+冪等な再送、未完成 run の拒否、merge lineage、履歴の byte 枠、inherited/local
+履歴の position による pagination と単項目取得を検証した。clippy/fmt も通過。

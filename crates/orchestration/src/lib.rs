@@ -10,4 +10,24 @@ pub use contracts::*;
 #[cfg(test)]
 mod test_support;
 
+pub mod context;
 pub mod rollback;
+
+/// Deterministic event identities for a committed command or guarded effect.
+pub fn events(
+    thread: &ThreadId,
+    key: &str,
+    payloads: Vec<EventPayload>,
+    now: &Timestamp,
+) -> Vec<DomainEvent> {
+    payloads
+        .into_iter()
+        .enumerate()
+        .map(|(i, payload)| DomainEvent {
+            id: EventId::new(format!("event:{key}:{i}")).expect("derived id"),
+            thread_id: thread.clone(),
+            occurred_at: now.clone(),
+            payload,
+        })
+        .collect()
+}

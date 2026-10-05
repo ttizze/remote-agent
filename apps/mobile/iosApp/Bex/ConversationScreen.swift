@@ -74,6 +74,7 @@ struct ThreadScreen: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     if let id = conversation.threadId {
+                        if conversation.canMergeBack { Button("Merge back to source") { model.perform(.mergeBack) } }
                         ThreadActions(
                             model: model,
                             id: id,

@@ -480,6 +480,15 @@ impl Desktop {
             .gap_2()
             .border_b_1()
             .border_color(color("toolbarBorder"));
+        if chat.can_merge_back {
+            header = header.child(
+                Button::new("merge-back")
+                    .label("Merge back to source")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|view, _, _, _| view.perform(Intent::MergeBack, None))),
+            );
+        }
         if self.renaming {
             header = header.child(Input::new(&self.rename).flex_1()).child(
                 Button::new("save-title")
@@ -727,6 +736,28 @@ impl Desktop {
                 }
             }
             RowKind::Assistant => {
+                if let Some(source) = &row.fork_source_thread_id
+                    && let Some(run) = &row.run_id
+                    && !row.streaming
+                {
+                    let source = source.clone();
+                    let run = run.clone();
+                    body = body.child(
+                        Button::new(SharedString::from(format!("fork-{}", row.id)))
+                            .label("Fork")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(move |view, _, _, _| {
+                                view.perform(
+                                    Intent::Fork {
+                                        source_thread_id: source.clone(),
+                                        run_id: run.clone(),
+                                    },
+                                    None,
+                                )
+                            })),
+                    );
+                }
                 body = body
                     .child(
                         TextView::markdown(SharedString::from(row.id.clone()), row.text.clone())

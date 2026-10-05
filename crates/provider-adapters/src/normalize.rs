@@ -945,8 +945,11 @@ pub fn claude(state: &TurnState, frame: &Value, now: &Timestamp) -> Translation 
         };
     }
     match frame["type"].as_str().unwrap_or("") {
-        "system" if frame["subtype"] == "init" => next.started(None, now, &mut payloads),
+        "system" if frame["subtype"] == "init" => {}
         "system" if frame["subtype"] == "compact_boundary" => {
+            if next.turn.status == TurnStatus::Pending {
+                next.started(None, now, &mut payloads);
+            }
             let item = next.item(
                 "compaction",
                 TurnItemBody::Compaction {
@@ -1568,6 +1571,23 @@ mod tests {
             .payloads
             .is_empty()
         );
+    }
+    #[test]
+    fn claude_initialization_does_not_consume_pending_context() {
+        let initial = state(Driver::Claude);
+        let result = claude(
+            &initial,
+            &json!({"type":"system","subtype":"init"}),
+            &timestamp(),
+        );
+        assert_eq!(result.state.turn.status, TurnStatus::Pending);
+        assert!(result.payloads.is_empty());
+        let started = claude(
+            &result.state,
+            &json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"message"}}}),
+            &timestamp(),
+        );
+        assert_eq!(started.state.turn.status, TurnStatus::Running);
     }
     #[test]
     fn claude_stream_and_final_frame_share_identity() {

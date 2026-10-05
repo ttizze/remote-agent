@@ -1055,6 +1055,14 @@ pub struct StoredEvent {
     pub event: DomainEvent,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForkPoint {
+    LatestStable,
+    Run { run_id: RunId },
+    Checkpoint { checkpoint_id: CheckpointId },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Command {
@@ -1161,6 +1169,20 @@ pub enum CommandBody {
         request_id: RuntimeRequestId,
         decision: Option<ApprovalDecision>,
         answers: Option<Answers>,
+    },
+    #[serde(rename = "thread.fork")]
+    ThreadFork {
+        target_thread_id: ThreadId,
+        source_point: ForkPoint,
+        title: Option<String>,
+        created_by: CreatedBy,
+        creation_source: CreationSource,
+    },
+    #[serde(rename = "thread.merge_back")]
+    ThreadMergeBack {
+        target_thread_id: ThreadId,
+        source_point: ForkPoint,
+        created_by: CreatedBy,
     },
     #[serde(rename = "checkpoint.rollback")]
     CheckpointRollback {
@@ -1359,8 +1381,7 @@ pub enum ThreadStreamItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryCursor {
-    pub ordinal: u64,
-    pub item_id: TurnItemId,
+    pub position: u64,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
