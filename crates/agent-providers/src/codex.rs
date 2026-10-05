@@ -557,6 +557,12 @@ impl CodexProtocol {
                     if self.interrupt_pending.remove(thread) {
                         output.outbound.extend(self.interrupt(thread, Some(&turn)));
                     }
+                    // Each turn names the native thread it continues.
+                    if self.thread.as_ref() == Some(thread) {
+                        events.push(ProviderEvent::SessionReady {
+                            native_thread: thread.clone(),
+                        });
+                    }
                 }
                 events.push(ProviderEvent::TurnStarted {
                     native_turn: Some(turn),
