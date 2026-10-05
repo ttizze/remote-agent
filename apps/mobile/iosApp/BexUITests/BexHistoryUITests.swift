@@ -269,12 +269,15 @@ extension BexLaunchUITests {
         XCTAssertEqual(first.frame.minX, second.frame.minX, accuracy: 1)
         XCTAssertGreaterThan(second.frame.minY, first.frame.maxY)
         XCTAssertTrue(first.isHittable)
+        // Measure after the conversation settles, so only the horizontal swipes can move the row.
+        waitForStableFrame(first)
         let firstRowY = first.frame.minY
         let headerHeight = header.frame.height
         captureScreen(app, named: "Japanese Markdown table first column")
         table.swipeLeft()
         table.swipeLeft()
         let burden = app.textViews["markdown.cell.0.1.2"]
+        waitForStableFrame(burden)
         XCTAssertTrue(burden.isHittable)
         XCTAssertEqual(burden.value as? String, "通信変換、モデルの挙動、サブスク認証との適合を検証する必要")
         XCTAssertGreaterThan(burden.frame.height, headerHeight * 2)
