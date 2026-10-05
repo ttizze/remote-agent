@@ -1049,6 +1049,67 @@ async fn claude_reuses_its_process_after_aligning_model_and_mode() {
     assert_eq!(process.written()[3]["request"]["mode"], "acceptEdits");
 }
 
+/// A rejection settles the waiter of its own request id, not another request
+/// of the same operation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_request_settles_only_the_waiter_of_its_id() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(|frame| {
+        if frame["request"]["subtype"] == "set_model" {
+            return vec![];
+        }
+        claude_replies(frame)
+    });
+    let id = thread("thread-reply-ids");
+    rig.create(
+        &id,
+        selection(Driver::Claude, "claude-sonnet-4-6"),
+        RuntimeMode::FullAccess,
+    )
+    .await;
+    rig.send(&id, "first", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    let entry = rig.sessions.entry(&rig.sessions.sessions()[0]).unwrap();
+    let set_model = |model: &'static str| {
+        Request::new(move |p| {
+            Ok(frames(vec![
+                p.claude()?
+                    .control
+                    .request("set_model", json!({ "model": model })),
+            ]))
+        })
+    };
+    rig.sessions
+        .send(&entry, set_model("unawaited"))
+        .await
+        .unwrap();
+    let awaited = tokio::spawn({
+        let (sessions, entry) = (rig.sessions.clone(), entry.clone());
+        async move { sessions.request_reply(&entry, set_model("awaited")).await }
+    });
+    let process = rig.host.process(0);
+    let requests = || {
+        process
+            .written()
+            .into_iter()
+            .filter(|frame| frame["request"]["subtype"] == "set_model")
+            .map(|frame| frame["request_id"].clone())
+            .collect::<Vec<_>>()
+    };
+    rig.until("both requests written", async || requests().len() == 2)
+        .await;
+    let ids = requests();
+    process.emit(json!({"type":"control_response","response":{"subtype":"error","request_id":ids[0],"error":"model rejected"}}));
+    process.emit(json!({"type":"control_response","response":{"subtype":"success","request_id":ids[1],"response":{"model":"awaited"}}}));
+    assert_eq!(awaited.await.unwrap(), Ok(json!({"model":"awaited"})));
+    rig.until("rejection recorded on the run", async || {
+        rig.state(&id).await.items.iter().any(|item| {
+            matches!(&item.kind, ItemKind::Error { message, .. } if message == "model rejected")
+        })
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn claude_respawns_when_launch_flags_change_and_ignores_the_old_process() {
     let rig = rig(SessionOptions::default(), 5);

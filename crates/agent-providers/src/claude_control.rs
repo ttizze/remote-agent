@@ -38,6 +38,7 @@ impl ClaudeControl {
                 };
                 if response["subtype"] == "error" {
                     return Err(ProtocolError::Remote {
+                        request: Some(id),
                         operation,
                         message: string(response, "error"),
                         turn_completed: false,

@@ -62,6 +62,8 @@ pub enum ProtocolError {
     Invalid(String),
     #[error("native provider rejected {operation}: {message}")]
     Remote {
+        /// The rejected native request id; `None` when it was never sent.
+        request: Option<String>,
         operation: String,
         message: String,
         turn_completed: bool,

@@ -43,8 +43,8 @@ impl Protocol {
 
 pub(crate) type Op = Box<dyn FnOnce(&mut Protocol) -> Result<Translation, ProtocolError> + Send>;
 pub(crate) type ReplyWait = oneshot::Receiver<Result<Value, String>>;
-/// Request id, operation and the caller waiting for the reply.
-pub(crate) type ReplyWaiter = (String, String, oneshot::Sender<Result<Value, String>>);
+/// Request id and the caller waiting for its reply.
+pub(crate) type ReplyWaiter = (String, oneshot::Sender<Result<Value, String>>);
 pub(crate) type CompletionWait = oneshot::Receiver<Result<Completion, String>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,9 +229,9 @@ impl Task {
             Expect::Written => {}
             Expect::Replies => {
                 for frame in &translation.outbound {
-                    if let Some((id, operation)) = request(frame) {
+                    if let Some(id) = request(frame) {
                         let (sender, receiver) = oneshot::channel();
-                        self.replies.push((id, operation, sender));
+                        self.replies.push((id, sender));
                         ran.replies.push(receiver);
                     }
                 }
@@ -309,12 +309,8 @@ impl Task {
             if reply.operation == "turn/steer" {
                 self.steers.pop_front();
             }
-            if let Some(index) = self
-                .replies
-                .iter()
-                .position(|(id, ..)| *id == reply.request)
-            {
-                let (.., waiter) = self.replies.remove(index);
+            if let Some(index) = self.replies.iter().position(|(id, _)| *id == reply.request) {
+                let (_, waiter) = self.replies.remove(index);
                 self.handshake = false;
                 let _ = waiter.send(Ok(reply.result.0));
             }
@@ -347,12 +343,17 @@ impl Task {
     async fn protocol_error(&mut self, error: ProtocolError) {
         match error {
             ProtocolError::Remote {
+                request,
                 operation,
                 message,
                 turn_completed,
             } => {
-                if let Some(index) = self.replies.iter().position(|(_, op, _)| *op == operation) {
-                    let (.., waiter) = self.replies.remove(index);
+                if let Some(index) = self
+                    .replies
+                    .iter()
+                    .position(|(id, _)| Some(id) == request.as_ref())
+                {
+                    let (_, waiter) = self.replies.remove(index);
                     let _ = waiter.send(Err(message));
                     return;
                 }
@@ -515,7 +516,7 @@ impl Task {
                 )
             }
         };
-        for (.., waiter) in self.replies.drain(..) {
+        for (_, waiter) in self.replies.drain(..) {
             let _ = waiter.send(Err("The provider session closed.".into()));
         }
         if let Some(waiter) = self.completion.take() {
@@ -549,16 +550,14 @@ async fn read_stderr(
     }
 }
 
-/// The id and operation of an outbound request whose reply can be awaited.
-fn request(frame: &Value) -> Option<(String, String)> {
+/// The id of an outbound request whose reply can be awaited, as the
+/// translators report it.
+fn request(frame: &Value) -> Option<String> {
     if frame["type"] == "control_request" {
-        return Some((
-            frame["request_id"].as_str()?.to_owned(),
-            frame["request"]["subtype"].as_str()?.to_owned(),
-        ));
+        return Some(frame["request_id"].as_str()?.to_owned());
     }
-    let method = frame.get("method")?.as_str()?;
-    Some((frame.get("id")?.to_string(), method.to_owned()))
+    frame.get("method")?;
+    Some(frame.get("id")?.to_string())
 }
 
 fn completion_operation(operation: &str) -> bool {

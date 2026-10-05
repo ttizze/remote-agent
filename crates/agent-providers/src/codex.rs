@@ -263,6 +263,7 @@ impl CodexProtocol {
                     .turns
                     .get(thread)
                     .ok_or_else(|| ProtocolError::Remote {
+                        request: None,
                         operation: "turn/steer".into(),
                         message: "No active turn".into(),
                         turn_completed: true,
@@ -577,6 +578,7 @@ impl CodexProtocol {
                 }
                 let operation = pending.operation();
                 return Err(ProtocolError::Remote {
+                    request: Some(id.to_string()),
                     turn_completed: completed_steer_error(&message),
                     operation,
                     message,
@@ -727,6 +729,7 @@ impl CodexProtocol {
                         .any(|terminal| terminal["processId"].as_str() == Some(process.as_str()));
                     if listed {
                         return Err(ProtocolError::Remote {
+                            request: Some(id.to_string()),
                             operation: "thread/backgroundTerminals/terminate".into(),
                             message: format!(
                                 "Codex background terminal {process} remained active after termination."
