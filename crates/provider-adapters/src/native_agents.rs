@@ -63,8 +63,32 @@ pub(crate) struct NativeAgents {
     sequence: u64,
     responses: Vec<(Value, Value)>,
     wake_task: Option<NodeId>,
-    buffered_wakes: BTreeMap<MessageId, Vec<Value>>,
+    buffered_wakes: BTreeMap<MessageId, WakeFrames>,
     collecting_wake: Option<MessageId>,
+}
+#[derive(Debug, Clone, Default)]
+struct WakeFrames {
+    frames: Vec<Value>,
+    bytes: usize,
+    truncated: bool,
+}
+impl WakeFrames {
+    fn push(&mut self, mut frame: Value) {
+        let terminal = frame["type"] == "result";
+        let size = frame.to_string().len();
+        if self.frames.len() >= 511 || self.bytes.saturating_add(size) > 2 * 1024 * 1024 {
+            self.truncated = true;
+        }
+        if terminal {
+            if self.truncated {
+                frame = serde_json::json!({"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Background output exceeded the continuation buffer limit"]});
+            }
+        } else if self.truncated {
+            return;
+        }
+        self.bytes += frame.to_string().len();
+        self.frames.push(frame);
+    }
 }
 fn key(parent: &ThreadId, native: &str) -> String {
     format!("{:x}", Sha256::digest(format!("{parent}\0{native}")))
@@ -142,7 +166,9 @@ impl NativeAgents {
         if self.collecting_wake.as_ref() == Some(message) {
             self.collecting_wake = None;
         }
-        self.buffered_wakes.remove(message)
+        self.buffered_wakes
+            .remove(message)
+            .map(|buffer| buffer.frames)
     }
     pub fn has_buffered_wake(&self, message: &MessageId) -> bool {
         self.buffered_wakes.contains_key(message)
@@ -162,14 +188,9 @@ impl NativeAgents {
     ) -> Option<NativeContinuationOffer> {
         if let Some(id) = self.collecting_wake.clone() {
             let frames = self.buffered_wakes.get_mut(&id)?;
-            if frames.len() < 512
-                && frames.iter().map(|f| f.to_string().len()).sum::<usize>()
-                    + frame.to_string().len()
-                    <= 2 * 1024 * 1024
-            {
-                frames.push(frame.clone());
-            }
-            if frame["type"] == "result" {
+            let terminal = frame["type"] == "result";
+            frames.push(frame);
+            if terminal {
                 self.collecting_wake = None;
             }
             return None;
@@ -191,8 +212,9 @@ impl NativeAgents {
             )
         ))
         .expect("derived id");
-        self.buffered_wakes
-            .insert(message_id.clone(), vec![frame.clone()]);
+        let mut buffered = WakeFrames::default();
+        buffered.push(frame.clone());
+        self.buffered_wakes.insert(message_id.clone(), buffered);
         if frame["type"] != "result" {
             self.collecting_wake = Some(message_id.clone());
         }
@@ -1076,6 +1098,179 @@ mod tests {
         )
     }
     #[test]
+    fn fallback_and_start_retry_batches_have_distinct_ids_and_ingest() {
+        let (mut state, store) = setup(Driver::Claude);
+        for _ in 0..3 {
+            let batch = state.batch(state.initial_payloads(), &crate::now());
+            assert_eq!(
+                store
+                    .ingest(
+                        batch.events,
+                        Some((&state.run.id, Some(&state.attempt.id))),
+                        &crate::now()
+                    )
+                    .unwrap()
+                    .events
+                    .len(),
+                2
+            );
+            state = TurnState::prepare(
+                state.run.clone(),
+                state.attempt.clone(),
+                state.provider_thread.clone(),
+                state.session.clone(),
+                state.turn.ordinal,
+                &crate::now(),
+            );
+        }
+    }
+    #[test]
+    fn completed_root_cannot_roll_back_until_its_native_child_stops() {
+        let (mut state, store) = setup(Driver::Claude);
+        state.provider_thread.provider_session_id = Some(state.session.id.clone());
+        store
+            .ingest(
+                state.batch(state.initial_payloads(), &crate::now()).events,
+                None,
+                &crate::now(),
+            )
+            .unwrap();
+        state = launch(state);
+        commit(&mut state, &store);
+        let mut p = store.projection(&state.run.thread_id).unwrap();
+        p.runs[0].status = RunStatus::Completed;
+        p.thread.active_provider_thread_id = Some(state.provider_thread.id.clone());
+        let scope = CheckpointScope {
+            id: CheckpointScopeId::new("test-root").unwrap(),
+            thread_id: p.thread.id.clone(),
+            run_id: Some(state.run.id.clone()),
+            node_id: state.attempt.root_node_id.clone(),
+            parent_scope_id: None,
+            provider_thread_id: Some(state.provider_thread.id.clone()),
+            kind: ScopeKind::RootRun,
+            ordinal_within_parent: 0,
+            advances_app_run_count: true,
+            cwd: "/workspace".into(),
+            created_at: crate::now(),
+        };
+        let cp = Checkpoint {
+            id: CheckpointId::new("test-baseline").unwrap(),
+            thread_id: p.thread.id.clone(),
+            scope_id: scope.id.clone(),
+            run_id: None,
+            node_id: scope.node_id.clone(),
+            parent_checkpoint_id: None,
+            ordinal_within_scope: 0,
+            app_run_ordinal: Some(0),
+            reference: CheckpointRef::new("refs/t3/test").unwrap(),
+            status: CheckpointStatus::Ready,
+            files: vec![],
+            captured_at: crate::now(),
+        };
+        p.checkpoint_scopes.push(scope.clone());
+        p.checkpoints.push(cp.clone());
+        assert!(rollback::target(&p, &scope.id, &cp.id).is_err());
+        p.subagents[0].status = NodeStatus::Interrupted;
+        assert!(rollback::target(&p, &scope.id, &cp.id).is_ok());
+        let mut child_turn = state.turn;
+        child_turn.run_attempt_id = None;
+        child_turn.status = TurnStatus::Running;
+        p.provider_turns.push(child_turn);
+        assert!(rollback::target(&p, &scope.id, &cp.id).is_err());
+    }
+    #[test]
+    fn restarting_retires_native_children_once_even_when_restart_is_chosen_by_delivery_intent() {
+        for intent in [false, true] {
+            let (mut state, store) = setup(Driver::Codex);
+            let mut root = vec![];
+            state.started(Some("root-turn"), &crate::now(), &mut root);
+            store
+                .ingest(state.batch(root, &crate::now()).events, None, &crate::now())
+                .unwrap();
+            let translated = codex(
+                state,
+                "item/started",
+                &json!({"threadId":"root-native","item":{"type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child"],"prompt":"work"}}),
+                None,
+                &crate::now(),
+            );
+            let mut state = translated.state;
+            let child = commit(&mut state, &store).remove(0);
+            let run_id = state.run.id.clone();
+            let command = Command {
+                command_id: CommandId::new("restart-native").unwrap(),
+                thread_id: state.run.thread_id.clone(),
+                body: CommandBody::MessageDispatch(Box::new(MessageDispatch {
+                    message_id: MessageId::new("restart-input").unwrap(),
+                    text: "restart".into(),
+                    dispatch_mode: if intent {
+                        DispatchMode::QueueAfterActive
+                    } else {
+                        DispatchMode::RestartActive {
+                            target_run_id: run_id.clone(),
+                        }
+                    },
+                    delivery_intent: intent.then_some(DeliveryIntent::Restart),
+                    created_by: CreatedBy::User,
+                    creation_source: CreationSource::Desktop,
+                    native_continuation: None,
+                    delegated_completion: None,
+                    source_plan_ref: None,
+                    context: None,
+                    attachments: vec![],
+                    model_selection: None,
+                })),
+            };
+            for replay in [false, true] {
+                let commit = store
+                    .dispatch(
+                        &command,
+                        &crate::now(),
+                        &capabilities::capabilities(Driver::Codex).turns,
+                        Driver::Codex,
+                    )
+                    .unwrap();
+                assert_eq!(commit.replayed, replay);
+                let p = store.projection(&command.thread_id).unwrap();
+                assert_eq!(p.subagents[0].status, NodeStatus::Interrupted);
+                assert!(
+                    store
+                        .projection(&child)
+                        .unwrap()
+                        .nodes
+                        .iter()
+                        .all(|n| !matches!(
+                            n.status,
+                            NodeStatus::Running | NodeStatus::Pending | NodeStatus::Waiting
+                        ))
+                );
+            }
+        }
+    }
+    #[test]
+    fn continuation_overflow_always_preserves_a_bounded_terminal_failure() {
+        for large in [false, true] {
+            let mut buffer = WakeFrames::default();
+            for _ in 0..600 {
+                buffer.push(json!({"type":"assistant","message":{"content":if large { "x".repeat(100_000) } else { "delta".into() }}}));
+            }
+            buffer.push(json!({"type":"result","subtype":"success","num_turns":1}));
+            assert!(buffer.frames.len() <= 512);
+            assert!(buffer.bytes <= 2 * 1024 * 1024 + 1024);
+            let last = buffer.frames.last().unwrap();
+            assert_eq!(last["type"], "result");
+            assert!(last["is_error"].as_bool().unwrap());
+            let state = normalize::claude_plain(
+                normalize::tests::state(Driver::Claude),
+                last,
+                &crate::now(),
+            )
+            .state;
+            assert!(state.terminal);
+            assert_eq!(state.run.status, RunStatus::Failed);
+        }
+    }
+    #[test]
     fn claude_early_child_text_is_runless_and_owned_after_root_returns() {
         let (state, store) = setup(Driver::Claude);
         let state = frame(
@@ -1319,7 +1514,7 @@ mod tests {
         );
     }
     #[test]
-    fn stop_commits_child_terminal_state_before_the_provider_callback() {
+    fn stop_preserves_native_ownership_until_confirmation_and_rejects_late_output() {
         let (state, store) = setup(Driver::Claude);
         let mut state = launch(state);
         let child = commit(&mut state, &store).remove(0);
@@ -1342,18 +1537,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.projection(&state.run.thread_id).unwrap().subagents[0].status,
-            NodeStatus::Interrupted
-        );
-        assert!(
-            store
-                .projection(&child)
-                .unwrap()
-                .nodes
-                .iter()
-                .all(|n| !matches!(
-                    n.status,
-                    NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
-                ))
+            NodeStatus::Running
         );
         state = frame(
             state,
@@ -1367,6 +1551,26 @@ mod tests {
                 .messages
                 .iter()
                 .any(|m| m.text == "Late output")
+        );
+        let stopped = state.native_agents.as_mut().unwrap().stop(&crate::now());
+        for _ in 0..2 {
+            state.native_batches.extend(stopped.clone());
+            commit(&mut state, &store);
+        }
+        assert_eq!(
+            store.projection(&state.run.thread_id).unwrap().subagents[0].status,
+            NodeStatus::Interrupted
+        );
+        assert!(
+            store
+                .projection(&child)
+                .unwrap()
+                .nodes
+                .iter()
+                .all(|n| !matches!(
+                    n.status,
+                    NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
+                ))
         );
     }
     #[test]

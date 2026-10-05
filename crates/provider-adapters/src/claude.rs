@@ -13,7 +13,7 @@ use std::{
     process::Stdio,
     sync::{Arc, Mutex},
 };
-use tokio::sync::{Notify, Semaphore, mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 
 #[derive(Clone)]
 pub struct ClaudeConfig {
@@ -45,7 +45,7 @@ enum EchoMode {
 #[derive(Default)]
 struct PromptGate {
     mode: EchoMode,
-    prompt: Option<String>,
+    accepted_prompts: std::collections::BTreeSet<String>,
     confirmed: bool,
     frames_before_echo: usize,
     held: Vec<Value>,
@@ -54,15 +54,16 @@ struct PromptGate {
 }
 impl PromptGate {
     fn begin(&mut self, uuid: String) {
-        self.prompt = Some(uuid);
+        self.accepted_prompts.clear();
+        self.accepted_prompts.insert(uuid);
         self.confirmed = false;
         self.frames_before_echo = 0;
         self.held.clear();
     }
     fn route(&mut self, frame: Value) -> Vec<Value> {
-        let Some(uuid) = self.prompt.as_deref() else {
+        if self.accepted_prompts.is_empty() {
             return vec![frame];
-        };
+        }
         let echoed: Vec<&str> = if let Some(array) = frame["user_message_uuids"].as_array() {
             array.iter().filter_map(Value::as_str).collect()
         } else {
@@ -70,7 +71,8 @@ impl PromptGate {
         };
         if self.confirmed {
             if frame["type"] == "result"
-                && (!echoed.is_empty() && !echoed.contains(&uuid)
+                && (!echoed.is_empty()
+                    && !echoed.iter().any(|id| self.accepted_prompts.contains(*id))
                     || !frame["origin"].is_null() && frame["origin"]["kind"] != "human")
             {
                 self.wake_covered = frame["num_turns"] != 0;
@@ -78,7 +80,7 @@ impl PromptGate {
             }
             return vec![frame];
         }
-        if echoed.contains(&uuid) {
+        if echoed.iter().any(|id| self.accepted_prompts.contains(*id)) {
             if matches!(self.mode, EchoMode::Unknown | EchoMode::Acknowledged) {
                 self.mode = if frame["type"] != "result" && self.frames_before_echo == 0 {
                     EchoMode::Early
@@ -93,7 +95,9 @@ impl PromptGate {
         }
         if self.mode == EchoMode::Unknown
             && frame["type"] == "command_lifecycle"
-            && frame["command_uuid"].as_str() == Some(uuid)
+            && frame["command_uuid"]
+                .as_str()
+                .is_some_and(|id| self.accepted_prompts.contains(id))
         {
             self.mode = EchoMode::Acknowledged;
         }
@@ -204,7 +208,6 @@ impl Drop for ProcessHandle {
 pub struct ClaudeAdapter {
     config: ClaudeConfig,
     processes: tokio::sync::Mutex<BTreeMap<ProviderThreadId, Arc<ProcessHandle>>>,
-    capacity: Arc<Semaphore>,
     cancelled_starts: Mutex<std::collections::BTreeSet<RunId>>,
     output: mpsc::Sender<ProviderBatch>,
 }
@@ -248,7 +251,6 @@ impl ClaudeAdapter {
         Self {
             config,
             processes: tokio::sync::Mutex::new(BTreeMap::new()),
-            capacity: Arc::new(Semaphore::new(8)),
             cancelled_starts: Mutex::new(Default::default()),
             output,
         }
@@ -520,6 +522,14 @@ impl ClaudeAdapter {
             .await
             .get(&provider_thread.id)
             .cloned();
+        if existing.as_ref().is_some_and(|h| {
+            !*h.done.borrow() && {
+                let state = h.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.attempt.id == attempt.id && state.input_sent
+            }
+        }) {
+            return Ok(());
+        }
         let wake = projection
             .messages
             .iter()
@@ -633,21 +643,6 @@ impl ClaudeAdapter {
             &timestamp,
         );
         state.native_wake_drain = wake.clone();
-        let permit = if reusable {
-            None
-        } else {
-            self.evict_idle().await?;
-            Some(
-                self.capacity
-                    .clone()
-                    .try_acquire_owned()
-                    .map_err(|_| AdapterError {
-                        message: "Claude process capacity is busy".into(),
-                        retryable: true,
-                        turn_completed: false,
-                    })?,
-            )
-        };
         let mut initial = state.batch(state.initial_payloads(), &timestamp);
         state.native_agents = Some(Box::new(crate::native_agents::NativeAgents::new(
             projection.thread.clone(),
@@ -656,7 +651,11 @@ impl ClaudeAdapter {
         initial.acknowledged = Some(acknowledged);
         self.output.send(initial).await.map_err(error)?;
         if !receipt.await.map_err(error)? {
-            return Ok(());
+            return Err(AdapterError {
+                message: "Claude ownership was not committed".into(),
+                retryable: true,
+                turn_completed: false,
+            });
         }
         let handle = if reusable {
             let handle = existing.expect("reusable process exists");
@@ -719,7 +718,6 @@ impl ClaudeAdapter {
                 tool_config,
                 state,
                 native,
-                permit.expect("new process has reserved capacity"),
                 self.output.clone(),
                 cwd,
                 credentials_home,
@@ -790,7 +788,10 @@ impl ClaudeAdapter {
                 .map_err(error)?;
             return received.await.map_err(error)?;
         }
-        message.text = orchestration::context::input_text(projection, &run, &message.text);
+        if !message.text.trim().eq_ignore_ascii_case("/compact") || !message.attachments.is_empty()
+        {
+            message.text = orchestration::context::input_text(projection, &run, &message.text);
+        }
         send_prompt(
             &handle,
             run_id,
@@ -798,27 +799,6 @@ impl ClaudeAdapter {
             false,
         )
         .await
-    }
-    async fn evict_idle(&self) -> Result<(), AdapterError> {
-        if self.capacity.available_permits() > 0 {
-            return Ok(());
-        }
-        let removed = {
-            let mut processes = self.processes.lock().await;
-            let id = processes
-                .iter()
-                .find(|(_, handle)| {
-                    let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-                    state.terminal && !state.native_agents.as_ref().is_some_and(|a| a.is_live())
-                })
-                .map(|(id, _)| id.clone());
-            id.and_then(|id| processes.remove(&id))
-        };
-        if let Some(handle) = removed {
-            let _ = handle.stop.send(true);
-            wait_done(&handle).await?;
-        }
-        Ok(())
     }
     pub async fn shutdown(&self) {
         let handles = std::mem::take(&mut *self.processes.lock().await);
@@ -986,7 +966,6 @@ fn spawn(
     tool_config: Option<tempfile::NamedTempFile>,
     state: TurnState,
     native: String,
-    permit: tokio::sync::OwnedSemaphorePermit,
     output: mpsc::Sender<ProviderBatch>,
     cwd: &Path,
     credentials_home: &Path,
@@ -1024,7 +1003,6 @@ fn spawn(
         model,
     });
     tokio::spawn(async move {
-        let _permit = permit;
         let _tool_config = tool_config;
         let mut writer = JsonlWriter::new(input);
         let mut reader = JsonlReader::new(stdout);
@@ -1045,7 +1023,7 @@ fn spawn(
                             match admission { Err(failure)=>Err(failure),Ok(())=>{ current.native_wake_drain=None;current.native_agents.as_mut().and_then(|a|a.take_wake(&message_id)).ok_or_else(||error("Native continuation buffer is unavailable")) } }
                         };
                         match frames { Err(failure)=>{ let _=acknowledged.send(Err(failure)); },Ok(frames)=>{
-                            gate.prompt=None;gate.held.clear();
+                            gate.accepted_prompts.clear();gate.held.clear();
                             for frame in frames { ingest_claude_frame(&state,&output,&mut writer,frame).await?; }
                             let _=acknowledged.send(Ok(()));
                         } }
@@ -1055,11 +1033,11 @@ fn spawn(
                         let admission = {
                             let mut current = state.lock().unwrap_or_else(|e| e.into_inner());
                             let admission = admit_prompt(&current.run.id, &run_id, current.terminal, current.interrupted, *shutdown.borrow());
-                            if admission.is_ok() { current.steered = steer; }
+                            if admission.is_ok() { current.steered = steer; current.input_sent = true; }
                             admission
                         };
                         if let Err(error) = admission { let _ = acknowledged.send(Err(error)); continue; }
-                        gate.begin(frame["uuid"].as_str().unwrap_or_default().into());
+                        if steer { gate.accepted_prompts.insert(frame["uuid"].as_str().unwrap_or_default().into()); } else { gate.begin(frame["uuid"].as_str().unwrap_or_default().into()); }
                         let written = writer.write_line(&frame.to_string()).await.map_err(error);
                         let failed = written.is_err();
                         let _ = acknowledged.send(written);
@@ -1068,7 +1046,7 @@ fn spawn(
                 }}
                 line=reader.read_line()=>{let Some(line)=line.map_err(error)?else{break;};let frame:Value=serde_json::from_str(&line).map_err(error)?;
                     if frame["type"]=="control_response"&&frame["response"]["request_id"]=="initialize" {ready.send_replace(Some(if frame["response"]["subtype"]=="success"{Ok(())}else{Err("Claude initialization rejected".into())}));continue;}
-                    { let current=state.lock().unwrap_or_else(|e|e.into_inner());if current.terminal && !current.interrupted && current.native_agents.as_ref().is_some_and(|a|a.has_wake()) { gate.prompt=None;gate.held.clear(); } }
+                    { let current=state.lock().unwrap_or_else(|e|e.into_inner());if current.terminal && !current.interrupted && current.native_agents.as_ref().is_some_and(|a|a.has_wake()) { gate.accepted_prompts.clear();gate.held.clear(); } }
                     for routed in gate.route(frame) {
                         for frame in buffer.push(routed) { ingest_claude_frame(&state, &output, &mut writer, frame).await?; }
                     }
@@ -1200,6 +1178,205 @@ async fn send_provider_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resume_fallback_commits_both_starts_and_retry_does_not_send_input_twice() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("claude-fixture");
+        let inputs = directory.path().join("inputs.jsonl");
+        std::fs::write(&program, format!(r#"#!/usr/bin/env python3
+import json, sys
+json.loads(sys.stdin.readline())
+resuming = '--resume' in sys.argv
+print(json.dumps({{"type":"control_response","response":{{"request_id":"initialize","subtype":"error" if resuming else "success"}}}}), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line)
+    if resuming or frame.get('type') != 'user': continue
+    with open({inputs:?}, 'a') as log: log.write(line)
+    print(json.dumps({{"type":"user","uuid":frame['uuid'],"user_message_uuid":frame['uuid']}}), flush=True)
+    print(json.dumps({{"type":"assistant","message":{{"id":"answer","content":[{{"type":"text","text":"resumed with portable context"}}]}}}}), flush=True)
+    if "silent-active" not in sys.argv: print(json.dumps({{"type":"result","subtype":"success","user_message_uuid":frame['uuid'],"num_turns":1}}), flush=True)
+"#)).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut p = crate::normalize::tests::projection(Driver::Claude);
+        p.provider_threads[0].native_thread_ref = Some(ProviderRef {
+            driver: Driver::Claude,
+            native_id: Some(uuid::Uuid::new_v4().to_string()),
+            strength: Strength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        });
+        let store = Arc::new(store::Store::memory().unwrap());
+        let mut payloads = vec![EventPayload::ThreadCreated(p.thread.clone())];
+        payloads.extend(p.runs.iter().cloned().map(EventPayload::RunCreated));
+        payloads.extend(
+            p.attempts
+                .iter()
+                .cloned()
+                .map(EventPayload::RunAttemptCreated),
+        );
+        payloads.extend(p.nodes.iter().cloned().map(EventPayload::NodeUpdated));
+        payloads.extend(
+            p.provider_threads
+                .iter()
+                .cloned()
+                .map(EventPayload::ProviderThreadUpdated),
+        );
+        payloads.extend(p.messages.iter().cloned().map(EventPayload::MessageUpdated));
+        store
+            .ingest(events(&p.thread.id, "seed", payloads, &now()), None, &now())
+            .unwrap();
+        let (output, mut incoming) = mpsc::channel::<ProviderBatch>(256);
+        let owner = store.clone();
+        let ingestion = tokio::spawn(async move {
+            while let Some(batch) = incoming.recv().await {
+                let commit = owner
+                    .ingest(
+                        batch.events,
+                        Some((&batch.run_id, Some(&batch.attempt_id))),
+                        &batch.occurred_at,
+                    )
+                    .unwrap();
+                if let Some(ack) = batch.acknowledged {
+                    ack.send(!commit.events.is_empty()).ok();
+                }
+            }
+        });
+        let adapter = ClaudeAdapter::new(
+            ClaudeConfig {
+                program,
+                config_home: directory.path().into(),
+            },
+            output,
+        );
+        let start = EffectBody::Start {
+            run_id: p.runs[0].id.clone(),
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            adapter.execute(
+                &start,
+                &p,
+                directory.path(),
+                directory.path(),
+                None,
+                directory.path(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if store.projection(&p.thread.id).unwrap().runs[0].status == RunStatus::Completed {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Replay the original Starting projection, as a lost effect settlement can do.
+        adapter
+            .execute(
+                &start,
+                &p,
+                directory.path(),
+                directory.path(),
+                None,
+                directory.path(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(inputs).unwrap().lines().count(), 1);
+        let current = store.projection(&p.thread.id).unwrap();
+        assert!(
+            current
+                .messages
+                .iter()
+                .any(|m| m.text == "resumed with portable context")
+        );
+        assert!(
+            current
+                .context_handoffs
+                .iter()
+                .any(|h| h.strategy == HandoffStrategy::FullThreadSummary)
+        );
+        // T3 has no global eight-process cap. All nine remain actively owned.
+        for index in 0..9 {
+            let thread = ThreadId::new(format!("concurrent-{index}")).unwrap();
+            let mut model = p.thread.model_selection.clone();
+            model.model = "silent-active".into();
+            store
+                .dispatch(
+                    &Command {
+                        command_id: CommandId::new(format!("create-{index}")).unwrap(),
+                        thread_id: thread.clone(),
+                        body: CommandBody::ThreadCreate {
+                            created_by: CreatedBy::User,
+                            creation_source: CreationSource::Desktop,
+                            project_id: p.thread.project_id.clone(),
+                            title: "Concurrent".into(),
+                            model_selection: model,
+                            runtime_mode: p.thread.runtime_mode,
+                            interaction_mode: p.thread.interaction_mode,
+                            branch: None,
+                            worktree_path: None,
+                        },
+                    },
+                    &now(),
+                    &capabilities(Driver::Claude).turns,
+                    Driver::Claude,
+                )
+                .unwrap();
+            store
+                .dispatch(
+                    &Command {
+                        command_id: CommandId::new(format!("send-{index}")).unwrap(),
+                        thread_id: thread.clone(),
+                        body: CommandBody::MessageDispatch(Box::new(MessageDispatch {
+                            message_id: MessageId::new(format!("input-{index}")).unwrap(),
+                            text: "Work".into(),
+                            created_by: CreatedBy::User,
+                            creation_source: CreationSource::Desktop,
+                            dispatch_mode: DispatchMode::StartImmediately,
+                            native_continuation: None,
+                            delegated_completion: None,
+                            source_plan_ref: None,
+                            context: None,
+                            attachments: vec![],
+                            model_selection: None,
+                            delivery_intent: None,
+                        })),
+                    },
+                    &now(),
+                    &capabilities(Driver::Claude).turns,
+                    Driver::Claude,
+                )
+                .unwrap();
+            let p = store.projection(&thread).unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                adapter.execute(
+                    &EffectBody::Start {
+                        run_id: p.runs[0].id.clone(),
+                    },
+                    &p,
+                    directory.path(),
+                    directory.path(),
+                    None,
+                    directory.path(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        assert_eq!(adapter.processes.lock().await.len(), 10);
+        adapter.shutdown().await;
+        ingestion.abort();
+    }
     #[test]
     fn mcp_scope_is_kept_in_a_private_ephemeral_file_instead_of_arguments() {
         let directory = tempfile::tempdir().unwrap();
@@ -1315,6 +1492,30 @@ mod tests {
         );
     }
     #[test]
+    fn steer_keeps_original_prompt_tail_and_accepts_either_terminal_uuid() {
+        for terminal in ["original", "steer"] {
+            let mut gate = PromptGate::default();
+            gate.begin("original".into());
+            assert_eq!(
+                gate.route(json!({"type":"stream_event","user_message_uuid":"original"}))
+                    .len(),
+                1
+            );
+            gate.accepted_prompts.insert("steer".into());
+            assert_eq!(
+                gate.route(json!({"type":"assistant","message":{"content":"tail"}}))
+                    .len(),
+                1
+            );
+            assert_eq!(
+                gate.route(json!({"type":"result","user_message_uuid":terminal,"num_turns":1}))
+                    .len(),
+                1
+            );
+            assert!(gate.wake_frames.is_empty());
+        }
+    }
+    #[test]
     fn result_only_and_legacy_clis_stream_without_waiting_but_foreign_results_do_not_finish() {
         let mut gate = PromptGate::default();
         gate.begin("prompt".into());
@@ -1380,13 +1581,11 @@ mod tests {
             .arg("cat >/dev/null")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
-        let permit = adapter.capacity.clone().try_acquire_owned().unwrap();
         let handle = spawn(
             command,
             None,
             state,
             uuid::Uuid::new_v4().to_string(),
-            permit,
             output,
             directory.path(),
             directory.path(),
@@ -1421,7 +1620,7 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .interrupted
         );
-        assert_eq!(adapter.capacity.available_permits(), 8);
+        assert!(*handle.done.borrow());
     }
     #[cfg(unix)]
     #[tokio::test]
@@ -1443,13 +1642,11 @@ mod tests {
             command.arg("-c").arg(if reject {
                 "read -r initialize; printf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"request_id\":\"initialize\",\"subtype\":\"error\"}}'; cat >/dev/null"
             } else { "cat >/dev/null" }).stdin(Stdio::piped()).stdout(Stdio::piped());
-            let permit = adapter.capacity.clone().try_acquire_owned().unwrap();
             let handle = spawn(
                 command,
                 None,
                 state,
                 uuid::Uuid::new_v4().to_string(),
-                permit,
                 output,
                 directory.path(),
                 directory.path(),
@@ -1473,7 +1670,7 @@ mod tests {
                     .contains(if reject { "rejected" } else { "timed out" })
             );
             assert!(adapter.processes.lock().await.is_empty());
-            assert_eq!(adapter.capacity.available_permits(), 8);
+            assert!(*handle.done.borrow());
             assert!(batches.try_recv().is_err());
         }
     }

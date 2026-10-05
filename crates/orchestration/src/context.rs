@@ -78,6 +78,11 @@ pub fn plan(
     let source = source
         .filter(|p| p.thread.deleted_at.is_none())
         .ok_or_else(|| DecisionError("source thread not found".into()))?;
+    if source.thread.rollback_request_id.is_some()
+        || target.is_some_and(|p| p.thread.rollback_request_id.is_some())
+    {
+        return Err(DecisionError("rollback is pending".into()));
+    }
     let (target_id, source_point, created_by) = match &command.body {
         CommandBody::ThreadFork {
             target_thread_id,

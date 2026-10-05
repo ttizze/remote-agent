@@ -205,3 +205,20 @@ M2 最終 cleanup: 親削除後に fork が参照していた asset は、最後
 - 最終の実装・全体テストと Host/3クライアントのビルド対象は `665deaa1`。以後の変更は検証記録のみ。CI待ち、cargo-mutants、E2E、実 provider/実機の受入確認は実施していない。
 
 初回の release build は外付けディスクの容量不足で失敗した。この worktree 専用 target の incremental cache と破損した Lua build-script cache だけを削除し、incremental/cache を無効にした再ビルドで通過した。他 worktree と共有 dev-env cache は変更していない。M2 の完成分を同じ PR #55 に push し、M3 と main の取り込みは行わない。
+
+## 3回目のレビュー（d948b812 への指摘）
+
+R2 の O4（native rollback 境界）、O6（resume fallback）、O7（interrupt/pump）、O10（steer UUID）、O14（fork の provider 文脈）と C6（変更 collection の共有）の「修正済み」は不完全または誤りだった。以下の R3 記録がそれらの判定を置き換える。中断時の未コミット変更も再確認し、再送・effect 再取得・他 thread の継続を回帰テストの対象にする。
+
+| R3 指摘 | 対応 | 回帰検証 |
+|---|---|---|
+| O1 / R2 O6 | fallback・Start 再準備の event namespace を分離。native 入力済み attempt は再入力しない。初期 commit の拒否は成功扱いしない | 実際の模擬 Claude と SQLite を通す resume fallback、同じ Start 再取得、event ID 非衝突 |
+| O2 / R2 O7 | 通常 interrupt 失敗で Codex pump を shutdown しない。既に終わった turn のエラーを分類し、それ以外は再試行可能とする | 模擬 JSON-RPC で interrupt 失敗後も別 thread の completion を取り込む |
+| O3 | Restart effect の run を基準に旧 native 子を終端化。delivery intent による Restart も含む | Restart と同じ command 再送、旧 attempt の late output 拒否 |
+| O4 | wake は byte 数を保持し、実 result 用の枠を予約。超過後も実 terminal を失わず、切り詰めを明示して終端化 | 512 frame / 2 MiB 超過、drain 後の Failed と bounded buffer |
+| O5 / R2 O10 | steer で gate を再初期化せず、元と steer の UUID を受理 | 両 UUID の terminal と元 turn の tail、既存 echo mode テスト |
+| O6 | Steer/Interrupt/Restart 失敗は error item だけを出し、native 所有権を保持。stop 時も停止確認前に子を終端化しない | failed control 後の run/turn、次の入力は queue、同じ command 再送、late child output 拒否 |
+| O7 | 固定 T3 にない8プロセスの上限・eviction を削除 | 模擬 Claude の9本の同時 active thread |
+| O8, O9 | live な子/native turn がある rollback と、pending rollback 中の実行・fork/merge・provider 設定変更を拒否。metadata は編集可能 | rollback admission、pending 中の command と rename/delete |
+
+残りの指摘と最終検証は、各修正の検証後に追記する。

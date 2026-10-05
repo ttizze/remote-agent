@@ -121,9 +121,17 @@ fn fail(
             && run.status.is_blocking()
             && run.status != RunStatus::Waiting
     }) {
-        let events =
+        let mut events =
             crate::decider::failed_effect(&projection, run, &claim.effect.id, message, &timestamp)
                 .events;
+        // A control error is not evidence that the native turn stopped. Preserve
+        // ownership until its terminal notification, while exposing the failure.
+        if matches!(
+            claim.effect.body,
+            EffectBody::Steer { .. } | EffectBody::Interrupt { .. } | EffectBody::Restart { .. }
+        ) {
+            events.retain(|e| matches!(&e.payload, EventPayload::TurnItemUpdated(item) if matches!(item.body, TurnItemBody::Error { .. })));
+        }
         store.ingest(
             events,
             Some((&run.id, run.active_attempt_id.as_ref())),
@@ -323,6 +331,91 @@ mod tests {
             )
             .unwrap();
         store
+    }
+    #[tokio::test]
+    async fn control_failure_keeps_the_native_run_owned_and_a_retry_cannot_start_another() {
+        for interrupt in [false, true] {
+            let store = setup();
+            let start = store.claim_effect("test", now_ms()).unwrap().unwrap();
+            store.finish_effect(&start, None, now_ms()).unwrap();
+            let mut running = store.projection(&create().thread_id).unwrap();
+            running.runs[0].status = RunStatus::Running;
+            let mut turn = crate::test_support::running().provider_turns[0].clone();
+            turn.provider_thread_id = running.runs[0].provider_thread_id.clone().unwrap();
+            turn.run_attempt_id = running.runs[0].active_attempt_id.clone();
+            turn.node_id = running.runs[0].root_node_id.clone().unwrap();
+            running.provider_turns.push(turn);
+            store
+                .ingest(
+                    crate::events(
+                        &running.thread.id,
+                        "running",
+                        vec![
+                            EventPayload::RunUpdated(running.runs[0].clone()),
+                            EventPayload::ProviderTurnUpdated(running.provider_turns[0].clone()),
+                        ],
+                        &now(),
+                    ),
+                    None,
+                    &now(),
+                )
+                .unwrap();
+            let run = running.runs[0].id.clone();
+            let input = if interrupt {
+                command(
+                    "control",
+                    CommandBody::RunInterrupt {
+                        run_id: run.clone(),
+                        reason: None,
+                        hold_queue: true,
+                    },
+                )
+            } else {
+                send(
+                    "control",
+                    DispatchMode::SteerActive {
+                        target_run_id: run.clone(),
+                    },
+                )
+            };
+            store
+                .dispatch(&input, &now(), &turns(), Driver::Codex)
+                .unwrap();
+            let claim = store.claim_effect("test", now_ms()).unwrap().unwrap();
+            execute(store.clone(), Arc::new(Failure), claim)
+                .await
+                .unwrap();
+            let p = store.projection(&input.thread_id).unwrap();
+            assert_eq!(p.runs[0].status, RunStatus::Running);
+            assert_eq!(p.provider_turns[0].status, TurnStatus::Running);
+            assert!(
+                p.turn_items
+                    .iter()
+                    .any(|item| matches!(item.body, TurnItemBody::Error { .. }))
+            );
+            store
+                .dispatch(
+                    &send("unsafe-next", DispatchMode::StartImmediately),
+                    &now(),
+                    &turns(),
+                    Driver::Codex,
+                )
+                .unwrap();
+            let p = store.projection(&input.thread_id).unwrap();
+            assert_eq!(p.runs[1].status, RunStatus::Queued);
+            assert!(
+                store
+                    .dispatch(&input, &now(), &turns(), Driver::Codex)
+                    .unwrap()
+                    .replayed
+            );
+            assert!(
+                store
+                    .claim_effect("test", now_ms() + 60_000)
+                    .unwrap()
+                    .is_none()
+            );
+        }
     }
     struct Initializing {
         started: tokio::sync::Notify,

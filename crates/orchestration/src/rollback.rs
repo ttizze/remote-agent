@@ -49,6 +49,13 @@ pub fn target<'a>(
         .ok_or_else(|| DecisionError("provider session is unavailable".into()))?;
     if !session.capabilities.threads.can_rollback_thread
         || projection.runs.iter().any(|r| r.status.is_blocking())
+        || crate::decider::has_native_turn(&projection.provider_turns)
+        || projection.subagents.iter().any(|task| {
+            matches!(
+                task.status,
+                NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
+            )
+        })
     {
         return Err(DecisionError(
             "provider cannot roll back while a run is active".into(),

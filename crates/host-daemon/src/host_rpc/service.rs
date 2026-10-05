@@ -2149,7 +2149,7 @@ impl ProviderAdapter for HostResources {
                                 .ok_or_else(|| adapter_error("attempt missing"))?,
                             events: orchestration::events(
                                 &effect.thread_id,
-                                &format!("{}:baseline", effect.id),
+                                &format!("{}:baseline:{}", effect.id, uuid::Uuid::new_v4()),
                                 payloads,
                                 &timestamp,
                             ),

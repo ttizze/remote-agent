@@ -234,6 +234,11 @@ impl CodexAdapter {
                     .provider_thread_id
                     .as_ref()
                     .ok_or_else(|| error("provider thread missing"))?;
+                if self.state(provider_thread_id).is_ok_and(|(_, state)| {
+                    Some(&state.attempt.id) == run.active_attempt_id.as_ref() && state.input_sent
+                }) {
+                    return Ok(());
+                }
                 self.interrupt(provider_thread_id).await?;
                 tokio::time::timeout(std::time::Duration::from_secs(15), async {
                     loop {
@@ -324,7 +329,18 @@ impl CodexAdapter {
             .find(|run| run.id == *run_id)
             .ok_or_else(|| error("run missing"))?
             .clone();
-        if !run.status.is_blocking() {
+        if !run.status.is_blocking()
+            || self
+                .states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .values()
+                .any(|s| {
+                    s.run.id == run.id
+                        && Some(&s.attempt.id) == run.active_attempt_id.as_ref()
+                        && s.input_sent
+                })
+        {
             return Ok(());
         }
         let attempt = projection
@@ -464,11 +480,11 @@ impl CodexAdapter {
         }
         self.output.send(initial).await.map_err(error)?;
         if !receipt.await.map_err(error)? {
-            self.states
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&native);
-            return Ok(());
+            return Err(AdapterError {
+                message: "Codex ownership was not committed".into(),
+                retryable: true,
+                turn_completed: false,
+            });
         }
         if self
             .states
@@ -500,6 +516,14 @@ impl CodexAdapter {
             &message.attachments,
             attachments_dir,
         )?;
+        if let Some(state) = self
+            .states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&native)
+        {
+            state.input_sent = true;
+        }
         if message.text.trim().eq_ignore_ascii_case("/compact") && message.attachments.is_empty() {
             self.request("thread/compact/start", json!({"threadId":native}))
                 .await?;
@@ -540,7 +564,7 @@ impl CodexAdapter {
     }
     async fn interrupt(&self, provider_thread_id: &ProviderThreadId) -> Result<(), AdapterError> {
         let (native, state) = self.state(provider_thread_id)?;
-        let (children, closed) = {
+        let children = {
             let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
             let state = states
                 .get_mut(&native)
@@ -548,13 +572,10 @@ impl CodexAdapter {
             state.interrupted = true;
             state
                 .native_agents
-                .as_mut()
-                .map(|a| (a.live_codex_turns(), a.stop(&now())))
+                .as_ref()
+                .map(|a| a.live_codex_turns())
                 .unwrap_or_default()
         };
-        for batch in closed {
-            self.output.send(batch.batch()).await.map_err(error)?;
-        }
         let mut turns = children;
         if !state.terminal
             && let Some(id) = state
@@ -563,17 +584,58 @@ impl CodexAdapter {
                 .as_ref()
                 .and_then(|r| r.native_id.as_ref())
         {
-            turns.push((native, id.clone()));
+            turns.push((native.clone(), id.clone()));
         }
         for (thread, turn) in turns {
             if let Err(failure) = self
                 .request("turn/interrupt", json!({"threadId":thread,"turnId":turn}))
                 .await
             {
-                self.shutdown();
-                return Err(failure);
+                let message = failure.message.to_ascii_lowercase();
+                if ![
+                    "turn completed",
+                    "no active turn",
+                    "turn not found",
+                    "thread not found",
+                    "already interrupted",
+                ]
+                .iter()
+                .any(|terminal| message.contains(terminal))
+                {
+                    return Err(AdapterError {
+                        retryable: true,
+                        ..failure
+                    });
+                }
             }
         }
+        // Child interruption acknowledgements alone are not terminal evidence.
+        // Keep their ownership until the notification pump observes completion.
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let changed = self.changed.notified();
+                if self
+                    .states
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&native)
+                    .is_none_or(|s| {
+                        s.native_agents
+                            .as_ref()
+                            .is_none_or(|a| a.live_codex_turns().is_empty())
+                    })
+                {
+                    break;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .map_err(|_| AdapterError {
+            message: "Codex subagents have not finished interrupting".into(),
+            retryable: true,
+            turn_completed: false,
+        })?;
         Ok(())
     }
     async fn handle(
@@ -854,6 +916,97 @@ async fn ingest_frame(adapter: &CodexAdapter, value: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_interrupt_keeps_the_pump_and_other_threads_alive_and_start_replay_is_safe() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("codex-fixture");
+        std::fs::write(&program,r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    request=json.loads(line)
+    if 'id' not in request: continue
+    if request['method']=='turn/interrupt':
+        response={'id':request['id'],'error':{'code':-32000,'message':'Temporary interrupt failure'}}
+    else:
+        response={'id':request['id'],'result':{'userAgent':'fixture','codexHome':'/tmp'} if request['method']=='initialize' else {}}
+    print(json.dumps(response),flush=True)
+    if request['method']=='fixture/emit':
+        print(json.dumps({'method':'turn/completed','params':{'threadId':'other','turn':{'id':'other-turn','status':'completed'}}}),flush=True)
+"#).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let server = Arc::new(
+            CodexAppServer::spawn(codex_app_server::AppServerConfig {
+                program,
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let (output, mut batches) = mpsc::channel(16);
+        let adapter = CodexAdapter::new(server.clone(), output);
+        let mut state = crate::normalize::tests::state(Driver::Codex);
+        state.input_sent = true;
+        state.turn.status = TurnStatus::Running;
+        state.turn.native_turn_ref = Some(ProviderRef {
+            driver: Driver::Codex,
+            native_id: Some("live-turn".into()),
+            strength: Strength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        });
+        let provider = state.provider_thread.id.clone();
+        let mut other = state.clone();
+        other.run.id = RunId::new("other-run").unwrap();
+        other.provider_thread.id = ProviderThreadId::new("other-provider").unwrap();
+        other.turn.native_turn_ref.as_mut().unwrap().native_id = Some("other-turn".into());
+        adapter
+            .states
+            .lock()
+            .unwrap()
+            .extend([("native".into(), state), ("other".into(), other)]);
+        let failure = adapter.interrupt(&provider).await.unwrap_err();
+        assert!(failure.retryable);
+        assert!(!*adapter.shutdown.borrow());
+        let p = crate::normalize::tests::projection(Driver::Codex);
+        adapter
+            .execute(
+                &EffectBody::Start {
+                    run_id: p.runs[0].id.clone(),
+                },
+                &p,
+                directory.path(),
+                directory.path(),
+                None,
+            )
+            .await
+            .unwrap();
+        adapter
+            .execute(
+                &EffectBody::Restart {
+                    run_id: p.runs[0].id.clone(),
+                    message_id: p.runs[0].user_message_id.clone(),
+                    attempt_id: p.attempts[0].id.clone(),
+                    provider_turn_id: ProviderTurnId::new("old").unwrap(),
+                },
+                &p,
+                directory.path(),
+                directory.path(),
+                None,
+            )
+            .await
+            .unwrap();
+        adapter.request("fixture/emit", json!({})).await.unwrap();
+        let batch = tokio::time::timeout(std::time::Duration::from_secs(3), batches.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(batch.events.iter().any(|e|matches!(&e.payload,EventPayload::RunUpdated(run) if run.id.as_str()=="other-run" && run.status==RunStatus::Completed)));
+        assert!(!*adapter.shutdown.borrow());
+        adapter.shutdown();
+        server.shutdown().await.unwrap();
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn child_frames_before_spawn_are_replayed_in_order() {

@@ -22,6 +22,8 @@ pub struct TurnState {
     pub claude_final_blocks: BTreeMap<String, u64>,
     pub terminal: bool,
     pub sequence: u64,
+    event_generation: String,
+    pub(crate) input_sent: bool,
     pub claude_message_id: String,
     pub claude_blocks: BTreeMap<u64, String>,
 }
@@ -77,6 +79,8 @@ impl TurnState {
             claude_final_blocks: BTreeMap::new(),
             terminal: false,
             sequence: 0,
+            event_generation: uuid::Uuid::new_v4().to_string(),
+            input_sent: false,
             claude_message_id: String::new(),
             claude_blocks: BTreeMap::new(),
         }
@@ -99,8 +103,8 @@ impl TurnState {
                 self.sequence += 1;
                 DomainEvent {
                     id: EventId::new(format!(
-                        "event:adapter:{}:{}",
-                        self.attempt.id, self.sequence
+                        "event:adapter:{}:{}:{}",
+                        self.attempt.id, self.event_generation, self.sequence
                     ))
                     .expect("derived id"),
                     thread_id: self.run.thread_id.clone(),

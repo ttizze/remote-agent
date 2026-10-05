@@ -371,15 +371,21 @@ impl Store {
                 }
                 _ => None,
             });
+        let restarted: BTreeSet<_> = decision
+            .effects
+            .iter()
+            .filter_map(|effect| match &effect.body {
+                EffectBody::Restart { run_id, .. } => Some(run_id.clone()),
+                _ => None,
+            })
+            .collect();
         let mut events = commit_decision(&transaction, decision, Some(&command.command_id), now)?;
-        if matches!(
-            command.body,
-            CommandBody::RunInterrupt { .. } | CommandBody::ThreadDelete
-        ) && let Some(p) = load_projection(&transaction, &command.thread_id)?
+        if (matches!(command.body, CommandBody::ThreadDelete) || !restarted.is_empty())
+            && let Some(p) = load_projection(&transaction, &command.thread_id)?
         {
             let stopped = match &command.body {
-                CommandBody::RunInterrupt { run_id, .. } => Some(BTreeSet::from([run_id.clone()])),
-                _ => None,
+                CommandBody::ThreadDelete => None,
+                _ => Some(restarted),
             };
             events.extend(native_ingest::stop_children(
                 &transaction,

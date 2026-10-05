@@ -103,7 +103,7 @@ async fn portable_fallback(
     }
     let events = events(
         &projection.thread.id,
-        &format!("resume-fallback:{}", run.id),
+        &format!("resume-fallback:{}:{}", run.id, uuid::Uuid::new_v4()),
         payloads,
         &timestamp,
     );

@@ -122,6 +122,23 @@ pub fn decide(
     driver: Driver,
 ) -> Result<Decision, DecisionError> {
     if let Some(projection) = projection {
+        require(
+            projection.thread.rollback_request_id.is_none()
+                || !matches!(
+                    command.body,
+                    CommandBody::MessageDispatch(_)
+                        | CommandBody::QueueResume
+                        | CommandBody::PreparedRunRelease { .. }
+                        | CommandBody::PreparedRunRetry { .. }
+                        | CommandBody::QueuedMessagePromoteToSteer { .. }
+                        | CommandBody::DelegatedTaskRequest(_)
+                        | CommandBody::ProviderSwitch { .. }
+                        | CommandBody::ThreadModelSelectionSet { .. }
+                        | CommandBody::ThreadRuntimeModeSet { .. }
+                        | CommandBody::ThreadInteractionModeSet { .. }
+                ),
+            "rollback is pending",
+        )?;
         if matches!(command.body, CommandBody::DelegatedTaskRequest(_)) {
             return crate::delegation::request(command, projection, now);
         }
@@ -976,25 +993,30 @@ pub fn decide(
         }
     }
     if let CommandBody::RunInterrupt { run_id, .. } = &command.body {
+        let mut updated = false;
         for event in &mut decision.events {
             if let EventPayload::RunUpdated(run) = &mut event.payload
                 && run.id == *run_id
-                && let Some(cohort) = &mut run.delegated_completion
             {
-                cohort.disposition = CohortDisposition::Stopped;
+                run.delegated_completion
+                    .get_or_insert(DelegatedCompletionCohort {
+                        disposition: CohortDisposition::Stopped,
+                        next_generation: 1,
+                        delivery: None,
+                    })
+                    .disposition = CohortDisposition::Stopped;
+                updated = true;
             }
         }
-        if !decision
-            .events
-            .iter()
-            .any(|e| matches!(&e.payload,EventPayload::RunUpdated(r) if r.id == *run_id))
-            && let Some(run) = projection
-                .runs
-                .iter()
-                .find(|r| r.id == *run_id && r.delegated_completion.is_some())
-        {
+        if !updated && let Some(run) = projection.runs.iter().find(|r| r.id == *run_id) {
             let mut run = run.clone();
-            run.delegated_completion.as_mut().unwrap().disposition = CohortDisposition::Stopped;
+            run.delegated_completion
+                .get_or_insert(DelegatedCompletionCohort {
+                    disposition: CohortDisposition::Stopped,
+                    next_generation: 1,
+                    delivery: None,
+                })
+                .disposition = CohortDisposition::Stopped;
             emit(&mut decision, command, now, EventPayload::RunUpdated(run));
         }
     }
@@ -2345,6 +2367,59 @@ mod tests {
             },
         );
         assert!(decide(&c, Some(&p), &now(), &turns(), Driver::Codex).is_err());
+    }
+    #[test]
+    fn pending_rollback_blocks_run_admission_but_keeps_metadata_editable() {
+        let mut p = running();
+        p.thread.rollback_request_id = Some(CommandId::new("rewind").unwrap());
+        let run_id = p.runs[0].id.clone();
+        for body in [
+            CommandBody::QueueResume,
+            CommandBody::PreparedRunRelease {
+                run_id: run_id.clone(),
+            },
+            CommandBody::PreparedRunRetry { run_id },
+            send("input", DispatchMode::QueueAfterActive).body,
+            CommandBody::ProviderSwitch {
+                model_selection: p.thread.model_selection.clone(),
+            },
+        ] {
+            let error = decide(
+                &command("blocked", body),
+                Some(&p),
+                &now(),
+                &turns(),
+                Driver::Codex,
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "rollback is pending");
+        }
+        assert!(
+            decide(
+                &command(
+                    "rename",
+                    CommandBody::ThreadMetadataUpdate {
+                        title: "New title".into()
+                    }
+                ),
+                Some(&p),
+                &now(),
+                &turns(),
+                Driver::Codex
+            )
+            .is_ok()
+        );
+        p.runs[0].status = RunStatus::Completed;
+        assert!(
+            decide(
+                &command("delete", CommandBody::ThreadDelete),
+                Some(&p),
+                &now(),
+                &turns(),
+                Driver::Codex
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn queued_runs_keep_execution_records_and_stop_holds_queue() {
