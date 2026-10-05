@@ -9,13 +9,68 @@ permissions:
   contents: read
 concurrency:
   group: native-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer main push waits, so every pushed change finishes verification.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_BUILD_JOBS: 4
   CARGO_INCREMENTAL: 0
   # Contract tests mostly await isolated processes and network replies.
   NEXTEST_TEST_THREADS: 16
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      android: ${{ steps.areas.outputs.android }}
+      iphone: ${{ steps.areas.outputs.iphone }}
+      mac: ${{ steps.areas.outputs.mac }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # A pull request checks out a merge commit whose first parent is its base.
+          fetch-depth: 2
+      - id: areas
+        name: Select client acceptance for files changed since the last verified main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          verify_all() {
+            printf '%s=true\n' android iphone mac >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) base=$(git rev-parse HEAD^1) ;;
+            push)
+              # Cancelled or failed runs leave their changes for the next push.
+              base=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow native.yml --branch main \
+                --status success --limit 1 --json headSha --jq '.[0].headSha // ""')
+              if [[ -z "$base" ]] || ! git fetch --no-tags --depth=1 origin "$base"; then verify_all; fi
+              ;;
+            *) verify_all ;;
+          esac
+          android=false iphone=false mac=false
+          while IFS= read -r path; do
+            # Unknown paths verify every client.
+            case "$path" in
+              docs/PRIVACY.md) area=all ;;
+              docs/* | AGENTS.md | CHANGELOG.md | CONTEXT.md | README.md | README.ja.md | SECURITY.md) area=docs ;;
+              apps/mobile/src/* | apps/mobile/build.gradle.kts | build.gradle.kts | settings.gradle.kts | \
+                gradle.properties | gradle/* | gradlew | gradlew.bat | detekt.yml) area=android ;;
+              apps/mobile/iosApp/* | .swiftformat | .swiftlint.yml | \
+                scripts/build-agent-ios.sh | scripts/archive-ios.sh) area=iphone ;;
+              apps/desktop/*) area=desktop ;;
+              *) area=all ;;
+            esac
+            if [[ $area == all || $area == android ]]; then android=true; fi
+            if [[ $area == all || $area == iphone ]]; then iphone=true; fi
+            if [[ $area == all || $area == desktop ]]; then mac=true; fi
+          done < <(git diff --name-only "$base" HEAD)
+          printf 'android=%s\niphone=%s\nmac=%s\n' "$android" "$iphone" "$mac" | tee -a "$GITHUB_OUTPUT"
   repository:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -79,6 +134,8 @@ jobs:
       - name: Documentation examples
         run: nix develop .#native --command cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p orchestration -p provider-adapters
   android:
+    needs: changes
+    if: needs.changes.outputs.android == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -106,32 +163,114 @@ jobs:
           ANDROID_USER_HOME: ${{ runner.temp }}/android
         run: >-
           nix develop .#android --command ./gradlew
-          :apps:mobile:ktfmtCheck
-
-          :apps:mobile:assembleDebug
+          :apps:mobile:ktfmtCheck :apps:mobile:assembleDebug
           --no-daemon --parallel --max-workers=4 --build-cache --console=plain
-  macos:
+  mac:
+    name: Mac
+    needs: changes
+    if: needs.changes.outputs.mac == 'true'
+    concurrency:
+      # Optional PRs share one Apple slot; main and manual clients stay parallel.
+      group: native-apple-${{ github.event_name == 'pull_request' && 'pr' || format('{0}-{1}', github.run_id, github.job) }}
+      cancel-in-progress: false
+      queue: max
     runs-on: macos-26
     timeout-minutes: 120
     env:
       CARGO_BUILD_JOBS: 2
       BEX_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      NEXTEST_TEST_THREADS: 2
+      NEXTEST_TEST_THREADS: 6
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - &apple-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
+      - &apple-xcode
+        name: Use preinstalled Xcode 26.6
+        run: |
+          export DEVELOPER_DIR="$BEX_XCODE_DEVELOPER_DIR"
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun simctl list runtimes
+          df -h /
+      - &apple-nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cmd-format: nix develop . --command {0}
-          key: macos-xcode-26.6-${{ hashFiles('flake.lock') }}
+          # Mac contracts also compile GPUI; keep that cache off iPhone runners.
+          key: macos-rust-xcode-26.6-${{ hashFiles('flake.lock') }}
           save-if: ${{ github.event_name != 'pull_request' }}
           cache-on-failure: true
-      - name: Native contracts and iOS build
-        run: nix develop . --command just quality apple
+      - name: Mac contracts
+        run: |
+          set -o pipefail
+          mkdir -p target/qa
+          nix develop . --command just quality rust 2>&1 | tee target/qa/quality.log
       - name: Build desktop and Host
         run: nix develop . --command cargo build --locked -p bex-desktop -p host-daemon -p bex-process
+      - name: Retain Mac verification logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: apple-macos-verification
+          path: target/qa/quality.log
+          retention-days: 7
+  iphone:
+    name: iPhone
+    needs: changes
+    if: needs.changes.outputs.iphone == 'true'
+    concurrency:
+      group: native-apple-${{ github.event_name == 'pull_request' && 'pr' || format('{0}-{1}', github.run_id, github.job) }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 2
+      BEX_XCODE_DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      # The builder validates Swift content/toolchain hashes before reuse.
+      BEX_IOS_SWIFT_CACHE_PATHS: |
+        target/qa/ios-derived-data
+        target/agent-bindings
+        target/aarch64-apple-ios-sim/release/libAgentCore.a
+        target/aarch64-apple-ios-sim/release/AgentCore.swiftmodule
+        target/aarch64-apple-ios-sim/release/AgentCore.swiftdoc
+        target/aarch64-apple-ios-sim/release/agent-core-swift.sha256
+    steps:
+      - *apple-checkout
+      - *apple-xcode
+      - *apple-nix
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cmd-format: nix develop . --command {0}
+          key: macos-swift-xcode-26.6-${{ hashFiles('flake.lock') }}
+          save-if: ${{ github.event_name != 'pull_request' }}
+          cache-on-failure: true
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        id: ios-cache
+        with:
+          path: ${{ env.BEX_IOS_SWIFT_CACHE_PATHS }}
+          key: ios-swift-xcode-26.6-${{ hashFiles('flake.lock', 'Cargo.lock', 'crates/agent-core/src/**', 'crates/agent-protocol/src/**', 'crates/orchestration/src/**', 'scripts/build-agent*.sh', 'apps/mobile/iosApp/**', 'apps/mobile/native-res/**') }}
+          restore-keys: ios-swift-xcode-26.6-
+      - name: Build iPhone client
+        run: |
+          set -o pipefail
+          mkdir -p target/qa
+          nix develop . --command just quality swift 2>&1 | tee target/qa/quality.log
+      - name: Save iPhone Swift builds
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.ios-cache.outputs.cache-primary-key != '' && steps.ios-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ env.BEX_IOS_SWIFT_CACHE_PATHS }}
+          key: ${{ steps.ios-cache.outputs.cache-primary-key }}
+      - name: Retain iPhone verification logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: apple-iphone-verification
+          path: target/qa/quality.log
+          retention-days: 7
   windows:
     needs: toolchain
     # Latest stable Windows Server major; Windows 11 UI acceptance is separate.

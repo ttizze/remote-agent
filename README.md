@@ -188,10 +188,38 @@ mutants, E2E and Simulator UI tests are excluded. Retired conversation types,
 fixtures and acceptance runners are removed.
 
 ```sh
+scripts/dev-env.sh just unit-tests
 scripts/dev-env.sh cargo nextest run -p orchestration -p provider-adapters -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p bex-desktop --lib --bins --features agent-core/bindings
 scripts/dev-env.sh scripts/build-agent-ios.sh simulator
 nix develop .#android --command ./gradlew :apps:mobile:assembleDebug
 ```
+
+Run all local unit tests with `scripts/dev-env.sh just unit-tests`. Native clients GitHub Actions runs on pushes to main, optional PRs and manual workflow dispatch. Each run verifies Linux and Windows, plus Android, Mac and iPhone checks when their files changed since the last successful main run; unknown paths and manual dispatch verify all clients. Main pushes queue instead of cancelling. Force pushes and deletion are blocked for everyone, including administrators. Require successful CI for the current commit and a clean working tree before claiming full verification. Commits do not launch local background checks. Unit tests and manual debugging commands remain available locally. Linux CI uses GitHub-hosted Ubuntu 24.04 runners and the `nix develop .#native` shell. Toolchain lookup runs on the same Ubuntu baseline, and Windows consumes the Rust version from the pinned flake. Lint thresholds are the tools' defaults with no baselines; rule exceptions need review.
+
+Android CI runs on GitHub-hosted Ubuntu 24.04 with the pinned Nix SDK, checks Kotlin formatting and builds the app APK. Apple CI has separate Mac and iPhone jobs on macos-26 with Xcode 26.6; Mac runs Rust checks and builds Host/desktop, while iPhone builds the native client. Optional PR Apple jobs share a queued runner slot. Cargo and Xcode derived data are cached, and verification logs are retained for seven days, including failed runs.
+
+Development and test builds keep filename/line-number backtraces without full variable debug information. Use `CARGO_PROFILE_DEV_DEBUG=full` when a debugger needs variables. Quality checks disable Rust incremental compilation; normal local builds retain it.
+
+The `default` and `native` Nix shells enable sccache for local Rust compilation. Its user-level disk cache reuses matching dependency compilations when Cargo outputs need to be rebuilt; normal Cargo output reuse and workspace incremental compilation remain enabled. The per-worktree `CARGO_HOME` and `CARGO_TARGET_DIR` exported by `scripts/dev-env.sh` prevent Rust cache reuse across worktrees with the pinned sccache version. Incremental crates and crates that invoke the linker bypass this cache. Run `scripts/dev-env.sh sccache --show-stats` to inspect cache hits. Set `SCCACHE_DIR` to override the cache location. CI retains its existing Cargo cache; the shells do not enable the wrapper when `CI` is set.
+
+`just unit-tests` runs all Rust workspace library and binary tests with native bindings enabled, and the standalone agent-peer CLI assertions with Cargo. The Nix-pinned cargo-nextest runner executes workspace tests in parallel with agent-peer; the command waits for both results and collects failures. The supervisor is built before tests start. Enable `agent-ffi/bindgen` only for binding generation. Retired conversation fixtures, Swift Markdown tests and native conversation acceptance runners are removed. Build cleanup and connection diagnostics remain Rust commands in `cargo xtask`. On macOS, the Nix shells select the operating system's `lsof` for kernel process inspection; Linux uses Nix's `lsof`.
+
+`scripts/dev-env.sh` reuses a fixed Nix environment across worktrees when `flake.nix`, `flake.lock` and the platform match; cached runs do not invoke Nix. Its shared profile protects the pinned tools from garbage collection. Cargo indexes, locks and `target` belong to each worktree; tests and dev builds within that worktree use the same Cargo cache and outputs. Only locked dependency sources and archives are seeded from existing caches, using APFS copy-on-write or reflinks where available to share their bytes. Changed test/code sources still require compilation; unchanged outputs are reused. Tests build their required helpers and bindings, while dev app builds, installation and restarts happen when applying changes to dev.
+
+To place new worktrees' build outputs on an external disk, create a directory on
+the mounted disk and set `git config --local bex.buildRoot /absolute/path/to/builds`.
+This local setting is shared by the repository's worktrees. `scripts/dev-env.sh`
+creates each new `target` as a symlink to a separate directory there, preserving
+the paths used by Cargo, Xcode, generated bindings and tooling caches. Existing
+targets stay in place; move them only while unused, then replace their original
+paths with symlinks. The configured build root must already exist; commands fail
+when it is unavailable, including when the disk is unplugged. Remove the setting
+with `git config --local --unset bex.buildRoot` to use local targets for new
+worktrees again.
+
+Every completed `just quality` run prunes inactive Cargo outputs across registered worktrees. Profiles last modified more than 3 days ago are removed; otherwise the oldest profiles are removed until inactive outputs total at most 32 GiB. Run `scripts/dev-env.sh just clean-builds --dry-run` to inspect the JSON plan, or omit `--dry-run` to apply it. Cleanup scans conventional `target` directories and their direct nested Cargo caches; it does not follow symlinked caches.
+
+Cleanup holds Cargo's build/artifact locks and preserves their inodes. Running binaries, active worktree processes and locked builds are excluded from the idle budget. This is a post-check retention policy, not a hard disk quota: active builds can temporarily exceed it. Only recognized Cargo `debug`/`release` output directories are disposable; keep application backups and verification records outside those directories. Bundled apps, `target/qa` results, summaries and source files are retained. Rebuilding a cleaned profile regenerates its outputs.
 
 See [TEST_MAINTENANCE.md](docs/TEST_MAINTENANCE.md) for general policy.
 
