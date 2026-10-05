@@ -17,9 +17,24 @@ enum QueueAction {
         before: Option<agent_protocol::ids::ClientInputId>,
     },
     Edit {
-        id: agent_protocol::ids::ClientInputId,
-        text: String,
+        submission: Submission,
     },
+}
+#[uniffi::remote(Enum)]
+enum Input {
+    Text { text: String },
+    Skill { name: String, path: String },
+    LocalImage { path: String },
+    Mention { path: String, name: String },
+}
+#[uniffi::remote(Record)]
+struct Submission {
+    thread_id: SessionRef,
+    client_user_message_id: agent_protocol::ids::ClientInputId,
+    input: Vec<Input>,
+    model: Option<ModelRef>,
+    effort: Option<String>,
+    service_tier: Option<String>,
 }
 #[uniffi::remote(Record)]
 struct QueueControl {

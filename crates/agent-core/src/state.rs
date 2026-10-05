@@ -72,8 +72,16 @@ pub struct Workspace {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum DraftKey {
-    Session { session: crate::session::SessionRef },
-    Local { key: String },
+    Session {
+        session: crate::session::SessionRef,
+    },
+    Queued {
+        session: crate::session::SessionRef,
+        id: agent_protocol::ids::ClientInputId,
+    },
+    Local {
+        key: String,
+    },
 }
 impl Default for DraftKey {
     fn default() -> Self {
@@ -233,6 +241,9 @@ pub struct Snapshot {
     pub model_errors: Arc<Map<String, Value>>,
     #[serde(with = "crate::persistence::entries")]
     pub drafts: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
+    /// Original input for each open queue editor; its content lives in drafts.
+    #[serde(with = "crate::persistence::entries")]
+    pub queue_edits: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
     pub pending_submissions:
         Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     pub file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
@@ -325,6 +336,7 @@ impl Snapshot {
 }
 
 mod notifications;
+mod queued_edit;
 use notifications::notification;
 pub mod operations;
 pub use operations::Intent;
@@ -336,6 +348,9 @@ use operations::add_attachment;
 pub struct ScopedData {
     #[serde(with = "crate::persistence::entries")]
     pub drafts: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
+    /// Original input for each open queue editor; its content lives in drafts.
+    #[serde(with = "crate::persistence::entries")]
+    pub queue_edits: Arc<BTreeMap<DraftKey, Arc<Draft>>>,
     pub pending_submissions:
         Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     pub file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
@@ -376,6 +391,7 @@ pub fn reduce(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
         Event::SessionUpdate(update) => notifications::session_update(previous, *update),
         event => reduce_event(previous, event),
     };
+    queued_edit::reconcile(&mut next);
     effects.extend(op::prefetch_composer_catalog(&mut next));
     (next, effects)
 }
@@ -389,6 +405,21 @@ macro_rules! prepare_operations {
 }
 
 fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>) {
+    let draft_key = match &intent {
+        Intent::SetDraft { thread_id, .. }
+        | Intent::SetDraftText { thread_id, .. }
+        | Intent::EditComposer { thread_id, .. }
+        | Intent::InsertInvocation { thread_id, .. }
+        | Intent::SelectModel { thread_id, .. }
+        | Intent::SelectEffort { thread_id, .. }
+        | Intent::SelectServiceTier { thread_id, .. } => Some(thread_id),
+        _ => None,
+    };
+    if draft_key.is_some_and(|key| {
+        matches!(key, DraftKey::Queued { .. }) && !previous.queue_edits.contains_key(key)
+    }) {
+        return (previous.clone(), Vec::new());
+    }
     let mut next = previous.clone();
     prepare_operations!(intent, previous, next, [
         ReadPermissionSettings, UpdatePermissionSettings,
@@ -436,15 +467,23 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 }
             }
         }
+        Intent::BeginQueueEdit { id } => {
+            queued_edit::begin(&mut next, id);
+        }
+        Intent::CancelQueueEdit => {
+            let key = previous.composer_key().clone();
+            queued_edit::finish(&mut next, &key, false);
+        }
         Intent::Submit {
             thread_id,
             client_user_message_id,
         } => {
             let thread_id = thread_id.or_else(|| previous.navigation.thread_id.clone());
-            let draft_key = thread_id
-                .clone()
-                .map(DraftKey::from)
-                .unwrap_or_else(|| previous.navigation.draft_key.clone());
+            let draft_key = if thread_id == previous.navigation.thread_id {
+                previous.composer_key().clone()
+            } else {
+                thread_id.clone().map(DraftKey::from).unwrap_or_else(|| previous.navigation.draft_key.clone())
+            };
             let draft = previous.drafts.get(&draft_key).cloned().unwrap_or_default();
             return submission(
                 previous,
@@ -457,7 +496,9 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             );
         }
         Intent::Queue { thread_id, client_user_message_id } => {
-            let draft_key = DraftKey::from(thread_id.clone());
+            let draft_key = if previous.navigation.thread_id.as_ref() == Some(&thread_id) {
+                previous.composer_key().clone()
+            } else { DraftKey::from(thread_id.clone()) };
             let draft = previous.drafts.get(&draft_key).cloned().unwrap_or_default();
             return submission(previous, Some(thread_id), draft_key, draft, client_user_message_id, None, true);
         }
@@ -588,7 +629,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
             Arc::make_mut(&mut next.drafts).insert(thread_id, Arc::new(draft));
         }
         Intent::EditComposer { thread_id, text, cursor } => {
-            let load_catalog = thread_id == previous.navigation.draft_key
+            let load_catalog = &thread_id == previous.composer_key()
                 && previous.connected
                 && crate::composer::query(&text, cursor as usize).is_some_and(|(_, _, filter)| {
                     crate::composer::should_refresh_catalog(
@@ -745,6 +786,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
             if !next.storage_scope.is_empty() {
                 let archived = ScopedData {
                     drafts: std::mem::take(&mut next.drafts),
+                    queue_edits: std::mem::take(&mut next.queue_edits),
                     pending_submissions: std::mem::take(&mut next.pending_submissions),
                     file_drafts: std::mem::take(&mut next.file_drafts),
                     navigation: std::mem::take(&mut next.navigation),
@@ -754,6 +796,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                     .insert(next.storage_scope.clone(), Arc::new(archived));
                 if let Some(saved) = Arc::make_mut(&mut next.archived_scopes).remove(&scope) {
                     next.drafts = saved.drafts.clone();
+                    next.queue_edits = saved.queue_edits.clone();
                     next.pending_submissions = saved.pending_submissions.clone();
                     next.file_drafts = saved.file_drafts.clone();
                     next.navigation = saved.navigation.clone();
@@ -1031,6 +1074,16 @@ fn submission(
     clear_draft: Option<Arc<Draft>>,
     force_queue: bool,
 ) -> (Snapshot, Vec<Effect>) {
+    if let DraftKey::Queued { session, id } = &draft_key {
+        return prepare(
+            previous,
+            previous.clone(),
+            op::SaveQueuedInput {
+                submission: draft.submission(session.clone(), id.clone()),
+                draft_key,
+            },
+        );
+    }
     let mut next = previous.clone();
     next.error = None;
     let cleared = clear_draft.as_ref().unwrap_or(&draft);

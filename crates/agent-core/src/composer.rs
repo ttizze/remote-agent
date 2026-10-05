@@ -51,7 +51,7 @@ impl Snapshot {
             .as_ref()
             .filter(|c| c.cwd == self.navigation.cwd);
         let filter = filter.to_lowercase();
-        let provider = self.model_provider_for_draft(self.navigation.draft_key.clone());
+        let provider = self.model_provider_for_draft(self.composer_key().clone());
         let candidates: Vec<_> = catalog
             .into_iter()
             .flat_map(|c| &c.candidates)

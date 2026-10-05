@@ -4,7 +4,7 @@ use crate::{
     store::{Execution, Outcome},
 };
 use agent_protocol::operations as rpc;
-use rpc::{Input, Submission};
+use rpc::Submission;
 
 macro_rules! no_input {
     () => {
@@ -68,6 +68,10 @@ pub enum Intent {
     ListSessions(ListSessions),
     ImportHistory(ImportHistory),
     QueueControl(agent_protocol::queue::QueueControl),
+    BeginQueueEdit {
+        id: agent_protocol::ids::ClientInputId,
+    },
+    CancelQueueEdit,
     AddProject(AddProject),
     ExpandThreadList {
         project_id: Option<String>,
@@ -359,6 +363,10 @@ mod submission;
 pub use submission::*;
 
 pub(super) fn add_attachment(next: &mut Snapshot, draft_key: DraftKey, attachment: Attachment) {
+    if matches!(draft_key, DraftKey::Queued { .. }) && !next.queue_edits.contains_key(&draft_key) {
+        next.error = Some("予約の編集が終了したため、添付を追加できませんでした".into());
+        return;
+    }
     Arc::make_mut(
         Arc::make_mut(&mut next.drafts)
             .entry(draft_key)

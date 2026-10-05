@@ -41,7 +41,6 @@ use std::{
 
 enum OperationCompletion {
     Busy,
-    QueueEdit(SessionRef, agent_protocol::ids::ClientInputId),
     Composer(u64),
     Editor(u64),
     Item { generation: u64, turn_id: TurnId },
@@ -108,11 +107,6 @@ struct Question {
     definition: agent_protocol::requests::Question,
     input: Entity<InputState>,
     selected: HashSet<String>,
-}
-struct QueueEditor {
-    session: SessionRef,
-    id: agent_protocol::ids::ClientInputId,
-    input: Entity<TextareaState>,
 }
 struct RequestInputs {
     questions: Vec<Question>,
@@ -190,7 +184,6 @@ pub(crate) struct Desktop {
     busy: usize,
     error: String,
     composer: Entity<TextareaState>,
-    queue_editor: Option<QueueEditor>,
     selection: Entity<selection::ConversationSelection>,
     pending_quote: Option<String>,
     pending_explanation: Option<String>,
@@ -479,7 +472,6 @@ impl Desktop {
             busy: 0,
             error: String::new(),
             composer,
-            queue_editor: None,
             selection,
             pending_quote: None,
             pending_explanation: None,
@@ -773,17 +765,6 @@ impl Desktop {
             OperationCompletion::Busy => {
                 self.busy = self.busy.saturating_sub(1);
             }
-            OperationCompletion::QueueEdit(session, id) => {
-                self.busy = self.busy.saturating_sub(1);
-                if result.is_ok()
-                    && self
-                        .queue_editor
-                        .as_ref()
-                        .is_some_and(|editor| editor.session == session && editor.id == id)
-                {
-                    self.queue_editor = None;
-                }
-            }
             OperationCompletion::Item {
                 generation,
                 turn_id,
@@ -925,13 +906,14 @@ impl Desktop {
             previous.error.as_deref(),
             self.snapshot.error.as_deref(),
         );
-        let previous_draft = previous.drafts.get(&previous.navigation.draft_key);
+        let previous_draft = previous.drafts.get(previous.composer_key());
         let sources_changed = previous_draft.map(|draft| &draft.attachments)
             != self
                 .snapshot
                 .drafts
                 .get(self.draft_key())
                 .map(|draft| &draft.attachments);
+        let composer_changed = previous.composer_key() != self.snapshot.composer_key();
         let navigated = previous.navigation.draft_key != self.snapshot.navigation.draft_key;
         let project_for_selected = |snapshot: &Snapshot| {
             snapshot
@@ -949,11 +931,13 @@ impl Desktop {
         {
             self.expanded_projects.insert(project);
         }
+        if composer_changed {
+            self.cancel_recording();
+            self.composer_pending = None;
+        }
         if navigated {
             self.selection
                 .update(cx, |selection, cx| selection.clear(cx));
-            self.cancel_recording();
-            self.composer_pending = None;
             self.rendered = None;
             self.diffs.clear();
             self.markdown_cache.clear();
@@ -1066,7 +1050,7 @@ impl Desktop {
         }
     }
     fn draft_key(&self) -> &DraftKey {
-        &self.snapshot.navigation.draft_key
+        self.snapshot.composer_key()
     }
     fn selected(&self) -> Option<&SessionRef> {
         self.snapshot.navigation.thread_id.as_ref()

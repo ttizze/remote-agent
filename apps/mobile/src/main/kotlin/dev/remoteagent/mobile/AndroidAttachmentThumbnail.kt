@@ -6,10 +6,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -52,11 +52,7 @@ import kotlinx.coroutines.withContext
 private const val THUMBNAIL_MAX_PIXELS = 512
 
 @Composable
-internal fun ImageSkeleton(
-    modifier: Modifier,
-    label: String = "画像を読み込み中",
-    tag: String = "image.loading.skeleton",
-) {
+internal fun ImageSkeleton(modifier: Modifier, label: String = "画像を読み込み中", tag: String = "image.loading.skeleton") {
     Box(
         modifier
             .placeholder(
@@ -97,20 +93,16 @@ internal fun DraftAttachments(
                 IconButton(
                     onClick = { perform(Intent.RemoveAttachment(draftKey, index.toUInt())) {} },
                     modifier =
-                            Modifier.size(48.dp)
-                                .align(Alignment.TopEnd)
-                                .offset(x = 4.dp, y = -4.dp)
-                                .semantics { contentDescription = "${attachment.name}を外す" },
+                        Modifier.size(48.dp).align(Alignment.TopEnd).offset(x = 4.dp, y = -4.dp).semantics {
+                            contentDescription = "${attachment.name}を外す"
+                        },
                 ) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopEnd) {
                         Icon(
                             painterResource(R.drawable.ic_close),
                             contentDescription = null,
                             tint = Color.Black,
-                            modifier =
-                                Modifier.size(18.dp)
-                                    .background(Color.White, CircleShape)
-                                    .padding(3.dp),
+                            modifier = Modifier.size(18.dp).background(Color.White, CircleShape).padding(3.dp),
                         )
                     }
                 }

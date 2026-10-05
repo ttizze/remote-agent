@@ -20,15 +20,24 @@ impl Operation for Dictate {
             draft_key: self.draft_key.clone(),
         })
     }
-    type Input = Arc<Draft>;
+    type Input = (Arc<Draft>, Option<Arc<Draft>>);
     fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
-        Ok(snapshot
-            .drafts
-            .get(&self.draft_key)
-            .cloned()
-            .unwrap_or_default())
+        let origin = snapshot.queue_edits.get(&self.draft_key).cloned();
+        if !snapshot.queue_edit_matches(&self.draft_key, origin.as_ref()) {
+            return Err(PeerError::InvalidMessage(
+                "queued input is no longer being edited".into(),
+            ));
+        }
+        Ok((
+            snapshot
+                .drafts
+                .get(&self.draft_key)
+                .cloned()
+                .unwrap_or_default(),
+            origin,
+        ))
     }
-    type Output = (Arc<Draft>, rpc::Transcription);
+    type Output = (Self::Input, rpc::Transcription);
     async fn run(
         &self,
         draft: Self::Input,
@@ -48,10 +57,10 @@ impl Operation for Dictate {
         if output.1.text.trim().is_empty() {
             return Vec::new();
         }
-        if !self.send {
+        if !self.send || !snapshot.queue_edit_matches(&self.draft_key, output.0.1.as_ref()) {
             return self.stale(snapshot, output);
         }
-        let (mut draft, output) = output;
+        let ((mut draft, _), output) = output;
         let Self {
             draft_key,
             client_user_message_id,
@@ -71,15 +80,30 @@ impl Operation for Dictate {
         *snapshot = next;
         effects
     }
-    fn stale(self, snapshot: &mut Snapshot, (_, output): Self::Output) -> Vec<Effect> {
+    fn stale(self, snapshot: &mut Snapshot, ((_, original), output): Self::Output) -> Vec<Effect> {
         if output.text.trim().is_empty() {
             return Vec::new();
         }
-        let draft = Arc::make_mut(
-            Arc::make_mut(&mut snapshot.drafts)
-                .entry(self.draft_key)
-                .or_default(),
-        );
+        let key = if let DraftKey::Queued { session, .. } = &self.draft_key {
+            if snapshot.queue_edit_matches(&self.draft_key, original.as_ref()) {
+                self.draft_key
+            } else {
+                let ordinary = DraftKey::from(session);
+                if snapshot.drafts.get(&ordinary).is_some_and(|draft| {
+                    !draft.text.trim().is_empty()
+                        || !draft.attachments.is_empty()
+                        || !draft.invocations.is_empty()
+                }) {
+                    snapshot.error =
+                        Some("予約の編集が終了したため、文字起こしを追加できませんでした".into());
+                    return Vec::new();
+                }
+                ordinary
+            }
+        } else {
+            self.draft_key
+        };
+        let draft = Arc::make_mut(Arc::make_mut(&mut snapshot.drafts).entry(key).or_default());
         append_transcript(&mut draft.text, &output.text);
         Vec::new()
     }
@@ -268,43 +292,9 @@ impl Operation for SendSubmission {
                 .await
                 .map(|opened| SubmissionProgress::Opened(Box::new(opened)));
         }
-        let mut input = Vec::with_capacity(
-            self.draft.attachments.len() + usize::from(!self.draft.text.is_empty()),
-        );
-        if !self.draft.text.is_empty() {
-            input.push(Input::Text {
-                text: self.draft.text.clone(),
-            });
-        }
-        input.extend(
-            self.draft
-                .invocations
-                .iter()
-                .filter(|item| {
-                    item.provider == self.thread_id.provider && item.is_in(&self.draft.text)
-                })
-                .map(agent_protocol::composer::Invocation::input),
-        );
-        for attachment in &self.draft.attachments {
-            input.push(if attachment.is_image {
-                Input::LocalImage {
-                    path: attachment.path.clone(),
-                }
-            } else {
-                Input::Mention {
-                    path: attachment.path.clone(),
-                    name: attachment.name.clone(),
-                }
-            });
-        }
-        let submission = Submission {
-            thread_id: self.thread_id.clone(),
-            client_user_message_id: self.client_user_message_id.clone(),
-            input,
-            model: self.draft.model.clone(),
-            effort: self.draft.effort.clone(),
-            service_tier: self.draft.service_tier.clone(),
-        };
+        let submission = self
+            .draft
+            .submission(self.thread_id.clone(), self.client_user_message_id.clone());
         let reply = if self.force_queue {
             context
                 .client
@@ -342,6 +332,70 @@ impl Operation for SendSubmission {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveQueuedInput {
+    pub submission: Submission,
+    pub draft_key: DraftKey,
+}
+impl Operation for SaveQueuedInput {
+    fn key(&self) -> Option<OperationKey> {
+        Some(OperationKey::Submission {
+            draft_key: self.draft_key.clone(),
+        })
+    }
+    type Input = Arc<Draft>;
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        snapshot
+            .queue_edits
+            .get(&self.draft_key)
+            .cloned()
+            .ok_or_else(|| {
+                PeerError::InvalidMessage("queued input is no longer being edited".into())
+            })
+    }
+    type Output = Arc<Draft>;
+    const STALE_POLICY: StalePolicy = StalePolicy::Apply;
+    fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
+        if !snapshot.queue_edits.contains_key(&self.draft_key) {
+            return Err("queued input is no longer being edited".into());
+        }
+        snapshot.error = None;
+        Ok(())
+    }
+    async fn run(
+        &self,
+        original: Self::Input,
+        context: &mut Execution<'_>,
+    ) -> Result<Self::Output, PeerError> {
+        context
+            .call(&agent_protocol::queue::QueueControl {
+                session: self.submission.thread_id.clone(),
+                action: agent_protocol::queue::QueueAction::Edit {
+                    submission: self.submission.clone(),
+                },
+            })
+            .await?;
+        Ok(original)
+    }
+    fn apply(self, snapshot: &mut Snapshot, original: Self::Output) -> Vec<Effect> {
+        if !snapshot.queue_edit_matches(&self.draft_key, Some(&original)) {
+            return vec![Effect::continuation(ReadThread::new(
+                self.submission.thread_id,
+            ))];
+        }
+        let changed = snapshot.drafts.get(&self.draft_key).is_some_and(|draft| {
+            draft.submission(
+                self.submission.thread_id.clone(),
+                self.submission.client_user_message_id.clone(),
+            ) != self.submission
+        });
+        super::super::queued_edit::finish(snapshot, &self.draft_key, changed);
+        vec![Effect::continuation(ReadThread::new(
+            self.submission.thread_id,
+        ))]
+    }
+}
+
 impl Operation for agent_protocol::queue::QueueControl {
     rpc_operation!();
     fn apply(self, _: &mut Snapshot, _: Self::Output) -> Vec<Effect> {
@@ -363,8 +417,17 @@ impl Operation for UploadAttachment {
             draft_key: self.draft_key.clone(),
         })
     }
-    no_input!();
-    type Output = String;
+    type Input = Option<Arc<Draft>>;
+    fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
+        let original = snapshot.queue_edits.get(&self.draft_key).cloned();
+        if !snapshot.queue_edit_matches(&self.draft_key, original.as_ref()) {
+            return Err(PeerError::InvalidMessage(
+                "queued input is no longer being edited".into(),
+            ));
+        }
+        Ok(original)
+    }
+    type Output = (Self::Input, String);
     const STALE_POLICY: StalePolicy = StalePolicy::Apply;
     fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
         snapshot.error = None;
@@ -372,7 +435,7 @@ impl Operation for UploadAttachment {
     }
     async fn run(
         &self,
-        _: Self::Input,
+        original: Self::Input,
         context: &mut Execution<'_>,
     ) -> Result<Self::Output, PeerError> {
         let session = context.session.ok_or_else(|| {
@@ -387,9 +450,13 @@ impl Operation for UploadAttachment {
         )
         .await
         .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-        Ok(uploaded.path)
+        Ok((original, uploaded.path))
     }
-    fn apply(mut self, snapshot: &mut Snapshot, path: Self::Output) -> Vec<Effect> {
+    fn apply(mut self, snapshot: &mut Snapshot, (original, path): Self::Output) -> Vec<Effect> {
+        if !snapshot.queue_edit_matches(&self.draft_key, original.as_ref()) {
+            snapshot.error = Some("予約の編集が終了したため、添付を追加できませんでした".into());
+            return Vec::new();
+        }
         self.attachment.path = path;
         add_attachment(snapshot, self.draft_key, self.attachment);
         Vec::new()

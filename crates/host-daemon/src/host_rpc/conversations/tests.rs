@@ -1109,8 +1109,15 @@ fn held_queue_keeps_edits_order_and_admission_identity_across_restart() {
         .queue_control(
             &target,
             &QueueAction::Edit {
-                id: "third".into(),
-                text: "edited message".into(),
+                submission: agent_protocol::operations::Submission {
+                    input: vec![
+                        agent_protocol::operations::Input::Text {
+                            text: "edited message".into(),
+                        },
+                        originals[2].input[1].clone(),
+                    ],
+                    ..originals[2].clone()
+                },
             },
         )
         .unwrap();
@@ -1156,8 +1163,12 @@ fn held_queue_keeps_edits_order_and_admission_identity_across_restart() {
             .queue_control(
                 &target,
                 &QueueAction::Edit {
-                    id: "third".into(),
-                    text: "must not change a claimed input".into()
+                    submission: agent_protocol::operations::Submission {
+                        input: vec![agent_protocol::operations::Input::Text {
+                            text: "must not change a claimed input".into()
+                        }],
+                        ..originals[2].clone()
+                    }
                 }
             )
             .is_err()
@@ -1298,8 +1309,12 @@ fn queue_mutations_are_atomic_and_cancellation_releases_only_the_selected_messag
             .queue_control(
                 &target,
                 &QueueAction::Edit {
-                    id: "second".into(),
-                    text: "changed".into()
+                    submission: agent_protocol::operations::Submission {
+                        input: vec![agent_protocol::operations::Input::Text {
+                            text: "changed".into()
+                        }],
+                        ..second.clone()
+                    }
                 }
             )
             .is_err()
@@ -1421,4 +1436,163 @@ proptest::proptest! {
         let actual = turns.iter().map(|turn| turn.id.parse::<u8>().unwrap()).collect::<Vec<_>>();
         proptest::prop_assert_eq!(actual, ids);
     }
+}
+
+#[test]
+fn queue_edit_replaces_attachments_context_and_settings_without_changing_its_receipt_identity() {
+    use agent_protocol::{operations::Input, queue::QueueAction};
+    let store = Conversations::memory();
+    let target = store.bind(&native("source"), "scope").unwrap();
+    first_page(&store, &target, vec![], None);
+    let mut original = input(&target);
+    original.input = vec![
+        Input::Text {
+            text: "original".into(),
+        },
+        Input::LocalImage {
+            path: "/isolated/old.png".into(),
+        },
+    ];
+    store.admit(&original, SubmissionDelivery::Queued).unwrap();
+    let mut edited = original.clone();
+    edited.input = vec![
+        Input::LocalImage {
+            path: "/isolated/new.png".into(),
+        },
+        Input::Mention {
+            name: "document".into(),
+            path: "/isolated/new.txt".into(),
+        },
+        Input::Skill {
+            name: "review".into(),
+            path: "/isolated/review".into(),
+        },
+    ];
+    edited.model = Some(agent_protocol::models::ModelRef {
+        provider: target.provider,
+        id: "another-model".into(),
+    });
+    edited.effort = Some("high".into());
+    edited.service_tier = Some("fast".into());
+    store
+        .queue_control(
+            &target,
+            &QueueAction::Edit {
+                submission: edited.clone(),
+            },
+        )
+        .unwrap();
+    assert_eq!(store.queued(&target).unwrap()[0], edited);
+    assert_eq!(
+        store.previous_command(&original).unwrap(),
+        Some(SubmissionDelivery::Queued)
+    );
+    assert!(store.previous_command(&edited).is_err());
+    assert_eq!(store.claim_queued(&target).unwrap(), Some(edited.clone()));
+    assert!(
+        store
+            .queue_control(&target, &QueueAction::Edit { submission: edited })
+            .is_err()
+    );
+}
+
+#[test]
+fn queue_edit_rejects_cross_conversation_cross_provider_and_missing_inputs_atomically() {
+    use agent_protocol::{operations::Input, queue::QueueAction};
+    let store = Conversations::memory();
+    let target = store.bind(&native("source"), "scope").unwrap();
+    first_page(&store, &target, vec![], None);
+    let mut original = input(&target);
+    original.input = vec![Input::Text {
+        text: "keep original".into(),
+    }];
+    store.admit(&original, SubmissionDelivery::Queued).unwrap();
+    let before = store.queued(&target).unwrap();
+    let mut edits = Vec::new();
+    let mut foreign = original.clone();
+    foreign.thread_id = native("foreign");
+    edits.push(foreign);
+    let mut foreign_model = original.clone();
+    foreign_model.model = Some(agent_protocol::models::ModelRef {
+        provider: ProviderKind::Claude,
+        id: "model".into(),
+    });
+    edits.push(foreign_model);
+    let mut missing = original.clone();
+    missing.client_user_message_id = "missing".into();
+    edits.push(missing);
+    for parts in [
+        vec![],
+        vec![Input::Text {
+            text: " \n\t".into(),
+        }],
+        vec![Input::LocalImage {
+            path: String::new(),
+        }],
+        vec![Input::Mention {
+            name: "no path".into(),
+            path: String::new(),
+        }],
+        vec![Input::Skill {
+            name: "review".into(),
+            path: "/isolated/skill".into(),
+        }],
+    ] {
+        edits.push(agent_protocol::operations::Submission {
+            input: parts,
+            ..original.clone()
+        });
+    }
+    for edit in edits {
+        assert!(
+            store
+                .queue_control(&target, &QueueAction::Edit { submission: edit })
+                .is_err()
+        );
+        assert_eq!(store.queued(&target).unwrap(), before);
+        assert_eq!(
+            store.previous_command(&original).unwrap(),
+            Some(SubmissionDelivery::Queued)
+        );
+    }
+}
+
+#[test]
+fn queue_edit_accepts_the_payload_limit_and_rejects_one_more_byte() {
+    use agent_protocol::{operations::Input, queue::QueueAction};
+    let store = Conversations::memory();
+    let target = store.bind(&native("source"), "scope").unwrap();
+    first_page(&store, &target, vec![], None);
+    let mut original = input(&target);
+    original.input = vec![Input::Text { text: "x".into() }];
+    store.admit(&original, SubmissionDelivery::Queued).unwrap();
+    let mut exact = original.clone();
+    let overhead = serde_json::to_vec(&exact).unwrap().len() - 1;
+    exact.input = vec![Input::Text {
+        text: "x".repeat(1024 * 1024 - overhead),
+    }];
+    assert_eq!(serde_json::to_vec(&exact).unwrap().len(), 1024 * 1024);
+    store
+        .queue_control(
+            &target,
+            &QueueAction::Edit {
+                submission: exact.clone(),
+            },
+        )
+        .unwrap();
+    let mut too_large = exact.clone();
+    if let Input::Text { text } = &mut too_large.input[0] {
+        text.push('x');
+    }
+    assert!(
+        store
+            .queue_control(
+                &target,
+                &QueueAction::Edit {
+                    submission: too_large
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(store.queued(&target).unwrap()[0], exact);
 }

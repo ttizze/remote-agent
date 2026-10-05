@@ -1848,8 +1848,12 @@ async fn claude_host_queue_preserves_edits_order_and_hold_across_restart() {
     for action in [
         QueueAction::Pause,
         QueueAction::Edit {
-            id: "queued-a".into(),
-            text: "edited follow-up".into(),
+            submission: rpc::Submission {
+                input: vec![rpc::Input::Text {
+                    text: "edited follow-up".into(),
+                }],
+                ..original.clone()
+            },
         },
         QueueAction::Move {
             id: "queued-c".into(),

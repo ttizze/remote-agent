@@ -30,8 +30,7 @@ impl Snapshot {
     }
     pub fn conversation_unchanged(&self, other: Arc<Self>) -> bool {
         let id = self.navigation.thread_id.as_ref();
-        if id != other.navigation.thread_id.as_ref()
-            || self.navigation.draft_key != other.navigation.draft_key
+        if id != other.navigation.thread_id.as_ref() || self.composer_key() != other.composer_key()
         {
             return false;
         }
@@ -134,9 +133,6 @@ impl Snapshot {
 }
 #[uniffi::export]
 impl Thread {
-    pub fn queue_messages(&self) -> Vec<crate::presentation::conversation::QueueMessage> {
-        crate::presentation::conversation::queue_messages(&self.0.queued_inputs)
-    }
     pub fn queue_held(&self) -> bool {
         self.0.queue_held
     }

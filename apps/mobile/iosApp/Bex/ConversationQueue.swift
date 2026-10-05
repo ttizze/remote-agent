@@ -3,14 +3,13 @@ import SwiftUI
 
 struct ConversationQueuePanel: View {
     let messages: [QueueMessage]
+    let edit: (Intent) -> Void
     let held: Bool
     let enabled: Bool
     let media: ConversationMediaAccess
     let action: (QueueAction) -> Void
     @Environment(\.colorScheme) private var colorScheme
     @State private var showingQueue = false
-    @State private var editingId: String?
-    @State private var editingText = ""
 
     var body: some View {
         Button { showingQueue = true } label: {
@@ -57,21 +56,6 @@ struct ConversationQueuePanel: View {
                             .disabled(!enabled).accessibilityIdentifier("queue.toggle")
                     }
                 }
-                .alert("キューを編集", isPresented: Binding(get: { editingId != nil }, set: {
-                    if !$0 {
-                        editingId = nil
-                    }
-                })) {
-                    TextField("メッセージ", text: $editingText)
-                    Button("保存") {
-                        if let id = editingId {
-                            action(.edit(id: id, text: editingText))
-                        }
-                        editingId = nil
-                    }
-                    .disabled(!enabled || editingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Button("キャンセル", role: .cancel) { editingId = nil }
-                }
             }
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
@@ -104,7 +88,11 @@ struct ConversationQueuePanel: View {
                     Button("下へ移動") { action(move) }
                 }
                 if message.editable {
-                    Button("編集") { editingText = message.text; editingId = message.id }
+                    if message.editing {
+                        Button("キャンセル") { edit(.cancelQueueEdit) }
+                    } else {
+                        Button("編集") { edit(.beginQueueEdit(id: message.id)); showingQueue = false }
+                    }
                 }
                 if message.removable {
                     Button("削除", role: .destructive) { action(.cancel(id: message.id)) }
@@ -117,6 +105,8 @@ struct ConversationQueuePanel: View {
             .disabled(!enabled)
         }
         .frame(minHeight: 56)
+        .background(message.editing ? Color.accentColor.opacity(0.12) : .clear)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
         .accessibilityIdentifier("queue.item." + message.id)
     }
 }

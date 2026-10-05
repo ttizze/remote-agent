@@ -8,10 +8,13 @@ import UniformTypeIdentifiers
 extension ThreadScreen {
     var composer: some View {
         let attachments = model.snapshot.draft(key: model.coreDraftKey).attachments
+        let queueControls = model.snapshot
+            .composerControls(busy: model.transferring || preparingMedia || dictation.requestingPermission)
         return VStack(spacing: 12) {
             if let threadId = model.selectedThreadId, let thread = model.snapshot.conversation(id: threadId),
-               !thread.queueMessages().isEmpty || thread.queueHeld() {
-                ConversationQueuePanel(messages: thread.queueMessages(), held: thread.queueHeld(),
+               !model.snapshot.queueMessages().isEmpty || thread.queueHeld() {
+                ConversationQueuePanel(messages: model.snapshot.queueMessages(),
+                                       edit: { model.perform($0) }, held: thread.queueHeld(),
                                        enabled: model.isConnected && !model.sending, media: model.mediaAccess,
                                        action: model.controlQueue)
                     .id(threadId)
@@ -131,7 +134,12 @@ extension ThreadScreen {
                         ProgressView().frame(height: 40)
                     }
                     Spacer(minLength: 0)
-                    if model.selectedThreadId != nil {
+                    if queueControls.editing {
+                        Button("キャンセル") { model.perform(.cancelQueueEdit) }
+                            .disabled(model.sending || model.transcribing || dictation.isRecording || model
+                                .transferring || preparingMedia)
+                            .accessibilityIdentifier("queue.edit.cancel")
+                    } else if model.selectedThreadId != nil {
                         Button {
                             UIApplication.shared.sendAction(
                                 #selector(UIResponder.resignFirstResponder),
@@ -144,10 +152,7 @@ extension ThreadScreen {
                         } label: {
                             Image(systemName: "text.badge.plus").frame(width: 44, height: 44)
                         }
-                        .disabled(!model.isConnected || model.sending || model.transferring || preparingMedia ||
-                            dictation.isRecording || model.transcribing ||
-                            (model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments
-                                .isEmpty))
+                        .disabled(!queueControls.queueEnabled || dictation.isRecording)
                         .accessibilityLabel("キューに追加")
                         .accessibilityIdentifier("queue.add")
                     }
@@ -219,7 +224,7 @@ extension ThreadScreen {
                         .transferring || preparingMedia)
                     .accessibilityLabel(dictation.isRecording ? "録音を終了して文字起こし" : "音声をCodexで文字起こし")
                     .accessibilityIdentifier("dictation.toggle")
-                    if let threadId = model.selectedThreadId,
+                    if !queueControls.editing, let threadId = model.selectedThreadId,
                        let runningTurnId = model.snapshot.conversation(id: threadId)?.activeTurnId(),
                        !dictation.isRecording, !dictation.requestingPermission, !model.transcribing,
                        model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, attachments
@@ -248,15 +253,18 @@ extension ThreadScreen {
                                 model.send()
                             }
                         } label: {
-                            Image(systemName: "arrow.up").font(.system(size: 20, weight: .semibold))
+                            Image(systemName: queueControls.editing ? "checkmark" : "arrow.up")
+                                .font(.system(
+                                    size: 20,
+                                    weight: .semibold
+                                ))
                         }
                         .buttonStyle(ComposerSendButtonStyle())
-                        .accessibilityLabel(dictation.isRecording ? "文字起こしして送信" : "送信")
+                        .accessibilityLabel(queueControls.editing ? "変更を保存" : dictation
+                            .isRecording ? "文字起こしして送信" : "送信")
                         .disabled(!model.isConnected || (!model.isNewThread && conversation == nil) || model
                             .sending || model.transferring || preparingMedia || dictation.requestingPermission || model
-                            .transcribing ||
-                            (!dictation.isRecording && model.draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                                .isEmpty && attachments.isEmpty))
+                            .transcribing || (!dictation.isRecording && !queueControls.sendEnabled))
                         .accessibilityIdentifier("task.send")
                     }
                 }

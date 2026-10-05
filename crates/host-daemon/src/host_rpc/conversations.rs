@@ -831,28 +831,38 @@ impl Conversations {
                     params![target.id, id.as_str()],
                 )?;
             }
-            QueueAction::Edit { id, text } => {
+            QueueAction::Edit { submission } => {
                 ensure!(
-                    !text.trim().is_empty() && text.len() <= 1024 * 1024,
-                    "queued text must contain between 1 byte and 1 MiB"
+                    &submission.thread_id == target,
+                    "queued input belongs to another conversation"
                 );
-                let payload: String = tx
-                    .query_row("SELECT execution FROM commands WHERE conversation=?1 AND input_id=?2 AND delivery='\"queued\"'", params![target.id, id.as_str()], |row| row.get(0))
-                    .optional()?
-                    .context("queued input is no longer available")?;
-                let mut input: agent_protocol::operations::Submission =
-                    serde_json::from_str(&payload)?;
-                input
-                    .input
-                    .retain(|part| !matches!(part, agent_protocol::operations::Input::Text { .. }));
-                input.input.insert(
-                    0,
-                    agent_protocol::operations::Input::Text { text: text.clone() },
+                ensure!(
+                    submission
+                        .model
+                        .as_ref()
+                        .is_none_or(|model| model.provider == target.provider),
+                    "queued model belongs to another provider"
                 );
-                tx.execute(
-                    "UPDATE commands SET execution=?3 WHERE conversation=?1 AND input_id=?2",
-                    params![target.id, id.as_str(), serde_json::to_string(&input)?],
+                ensure!(
+                    submission.input.iter().any(|part| match part {
+                        agent_protocol::operations::Input::Text { text } => !text.trim().is_empty(),
+                        agent_protocol::operations::Input::LocalImage { path }
+                        | agent_protocol::operations::Input::Mention { path, .. } =>
+                            !path.is_empty(),
+                        agent_protocol::operations::Input::Skill { .. } => false,
+                    }),
+                    "queued input must contain text or attachments"
+                );
+                let payload = serde_json::to_string(submission)?;
+                ensure!(
+                    payload.len() <= 1024 * 1024,
+                    "queued input must be at most 1 MiB"
+                );
+                let changed = tx.execute(
+                    "UPDATE commands SET execution=?3 WHERE conversation=?1 AND input_id=?2 AND delivery='\"queued\"'",
+                    params![target.id, submission.client_user_message_id.as_str(), payload],
                 )?;
+                ensure!(changed == 1, "queued input is no longer available");
             }
         }
         tx.execute(

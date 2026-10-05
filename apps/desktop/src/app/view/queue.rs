@@ -1,5 +1,4 @@
 use super::*;
-use agent_core::presentation::conversation::queue_messages;
 use agent_protocol::queue::{QueueAction, QueueControl};
 
 impl Desktop {
@@ -10,7 +9,7 @@ impl Desktop {
         let Some(session) = thread.id.clone() else {
             return div().into_any_element();
         };
-        let messages = queue_messages(&thread.queued_inputs);
+        let messages = self.snapshot.queue_messages();
         if messages.is_empty() && !thread.queue_held {
             return div().into_any_element();
         }
@@ -84,30 +83,31 @@ impl Desktop {
                 }
             }
             if message.editable {
-                let target = session.clone();
                 let id = message.id.clone();
-                let text = message.text.clone();
+                let editing = message.editing;
                 controls = controls.child(
                     Button::new(format!("queue-edit-{id}"))
-                        .label("編集")
+                        .label(if editing { "キャンセル" } else { "編集" })
                         .xsmall()
                         .ghost()
                         .disabled(!enabled)
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            view.queue_editor = Some(QueueEditor {
-                                session: target.clone(),
-                                id: id.clone(),
-                                input: cx.new(|cx| {
-                                    TextareaState::new(window, cx)
-                                        .default_value(text.clone())
-                                        .auto_grow(2, 6)
-                                }),
+                        .on_click(cx.listener(move |view, _, _, _| {
+                            view.dispatch(if editing {
+                                Intent::CancelQueueEdit
+                            } else {
+                                Intent::BeginQueueEdit { id: id.clone() }
                             });
-                            cx.notify();
                         })),
                 );
             }
-            let mut row = v_flex().gap_1().child(div().text_sm().child(message.text));
+            let mut row = v_flex()
+                .gap_1()
+                .p_2()
+                .rounded_md()
+                .when(message.editing, |row| {
+                    row.border_1().border_color(cx.theme().primary)
+                })
+                .child(div().text_sm().child(message.text));
             if !message.images.is_empty() {
                 row = row.child(
                     div()
@@ -116,62 +116,6 @@ impl Desktop {
                 )
             }
             panel = panel.child(row.child(controls));
-        }
-        if let Some(editor) = &self.queue_editor
-            && editor.session == session
-        {
-            let id = editor.id.clone();
-            let target = editor.session.clone();
-            panel = panel.child(
-                v_flex()
-                    .gap_2()
-                    .child("キューを編集")
-                    .child(Textarea::new(&editor.input).readonly(!enabled))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("queue-edit-save")
-                                    .label("保存")
-                                    .small()
-                                    .disabled(!enabled)
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        let Some(editor) = &view.queue_editor else {
-                                            return;
-                                        };
-                                        let text = editor.input.read(cx).value().to_string();
-                                        if text.trim().is_empty() {
-                                            return;
-                                        }
-                                        view.busy += 1;
-                                        view.perform(
-                                            Intent::QueueControl(QueueControl {
-                                                session: target.clone(),
-                                                action: QueueAction::Edit {
-                                                    id: id.clone(),
-                                                    text,
-                                                },
-                                            }),
-                                            OperationCompletion::QueueEdit(
-                                                target.clone(),
-                                                id.clone(),
-                                            ),
-                                        );
-                                    })),
-                            )
-                            .child(
-                                Button::new("queue-edit-cancel")
-                                    .label("キャンセル")
-                                    .small()
-                                    .ghost()
-                                    .disabled(!enabled)
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.queue_editor = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            );
         }
         panel.into_any_element()
     }

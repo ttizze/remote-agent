@@ -169,7 +169,9 @@
             "crates/agent-core/src/presentation/conversation.rs",
             "apps/desktop/src/app/view/queue.rs",
             "apps/mobile/iosApp/Bex/ConversationQueue.swift",
-            "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt"
+            "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt",
+            "crates/agent-core/src/state/queued_edit.rs",
+            "crates/agent-core/src/state/operations/submission.rs"
           ],
           "clients": [
             "desktop",
@@ -178,14 +180,14 @@
           ],
           "remaining": [
             "promote to steer",
-            "full composer editing and draft restoration",
             "drag handles and keyboard shortcuts",
             "native and visual acceptance"
           ],
           "verification": {
             "host_queue_unit_tests": "passed",
             "native_acceptance": "pending",
-            "visual_comparison": "pending"
+            "visual_comparison": "pending",
+            "composer_edit_unit_tests": "passed"
           }
         },
         {
@@ -2344,7 +2346,7 @@
     {
       "name": "queued-run.edit",
       "source": "https://github.com/pingdotgg/t3code/blob/4ee6bfd50ef4a089440d5c3662db2298da9cc50e/packages/contracts/src/orchestrationV2.ts",
-      "state": "designed",
+      "state": "implemented",
       "clients": [
         "desktop",
         "ios",
@@ -2356,17 +2358,18 @@
         "crates/agent-core/src/presentation/conversation.rs",
         "apps/desktop/src/app/view/queue.rs",
         "apps/mobile/iosApp/Bex/ConversationQueue.swift",
-        "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt"
+        "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidConversationQueue.kt",
+        "crates/agent-core/src/state/queued_edit.rs",
+        "crates/agent-core/src/state/operations/submission.rs"
       ],
-      "acceptance": "Host persistence, held restart recovery, immutable admission identity, stale controls, and all native entry points.",
+      "acceptance": "Full composer text, attachments, invocation context and model settings replace the queued payload; ordinary draft survives save/cancel; remotely started or removed input ends editing; delayed operation results cannot affect a reopened editor; immutable admission identity survives edit.",
       "verification": {
         "unit_tests": "passed",
         "native_acceptance": "pending",
         "visual_comparison": "pending"
       },
       "remaining": [
-        "attachment and context editing",
-        "composer edit draft restore and stale edit recovery"
+        "native and visual acceptance"
       ]
     },
     {

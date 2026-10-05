@@ -18,6 +18,8 @@ pub struct PersistedState {
     archived_scopes: Arc<BTreeMap<String, Arc<ScopedData>>>,
     #[serde(with = "entries")]
     drafts: Arc<BTreeMap<crate::state::DraftKey, Arc<Draft>>>,
+    #[serde(with = "entries")]
+    queue_edits: Arc<BTreeMap<crate::state::DraftKey, Arc<Draft>>>,
     pending_submissions: Arc<BTreeMap<agent_protocol::ids::ClientInputId, Arc<PendingSubmission>>>,
     file_drafts: Arc<BTreeMap<String, Arc<FileDraft>>>,
     navigation: Arc<Navigation>,
@@ -32,6 +34,7 @@ impl PersistedState {
             storage_scope: snapshot.storage_scope.clone(),
             archived_scopes: snapshot.archived_scopes.clone(),
             drafts: snapshot.drafts.clone(),
+            queue_edits: snapshot.queue_edits.clone(),
             pending_submissions: snapshot.pending_submissions.clone(),
             file_drafts: snapshot.file_drafts.clone(),
             navigation: snapshot.navigation.clone(),
@@ -94,6 +97,7 @@ pub fn decode(bytes: &[u8]) -> Result<Snapshot, serde_json::Error> {
         storage_scope: saved.storage_scope,
         archived_scopes: saved.archived_scopes,
         drafts: saved.drafts,
+        queue_edits: saved.queue_edits,
         pending_submissions: saved.pending_submissions,
         file_drafts: saved.file_drafts,
         navigation: saved.navigation,

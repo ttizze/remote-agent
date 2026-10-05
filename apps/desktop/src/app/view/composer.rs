@@ -355,7 +355,9 @@ impl Desktop {
         let running = self.thread().and_then(|thread| thread.active_turn_id());
         let empty = self.composer.read(cx).value().trim().is_empty() && attachments.is_empty();
         let phase = self.dictation.as_ref().map(|d| d.phase);
-        let send = if let Some(id) = running.filter(|_| empty) {
+        let controls = self.snapshot.composer_controls(self.busy > 0);
+        let editing = controls.editing;
+        let send = if let Some(id) = running.filter(|_| empty && !editing) {
             Self::icon_button(
                 "stop",
                 Icon::default().path("bex/stop.svg"),
@@ -370,20 +372,18 @@ impl Desktop {
             )
             .disabled(!self.snapshot.connected || self.busy > 0)
         } else {
-            Self::icon_button("send", IconName::ArrowUp, "送信", cx, |s, _, cx| {
-                s.send(cx)
-            })
-            .disabled(
-                !self.snapshot.connected
-                    || self.busy > 0
-                    || empty
-                    || self
-                        .thread()
-                        .and_then(|thread| {
-                            agent_protocol::session::input_unavailable_reason(thread)
-                        })
-                        .is_some(),
+            Self::icon_button(
+                "send",
+                if editing {
+                    IconName::Check
+                } else {
+                    IconName::ArrowUp
+                },
+                if editing { "変更を保存" } else { "送信" },
+                cx,
+                |s, _, cx| s.send(cx),
             )
+            .disabled(!controls.send_enabled || empty)
         };
         let microphone = Button::new("dictation-toggle")
             .icon(Icon::default().path("bex/microphone.svg").size(px(23.)))
@@ -478,13 +478,13 @@ impl Desktop {
                         )
                         .child(self.permission_menu(cx))
                         .child(div().flex_1())
-                        .when(self.selected().is_some(), |row| {
+                        .when(self.selected().is_some() && !editing, |row| {
                             row.child(
                                 Button::new("queue-add")
                                     .label("キューに追加")
                                     .small()
                                     .ghost()
-                                    .disabled(!self.snapshot.connected || self.busy > 0 || empty)
+                                    .disabled(!controls.queue_enabled || empty)
                                     .on_click(cx.listener(|view, _, _, _| {
                                         if let Some(session) = view.selected().cloned() {
                                             view.busy += 1;
@@ -498,6 +498,18 @@ impl Desktop {
                                                 OperationCompletion::Busy,
                                             );
                                         }
+                                    })),
+                            )
+                        })
+                        .when(editing, |row| {
+                            row.child(
+                                Button::new("queue-edit-cancel")
+                                    .label("キャンセル")
+                                    .small()
+                                    .ghost()
+                                    .disabled(self.busy > 0)
+                                    .on_click(cx.listener(|view, _, _, _| {
+                                        view.dispatch(Intent::CancelQueueEdit)
                                     })),
                             )
                         })

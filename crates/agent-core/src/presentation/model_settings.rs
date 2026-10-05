@@ -11,7 +11,8 @@ pub(crate) fn draft_provider(
     model: Option<&ModelRef>,
 ) -> ProviderKind {
     match key {
-        crate::state::DraftKey::Session { session } => session.provider,
+        crate::state::DraftKey::Session { session }
+        | crate::state::DraftKey::Queued { session, .. } => session.provider,
         crate::state::DraftKey::Local { .. } => model
             .map(|model| model.provider)
             .unwrap_or(ProviderKind::Codex),

@@ -81,7 +81,7 @@ extension BexAppViewModel {
     }
 
     var coreDraftKey: DraftKey {
-        snapshot.navigation().draftKey
+        snapshot.composerDraftKey()
     }
 
     var draftKey: DraftIdentity {

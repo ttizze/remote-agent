@@ -117,7 +117,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private val flushes = mutableSetOf<Job>()
     private val pending = ArrayDeque<Pair<Intent, (Result<Outcome>) -> Unit>>()
     val draftKey
-        get() = snapshot.navigation().draftKey
+        get() = snapshot.composerDraftKey()
 
     val selectionKey
         get() = profileId to draftKey

@@ -1,3 +1,5 @@
+import com.ncorti.ktfmt.gradle.tasks.KtfmtCheckTask
+import com.ncorti.ktfmt.gradle.tasks.KtfmtFormatTask
 import org.gradle.api.tasks.Exec
 
 plugins {
@@ -12,6 +14,14 @@ ktfmt {
     kotlinLangStyle()
     maxWidth.set(120)
 }
+
+// AGP's built-in Kotlin source directories are not Java source sets.
+val ktfmtFormatSources by tasks.registering(KtfmtFormatTask::class) { source = fileTree("src") { include("**/*.kt") } }
+val ktfmtCheckSources by tasks.registering(KtfmtCheckTask::class) { source = fileTree("src") { include("**/*.kt") } }
+
+tasks.named("ktfmtFormat") { dependsOn(ktfmtFormatSources) }
+
+tasks.named("ktfmtCheck") { dependsOn(ktfmtCheckSources) }
 
 detekt {
     toolVersion = "1.23.8"

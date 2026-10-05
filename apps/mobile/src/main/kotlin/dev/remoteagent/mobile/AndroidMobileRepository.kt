@@ -33,11 +33,7 @@ internal class AndroidMobileRepository(context: Context) {
     }
 
     fun diagnosticsDirectory(id: String): String =
-        File(
-                directory,
-                "connection-diagnostics/${encodedId(id)}",
-            )
-            .absolutePath
+        File(directory, "connection-diagnostics/${encodedId(id)}").absolutePath
 
     fun load(id: String): ByteArray {
         val file = snapshotFile(id)

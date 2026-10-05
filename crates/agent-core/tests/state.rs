@@ -797,7 +797,7 @@ fn durable_upload_and_pairing_results_survive_navigation() {
         },
         directory: "/old".into(),
     }
-    .stale(&mut snapshot, "/uploaded".into());
+    .stale(&mut snapshot, (None, "/uploaded".into()));
     assert_eq!(
         snapshot.drafts[&DraftKey::from("old")].attachments[0].path,
         "/uploaded"

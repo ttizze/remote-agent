@@ -486,6 +486,7 @@ pub(super) fn refresh_thread(snapshot: &mut Snapshot, incoming: Thread) {
     }
     Arc::make_mut(&mut snapshot.conversations).insert(id.clone(), Arc::new(thread));
     reconcile_pending(snapshot, &id);
+    super::super::queued_edit::reconcile(snapshot);
 }
 
 pub use agent_protocol::operations::ForkSession;
@@ -580,7 +581,9 @@ impl Operation for LoadModels {
         let drafts = snapshot.drafts.clone();
         for (id, previous_draft) in drafts.iter() {
             let provider = match id {
-                DraftKey::Session { session } => Some(session.provider),
+                DraftKey::Session { session } | DraftKey::Queued { session, .. } => {
+                    Some(session.provider)
+                }
                 DraftKey::Local { .. } => None,
             };
             let settings = supported_settings(

@@ -109,6 +109,7 @@ fn missing_or_invalid_user_work_is_not_silently_discarded() {
         "storage_scope",
         "archived_scopes",
         "drafts",
+        "queue_edits",
         "pending_submissions",
         "file_drafts",
         "navigation",

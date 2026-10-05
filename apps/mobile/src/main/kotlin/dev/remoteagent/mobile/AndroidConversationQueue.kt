@@ -1,5 +1,6 @@
 package dev.remoteagent.mobile
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,14 +12,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -51,7 +50,6 @@ internal fun ConversationQueuePanel(
     action: (QueueAction) -> Unit,
 ) {
     var showing by remember { mutableStateOf(false) }
-    var editing by remember { mutableStateOf<QueueMessage?>(null) }
     if (messages.isNotEmpty() || held) {
         TextButton(onClick = { showing = true }, modifier = Modifier.testTag("queue.open")) {
             Text("キュー ${messages.size}")
@@ -82,15 +80,17 @@ internal fun ConversationQueuePanel(
                     )
                 Column(Modifier.heightIn(min = 240.dp, max = 600.dp).verticalScroll(rememberScrollState())) {
                     if (messages.isEmpty()) Text("待機中のメッセージはありません", Modifier.padding(top = 24.dp))
-                    messages.forEach { message -> QueueRow(message, enabled, perform, action) { editing = message } }
+                    messages.forEach { message ->
+                        QueueRow(message, enabled, perform, action) {
+                            if (message.editing) perform(Intent.CancelQueueEdit) {}
+                            else {
+                                perform(Intent.BeginQueueEdit(message.id)) {}
+                                showing = false
+                            }
+                        }
+                    }
                 }
             }
-        }
-    }
-    editing?.let { message ->
-        QueueEditor(message.id, message.text, enabled, { editing = null }) { text ->
-            action(QueueAction.Edit(message.id, text))
-            editing = null
         }
     }
 }
@@ -104,7 +104,14 @@ private fun QueueRow(
     edit: () -> Unit,
 ) {
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 56.dp).testTag("queue.item.${message.id}"),
+        Modifier.fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .testTag("queue.item.${message.id}")
+            .then(
+                if (message.editing)
+                    Modifier.background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
+                else Modifier
+            ),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -165,7 +172,7 @@ private fun QueueMenu(message: QueueMessage, enabled: Boolean, action: (QueueAct
             }
             if (message.editable)
                 DropdownMenuItem(
-                    text = { Text("編集") },
+                    text = { Text(if (message.editing) "キャンセル" else "編集") },
                     onClick = {
                         showing = false
                         edit()
@@ -181,16 +188,4 @@ private fun QueueMenu(message: QueueMessage, enabled: Boolean, action: (QueueAct
                 )
         }
     }
-}
-
-@Composable
-private fun QueueEditor(id: String, original: String, enabled: Boolean, dismiss: () -> Unit, save: (String) -> Unit) {
-    var text by remember(id) { mutableStateOf(original) }
-    AlertDialog(
-        onDismissRequest = dismiss,
-        title = { Text("キューを編集") },
-        text = { OutlinedTextField(text, { text = it }, label = { Text("メッセージ") }, minLines = 3) },
-        confirmButton = { TextButton(onClick = { save(text) }, enabled = enabled && text.isNotBlank()) { Text("保存") } },
-        dismissButton = { TextButton(onClick = dismiss) { Text("キャンセル") } },
-    )
 }

@@ -47,13 +47,17 @@ pub struct QueueMessage {
     pub images: Vec<String>,
     pub delivery: agent_protocol::session::SubmissionDelivery,
     pub editable: bool,
+    pub editing: bool,
     pub removable: bool,
     pub status: String,
     pub move_up: Option<agent_protocol::queue::QueueAction>,
     pub move_down: Option<agent_protocol::queue::QueueAction>,
 }
 
-pub fn queue_messages(entries: &[agent_protocol::queue::QueueEntry]) -> Vec<QueueMessage> {
+pub fn queue_messages(
+    entries: &[agent_protocol::queue::QueueEntry],
+    editing_id: Option<&str>,
+) -> Vec<QueueMessage> {
     use agent_protocol::operations::Input;
     use agent_protocol::{queue::QueueAction, session::SubmissionDelivery};
     let waiting: Vec<_> = entries
@@ -89,6 +93,8 @@ pub fn queue_messages(entries: &[agent_protocol::queue::QueueEntry]) -> Vec<Queu
                     .collect(),
                 delivery: entry.delivery.clone(),
                 editable: entry.delivery == SubmissionDelivery::Queued,
+                editing: entry.delivery == SubmissionDelivery::Queued
+                    && editing_id == Some(id.as_str()),
                 removable: !matches!(
                     entry.delivery,
                     SubmissionDelivery::Sending | SubmissionDelivery::Accepted { .. }
@@ -866,7 +872,7 @@ mod tests {
             delivery,
         })
         .collect();
-        let messages = super::queue_messages(&entries);
+        let messages = super::queue_messages(&entries, None);
         assert_eq!(
             messages[0].move_down,
             Some(QueueAction::Move {

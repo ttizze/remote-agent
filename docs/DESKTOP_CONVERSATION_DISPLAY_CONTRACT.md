@@ -666,6 +666,8 @@ Acceptance: core `composer::tests`,
 
 Live provider events may publish a deferred body before the full tool output is available. Reading that body imports it once into the Host database, after native IO completes outside the event pump. The import compares the stored item with the requested version; a newer streamed item cannot be replaced by an older full body. Reading or hydrating details does not change conversation activity time.
 
+Editing a queued message uses the normal composer and highlights the original queued row until saving. The ordinary draft remains separate and returns after save or cancel. Text, images, files, invocation context and model settings are replaced together when the Host still owns an unclaimed queued input. A remote start or removal ends editing; changed content is recovered only into an empty ordinary composer. Late save replies cannot close a newly opened editor, and editing never replaces the original submission receipt identity.
+
 Queued input belongs to the Host, remains separate from executed turns, and is durable before its receipt is returned. Pause/resume, edit, reorder and removal operate on that queue. Restart preserves order and edits and holds undelivered input. A claimed write becomes Unknown after a restart; removing its visible queue row does not change that outcome or make resending the same input safe.
 
 A successful stop holds waiting inputs before another queue entry can be claimed.

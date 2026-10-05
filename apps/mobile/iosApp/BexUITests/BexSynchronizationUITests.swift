@@ -13,15 +13,17 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.buttons["queue.open"].waitForExistence(timeout: 10))
         let cleared = expectation(for: NSPredicate(format: "value == placeholderValue"), evaluatedWith: composer)
         wait(for: [cleared], timeout: 10)
+        composer.tap(); composer.typeText("Keep this separate draft")
         app.buttons["queue.open"].tap()
         XCTAssertTrue(app.staticTexts["Queued from iPhone"].waitForExistence(timeout: 10))
         app.buttons["queue.toggle"].tap()
         XCTAssertTrue(app.staticTexts["キューは停止中です"].waitForExistence(timeout: 10))
         editFirstQueuedMessage(app, suffix: " edited")
+        XCTAssertEqual(composer.value as? String, "Keep this separate draft")
+        app.buttons["queue.open"].tap()
         XCTAssertTrue(app.staticTexts["Queued from iPhone edited"].waitForExistence(timeout: 10))
         captureScreen(app, named: "Held queue edited on iPhone")
         app.buttons["queue.close"].tap()
-        composer.tap(); composer.typeText("Keep this separate draft")
         app.terminate(); app.launch()
         XCTAssertTrue(composer.waitForExistence(timeout: 15))
         XCTAssertEqual(composer.value as? String, "Keep this separate draft")
@@ -39,12 +41,18 @@ extension BexLaunchUITests {
     private func editFirstQueuedMessage(_ app: XCUIApplication, suffix: String) {
         prefixedButton(app, prefix: "queue.actions.").tap()
         app.buttons["編集"].tap()
-        let field = app.alerts.textFields["メッセージ"]
+        let field = app.textFields["task.message"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["queue.edit.cancel"].exists)
         let original = field.value as? String ?? ""
         field.tap(); field.typeKey("a", modifierFlags: .command)
         field.typeText(original + suffix)
-        app.alerts.buttons["保存"].tap()
+        app.buttons["task.send"].tap()
+        let finished = expectation(
+            for: NSPredicate(format: "exists == false"),
+            evaluatedWith: app.buttons["queue.edit.cancel"]
+        )
+        wait(for: [finished], timeout: 10)
     }
 
     private func createBackgroundTaskRowIdentifier() throws -> String {

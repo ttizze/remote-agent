@@ -21,8 +21,7 @@ pub enum QueueAction {
         before: Option<ClientInputId>,
     },
     Edit {
-        id: ClientInputId,
-        text: String,
+        submission: crate::operations::Submission,
     },
 }
 

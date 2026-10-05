@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import dev.remoteagent.core.ComposerControls
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Outcome
 import dev.remoteagent.core.Snapshot
@@ -38,11 +39,12 @@ internal fun ThreadComposer(
     attach: @Composable () -> Unit,
 ) {
     val navigation = snapshot.navigation()
-    val draft = snapshot.draft(navigation.draftKey)
+    val draftKey = snapshot.composerDraftKey()
+    val draft = snapshot.draft(draftKey)
     var sending by remember { mutableStateOf(false) }
     val session = navigation.threadId
     val thread = session?.let(snapshot::conversation)
-    val available = snapshot.connected() && !sending && (draft.text.isNotBlank() || draft.attachments.isNotEmpty())
+    val controls = snapshot.composerControls(sending)
     val send: (Boolean) -> Unit = { queue ->
         sending = true
         onSend()
@@ -54,7 +56,7 @@ internal fun ThreadComposer(
     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (session != null && thread != null) {
             ConversationQueuePanel(
-                thread.queueMessages(),
+                snapshot.queueMessages(),
                 thread.queueHeld(),
                 snapshot.connected() && !sending,
                 perform,
@@ -66,7 +68,7 @@ internal fun ThreadComposer(
         val cursor = draft.text.toByteArray(Charsets.UTF_8).size.toUInt()
         ComposerInvocationPicker(snapshot.composerSuggestions(draft.text, cursor)) { invocation ->
             insertInvocation(draft.text, cursor, invocation.kind, invocation.name)?.let {
-                perform(Intent.InsertInvocation(navigation.draftKey, it.text, invocation)) {}
+                perform(Intent.InsertInvocation(draftKey, it.text, invocation)) {}
             }
         }
         androidx.compose.material3.Surface(
@@ -76,17 +78,15 @@ internal fun ThreadComposer(
                 androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.8f)),
         ) {
             Column(Modifier.padding(12.dp)) {
-                DraftAttachments(draft.attachments, navigation.draftKey, perform)
+                DraftAttachments(draft.attachments, draftKey, perform)
                 ComposerInput(draft.text) {
-                    perform(
-                        Intent.EditComposer(navigation.draftKey, it, it.toByteArray(Charsets.UTF_8).size.toUInt())
-                    ) {}
+                    perform(Intent.EditComposer(draftKey, it, it.toByteArray(Charsets.UTF_8).size.toUInt())) {}
                 }
                 ComposerActions(
-                    available && thread?.inputUnavailableReason() == null,
-                    available,
+                    controls,
                     { send(false) },
-                    navigation.threadId?.let { { send(true) } },
+                    navigation.threadId?.takeIf { !controls.editing }?.let { { send(true) } },
+                    if (controls.editing) ({ perform(Intent.CancelQueueEdit) {} }) else null,
                     attach,
                 )
             }
@@ -114,22 +114,23 @@ private fun ComposerInput(text: String, change: (String) -> Unit) {
 
 @Composable
 private fun ComposerActions(
-    enabled: Boolean,
-    queueEnabled: Boolean,
+    controls: ComposerControls,
     send: () -> Unit,
     queue: (() -> Unit)?,
+    cancelEdit: (() -> Unit)?,
     attach: @Composable () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         attach()
         androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
-        queue?.let { TextButton(onClick = it, enabled = queueEnabled) { Text("キューに追加") } }
+        cancelEdit?.let { TextButton(onClick = it) { Text("キャンセル") } }
+        queue?.let { TextButton(onClick = it, enabled = controls.queueEnabled) { Text("キューに追加") } }
         FilledIconButton(
             onClick = send,
-            enabled = enabled,
-            modifier = Modifier.semantics { contentDescription = "送信" },
+            enabled = controls.sendEnabled,
+            modifier = Modifier.semantics { contentDescription = if (controls.editing) "変更を保存" else "送信" },
         ) {
-            Text("↑")
+            Text(if (controls.editing) "✓" else "↑")
         }
     }
 }

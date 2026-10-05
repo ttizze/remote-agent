@@ -722,6 +722,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         models,
         model_errors,
         drafts,
+        queue_edits,
         pending_submissions,
         file_drafts,
         workspace,
@@ -756,6 +757,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         && Arc::ptr_eq(&current.models, models)
         && Arc::ptr_eq(&current.model_errors, model_errors)
         && Arc::ptr_eq(&current.drafts, drafts)
+        && Arc::ptr_eq(&current.queue_edits, queue_edits)
         && Arc::ptr_eq(&current.pending_submissions, pending_submissions)
         && Arc::ptr_eq(&current.file_drafts, file_drafts)
         && Arc::ptr_eq(&current.workspace, workspace)
@@ -1494,6 +1496,9 @@ mod tests {
             }),
             ("models", |snapshot| snapshot.models = Arc::default()),
             ("drafts", |snapshot| snapshot.drafts = Arc::default()),
+            ("queue_edits", |snapshot| {
+                snapshot.queue_edits = Arc::default()
+            }),
             ("pending_submissions", |snapshot| {
                 snapshot.pending_submissions = Arc::default()
             }),
