@@ -72,7 +72,7 @@ pub struct CapturedWindow {
     pub accessibility: Option<Accessibility>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "format", rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Accessibility {
     FlatText {
         text: String,

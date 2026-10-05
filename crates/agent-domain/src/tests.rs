@@ -2690,3 +2690,165 @@ proptest! {
         }
     }
 }
+fn round_trip<T>(value: &T)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let json = serde_json::to_string(value).unwrap();
+    assert_eq!(&serde_json::from_str::<T>(&json).unwrap(), value);
+    let bytes = postcard::to_allocvec(value).unwrap();
+    assert_eq!(&postcard::from_bytes::<T>(&bytes).unwrap(), value);
+}
+fn captured_image() -> Attachment {
+    Attachment {
+        kind: AttachmentKind::Image,
+        source: Some(CapturedWindow {
+            app_name: "Editor".into(),
+            window_title: "main.rs".into(),
+            accessible_text: Some("fn main".into()),
+            accessibility: Some(Accessibility::ElementTree {
+                coordinate_space: "window".into(),
+                image_size: ImageSize {
+                    width: 800,
+                    height: 600,
+                },
+                truncated: false,
+                root: Box::new(AccessibilityNode {
+                    role: "window".into(),
+                    name: Some("main.rs".into()),
+                    value: None,
+                    description: None,
+                    bounds: Some(Bounds {
+                        x: -4,
+                        y: 0,
+                        width: 800,
+                        height: 600,
+                    }),
+                    state: Some(Json(
+                        serde_json::json!({"focused":true,"items":[1,2.5,null]}),
+                    )),
+                    actions: vec!["press".into()],
+                    children: vec![],
+                }),
+            }),
+        }),
+        id: "capture".into(),
+        name: "capture.png".into(),
+        mime_type: "image/png".into(),
+        path: "/tmp/capture.png".into(),
+        size: 10,
+    }
+}
+#[test]
+fn wire_encodings_round_trip_state_facts_commands_and_effects() {
+    round_trip(&Accessibility::FlatText {
+        text: "text".into(),
+        truncated: true,
+    });
+    let mut s = state();
+    let mut steps = vec![];
+    let send = Command::Send(SendMessage {
+        created_by: MessageAuthor::User,
+        creation_source: "client".into(),
+        id: MessageId::new("captured").unwrap(),
+        text: "Look at this window".into(),
+        attachments: vec![captured_image()],
+        selection: None,
+        mode: DispatchMode::StartImmediately,
+        intent: Some(DeliveryIntent::Auto),
+        source_plan: None,
+    });
+    round_trip(&send);
+    steps.push(command(&mut s, "captured", send));
+    let attempt = s.runs[0].attempt.clone().unwrap();
+    for (key, event) in [
+        (
+            "ready",
+            ProviderEvent::SessionReady {
+                native_thread: "native".into(),
+            },
+        ),
+        (
+            "turn",
+            ProviderEvent::TurnStarted {
+                native_turn: Some("turn".into()),
+            },
+        ),
+        (
+            "tool",
+            ProviderEvent::ItemFinished {
+                key: "tool".into(),
+                kind: ProviderItem::Tool {
+                    presentation: ToolPresentation {
+                        title: Some("Read".into()),
+                        source: Some(Json(serde_json::json!({"key":"mcp:x"}))),
+                    },
+                    name: "read".into(),
+                    input: Json(serde_json::json!({"path":"a"})),
+                    output: Some(Json(serde_json::json!([{"text":"b"}]))),
+                },
+                text: Some("b".into()),
+                status: ItemStatus::Completed,
+            },
+        ),
+        (
+            "approval",
+            ProviderEvent::RequestOpened {
+                owner_path: vec![],
+                key: "1".into(),
+                body: RequestBody::Approval {
+                    kind: "command".into(),
+                    title: "ls".into(),
+                    detail: None,
+                    options: vec![ApprovalOption {
+                        label: "Approve".into(),
+                        decision: ApprovalDecision::Accept,
+                    }],
+                    input: Json(serde_json::json!({"command":"ls"})),
+                },
+                capability: ResponseCapability::Live,
+            },
+        ),
+        (
+            "plan",
+            ProviderEvent::Plan {
+                kind: PlanKind::Todo,
+                key: "todo".into(),
+                markdown: String::new(),
+                steps: vec![PlanStep {
+                    text: "step".into(),
+                    status: "pending".into(),
+                }],
+            },
+        ),
+        (
+            "child",
+            ProviderEvent::SubagentStarted {
+                background: true,
+                native_thread: None,
+                key: "agent".into(),
+                parent: None,
+                prompt: "child".into(),
+                model: None,
+            },
+        ),
+    ] {
+        round_trip(&event);
+        steps.push(provider(&mut s, key, &attempt, event));
+    }
+    finish(&mut s, &attempt);
+    for step in &steps {
+        round_trip(step);
+        for fact in &step.facts {
+            round_trip(fact);
+        }
+        for effect in &step.effects {
+            round_trip(effect);
+            if let EffectBody::SendToThread { command, .. } = &effect.body {
+                round_trip(command.as_ref());
+            }
+        }
+    }
+    round_trip(&s);
+    assert!(!s.items.is_empty() && !s.requests.is_empty() && !s.tasks.is_empty());
+}

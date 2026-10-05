@@ -1378,6 +1378,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
     }
     Ok(())
 }
+/// Version of the folded `State` and `Fact` encodings. Stored snapshots with
+/// another value are rebuilt from facts.
+pub const STATE_FORMAT: u32 = 1;
 pub fn fold(initial: &State, facts: &[Fact]) -> Result<State, FoldError> {
     let mut state = initial.clone();
     for fact in facts {
