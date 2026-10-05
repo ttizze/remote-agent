@@ -107,6 +107,15 @@ fn running(s: &mut State, key: &str) -> (RunId, RunAttemptId) {
     );
     (run, attempt)
 }
+/// A run whose provider has not accepted the turn yet, so completions queue.
+fn starting(s: &mut State, key: &str) -> (RunId, RunAttemptId) {
+    let Reply::Run(run) = command(s, key, send_message(key, DispatchMode::StartImmediately)).reply
+    else {
+        panic!()
+    };
+    let attempt = s.active_run().unwrap().attempt.clone().unwrap();
+    (run, attempt)
+}
 fn finish(s: &mut State, attempt: &RunAttemptId) {
     provider(
         s,
@@ -1119,6 +1128,7 @@ fn recovered_native_children_reject_old_output_and_remain_provider_owned() {
             owner: owner.clone(),
             parent: ThreadId::new("parent").unwrap(),
             task: NodeId::new("task").unwrap(),
+            generation: 0,
         },
     );
     provider(
@@ -1543,7 +1553,7 @@ fn approvals_resolve_once_and_questions_keep_attachment_answers() {
 #[test]
 fn cancelled_delegated_wake_stays_disposed_after_reconciliation() {
     let mut s = state();
-    let (_, a) = running(&mut s, "first");
+    let (_, a) = starting(&mut s, "first");
     let task = NodeId::new("task").unwrap();
     command(
         &mut s,
@@ -1565,6 +1575,7 @@ fn cancelled_delegated_wake_stays_disposed_after_reconciliation() {
         &mut s,
         "task-result",
         Command::TaskResult {
+            generation: None,
             source_message,
             context: None,
             task: task.clone(),
@@ -1841,7 +1852,7 @@ fn automatic_delivery_obeys_negotiated_turn_capabilities() {
 #[test]
 fn automatic_completion_delivery_precedes_visible_queued_messages() {
     let mut s = state();
-    running(&mut s, "parent");
+    starting(&mut s, "parent");
     command(
         &mut s,
         "visible-first",
@@ -1873,6 +1884,7 @@ fn automatic_completion_delivery_precedes_visible_queued_messages() {
         &mut s,
         "result",
         Command::TaskResult {
+            generation: None,
             source_message,
             context: None,
             task: task.clone(),
@@ -2630,7 +2642,7 @@ fn late_native_usage_moves_the_baseline_without_billing_the_live_turn() {
 #[test]
 fn delegated_notifications_report_the_original_count_labels_and_child_links() {
     let mut s = state();
-    let (run, a) = running(&mut s, "parent");
+    let (run, a) = starting(&mut s, "parent");
     let ids = ["a", "b", "c"].map(|id| NodeId::new(id).unwrap());
     for (index, prompt) in ["Review src/math.ts", "Write tests", "Update docs"]
         .into_iter()
@@ -2658,6 +2670,7 @@ fn delegated_notifications_report_the_original_count_labels_and_child_links() {
             &mut s,
             &format!("finish-{task}"),
             Command::TaskResult {
+                generation: None,
                 source_message,
                 context: None,
                 task: task.clone(),
@@ -2710,10 +2723,12 @@ fn delegated_notifications_report_the_original_count_labels_and_child_links() {
     );
 }
 
+// T3 Orchestrator.ts:8722 and :7333: a queued sibling joins the parent run's wake, and
+// cancelling that wake disposes the whole cohort.
 #[test]
-fn cancelling_one_delegated_delivery_disposes_only_its_cohort_and_parent_stop_disposes_the_rest() {
+fn queued_siblings_share_one_wake_and_cancelling_it_disposes_the_cohort() {
     let mut s = state();
-    let (_, a) = running(&mut s, "parent");
+    let (_, a) = starting(&mut s, "parent");
     let mut deliveries = vec![];
     for id in ["a", "b"] {
         let task = NodeId::new(id).unwrap();
@@ -2737,6 +2752,7 @@ fn cancelling_one_delegated_delivery_disposes_only_its_cohort_and_parent_stop_di
             &mut s,
             &format!("finish-{id}"),
             Command::TaskResult {
+                generation: None,
                 source_message,
                 context: None,
                 task: task.clone(),
@@ -2744,39 +2760,44 @@ fn cancelling_one_delegated_delivery_disposes_only_its_cohort_and_parent_stop_di
                 result: "Done".into(),
             },
         );
-        let Reply::Run(delivery) = command(
-            &mut s,
-            &format!("wake-{id}"),
-            Command::AcceptTaskWake {
-                task_ids: vec![task],
-            },
-        )
-        .reply
-        else {
-            panic!()
-        };
-        deliveries.push(delivery);
+        deliveries.push(
+            command(
+                &mut s,
+                &format!("wake-{id}"),
+                Command::AcceptTaskWake {
+                    task_ids: vec![task],
+                },
+            )
+            .reply,
+        );
     }
-    command(
-        &mut s,
-        "cancel-one",
-        Command::CancelQueued {
-            run: deliveries[0].clone(),
-        },
-    );
-    assert_eq!(s.tasks[0].delivery, DeliveryState::Disposed);
-    assert_eq!(s.tasks[1].delivery, DeliveryState::Claimed);
-    command(&mut s, "stop", Command::Stop);
-    assert_eq!(s.tasks[1].delivery, DeliveryState::Disposed);
-    assert_eq!(s.tasks[1].status, ItemStatus::Completed);
+    let Reply::Run(wake) = deliveries[0].clone() else {
+        panic!("{deliveries:?}")
+    };
+    assert_eq!(deliveries[1], Reply::Accepted);
+    assert_eq!(s.runs.len(), 2);
+    let message = s.message(&s.runs[1].message).unwrap();
     assert_eq!(
-        s.runs
-            .iter()
-            .find(|run| run.id == deliveries[1])
-            .unwrap()
-            .status,
-        RunStatus::Cancelled
+        message.text,
+        "Delegated tasks a, b reached terminal states. Use task_status with each taskId to read the results."
     );
+    assert!(
+        s.tasks
+            .iter()
+            .all(|task| task.delivery == DeliveryState::Claimed)
+    );
+    command(&mut s, "cancel", Command::CancelQueued { run: wake });
+    assert!(
+        s.tasks
+            .iter()
+            .all(|task| task.delivery == DeliveryState::Disposed)
+    );
+    assert!(
+        s.tasks
+            .iter()
+            .all(|task| task.status == ItemStatus::Completed)
+    );
+    command(&mut s, "stop", Command::Stop);
     finish(&mut s, &a);
     let step = ThreadMachine::step(
         &s,
@@ -3803,6 +3824,7 @@ fn complete_task(s: &mut State, key: &str, task: &NodeId) -> Step {
         s,
         key,
         Command::TaskResult {
+            generation: None,
             source_message,
             context: None,
             task: task.clone(),
@@ -3853,7 +3875,7 @@ fn archive_cancels_queued_work_and_detaches_without_unarchive_resuming() {
 #[test]
 fn settle_rejects_blocked_work_and_cancels_automatic_deliveries() {
     let mut s = state();
-    let (_, a) = running(&mut s, "first");
+    let (_, a) = starting(&mut s, "first");
     let settle = |s: &mut State, key: &str| {
         command(
             s,
@@ -4206,4 +4228,510 @@ fn message_capable_questions_stay_answerable_after_their_turn_ends() {
         assert!(matches!(answer.reply, Reply::Run(_)));
         assert_eq!(s.messages.last().unwrap().text, "Which?\nBlue");
     }
+}
+fn delegate_with(s: &mut State, key: &str, wake: CompletionWake) -> NodeId {
+    let task = NodeId::new(key).unwrap();
+    command(
+        s,
+        key,
+        Command::Delegate {
+            task: task.clone(),
+            child: ThreadId::new(format!("child-{key}")).unwrap(),
+            prompt: format!("prompt {key}"),
+            selection: selection(),
+            wake,
+        },
+    );
+    task
+}
+// T3 Orchestrator.ts:4570: an always-wake completion steers into a running parent turn.
+#[test]
+fn always_completions_steer_into_the_running_parent_and_are_delivered_with_it() {
+    let mut s = state();
+    let (run, a) = running(&mut s, "parent");
+    let task = delegate_with(&mut s, "task", CompletionWake::Always);
+    let done = complete_task(&mut s, "done", &task);
+    let Some(EffectBody::SendToThread { command: wake, .. }) =
+        done.effects.iter().map(|e| &e.body).find(|body| {
+            matches!(body, EffectBody::SendToThread { command, .. } if matches!(command.as_ref(), Command::AcceptTaskWake { .. }))
+        })
+    else {
+        panic!("{:?}", done.effects)
+    };
+    let steered = command(&mut s, "wake", *wake.clone());
+    assert_eq!(steered.reply, Reply::Run(run.clone()));
+    assert!(steered.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::Provider(ProviderCommand::Steer { text, .. }) if text.starts_with("Delegated task task reached")
+    )));
+    assert_eq!(s.runs.len(), 1);
+    assert_eq!(s.tasks[0].delivery, DeliveryState::Claimed);
+    let message = s.messages.last().unwrap();
+    assert_eq!(message.intent, InputIntent::Steer);
+    assert!(message.notification.is_some());
+    finish(&mut s, &a);
+    assert_eq!(s.tasks[0].delivery, DeliveryState::Delivered);
+    assert_eq!(s.runs.len(), 1);
+}
+// T3 DelegatedCompletionDelivery.test.ts:1211: settled-only waits only for its spawning run.
+#[test]
+fn settled_only_completion_waits_only_for_its_spawning_run() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "spawning");
+    let task = delegate_with(&mut s, "task", CompletionWake::SettledOnly);
+    let early = complete_task(&mut s, "early", &task);
+    assert!(!early.effects.iter().any(|e| matches!(&e.body, EffectBody::SendToThread { command, .. } if matches!(command.as_ref(), Command::AcceptTaskWake { .. }))));
+    let mut other = state();
+    std::mem::swap(&mut other, &mut s);
+    let mut s = other;
+    command(
+        &mut s,
+        "queued",
+        send_message("continuation", DispatchMode::QueueAfterActive),
+    );
+    let ended = provider(
+        &mut s,
+        "spawning-done",
+        &a,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Completed,
+            native_head: None,
+        },
+    );
+    assert_eq!(s.runs[1].status, RunStatus::Starting);
+    let wake = ended
+        .effects
+        .iter()
+        .find_map(|e| match &e.body {
+            EffectBody::SendToThread { command, .. }
+                if matches!(command.as_ref(), Command::AcceptTaskWake { .. }) =>
+            {
+                Some(command.as_ref().clone())
+            }
+            _ => None,
+        })
+        .expect("the spawning run ended");
+    command(&mut s, "wake", wake);
+    assert_eq!(s.tasks[0].delivery, DeliveryState::Claimed);
+    assert_eq!(s.runs.last().unwrap().status, RunStatus::Queued);
+}
+// T3 SubagentProjection.test.ts: the failure wins over progress messages.
+#[test]
+fn delegated_results_use_the_failure_or_latest_answer() {
+    let mut s = state();
+    let (run, a) = running(&mut s, "child task");
+    for (key, text) in [("one", "Investigating…"), ("two", "Final answer")] {
+        provider(
+            &mut s,
+            key,
+            &a,
+            ProviderEvent::ItemFinished {
+                key: key.into(),
+                kind: ProviderItem::Text,
+                text: Some(text.into()),
+                status: ItemStatus::Completed,
+            },
+        );
+    }
+    let record = s.runs[0].clone();
+    let mut completed = record.clone();
+    completed.status = RunStatus::Completed;
+    assert_eq!(
+        delegated_result(&completed, &s.items, &s.messages),
+        "Final answer"
+    );
+    fail_with(&mut s, &a, "auth", "provider_error");
+    let failed = s.runs.iter().find(|r| r.id == run).unwrap();
+    assert_eq!(
+        delegated_result(failed, &s.items, &s.messages),
+        "provider_error"
+    );
+    let mut empty = state();
+    let (_, b) = running(&mut empty, "quiet");
+    finish(&mut empty, &b);
+    assert_eq!(
+        delegated_result(&empty.runs[0], &empty.items, &empty.messages),
+        "Child task completed without an assistant result."
+    );
+    let mut stopped = empty.runs[0].clone();
+    stopped.status = RunStatus::Interrupted;
+    assert_eq!(
+        delegated_result(&stopped, &[], &[]),
+        "Child task ended with status interrupted."
+    );
+}
+// T3 ClaudeAdapterV2.ts:4166 and :4315: a resumed native task reopens its card, and a
+// result of the previous generation cannot complete it.
+#[test]
+fn a_resumed_native_task_reopens_its_card_and_rejects_stale_results() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let start = ProviderEvent::SubagentStarted {
+        background: false,
+        native_thread: None,
+        key: "child".into(),
+        parent: None,
+        prompt: "Hello".into(),
+        model: None,
+    };
+    provider(&mut s, "spawn", &a, start.clone());
+    provider(
+        &mut s,
+        "done",
+        &a,
+        ProviderEvent::SubagentFinished {
+            key: "child".into(),
+            status: ItemStatus::Completed,
+            result: "first".into(),
+        },
+    );
+    finish(&mut s, &a);
+    let (second, b) = running(&mut s, "second");
+    let reopened = provider(&mut s, "reopen", &b, start);
+    let card = s
+        .items
+        .iter()
+        .find(|item| matches!(item.kind, ItemKind::Subagent { .. }))
+        .unwrap();
+    assert_eq!(card.status, ItemStatus::Running);
+    assert_eq!(card.run.as_ref(), Some(&second));
+    assert_eq!(card.completed_at, None);
+    assert!(reopened.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::SendToThread { command, .. }
+            if matches!(command.as_ref(), Command::BindNativeChild { generation: 1, .. })
+    )));
+    let task = s.tasks[0].id.clone();
+    let stale = command(
+        &mut s,
+        "stale",
+        Command::TaskResult {
+            generation: Some(0),
+            source_message: None,
+            context: None,
+            task: task.clone(),
+            status: ItemStatus::Completed,
+            result: "old".into(),
+        },
+    );
+    assert_eq!(stale.reply, Reply::Ignored);
+    assert_eq!(s.tasks[0].status, ItemStatus::Running);
+    command(
+        &mut s,
+        "current",
+        Command::TaskResult {
+            generation: Some(1),
+            source_message: None,
+            context: None,
+            task,
+            status: ItemStatus::Completed,
+            result: "second".into(),
+        },
+    );
+    assert_eq!(s.tasks[0].status, ItemStatus::Completed);
+    assert_eq!(s.tasks[0].result.as_deref(), Some("second"));
+}
+// T3 Orchestrator.ts:7402, :7228 and :7077.
+#[test]
+fn queued_edits_are_validated_and_automatic_deliveries_are_fixed() {
+    let mut s = state();
+    let (_, a) = starting(&mut s, "parent");
+    command(
+        &mut s,
+        "user",
+        send_message("user", DispatchMode::QueueAfterActive),
+    );
+    let user = s.runs[1].id.clone();
+    let edit = |s: &mut State, key: &str, run: &RunId, text: &str| {
+        command(
+            s,
+            key,
+            Command::EditQueued {
+                run: run.clone(),
+                text: text.into(),
+                attachments: None,
+            },
+        )
+        .reply
+    };
+    assert_eq!(
+        edit(&mut s, "blank", &user, "   "),
+        Reply::Rejected {
+            reason: "empty-message".into()
+        }
+    );
+    let task = delegate_with(&mut s, "task", CompletionWake::Always);
+    complete_task(&mut s, "done", &task);
+    command(
+        &mut s,
+        "wake",
+        Command::AcceptTaskWake {
+            task_ids: vec![task],
+        },
+    );
+    let wake = s.runs.last().unwrap().id.clone();
+    assert_eq!(
+        edit(&mut s, "edit-wake", &wake, "changed"),
+        Reply::Rejected {
+            reason: "automatic-delivery-not-editable".into()
+        }
+    );
+    for (key, run, before, reason) in [
+        (
+            "move-wake",
+            &wake,
+            None,
+            "automatic-delivery-not-reorderable",
+        ),
+        (
+            "ahead",
+            &user,
+            Some(wake.clone()),
+            "cannot-reorder-ahead-of-automatic-delivery",
+        ),
+    ] {
+        assert_eq!(
+            command(
+                &mut s,
+                key,
+                Command::ReorderQueued {
+                    run: run.clone(),
+                    before,
+                },
+            )
+            .reply,
+            Reply::Rejected {
+                reason: reason.into()
+            }
+        );
+    }
+    provider(
+        &mut s,
+        "accepted",
+        &a,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    let active = s.runs[0].id.clone();
+    assert_eq!(
+        command(
+            &mut s,
+            "promote",
+            Command::PromoteToSteer {
+                queued: wake,
+                active,
+            },
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "automatic-delivery-not-promotable".into()
+        }
+    );
+}
+// T3 Orchestrator.ts:6866 and :7022: cancel needs no answers and closes the card as cancelled.
+#[test]
+fn declined_requests_and_dismissed_questions_close_their_cards_as_cancelled() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let question = |capability, key: &str| ProviderEvent::RequestOpened {
+        owner_path: vec![],
+        key: key.into(),
+        body: RequestBody::Questions {
+            questions: vec![Question {
+                required: true,
+                id: "q".into(),
+                header: "Question".into(),
+                question: "Which?".into(),
+                multiple: false,
+                options: vec![],
+            }],
+        },
+        capability,
+    };
+    provider(
+        &mut s,
+        "live",
+        &a,
+        question(ResponseCapability::Live, "live"),
+    );
+    provider(
+        &mut s,
+        "message",
+        &a,
+        question(ResponseCapability::Message, "message"),
+    );
+    provider(
+        &mut s,
+        "approval",
+        &a,
+        ProviderEvent::RequestOpened {
+            owner_path: vec![],
+            key: "approval".into(),
+            body: RequestBody::Approval {
+                kind: "command".into(),
+                title: "rm".into(),
+                detail: None,
+                options: vec![],
+                input: Json(serde_json::json!({})),
+            },
+            capability: ResponseCapability::Live,
+        },
+    );
+    let ids = s.requests.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+    let cancel = command(
+        &mut s,
+        "cancel-live",
+        Command::Respond {
+            request: ids[0].clone(),
+            decision: Some(ApprovalDecision::Cancel),
+            answers: None,
+            attachments: BTreeMap::new(),
+        },
+    );
+    assert!(cancel.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::Provider(ProviderCommand::Respond {
+            decision: Some(ApprovalDecision::Cancel),
+            answers: None,
+            ..
+        })
+    )));
+    command(
+        &mut s,
+        "decline",
+        Command::Respond {
+            request: ids[2].clone(),
+            decision: Some(ApprovalDecision::Decline),
+            answers: None,
+            attachments: BTreeMap::new(),
+        },
+    );
+    assert_eq!(
+        command(
+            &mut s,
+            "dismiss-live",
+            Command::DismissQuestion {
+                request: ids[0].clone()
+            },
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "question-already-answered".into()
+        }
+    );
+    command(
+        &mut s,
+        "dismiss",
+        Command::DismissQuestion {
+            request: ids[1].clone(),
+        },
+    );
+    assert!(
+        s.requests
+            .iter()
+            .all(|r| r.status == RequestStatus::Resolved)
+    );
+    assert_eq!(s.requests[1].decision, Some(ApprovalDecision::Cancel));
+    let cards = s
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                ItemKind::UserInputRequest { .. } | ItemKind::ApprovalRequest { .. }
+            )
+        })
+        .map(|item| item.status)
+        .collect::<Vec<_>>();
+    assert_eq!(cards, [ItemStatus::Cancelled; 3]);
+    assert_eq!(s.messages.len(), 1);
+}
+// T3 orchestrationV2.ts:2878 and SubagentProjection.ts:28: a delegation needs a task.
+#[test]
+fn delegation_requires_a_task_and_titles_the_child_from_it() {
+    let mut s = state();
+    running(&mut s, "parent");
+    let delegate = |s: &mut State, key: &str, prompt: &str| {
+        command(
+            s,
+            key,
+            Command::Delegate {
+                task: NodeId::new(key).unwrap(),
+                child: ThreadId::new(format!("child-{key}")).unwrap(),
+                prompt: prompt.into(),
+                selection: selection(),
+                wake: CompletionWake::SettledOnly,
+            },
+        )
+    };
+    assert_eq!(
+        delegate(&mut s, "blank", "  \n ").reply,
+        Reply::Rejected {
+            reason: "task-required".into()
+        }
+    );
+    assert!(s.tasks.is_empty());
+    let long = "x".repeat(80);
+    let step = delegate(&mut s, "long", &format!("  {long}  "));
+    let Some(Command::AcceptDelegation { title, message, .. }) =
+        step.effects.iter().find_map(|e| match &e.body {
+            EffectBody::SendToThread { command, .. } => Some(command.as_ref()),
+            _ => None,
+        })
+    else {
+        panic!()
+    };
+    assert_eq!(title, &format!("{}...", "x".repeat(69)));
+    assert_eq!(message.text, long);
+}
+// The streaming shortcut applies the same ownership checks as ordinary output.
+#[test]
+fn stale_streaming_output_cannot_reach_a_newer_attempt() {
+    let mut s = state();
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider {
+            selection: claude_selection(),
+        },
+    );
+    let (_, a) = running(&mut s, "first");
+    command(&mut s, "stop", Command::Stop);
+    provider(
+        &mut s,
+        "stopped",
+        &a,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Interrupted,
+            native_head: None,
+        },
+    );
+    let (_, b) = running(&mut s, "second");
+    provider(
+        &mut s,
+        "open",
+        &b,
+        ProviderEvent::ItemStarted {
+            key: "block".into(),
+            kind: ProviderItem::Text,
+        },
+    );
+    let before = s.clone();
+    let stale = provider(
+        &mut s,
+        "stale",
+        &a,
+        ProviderEvent::NativeOutput {
+            echoed_prompts: vec![],
+            acknowledged_prompt: None,
+            root: true,
+            result: None,
+            events: vec![ProviderEvent::TextDelta {
+                key: "block".into(),
+                kind: ProviderItem::Text,
+                text: "stale".into(),
+            }],
+        },
+    );
+    assert_eq!(stale.reply, Reply::Ignored);
+    assert_eq!(s, before);
 }

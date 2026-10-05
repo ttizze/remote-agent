@@ -430,6 +430,9 @@ pub struct Task {
     pub progress: Option<String>,
     pub wake: CompletionWake,
     pub delivery: DeliveryState,
+    /// Incremented when a native task is resumed; results of an earlier
+    /// generation are stale.
+    pub generation: u64,
 }
 impl Task {
     pub fn app_owned(&self) -> bool {
@@ -542,6 +545,7 @@ pub struct State {
     pub stopping: BTreeSet<RunAttemptId>,
     pub native_owner: Option<RunAttemptId>,
     pub native_parent: Option<(ThreadId, NodeId)>,
+    pub native_generation: u64,
     pub native_child_thread: Option<String>,
     pub native_child_turn: Option<String>,
     pub native_context_usage: Option<ContextUsage>,
@@ -811,6 +815,8 @@ pub enum Command {
     },
     TaskResult {
         source_message: Option<MessageId>,
+        /// The native child generation that produced this result.
+        generation: Option<u64>,
         context: Option<TaskResultContext>,
         task: NodeId,
         status: ItemStatus,
@@ -836,6 +842,7 @@ pub enum Command {
         owner: RunAttemptId,
         parent: ThreadId,
         task: NodeId,
+        generation: u64,
     },
     NativeInput {
         attempt: RunAttemptId,

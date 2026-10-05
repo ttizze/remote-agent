@@ -74,6 +74,8 @@ pub struct CodexProtocol {
     stop_before_thread: bool,
     /// Native child thread -> native parent, used solely to route notifications.
     children: BTreeMap<String, String>,
+    /// Pending server request ID -> method, to shape the reply.
+    server_requests: BTreeMap<String, String>,
 }
 impl CodexProtocol {
     fn request(&mut self, method: &str, params: Value, pending: Pending) -> Value {
@@ -241,7 +243,11 @@ impl CodexProtocol {
             } => {
                 let id: Value = serde_json::from_str(native_key)
                     .map_err(|_| ProtocolError::Invalid("invalid native request id".into()))?;
-                let result = if let Some(answers) = answers {
+                let question = self.server_requests.remove(native_key).as_deref()
+                    == Some("item/tool/requestUserInput");
+                let result = if question {
+                    json!({"answers":answers.iter().flatten().map(|(k,v)| (k.clone(),json!({"answers":v.choices()}))).collect::<BTreeMap<_,_>>()})
+                } else if let Some(answers) = answers {
                     json!({"answers":answers.iter().map(|(k,v)| (k.clone(),json!({"answers":v.choices()}))).collect::<BTreeMap<_,_>>()})
                 } else if let Some(payload) = input
                     .as_ref()
@@ -822,17 +828,24 @@ impl CodexProtocol {
                     }
                 }
             }
-            "item/tool/requestUserInput" => events.push(ProviderEvent::RequestOpened {
-                owner_path: vec![],
-                key: frame["id"].to_string(),
-                body: RequestBody::Questions {
-                    questions: questions(&p["questions"]),
-                },
-                capability: ResponseCapability::Live,
-            }),
-            "serverRequest/resolved" => events.push(ProviderEvent::RequestClosed {
-                key: p["requestId"].to_string(),
-            }),
+            "item/tool/requestUserInput" => {
+                self.server_requests
+                    .insert(frame["id"].to_string(), method.clone());
+                events.push(ProviderEvent::RequestOpened {
+                    owner_path: vec![],
+                    key: frame["id"].to_string(),
+                    body: RequestBody::Questions {
+                        questions: questions(&p["questions"]),
+                    },
+                    capability: ResponseCapability::Live,
+                })
+            }
+            "serverRequest/resolved" => {
+                self.server_requests.remove(&p["requestId"].to_string());
+                events.push(ProviderEvent::RequestClosed {
+                    key: p["requestId"].to_string(),
+                })
+            }
             "item/commandExecution/requestApproval"
             | "item/fileChange/requestApproval"
             | "item/permissions/requestApproval"

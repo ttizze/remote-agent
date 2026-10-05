@@ -135,6 +135,7 @@ pub enum FactBody {
         owner: RunAttemptId,
         parent: ThreadId,
         task: NodeId,
+        generation: u64,
     },
     NativeChildTurnBound {
         native_turn: Option<String>,
@@ -704,7 +705,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             owner,
             parent,
             task,
+            generation,
         } => {
+            state.native_generation = *generation;
             state.native_owner = Some(owner.clone());
             state.native_child_thread = native_thread.clone();
             state.native_child_turn = None;
@@ -1376,6 +1379,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 result: None,
                 progress: None,
                 delivery: DeliveryState::Pending,
+                generation: 0,
             });
         }
         TaskProgressed {
@@ -1415,6 +1419,16 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             t.started_at = at.clone();
             t.delivery = DeliveryState::Pending;
             t.completed_at = None;
+            t.generation += 1;
+            for item in &mut state.items {
+                if matches!(&item.kind, ItemKind::Subagent { task } if task == id) {
+                    item.status = ItemStatus::Running;
+                    item.run = run.clone();
+                    item.attempt = Some(attempt.clone());
+                    item.started_at = at.clone();
+                    item.completed_at = None;
+                }
+            }
         }
         TaskWakeChanged { id, wake } => {
             find_mut(&mut state.tasks, "task", |t| &t.id == id)?.wake = *wake

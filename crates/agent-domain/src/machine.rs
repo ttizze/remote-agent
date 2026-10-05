@@ -1014,12 +1014,7 @@ impl Decision {
             .filter(|item| item.run.as_ref() == Some(run))
             .cloned()
             .collect::<Vec<_>>();
-        let result = items
-            .iter()
-            .filter(|item| matches!(item.kind, ItemKind::AssistantMessage { .. }))
-            .map(|item| item.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let result = delegated_result(record, &self.state.items, &self.state.messages);
         let history = prepare_history(&self.state, &items, record.ordinal);
         self.effect(
             record.attempt.clone(),
@@ -1027,6 +1022,7 @@ impl Decision {
                 thread: origin.parent,
                 command: Box::new(Command::TaskResult {
                     source_message: Some(origin.message),
+                    generation: None,
                     context: Some(TaskResultContext {
                         boundary: record.ordinal,
                         history,
@@ -1121,8 +1117,10 @@ impl Decision {
                 status,
             });
             self.complete_delegation(run, status);
+            self.settle_deliveries(run);
             self.hold_after_failure(run);
             self.promote();
+            self.wake_tasks();
         }
     }
     fn create_run(&mut self, message: &SendMessage) -> Reply {
@@ -1530,12 +1528,14 @@ impl Decision {
                 owner,
                 parent,
                 task,
+                generation,
             } => {
                 self.fact(FactBody::NativeChildBound {
                     native_thread: native_thread.clone(),
                     owner: owner.clone(),
                     parent: parent.clone(),
                     task: task.clone(),
+                    generation: *generation,
                 });
                 Reply::Accepted
             }
@@ -1980,6 +1980,12 @@ impl Decision {
                 if !order.contains(run) || before.as_ref().is_some_and(|id| !order.contains(id)) {
                     return reject("queued-run-not-found");
                 }
+                if self.automatic_run(run) {
+                    return reject("automatic-delivery-not-reorderable");
+                }
+                if before.as_ref().is_some_and(|id| self.automatic_run(id)) {
+                    return reject("cannot-reorder-ahead-of-automatic-delivery");
+                }
                 if before.as_ref() == Some(run) {
                     return Reply::Accepted;
                 }
@@ -2031,6 +2037,9 @@ impl Decision {
                 text,
                 attachments,
             } => {
+                if text.trim().is_empty() {
+                    return reject("empty-message");
+                }
                 let Some(r) = self
                     .state
                     .runs
@@ -2039,6 +2048,14 @@ impl Decision {
                 else {
                     return reject("queued-run-not-found");
                 };
+                if self.automatic_run(run) {
+                    return reject("automatic-delivery-not-editable");
+                }
+                if let Some(attachments) = attachments
+                    && let Err(reason) = validate_attachments(attachments)
+                {
+                    return reject(reason);
+                }
                 self.fact(FactBody::MessageEdited {
                     id: r.message.clone(),
                     text: text.clone(),
@@ -2047,6 +2064,17 @@ impl Decision {
                 Reply::Accepted
             }
             PromoteToSteer { queued, active } => {
+                if self
+                    .state
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| thread.archived_at.is_some())
+                {
+                    return reject("thread-not-active");
+                }
+                if self.automatic_run(queued) {
+                    return reject("automatic-delivery-not-promotable");
+                }
                 let Some(target) = self
                     .state
                     .runs
@@ -2107,16 +2135,21 @@ impl Decision {
                 else {
                     return reject("request-not-ready");
                 };
+                let declined = matches!(
+                    decision,
+                    Some(ApprovalDecision::Decline | ApprovalDecision::Cancel)
+                );
                 match &r.body {
                     RequestBody::Approval { .. } if decision.is_none() => {
                         return reject("invalid-approval-decision");
                     }
                     RequestBody::Questions { questions }
-                        if answers.is_none()
-                            || questions.iter().any(|q| {
-                                q.required
-                                    && answers.as_ref().is_none_or(|a| !a.contains_key(&q.id))
-                            }) =>
+                        if !declined
+                            && (answers.is_none()
+                                || questions.iter().any(|q| {
+                                    q.required
+                                        && answers.as_ref().is_none_or(|a| !a.contains_key(&q.id))
+                                })) =>
                     {
                         return reject("missing-question-answer");
                     }
@@ -2125,14 +2158,23 @@ impl Decision {
                 if r.capability == ResponseCapability::NotResumable {
                     return reject("request-not-resumable");
                 }
-                let provider_answers = match answers {
+                let card = if declined {
+                    ItemStatus::Cancelled
+                } else {
+                    ItemStatus::Completed
+                };
+                if declined && r.capability == ResponseCapability::Message {
+                    self.resolve_request(request, RequestStatus::Resolved, *decision, card);
+                    return Reply::Request(request.clone());
+                }
+                let provider_answers = match answers.as_ref().filter(|_| !declined) {
                     Some(answers) => match append_answer_attachments(answers, attachments) {
                         Ok(answers) => Some(answers),
                         Err(reason) => return reject(reason),
                     },
                     None => None,
                 };
-                let async_text = if r.capability == ResponseCapability::Message {
+                let async_text = if r.capability == ResponseCapability::Message && !declined {
                     let RequestBody::Questions { questions } = &r.body else {
                         return reject("question-not-found");
                     };
@@ -2161,13 +2203,7 @@ impl Decision {
                     answers: answers.clone(),
                     attachments: attachments.clone(),
                 });
-                let items=self.state.items.iter().filter(|i| matches!(&i.kind,ItemKind::ApprovalRequest { request:r }|ItemKind::UserInputRequest { request:r } if r==request)).map(|i| i.id.clone()).collect::<Vec<_>>();
-                for id in items {
-                    self.fact(FactBody::ItemCompleted {
-                        id,
-                        status: ItemStatus::Completed,
-                    });
-                }
+                self.complete_request_cards(request, card);
                 if r.capability == ResponseCapability::Message {
                     let message = SendMessage {
                         created_by: MessageAuthor::User,
@@ -2198,20 +2234,25 @@ impl Decision {
                 Reply::Request(request.clone())
             }
             DismissQuestion { request } => {
-                if !self.state.requests.iter().any(|r| {
-                    &r.id == request
-                        && r.status == RequestStatus::Pending
-                        && r.capability == ResponseCapability::Message
-                }) {
-                    return reject("question-not-dismissible");
+                let Some(r) = self
+                    .state
+                    .requests
+                    .iter()
+                    .find(|r| &r.id == request && r.status == RequestStatus::Pending)
+                else {
+                    return reject("question-already-answered");
+                };
+                if r.capability != ResponseCapability::Message
+                    || !matches!(r.body, RequestBody::Questions { .. })
+                {
+                    return reject("question-needs-answer");
                 }
-                self.fact(FactBody::RequestResolved {
-                    id: request.clone(),
-                    status: RequestStatus::Cancelled,
-                    decision: None,
-                    answers: None,
-                    attachments: BTreeMap::new(),
-                });
+                self.resolve_request(
+                    request,
+                    RequestStatus::Resolved,
+                    Some(ApprovalDecision::Cancel),
+                    ItemStatus::Cancelled,
+                );
                 Reply::Accepted
             }
             Rollback {
@@ -2608,6 +2649,18 @@ impl Decision {
                 {
                     return reject("task-already-exists");
                 }
+                let prompt = prompt.trim();
+                if prompt.is_empty() {
+                    return reject("task-required");
+                }
+                if prompt.encode_utf16().count() > 120_000 {
+                    return reject("message-too-long");
+                }
+                let child_title = delegated_title(
+                    prompt,
+                    &self.state.thread.as_ref().unwrap().title,
+                    self.state.tasks.iter().filter(|t| t.app_owned()).count() + 1,
+                );
                 let message = MessageId::new(self.key("delegate-message", task.as_str())).unwrap();
                 self.fact(FactBody::TaskStarted {
                     original_message: Some(message.clone()),
@@ -2618,7 +2671,7 @@ impl Decision {
                     attempt: attempt.clone(),
                     child: child.clone(),
                     parent: None,
-                    prompt: prompt.clone(),
+                    prompt: prompt.into(),
                     model: Some(selection.model.clone()),
                     wake: *wake,
                 });
@@ -2637,7 +2690,7 @@ impl Decision {
                         command: Box::new(AcceptDelegation {
                             thread: child.clone(),
                             project: thread.project.clone(),
-                            title: prompt.lines().next().unwrap_or("Task").into(),
+                            title: child_title,
                             selection: selection.clone(),
                             runtime_mode: thread.runtime_mode,
                             interaction_mode: thread.interaction_mode,
@@ -2650,7 +2703,7 @@ impl Decision {
                                 created_by: MessageAuthor::Agent,
                                 creation_source: "server".into(),
                                 id: message,
-                                text: prompt.clone(),
+                                text: prompt.into(),
                                 attachments: vec![],
                                 selection: None,
                                 mode: DispatchMode::StartImmediately,
@@ -2706,6 +2759,7 @@ impl Decision {
             TaskResult {
                 task,
                 source_message,
+                generation,
                 context,
                 status,
                 result,
@@ -2721,6 +2775,7 @@ impl Decision {
                 };
                 if existing.original_message != *source_message
                     || existing.app_owned() && existing.status.terminal()
+                    || generation.is_some_and(|generation| generation != existing.generation)
                 {
                     return Reply::Ignored;
                 }
@@ -2773,48 +2828,110 @@ impl Decision {
                 Reply::Accepted
             }
             AcceptTaskWake { task_ids } => {
-                let tasks = self
+                let Some(cohort) = task_ids.iter().find_map(|id| {
+                    self.state
+                        .tasks
+                        .iter()
+                        .find(|task| &task.id == id && task.app_owned())
+                        .and_then(|task| task.run.clone())
+                }) else {
+                    return reject("invalid-completion-cohort");
+                };
+                let eligible = self.wake_eligible(&cohort);
+                if eligible.is_empty() {
+                    return Reply::Ignored;
+                }
+                match self.cohort_wake(&cohort) {
+                    Some((message, RunStatus::Queued)) => {
+                        let mut ids = self
+                            .state
+                            .message(&message)
+                            .and_then(|m| m.notification.as_ref())
+                            .map(|n| match &n.source {
+                                NotificationSource::Delegated { task_ids } => task_ids.clone(),
+                                _ => vec![],
+                            })
+                            .unwrap_or_default();
+                        ids.extend(eligible.iter().cloned());
+                        self.fact(FactBody::MessageEdited {
+                            id: message.clone(),
+                            text: wake_text(&ids),
+                            attachments: None,
+                        });
+                        self.fact(FactBody::MessageNotificationAssigned {
+                            id: message,
+                            notification: delegated_notification(&ids, &cohort, &self.state.tasks),
+                        });
+                        for id in eligible {
+                            self.fact(FactBody::TaskDeliveryChanged {
+                                id,
+                                state: DeliveryState::Claimed,
+                            });
+                        }
+                        return Reply::Accepted;
+                    }
+                    Some((_, status)) if !status.terminal() => return Reply::Ignored,
+                    _ => {}
+                }
+                let task_ids = &eligible;
+                let notification = delegated_notification(task_ids, &cohort, &self.state.tasks);
+                let text = wake_text(task_ids);
+                let message_id =
+                    MessageId::new(self.key("completion-message", id.as_str())).unwrap();
+                let always = self.state.tasks.iter().all(|task| {
+                    !task_ids.contains(&task.id) || task.wake == CompletionWake::Always
+                });
+                if let Some(target) = self
                     .state
-                    .tasks
-                    .iter()
-                    .filter(|t| {
-                        task_ids.contains(&t.id)
-                            && t.status.terminal()
-                            && t.delivery == DeliveryState::Pending
+                    .active_run()
+                    .filter(|run| {
+                        always
+                            && run.status == RunStatus::Running
+                            && run.attempt.is_some()
+                            && TurnSupport::for_driver(run.selection.driver).steer
+                            && self
+                                .state
+                                .message(&run.message)
+                                .is_none_or(|m| maintenance(&m.text, &m.attachments).is_none())
                     })
                     .cloned()
-                    .collect::<Vec<_>>();
-                if tasks.is_empty()
-                    || tasks.len() != task_ids.len()
-                    || tasks
-                        .iter()
-                        .any(|task| !task.app_owned() || task.run != tasks[0].run)
                 {
-                    return reject("invalid-completion-cohort");
+                    self.fact(FactBody::MessageCreated {
+                        id: message_id.clone(),
+                        run: Some(target.id.clone()),
+                        role: Role::User,
+                        text: text.clone(),
+                        attachments: vec![],
+                        intent: InputIntent::Steer,
+                        created_by: MessageAuthor::Agent,
+                        creation_source: "server".into(),
+                    });
+                    self.fact(FactBody::MessageNotificationAssigned {
+                        id: message_id.clone(),
+                        notification,
+                    });
+                    self.user_item(&message_id, &target.id);
+                    for task in task_ids {
+                        self.fact(FactBody::TaskDeliveryChanged {
+                            id: task.clone(),
+                            state: DeliveryState::Claimed,
+                        });
+                    }
+                    self.effect(
+                        target.attempt.clone(),
+                        EffectBody::Provider(ProviderCommand::Steer {
+                            message: message_id,
+                            text,
+                            attachments: vec![],
+                        }),
+                    );
+                    return Reply::Run(target.id);
                 }
-                let notification = delegated_notification(
-                    task_ids,
-                    tasks[0].run.as_ref().unwrap(),
-                    &self.state.tasks,
-                );
-                let list = task_ids
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let text = if task_ids.len() == 1 {
-                    format!(
-                        "Delegated task {list} reached a terminal state. Use task_status with taskId {list} to read the result."
-                    )
-                } else {
-                    format!(
-                        "Delegated tasks {list} reached terminal states. Use task_status with each taskId to read the results."
-                    )
-                };
+                let tasks = task_ids.clone();
                 let message = SendMessage {
                     created_by: MessageAuthor::Agent,
                     creation_source: "server".into(),
-                    id: MessageId::new(self.key("completion-message", id.as_str())).unwrap(),
+                    id: message_id,
                     text,
                     attachments: vec![],
                     selection: None,
@@ -2828,9 +2945,9 @@ impl Decision {
                         id: message.id.clone(),
                         notification,
                     });
-                    for t in tasks {
+                    for id in tasks {
                         self.fact(FactBody::TaskDeliveryChanged {
-                            id: t.id,
+                            id,
                             state: DeliveryState::Claimed,
                         });
                     }
@@ -2838,6 +2955,62 @@ impl Decision {
                 reply
             }
         }
+    }
+    fn automatic_run(&self, run: &RunId) -> bool {
+        self.state
+            .runs
+            .iter()
+            .find(|r| &r.id == run)
+            .and_then(|r| self.state.message(&r.message))
+            .is_some_and(|message| message.notification.is_some())
+    }
+    /// Terminal tasks of a parent run awaiting delivery. A settled-only task
+    /// waits for its spawning run, not for unrelated active runs.
+    fn wake_eligible(&self, cohort: &RunId) -> Vec<NodeId> {
+        let spawning_live = self.state.runs.iter().any(|run| {
+            &run.id == cohort
+                && matches!(
+                    run.status,
+                    RunStatus::Preparing | RunStatus::Starting | RunStatus::Running
+                )
+        });
+        self.state
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.app_owned()
+                    && task.status.terminal()
+                    && task.delivery == DeliveryState::Pending
+                    && task.run.as_ref() == Some(cohort)
+                    && (task.wake == CompletionWake::Always || !spawning_live)
+            })
+            .map(|task| task.id.clone())
+            .collect()
+    }
+    /// The latest completion message of a parent run's cohort and its run status.
+    fn cohort_wake(&self, cohort: &RunId) -> Option<(MessageId, RunStatus)> {
+        self.state.messages.iter().rev().find_map(|message| {
+            let NotificationSource::Delegated { task_ids } = &message.notification.as_ref()?.source
+            else {
+                return None;
+            };
+            task_ids
+                .iter()
+                .any(|id| {
+                    self.state
+                        .tasks
+                        .iter()
+                        .any(|task| &task.id == id && task.run.as_ref() == Some(cohort))
+                })
+                .then(|| {
+                    let status = message
+                        .run
+                        .as_ref()
+                        .and_then(|run| self.state.runs.iter().find(|r| &r.id == run))
+                        .map_or(RunStatus::Completed, |run| run.status);
+                    (message.id.clone(), status)
+                })
+        })
     }
     fn wake_tasks(&mut self) {
         let Some(thread) = &self.state.thread else {
@@ -2847,21 +3020,21 @@ impl Decision {
             return;
         }
         let thread = thread.id.clone();
-        let mut cohorts = BTreeMap::<RunId, Vec<NodeId>>::new();
-        for task in &self.state.tasks {
-            if task.app_owned()
-                && task.status.terminal()
-                && task.delivery == DeliveryState::Pending
-                && (task.wake == CompletionWake::Always || self.state.active_run().is_none())
-                && let Some(run) = &task.run
+        let cohorts = self
+            .state
+            .tasks
+            .iter()
+            .filter_map(|task| task.run.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for cohort in cohorts {
+            let task_ids = self.wake_eligible(&cohort);
+            if task_ids.is_empty()
+                || self
+                    .cohort_wake(&cohort)
+                    .is_some_and(|(_, status)| status != RunStatus::Queued && !status.terminal())
             {
-                cohorts
-                    .entry(run.clone())
-                    .or_default()
-                    .push(task.id.clone());
+                continue;
             }
-        }
-        for task_ids in cohorts.into_values() {
             self.effect(
                 None,
                 EffectBody::SendToThread {
@@ -2869,6 +3042,32 @@ impl Decision {
                     command: Box::new(Command::AcceptTaskWake { task_ids }),
                 },
             );
+        }
+    }
+    /// Claimed completions are delivered once the run that carried them ends.
+    fn settle_deliveries(&mut self, run: &RunId) {
+        let delivered = self
+            .state
+            .messages
+            .iter()
+            .filter(|message| message.run.as_ref() == Some(run))
+            .filter_map(|message| match &message.notification.as_ref()?.source {
+                NotificationSource::Delegated { task_ids } => Some(task_ids.clone()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|id| {
+                self.state
+                    .tasks
+                    .iter()
+                    .any(|task| &task.id == id && task.delivery == DeliveryState::Claimed)
+            })
+            .collect::<Vec<_>>();
+        for id in delivered {
+            self.fact(FactBody::TaskDeliveryChanged {
+                id,
+                state: DeliveryState::Delivered,
+            });
         }
     }
 
@@ -3413,7 +3612,6 @@ impl Decision {
                         head,
                     });
                     self.finish(&run.id, status, true);
-                    self.wake_tasks();
                 } else {
                     if self.state.thread.as_ref().unwrap().selection.driver == Driver::Codex {
                         let usage = complete_codex_usage(
@@ -3448,16 +3646,18 @@ impl Decision {
                             .filter(|item| {
                                 item.ordinal > boundary
                                     && matches!(item.kind, ItemKind::AssistantMessage { .. })
+                                    && !item.text.trim().is_empty()
                             })
-                            .map(|item| item.text.as_str())
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
+                            .max_by_key(|item| item.ordinal)
+                            .map(|item| item.text.clone())
+                            .unwrap_or_default();
                         self.effect(
                             Some(attempt.clone()),
                             EffectBody::SendToThread {
                                 thread: parent,
                                 command: Box::new(Command::TaskResult {
                                     source_message: None,
+                                    generation: Some(self.state.native_generation),
                                     context: None,
                                     task,
                                     status: match status {
@@ -3574,13 +3774,12 @@ impl Decision {
                     })
                     .map(|r| r.id.clone())
                 {
-                    self.fact(FactBody::RequestResolved {
-                        id,
-                        status: RequestStatus::Resolved,
-                        decision: None,
-                        answers: None,
-                        attachments: BTreeMap::new(),
-                    });
+                    self.resolve_request(
+                        &id,
+                        RequestStatus::Cancelled,
+                        None,
+                        ItemStatus::Cancelled,
+                    );
                 }
             }
             UserMessage { key, text } => {
@@ -3751,6 +3950,12 @@ impl Decision {
                             prompt: prompt.clone(),
                         });
                     }
+                    let generation = self
+                        .state
+                        .tasks
+                        .iter()
+                        .find(|candidate| candidate.id == task.id)
+                        .map_or(0, |task| task.generation);
                     self.effect(
                         Some(attempt.clone()),
                         EffectBody::SendToThread {
@@ -3760,6 +3965,7 @@ impl Decision {
                                 owner: attempt.clone(),
                                 parent: self.state.thread.as_ref().unwrap().id.clone(),
                                 task: task.id,
+                                generation,
                             }),
                         },
                     );
@@ -3842,6 +4048,7 @@ impl Decision {
                                 owner: attempt.clone(),
                                 parent: t.id,
                                 task: id,
+                                generation: 0,
                             }),
                         },
                     );
@@ -4089,10 +4296,13 @@ impl Decision {
         events: &[ProviderEvent],
     ) -> Reply {
         if root && self.state.stopping.contains(owner) {
+            let mut reply = Reply::Ignored;
             for event in events {
-                self.provider(owner, event);
+                if self.provider(owner, event) != Reply::Ignored {
+                    reply = Reply::Accepted;
+                }
             }
-            return Reply::Accepted;
+            return reply;
         }
 
         if !root
@@ -4470,7 +4680,10 @@ impl Decision {
                         status,
                     });
                     self.complete_delegation(run, status);
+                    self.settle_deliveries(run);
+                    self.hold_after_failure(run);
                     self.promote();
+                    self.wake_tasks();
                 }
             }
             EffectResult::RollbackFinished { command, bindings } => {
@@ -4842,6 +5055,33 @@ pub fn usage_limited(state: &State) -> bool {
             && failure_class(state, &run.id).as_deref() == Some("usage_limit")
     })
 }
+/// A delegated child's title: the trimmed prompt, clipped past 72 UTF-16 units.
+fn delegated_title(prompt: &str, parent_title: &str, ordinal: usize) -> String {
+    let units = prompt.encode_utf16().collect::<Vec<_>>();
+    if units.is_empty() {
+        format!("{parent_title} subagent {ordinal}")
+    } else if units.len() > 72 {
+        format!("{}...", String::from_utf16_lossy(&units[..69]))
+    } else {
+        prompt.into()
+    }
+}
+fn wake_text(task_ids: &[NodeId]) -> String {
+    let list = task_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if task_ids.len() == 1 {
+        format!(
+            "Delegated task {list} reached a terminal state. Use task_status with taskId {list} to read the result."
+        )
+    } else {
+        format!(
+            "Delegated tasks {list} reached terminal states. Use task_status with each taskId to read the results."
+        )
+    }
+}
 fn reject(reason: &str) -> Reply {
     Reply::Rejected {
         reason: reason.into(),
@@ -4883,8 +5123,20 @@ impl ThreadMachine {
                             .runs
                             .iter()
                             .find(|r| r.attempt.as_ref() == Some(owner));
-                        if owner_run
-                            .is_some_and(|r| r.selection.instance == active.selection.instance)
+                        let owner_current = !state.stopping.contains(owner)
+                            && state.attempts.iter().any(|a| {
+                                &a.id == owner
+                                    && !matches!(
+                                        a.status,
+                                        AttemptStatus::Superseded
+                                            | AttemptStatus::Cancelled
+                                            | AttemptStatus::Interrupted
+                                            | AttemptStatus::Failed
+                                    )
+                            });
+                        if owner_current
+                            && owner_run
+                                .is_some_and(|r| r.selection.instance == active.selection.instance)
                         {
                             attempt = active.attempt.as_ref().unwrap_or(owner);
                             observed = state.pending_prompt.as_ref().is_some_and(|p| !p.confirmed);

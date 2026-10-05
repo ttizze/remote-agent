@@ -641,6 +641,26 @@ fn codex_start_and_steer_send_prepared_images_after_the_text() {
             .is_err()
     );
 }
+#[test]
+fn a_cancelled_codex_question_replies_with_no_answers() {
+    let mut codex = CodexProtocol::default();
+    codex
+        .receive(&json!({"id":7,"method":"item/tool/requestUserInput","params":{"threadId":"t","questions":[{"id":"q","header":"Q","question":"Which?"}]}}))
+        .unwrap();
+    let reply = codex
+        .command(
+            &ProviderCommand::Respond {
+                native_key: "7".into(),
+                decision: Some(ApprovalDecision::Cancel),
+                answers: None,
+                input: None,
+            },
+            &wire_context(),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(reply[0], json!({"id":7,"result":{"answers":{}}}));
+}
 fn prepared_attachment() -> Attachment {
     Attachment {
         kind: AttachmentKind::Image,
