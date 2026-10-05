@@ -4,8 +4,8 @@ mod writer;
 pub use load::*;
 pub use writer::*;
 
-use crate::{ShellRow, StoreError};
-use agent_domain::{CommandId, Effect, Fact, FactBody, Receipt, Reply, ThreadId, Timestamp};
+use crate::{OUTBOX_COLUMNS, OutboxRow, RawOutboxRow, ShellRow, StoreError};
+use agent_domain::{CommandId, Fact, FactBody, Receipt, Reply, ThreadId, Timestamp};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -44,17 +44,6 @@ pub struct FactGap {
     pub facts: u64,
     pub bytes: u64,
     pub contains_created: bool,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct OutboxRow {
-    pub effect: Effect,
-    pub thread: ThreadId,
-    pub lane: String,
-    pub kind: String,
-    pub status: String,
-    pub attempts: u32,
-    pub available_at: i64,
 }
 
 /// The SQLite fact log. One writer thread owns the write connection; reads use a pool.
@@ -253,33 +242,11 @@ impl Store {
 
     pub fn outbox(&self, thread: &ThreadId) -> Result<Vec<OutboxRow>, StoreError> {
         self.read(|c| {
-            let mut statement = c.prepare_cached(
-                "SELECT payload, lane, kind, status, attempts, available_at
-                 FROM outbox WHERE thread_id = ?1 ORDER BY rowid",
-            )?;
-            let rows = statement.query_map([thread.as_str()], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            })?;
-            rows.map(|row| {
-                let (payload, lane, kind, status, attempts, available_at) = row?;
-                Ok(OutboxRow {
-                    effect: serde_json::from_str(&payload)?,
-                    thread: thread.clone(),
-                    lane,
-                    kind,
-                    status,
-                    attempts: attempts as u32,
-                    available_at,
-                })
-            })
-            .collect()
+            let mut statement = c.prepare_cached(&format!(
+                "SELECT {OUTBOX_COLUMNS} FROM outbox WHERE thread_id = ?1 ORDER BY rowid"
+            ))?;
+            let rows = statement.query_map([thread.as_str()], RawOutboxRow::read)?;
+            rows.map(|row| row?.decode()).collect()
         })
     }
 
@@ -360,7 +327,7 @@ fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn thread_id(value: String) -> Result<ThreadId, StoreError> {
+pub(crate) fn thread_id(value: String) -> Result<ThreadId, StoreError> {
     ThreadId::new(value).map_err(|error| StoreError::Corrupt(error.to_string()))
 }
 

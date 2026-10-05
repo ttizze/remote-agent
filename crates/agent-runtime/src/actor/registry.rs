@@ -1,6 +1,6 @@
 use super::{ActorContext, ActorHandle, CommandOrigin, Committed};
-use crate::{KeyedSerial, RuntimeError};
-use agent_domain::{Command, CommandId, ThreadId};
+use crate::{KeyedSerial, RuntimeError, Settlement};
+use agent_domain::{Command, CommandId, EffectResult, State, ThreadId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -84,6 +84,39 @@ impl ActorRegistry {
                 self.get_or_load(thread)
                     .await?
                     .dispatch(id, command, origin)
+                    .await
+            }
+            result => result,
+        }
+    }
+
+    /// The thread's committed state, loading its actor if needed.
+    pub async fn state(&self, thread: &ThreadId) -> Result<Arc<State>, RuntimeError> {
+        match self.get_or_load(thread).await?.view().await {
+            Err(RuntimeError::ActorStopped) => {
+                Ok(self.get_or_load(thread).await?.view().await?.state)
+            }
+            result => Ok(result?.state),
+        }
+    }
+
+    /// Feeds an effect result to its thread and settles the outbox row in the same commit.
+    pub async fn settle_effect(
+        &self,
+        thread: &ThreadId,
+        effect_id: String,
+        result: EffectResult,
+        settlement: Settlement,
+    ) -> Result<Committed, RuntimeError> {
+        let handle = self.get_or_load(thread).await?;
+        match handle
+            .settle_effect(effect_id.clone(), result.clone(), settlement.clone())
+            .await
+        {
+            Err(RuntimeError::ActorStopped) => {
+                self.get_or_load(thread)
+                    .await?
+                    .settle_effect(effect_id, result, settlement)
                     .await
             }
             result => result,

@@ -7,8 +7,8 @@ pub use registry::*;
 pub use subscribe::*;
 
 use crate::{
-    Clock, CommitBatch, RuntimeError, SNAPSHOT_INTERVAL, ShellProjector, ShellRow, Store,
-    StoreError, SystemClock, ThreadHead, ThreadRecordShell, attachment_paths, envelope_key,
+    Clock, CommitBatch, RuntimeError, SNAPSHOT_INTERVAL, Settlement, ShellProjector, ShellRow,
+    Store, StoreError, SystemClock, ThreadHead, ThreadRecordShell, attachment_paths, envelope_key,
     needs_recovery, search_changes,
 };
 use agent_domain::{
@@ -130,6 +130,7 @@ pub(crate) enum Mail {
     EffectResult {
         effect_id: String,
         result: EffectResult,
+        settlement: Settlement,
         ack: Ack,
     },
     Input {
@@ -226,9 +227,21 @@ impl ActorHandle {
         effect_id: String,
         result: EffectResult,
     ) -> Result<Committed, RuntimeError> {
+        self.settle_effect(effect_id, result, Settlement::Succeeded)
+            .await
+    }
+
+    /// Feeds an effect result back and settles its outbox row as `settlement` in the same commit.
+    pub async fn settle_effect(
+        &self,
+        effect_id: String,
+        result: EffectResult,
+        settlement: Settlement,
+    ) -> Result<Committed, RuntimeError> {
         self.request(|ack| Mail::EffectResult {
             effect_id,
             result,
+            settlement,
             ack,
         })
         .await?
@@ -384,9 +397,12 @@ impl Actor {
             Mail::EffectResult {
                 effect_id,
                 result,
+                settlement,
                 ack,
             } => {
-                let result = self.step(Input::Effect(result), Some(effect_id)).await;
+                let result = self
+                    .step(Input::Effect(result), Some((effect_id, settlement)))
+                    .await;
                 let _ = ack.send(result);
             }
             Mail::Input { input, ack } => {
@@ -498,7 +514,7 @@ impl Actor {
     async fn step(
         &mut self,
         input: Input,
-        settle: Option<String>,
+        settle: Option<(String, Settlement)>,
     ) -> Result<Committed, RuntimeError> {
         let (at, step) = self.decide(input);
         self.persist(at, step, settle).await
@@ -524,7 +540,7 @@ impl Actor {
         &mut self,
         at: Timestamp,
         step: Step,
-        settle: Option<String>,
+        settle: Option<(String, Settlement)>,
     ) -> Result<Committed, RuntimeError> {
         let Step {
             facts,
@@ -762,4 +778,4 @@ fn rejected(reason: &str) -> Reply {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

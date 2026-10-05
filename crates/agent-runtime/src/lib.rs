@@ -3,6 +3,7 @@ mod actor;
 mod clock;
 mod error;
 mod keyed;
+mod outbox;
 mod shell;
 mod store;
 
@@ -10,6 +11,7 @@ pub use actor::*;
 pub use clock::*;
 pub use error::*;
 pub use keyed::*;
+pub use outbox::*;
 pub use shell::*;
 pub use store::*;
 

@@ -47,10 +47,10 @@ fn harness() -> Harness {
         notices,
     }
 }
-fn command_id(id: &str) -> CommandId {
+pub(crate) fn command_id(id: &str) -> CommandId {
     CommandId::new(id).unwrap()
 }
-fn create(thread: &ThreadId) -> Command {
+pub(crate) fn create(thread: &ThreadId) -> Command {
     Command::Create {
         thread: thread.clone(),
         project: "project".into(),
@@ -60,7 +60,7 @@ fn create(thread: &ThreadId) -> Command {
         interaction_mode: InteractionMode::Default,
     }
 }
-fn send(id: &str) -> Command {
+pub(crate) fn send(id: &str) -> Command {
     Command::Send(SendMessage {
         created_by: MessageAuthor::User,
         creation_source: "client".into(),
@@ -78,7 +78,7 @@ fn rename(title: &str) -> Command {
         title: title.into(),
     }
 }
-async fn created(context: &ActorContext, id: &ThreadId) -> ActorHandle {
+pub(crate) async fn created(context: &ActorContext, id: &ThreadId) -> ActorHandle {
     let handle = ActorHandle::spawn(context.clone(), id.clone())
         .await
         .unwrap();
@@ -166,7 +166,7 @@ async fn commits_facts_receipt_and_outbox_in_one_step() {
     let outbox = h.context.store.outbox(&id).unwrap();
     assert!(
         outbox.iter().any(|row| row.kind == "Provider.Start"
-            && row.status == "pending"
+            && row.status == crate::EffectStatus::Pending
             && row.lane == "main"),
         "{outbox:?}"
     );
@@ -787,7 +787,7 @@ async fn settles_the_consumed_effect_in_the_same_commit() {
         .into_iter()
         .find(|row| row.effect.id == start.effect.id)
         .unwrap();
-    assert_eq!(row.status, "succeeded");
+    assert_eq!(row.status, crate::EffectStatus::Succeeded);
     let view = handle.view().await.unwrap();
     assert_eq!(
         view.state.runs.iter().find(|r| r.id == run).unwrap().status,

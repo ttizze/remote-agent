@@ -1,5 +1,5 @@
 use super::{Store, StoredFact, ThreadHead, head};
-use crate::{SearchChanges, ShellRow, StoreError};
+use crate::{EffectStatus, SearchChanges, ShellRow, StoreError};
 use agent_domain::{Effect, EffectBody, Fact, Receipt, ThreadId, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
@@ -18,8 +18,8 @@ pub struct CommitBatch {
     pub receipt: Option<Receipt>,
     pub facts: Vec<Fact>,
     pub effects: Vec<Effect>,
-    /// The outbox row whose result this step consumed.
-    pub settle: Option<String>,
+    /// The outbox row whose result this step consumed, and how it ends.
+    pub settle: Option<(String, Settlement)>,
     pub shell: Option<ShellRow>,
     pub needs_recovery: bool,
     pub search: SearchChanges,
@@ -43,6 +43,29 @@ pub struct CommitNotice {
     pub effects: Arc<[Effect]>,
     pub shell: Option<ShellRow>,
     pub settled: Option<String>,
+}
+
+/// How a claimed outbox row ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Settlement {
+    Succeeded,
+    Failed(String),
+    Cancelled(String),
+}
+impl Settlement {
+    pub fn status(&self) -> EffectStatus {
+        match self {
+            Self::Succeeded => EffectStatus::Succeeded,
+            Self::Failed(_) => EffectStatus::Failed,
+            Self::Cancelled(_) => EffectStatus::Cancelled,
+        }
+    }
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            Self::Succeeded => None,
+            Self::Failed(error) | Self::Cancelled(error) => Some(error),
+        }
+    }
 }
 
 /// Runs on the writer thread after COMMIT and before the next transaction.
@@ -134,7 +157,8 @@ fn variant(value: &serde_json::Value) -> String {
 fn variant_of(value: &impl Serialize) -> Result<String, StoreError> {
     Ok(variant(&serde_json::to_value(value)?))
 }
-pub(crate) fn effect_kind(body: &EffectBody) -> Result<String, StoreError> {
+/// The outbox `kind` of an effect: the variant name, or `Provider.<command>`.
+pub fn effect_kind(body: &EffectBody) -> Result<String, StoreError> {
     Ok(match body {
         EffectBody::Provider(command) => format!("Provider.{}", variant_of(command)?),
         other => variant_of(other)?,
@@ -253,12 +277,18 @@ fn write_batch(
             ])?;
         }
     }
-    if let Some(effect) = &batch.settle {
+    if let Some((effect, settlement)) = &batch.settle {
         tx.execute(
-            "UPDATE outbox SET status = 'succeeded', completed_at = ?2, updated_at = ?2,
+            "UPDATE outbox SET status = ?4, last_error = ?5, completed_at = ?2, updated_at = ?2,
                  lease_owner = NULL, lease_expires_at = NULL
              WHERE effect_id = ?1 AND thread_id = ?3 AND status IN ('pending', 'running')",
-            params![effect, at_millis, thread],
+            params![
+                effect,
+                at_millis,
+                thread,
+                settlement.status().as_str(),
+                settlement.error()
+            ],
         )?;
     }
     if let Some(shell) = &batch.shell {
@@ -324,7 +354,7 @@ fn write_batch(
             facts: facts.clone(),
             effects: batch.effects.into(),
             shell: batch.shell,
-            settled: batch.settle,
+            settled: batch.settle.map(|(effect, _)| effect),
         },
         CommitOutcome { head, facts },
     ))
