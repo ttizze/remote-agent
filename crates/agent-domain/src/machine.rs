@@ -75,10 +75,10 @@ impl Decision {
         }
     }
     fn fact(&mut self, body: FactBody) {
-        let fact = Fact {
-            at: self.at.clone(),
-            body,
-        };
+        self.fact_at(self.at.clone(), body);
+    }
+    fn fact_at(&mut self, at: Timestamp, body: FactBody) {
+        let fact = Fact { at, body };
         apply(&mut self.state, &fact).expect("domain decisions produce valid facts");
         self.facts.push(fact);
     }
@@ -147,15 +147,61 @@ impl Decision {
             .unwrap()
             .text
             .clone();
-        self.fact(FactBody::ItemTextAppended {
-            id: id.clone(),
-            offset: 0,
-            text,
-        });
+        self.append_text(&id, &text);
         self.fact(FactBody::ItemCompleted {
             id,
             status: ItemStatus::Completed,
         });
+    }
+    fn append_text(&mut self, id: &TurnItemId, text: &str) {
+        self.append_text_at(self.at.clone(), id, text);
+    }
+    fn append_text_at(&mut self, at: Timestamp, id: &TurnItemId, text: &str) {
+        for chunk in text_chunks(text) {
+            let offset = self
+                .state
+                .items
+                .iter()
+                .find(|i| &i.id == id)
+                .unwrap()
+                .text
+                .len();
+            self.fact_at(
+                at.clone(),
+                FactBody::ItemTextAppended {
+                    id: id.clone(),
+                    offset,
+                    text: chunk.to_owned(),
+                },
+            );
+        }
+    }
+    fn replace_text(&mut self, id: &TurnItemId, text: &str) {
+        let chunks = text_chunks(text);
+        self.fact(FactBody::ItemTextReplaced {
+            id: id.clone(),
+            text: chunks.first().copied().unwrap_or_default().to_owned(),
+        });
+        for chunk in chunks.iter().skip(1) {
+            self.append_text(id, chunk);
+        }
+    }
+    fn append_plan(&mut self, id: &PlanId, text: &str) {
+        for chunk in text_chunks(text) {
+            let offset = self
+                .state
+                .plans
+                .iter()
+                .find(|p| &p.id == id)
+                .unwrap()
+                .markdown
+                .len();
+            self.fact(FactBody::PlanMarkdownAppended {
+                id: id.clone(),
+                offset,
+                text: chunk.to_owned(),
+            });
+        }
     }
     fn prepare_provider_handoff(&mut self, target_run: &Run, native_thread: Option<&str>) {
         let is_source = |run: &Run| {
@@ -164,25 +210,41 @@ impl Decision {
                 RunStatus::Completed | RunStatus::Failed | RunStatus::Interrupted
             )
         };
-        let Some(latest) = self.state.runs.iter().rev().find(|run| is_source(run)) else {
-            return;
-        };
+        // Imported history reached only the native session it was imported from.
+        let imported = self
+            .state
+            .items
+            .iter()
+            .filter(|item| {
+                item.run.is_none()
+                    && item.attempt.is_none()
+                    && matches!(
+                        item.kind,
+                        ItemKind::UserMessage { .. } | ItemKind::AssistantMessage { .. }
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let latest = self.state.runs.iter().rev().find(|run| is_source(run));
         let needs_backfill = native_thread.is_none()
-            && self.state.attempts.iter().any(|attempt| {
-                attempt.native_thread.is_some()
-                    && self.state.runs.iter().any(|run| {
-                        run.id == attempt.run
-                            && run.selection.instance == target_run.selection.instance
-                            && is_source(run)
-                    })
-            });
-        if latest.selection.instance == target_run.selection.instance && !needs_backfill {
+            && (!imported.is_empty()
+                || self.state.attempts.iter().any(|attempt| {
+                    attempt.native_thread.is_some()
+                        && self.state.runs.iter().any(|run| {
+                            run.id == attempt.run
+                                && run.selection.instance == target_run.selection.instance
+                                && is_source(run)
+                        })
+                }));
+        if latest.is_none_or(|latest| latest.selection.instance == target_run.selection.instance)
+            && !needs_backfill
+        {
             if let Some(native) = native_thread {
                 self.prepare_missed_inputs(target_run, native);
             }
             return;
         }
-        let boundary = latest.ordinal;
+        let boundary = latest.map_or(0, |latest| latest.ordinal);
         if self.state.transfers.iter().any(|transfer| {
             !transfer.superseded
                 && transfer.instance == target_run.selection.instance
@@ -212,21 +274,25 @@ impl Decision {
                 })
             })
             .map_or(0, |run| run.ordinal);
-        let items = self
-            .state
-            .visible_items()
+        let items = imported
             .into_iter()
-            .filter(|item| {
-                item.run.as_ref().is_some_and(|id| {
-                    self.state.runs.iter().any(|run| {
-                        &run.id == id
-                            && is_source(run)
-                            && run.ordinal > last_seen
-                            && run.ordinal <= boundary
+            .filter(|_| native_thread.is_none())
+            .chain(
+                self.state
+                    .visible_items()
+                    .into_iter()
+                    .filter(|item| {
+                        item.run.as_ref().is_some_and(|id| {
+                            self.state.runs.iter().any(|run| {
+                                &run.id == id
+                                    && is_source(run)
+                                    && run.ordinal > last_seen
+                                    && run.ordinal <= boundary
+                            })
+                        })
                     })
-                })
-            })
-            .cloned()
+                    .cloned(),
+            )
             .collect::<Vec<_>>();
         if items.is_empty() {
             return;
@@ -1165,8 +1231,40 @@ impl Decision {
             .clone()
             .unwrap_or_else(|| thread.selection.clone());
         let thread_selection = thread.selection.clone();
-        if thread.settled.is_some() {
+        let settled = thread.settled.is_some();
+        let earlier_users = self
+            .state
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .collect::<Vec<_>>();
+        let title_armed = maintenance(&message.text, &message.attachments).is_none()
+            && (message.title_seed.is_some() && self.state.messages.is_empty()
+                || message.created_by == MessageAuthor::User
+                    && !earlier_users.is_empty()
+                    && earlier_users
+                        .iter()
+                        .all(|m| maintenance(&m.text, &m.attachments).is_some()));
+        if settled {
             self.fact(FactBody::ThreadUnsettled);
+        }
+        if title_armed {
+            if let Some(seed) = &message.title_seed {
+                self.fact(FactBody::ThreadRenamed {
+                    title: seed.clone(),
+                });
+            }
+            let request = CommandId::new(format!("title:{}", message.id)).unwrap();
+            self.fact(FactBody::TitleRequested {
+                request: request.clone(),
+            });
+            self.effect(
+                None,
+                EffectBody::GenerateTitle {
+                    request,
+                    message: Some(message.id.clone()),
+                },
+            );
         }
         if self
             .state
@@ -1349,7 +1447,7 @@ impl Decision {
         use Command::*;
         if !matches!(
             command,
-            Create { .. } | AcceptFork { .. } | AcceptDelegation { .. }
+            Create { .. } | Import { .. } | AcceptFork { .. } | AcceptDelegation { .. }
         ) {
             let Some(thread) = &self.state.thread else {
                 return reject("thread-not-found");
@@ -1547,6 +1645,7 @@ impl Decision {
                 selection,
                 runtime_mode,
                 interaction_mode,
+                workspace,
             } => {
                 if self.state.thread.is_some() {
                     return reject("thread-already-exists");
@@ -1559,6 +1658,11 @@ impl Decision {
                     runtime_mode: *runtime_mode,
                     interaction_mode: *interaction_mode,
                 });
+                if workspace.is_some() {
+                    self.fact(FactBody::WorkspaceBound {
+                        workspace: workspace.clone(),
+                    });
+                }
                 Reply::Thread(thread.clone())
             }
             Rename { title } => {
@@ -1569,6 +1673,133 @@ impl Decision {
                     title: title.trim().to_owned(),
                 });
                 Reply::Accepted
+            }
+            RegenerateTitle => {
+                self.fact(FactBody::TitleRequested {
+                    request: id.clone(),
+                });
+                self.effect(
+                    None,
+                    EffectBody::GenerateTitle {
+                        request: id.clone(),
+                        message: None,
+                    },
+                );
+                Reply::Accepted
+            }
+            Import {
+                thread,
+                project,
+                title,
+                selection,
+                workspace,
+                created_at,
+                updated_at,
+                messages,
+                native,
+            } => {
+                if let Some(existing) = &self.state.thread {
+                    return if existing.imported {
+                        Reply::Ignored
+                    } else {
+                        reject("thread-has-activity")
+                    };
+                }
+                let title = match title.trim() {
+                    "" => "Untitled thread".to_owned(),
+                    title => title.to_owned(),
+                };
+                self.fact_at(
+                    created_at.clone(),
+                    FactBody::ThreadCreated {
+                        id: thread.clone(),
+                        project: project.clone(),
+                        title,
+                        selection: selection.clone(),
+                        runtime_mode: crate::RuntimeMode::FullAccess,
+                        interaction_mode: crate::InteractionMode::Default,
+                    },
+                );
+                self.fact_at(created_at.clone(), FactBody::ThreadImported);
+                if workspace.is_some() {
+                    self.fact_at(
+                        created_at.clone(),
+                        FactBody::WorkspaceBound {
+                            workspace: workspace.clone(),
+                        },
+                    );
+                }
+                for (index, imported) in messages.iter().enumerate() {
+                    let suffix = format!("{index:06}");
+                    let message = MessageId::new(format!("{thread}:{suffix}")).unwrap();
+                    let item = TurnItemId::new(format!("import:{thread}:{suffix}")).unwrap();
+                    let at = imported.at.clone();
+                    self.fact_at(
+                        at.clone(),
+                        FactBody::MessageCreated {
+                            id: message.clone(),
+                            run: None,
+                            role: imported.role,
+                            text: if imported.role == Role::Assistant {
+                                String::new()
+                            } else {
+                                imported.text.clone()
+                            },
+                            attachments: vec![],
+                            intent: InputIntent::TurnStart,
+                            created_by: if imported.role == Role::User {
+                                MessageAuthor::User
+                            } else {
+                                MessageAuthor::Agent
+                            },
+                            creation_source: "server".into(),
+                        },
+                    );
+                    self.fact_at(
+                        at.clone(),
+                        FactBody::ItemStarted {
+                            id: item.clone(),
+                            run: None,
+                            attempt: None,
+                            native_key: message.to_string(),
+                            ordinal: index as u64 + 1,
+                            kind: if imported.role == Role::User {
+                                ItemKind::UserMessage {
+                                    message: message.clone(),
+                                }
+                            } else {
+                                ItemKind::AssistantMessage {
+                                    message: message.clone(),
+                                }
+                            },
+                        },
+                    );
+                    self.append_text_at(at.clone(), &item, &imported.text);
+                    self.fact_at(
+                        at.clone(),
+                        FactBody::ItemCompleted {
+                            id: item,
+                            status: ItemStatus::Completed,
+                        },
+                    );
+                    self.fact_at(at, FactBody::MessageFinished { id: message });
+                }
+                self.fact_at(
+                    updated_at.clone(),
+                    FactBody::ThreadSettled {
+                        settled: true,
+                        at: updated_at.clone(),
+                    },
+                );
+                self.fact_at(
+                    updated_at.clone(),
+                    FactBody::NativeSessionBound {
+                        instance: native.instance.clone(),
+                        native_thread: native.thread.clone(),
+                        head: native.head.clone(),
+                    },
+                );
+                Reply::Thread(thread.clone())
             }
             Archive { archived } => {
                 let thread = self.state.thread.as_ref().unwrap();
@@ -1582,6 +1813,9 @@ impl Decision {
                 self.fact(FactBody::ThreadArchived {
                     archived: *archived,
                 });
+                if *archived && thread_title_pending(&self.state) {
+                    self.fact(FactBody::TitleRequestCleared);
+                }
                 if *archived {
                     let queued = self
                         .state
@@ -1860,6 +2094,7 @@ impl Decision {
                     mode: DispatchMode::QueueAfterActive,
                     intent: None,
                     source_plan: None,
+                    title_seed: None,
                 };
                 self.create_run(&message)
             }
@@ -2215,6 +2450,7 @@ impl Decision {
                         mode: DispatchMode::QueueAfterActive,
                         intent: Some(DeliveryIntent::Auto),
                         source_plan: None,
+                        title_seed: None,
                     };
                     return self.create_run(&message);
                 }
@@ -2399,6 +2635,7 @@ impl Decision {
                     boundary: run.ordinal,
                     history,
                     messages,
+                    workspace: thread.workspace.clone(),
                     checkpoint_scope: self.state.checkpoint_scope.clone(),
                     context,
                     native: None,
@@ -2469,6 +2706,7 @@ impl Decision {
                 boundary,
                 history,
                 messages,
+                workspace,
                 checkpoint_scope,
                 context,
                 native,
@@ -2484,6 +2722,11 @@ impl Decision {
                     runtime_mode: *runtime_mode,
                     interaction_mode: *interaction_mode,
                 });
+                if workspace.is_some() {
+                    self.fact(FactBody::WorkspaceBound {
+                        workspace: workspace.clone(),
+                    });
+                }
                 self.fact(FactBody::CheckpointScopeBound {
                     run: None,
                     scope: checkpoint_scope.clone(),
@@ -2694,6 +2937,7 @@ impl Decision {
                             selection: selection.clone(),
                             runtime_mode: thread.runtime_mode,
                             interaction_mode: thread.interaction_mode,
+                            workspace: thread.workspace.clone(),
                             origin: Delegation {
                                 parent: thread.id.clone(),
                                 task: task.clone(),
@@ -2709,6 +2953,7 @@ impl Decision {
                                 mode: DispatchMode::StartImmediately,
                                 intent: None,
                                 source_plan: None,
+                                title_seed: None,
                             },
                         }),
                     },
@@ -2722,6 +2967,7 @@ impl Decision {
                 selection,
                 runtime_mode,
                 interaction_mode,
+                workspace,
                 origin,
                 message,
             } => {
@@ -2736,6 +2982,11 @@ impl Decision {
                     runtime_mode: *runtime_mode,
                     interaction_mode: *interaction_mode,
                 });
+                if workspace.is_some() {
+                    self.fact(FactBody::WorkspaceBound {
+                        workspace: workspace.clone(),
+                    });
+                }
                 self.fact(FactBody::DelegationAccepted {
                     origin: origin.clone(),
                 });
@@ -2938,6 +3189,7 @@ impl Decision {
                     mode: DispatchMode::QueueAfterActive,
                     intent: None,
                     source_plan: None,
+                    title_seed: None,
                 };
                 let reply = self.create_run(&message);
                 if !matches!(reply, Reply::Rejected { .. }) {
@@ -3119,7 +3371,7 @@ impl Decision {
             attempt,
             String::new(),
             ItemKind::Error {
-                message: message.into(),
+                message: bounded_failure_text(message, 4096),
                 retrying: false,
                 code: None,
                 class: class.map(str::to_owned),
@@ -3185,8 +3437,8 @@ impl Decision {
             } => ItemKind::DynamicTool {
                 presentation: presentation.clone(),
                 name: name.clone(),
-                input: input.clone(),
-                output: output.clone(),
+                input: bounded_json(input),
+                output: output.as_ref().map(bounded_json),
             },
             ProviderItem::WebSearch { query, results } => ItemKind::WebSearch {
                 query: query.clone(),
@@ -3206,9 +3458,9 @@ impl Decision {
                 class,
                 retryable,
             } => ItemKind::Error {
-                message: message.clone(),
+                message: bounded_failure_text(message, 4096),
                 retrying: *retrying,
-                code: code.clone(),
+                code: code.as_deref().map(|code| bounded_failure_text(code, 128)),
                 class: class.clone(),
                 retryable: *retryable,
             },
@@ -3680,11 +3932,7 @@ impl Decision {
                 let id = self.provider_item(attempt, run_id, key, kind);
                 let item = self.state.items.iter().find(|i| i.id == id).unwrap();
                 if !item.status.terminal() {
-                    self.fact(FactBody::ItemTextAppended {
-                        id,
-                        offset: item.text.len(),
-                        text: text.clone(),
-                    });
+                    self.append_text(&id, text);
                 }
             }
             ItemFinished {
@@ -3700,19 +3948,20 @@ impl Decision {
                 };
                 let id = self.provider_item(attempt, run_id, &key, kind);
                 if let Some(text) = text {
-                    let current = &self.state.items.iter().find(|i| i.id == id).unwrap().text;
-                    if text != current {
-                        if let Some(tail) = text.strip_prefix(current) {
-                            self.fact(FactBody::ItemTextAppended {
-                                id: id.clone(),
-                                offset: current.len(),
-                                text: tail.to_owned(),
-                            });
+                    let current = self
+                        .state
+                        .items
+                        .iter()
+                        .find(|i| i.id == id)
+                        .unwrap()
+                        .text
+                        .clone();
+                    if *text != current {
+                        if let Some(tail) = text.strip_prefix(current.as_str()) {
+                            let tail = tail.to_owned();
+                            self.append_text(&id, &tail);
                         } else {
-                            self.fact(FactBody::ItemTextReplaced {
-                                id: id.clone(),
-                                text: text.clone(),
-                            });
+                            self.replace_text(&id, text);
                         }
                     }
                 }
@@ -3804,11 +4053,7 @@ impl Decision {
                             key.clone(),
                             ItemKind::UserMessage { message },
                         );
-                        self.fact(FactBody::ItemTextAppended {
-                            id: item.clone(),
-                            offset: 0,
-                            text: text.clone(),
-                        });
+                        self.append_text(&item, text);
                         self.fact(FactBody::ItemCompleted {
                             id: item,
                             status: ItemStatus::Completed,
@@ -3821,32 +4066,8 @@ impl Decision {
                     return Reply::Ignored;
                 };
                 let (id, item) = self.ensure_plan(run, attempt, key, PlanKind::Proposed);
-                let offset = self
-                    .state
-                    .plans
-                    .iter()
-                    .find(|p| p.id == id)
-                    .unwrap()
-                    .markdown
-                    .len();
-                self.fact(FactBody::PlanMarkdownAppended {
-                    id,
-                    offset,
-                    text: text.clone(),
-                });
-                let offset = self
-                    .state
-                    .items
-                    .iter()
-                    .find(|i| i.id == item)
-                    .unwrap()
-                    .text
-                    .len();
-                self.fact(FactBody::ItemTextAppended {
-                    id: item,
-                    offset,
-                    text: text.clone(),
-                });
+                self.append_plan(&id, text);
+                self.append_text(&item, text);
             }
             Plan {
                 kind,
@@ -3867,14 +4088,15 @@ impl Decision {
                     .markdown
                     != *markdown
                 {
+                    let chunks = text_chunks(markdown);
                     self.fact(FactBody::PlanMarkdownReplaced {
                         id: id.clone(),
-                        text: markdown.clone(),
+                        text: chunks.first().copied().unwrap_or_default().to_owned(),
                     });
-                    self.fact(FactBody::ItemTextReplaced {
-                        id: item,
-                        text: markdown.clone(),
-                    });
+                    for chunk in chunks.iter().skip(1) {
+                        self.append_plan(&id, chunk);
+                    }
+                    self.replace_text(&item, markdown);
                 }
                 if self.state.plans.iter().find(|p| p.id == id).unwrap().steps != *steps {
                     self.fact(FactBody::PlanStepsReplaced {
@@ -4036,6 +4258,7 @@ impl Decision {
                                 selection,
                                 runtime_mode: t.runtime_mode,
                                 interaction_mode: t.interaction_mode,
+                                workspace: t.workspace.clone(),
                             }),
                         },
                     );
@@ -4211,6 +4434,7 @@ impl Decision {
                     mode: DispatchMode::QueueAfterActive,
                     intent: None,
                     source_plan: None,
+                    title_seed: None,
                 };
                 self.create_run(&message);
             }
@@ -4722,9 +4946,26 @@ impl Decision {
                     message: message.clone(),
                 });
             }
-            EffectResult::TitleGenerated { title } => self.fact(FactBody::ThreadRenamed {
-                title: title.clone(),
-            }),
+            EffectResult::TitleGenerated { request, title } => {
+                let Some(thread) = self
+                    .state
+                    .thread
+                    .as_ref()
+                    .filter(|thread| thread.title_request.as_ref() == Some(request))
+                else {
+                    return Reply::Ignored;
+                };
+                match title.as_deref().map(str::trim) {
+                    Some(title)
+                        if !title.is_empty() && title != "New thread" && title != thread.title =>
+                    {
+                        self.fact(FactBody::ThreadRenamed {
+                            title: title.to_owned(),
+                        })
+                    }
+                    _ => self.fact(FactBody::TitleRequestCleared),
+                }
+            }
         }
         Reply::Accepted
     }
@@ -5066,6 +5307,12 @@ fn delegated_title(prompt: &str, parent_title: &str, ordinal: usize) -> String {
         prompt.into()
     }
 }
+fn thread_title_pending(state: &State) -> bool {
+    state
+        .thread
+        .as_ref()
+        .is_some_and(|thread| thread.title_request.is_some())
+}
 fn wake_text(task_ids: &[NodeId]) -> String {
     let list = task_ids
         .iter()
@@ -5155,6 +5402,7 @@ impl ThreadMachine {
             };
             if let ProviderEvent::TextDelta { key, text, .. }
             | ProviderEvent::PlanDelta { key, text } = event
+                && text.len() <= MAX_FACT_TEXT
             {
                 let current = state.native_owner.as_ref() == Some(attempt)
                     || state.runs.iter().any(|r| {
@@ -5300,6 +5548,16 @@ impl ThreadMachine {
                     token_cap: *token_cap,
                 });
                 Reply::Accepted
+            }
+            Input::Workspace { workspace } => {
+                if decision.state.thread.is_none() {
+                    Reply::Ignored
+                } else {
+                    decision.fact(FactBody::WorkspaceBound {
+                        workspace: workspace.clone(),
+                    });
+                    Reply::Accepted
+                }
             }
             Input::NativeSessionReset { instance } => {
                 decision.fact(FactBody::NativeSessionCleared {

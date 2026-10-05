@@ -125,6 +125,7 @@ impl Replay {
                 },
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
+                workspace: None,
             },
         );
         replay
@@ -243,6 +244,7 @@ impl Replay {
                 mode,
                 intent: None,
                 source_plan: None,
+                title_seed: None,
             }),
         );
         assert!(!matches!(reply, Reply::Rejected { .. }), "{reply:?}");
@@ -1354,6 +1356,7 @@ fn native_subagent_threads_refuse_messages_with_the_reference_error_and_no_proje
                 mode: DispatchMode::StartImmediately,
                 intent: None,
                 source_plan: None,
+                title_seed: None,
             }),
         );
         assert_eq!(reply,Reply::Rejected {reason:"This subagent is run by its provider and cannot take messages. Message the parent thread instead.".into()});

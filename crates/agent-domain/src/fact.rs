@@ -144,6 +144,14 @@ pub enum FactBody {
         title: String,
     },
     ThreadUnsettled,
+    ThreadImported,
+    WorkspaceBound {
+        workspace: Option<Workspace>,
+    },
+    TitleRequested {
+        request: CommandId,
+    },
+    TitleRequestCleared,
     RunRestarting {
         id: RunId,
         selection: ModelSelection,
@@ -690,6 +698,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 auto_settle: true,
                 parent: None,
                 fork_boundary: None,
+                workspace: None,
+                title_request: None,
+                imported: false,
             });
         }
         ChildEventDeferred { key, event } => state
@@ -726,11 +737,37 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             state.native_turn_usage = None;
         }
         ThreadRenamed { title } => {
+            let thread = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
+            thread.title = title.clone();
+            thread.title_request = None;
+        }
+        ThreadImported => {
             state
                 .thread
                 .as_mut()
                 .ok_or(FoldError::Missing("thread"))?
-                .title = title.clone()
+                .imported = true
+        }
+        WorkspaceBound { workspace } => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .workspace = workspace.clone()
+        }
+        TitleRequested { request } => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .title_request = Some(request.clone())
+        }
+        TitleRequestCleared => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .title_request = None
         }
         ThreadUnsettled => {
             let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
@@ -1444,6 +1481,46 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
         thread.updated_at = at.clone();
     }
     Ok(())
+}
+/// Largest text carried by one fact. Longer text is split across appends so
+/// each fact fits a transport frame; nothing is truncated.
+pub const MAX_FACT_TEXT: usize = 1 << 20;
+/// Largest encoded JSON value kept on one fact.
+pub const MAX_FACT_JSON: usize = 4 << 20;
+pub fn text_chunks(text: &str) -> Vec<&str> {
+    let mut chunks = vec![];
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(MAX_FACT_TEXT);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunks.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    chunks
+}
+/// JSON larger than `MAX_FACT_JSON` is replaced by its size; the item text
+/// keeps the readable output.
+pub fn bounded_json(value: &Json) -> Json {
+    let size = serde_json::to_vec(&value.0).map_or(0, |bytes| bytes.len());
+    if size > MAX_FACT_JSON {
+        Json(serde_json::json!({"omittedBytes": size}))
+    } else {
+        value.clone()
+    }
+}
+/// Reference failure text bounds: UTF-16 units, cut with an ellipsis.
+pub fn bounded_failure_text(text: &str, max: usize) -> String {
+    let units = text.encode_utf16().collect::<Vec<_>>();
+    if units.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max - 1;
+    if (0xDC00..=0xDFFF).contains(&units[end]) {
+        end -= 1;
+    }
+    String::from_utf16_lossy(&units[..end]) + "…"
 }
 /// Version of the folded `State` and `Fact` encodings. Stored snapshots with
 /// another value are rebuilt from facts.

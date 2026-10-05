@@ -39,6 +39,7 @@ fn state() -> State {
             selection: selection(),
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Default,
+            workspace: None,
         },
     );
     s
@@ -59,6 +60,7 @@ fn send_message(key: &str, mode: DispatchMode) -> Command {
         mode,
         intent: None,
         source_plan: None,
+        title_seed: None,
     })
 }
 fn provider(s: &mut State, key: &str, attempt: &RunAttemptId, event: ProviderEvent) -> Step {
@@ -1461,6 +1463,7 @@ fn plan_followup_preserves_attachments_and_consumes_the_proposal() {
             mode: DispatchMode::StartImmediately,
             intent: None,
             source_plan: Some(plan),
+            title_seed: None,
         }),
     );
     assert_eq!(s.plans[0].implemented_by, Some(s.runs[1].id.clone()));
@@ -3092,6 +3095,7 @@ fn wire_encodings_round_trip_state_facts_commands_and_effects() {
         mode: DispatchMode::StartImmediately,
         intent: Some(DeliveryIntent::Auto),
         source_plan: None,
+        title_seed: None,
     });
     round_trip(&send);
     steps.push(command(&mut s, "captured", send));
@@ -4734,4 +4738,336 @@ fn stale_streaming_output_cannot_reach_a_newer_attempt() {
     );
     assert_eq!(stale.reply, Reply::Ignored);
     assert_eq!(s, before);
+}
+fn title_effect(step: &Step) -> Option<(CommandId, Option<MessageId>)> {
+    step.effects.iter().find_map(|effect| match &effect.body {
+        EffectBody::GenerateTitle { request, message } => Some((request.clone(), message.clone())),
+        _ => None,
+    })
+}
+// T3 ThreadLaunchService.test.ts and ThreadTitleRegenerationService.test.ts.
+#[test]
+fn titles_are_generated_once_and_a_rename_supersedes_the_request() {
+    let mut s = state();
+    let mut first = send_message("first", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut first {
+        message.title_seed = Some("Generate my title".into());
+    }
+    let step = command(&mut s, "first", first);
+    let (request, message) = title_effect(&step).unwrap();
+    assert_eq!(message.unwrap().as_str(), "first");
+    assert_eq!(s.thread.as_ref().unwrap().title, "Generate my title");
+    command(
+        &mut s,
+        "rename",
+        Command::Rename {
+            title: "Keep my title".into(),
+        },
+    );
+    let before = s.clone();
+    let stale = result(
+        &mut s,
+        "stale",
+        EffectResult::TitleGenerated {
+            request: request.clone(),
+            title: Some("Stale generated title".into()),
+        },
+    );
+    assert_eq!(stale.reply, Reply::Ignored);
+    assert_eq!(s, before);
+    let regenerate = command(&mut s, "regenerate", Command::RegenerateTitle);
+    let (request, message) = title_effect(&regenerate).unwrap();
+    assert_eq!(message, None);
+    result(
+        &mut s,
+        "fallback",
+        EffectResult::TitleGenerated {
+            request,
+            title: Some("New thread".into()),
+        },
+    );
+    assert_eq!(s.thread.as_ref().unwrap().title, "Keep my title");
+    assert_eq!(s.thread.as_ref().unwrap().title_request, None);
+    let regenerate = command(&mut s, "again", Command::RegenerateTitle);
+    let (request, _) = title_effect(&regenerate).unwrap();
+    result(
+        &mut s,
+        "fresh",
+        EffectResult::TitleGenerated {
+            request,
+            title: Some("Fresh title".into()),
+        },
+    );
+    assert_eq!(s.thread.as_ref().unwrap().title, "Fresh title");
+    let later = command(
+        &mut s,
+        "later",
+        send_message("later", DispatchMode::QueueAfterActive),
+    );
+    assert_eq!(title_effect(&later), None);
+
+    let mut s = state();
+    let mut compact = send_message("compact", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut compact {
+        message.text = "/compact".into();
+    }
+    assert_eq!(title_effect(&command(&mut s, "compact", compact)), None);
+    let a = s.runs[0].attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "started",
+        &a,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &a);
+    let step = command(
+        &mut s,
+        "real",
+        send_message("real", DispatchMode::StartImmediately),
+    );
+    assert!(title_effect(&step).is_some());
+    command(&mut s, "archive", Command::Archive { archived: true });
+    assert_eq!(s.thread.as_ref().unwrap().title_request, None);
+}
+fn import(thread: &str) -> Command {
+    Command::Import {
+        thread: ThreadId::new(thread).unwrap(),
+        project: "project".into(),
+        title: "  ".into(),
+        selection: selection(),
+        workspace: Some(Workspace {
+            cwd: "/repo".into(),
+            worktree_path: None,
+            branch: Some("main".into()),
+        }),
+        created_at: Timestamp::parse("2026-01-01T00:00:00Z").unwrap(),
+        updated_at: Timestamp::parse("2026-01-02T00:00:00Z").unwrap(),
+        messages: vec![
+            ImportedMessage {
+                role: Role::User,
+                text: "Fix it".into(),
+                at: Timestamp::parse("2026-01-01T00:01:00Z").unwrap(),
+            },
+            ImportedMessage {
+                role: Role::Assistant,
+                text: "Fixed".into(),
+                at: Timestamp::parse("2026-01-01T00:02:00Z").unwrap(),
+            },
+        ],
+        native: NativeBinding {
+            instance: "codex".into(),
+            thread: "native-codex-thread".into(),
+            head: None,
+        },
+    }
+}
+// T3 AgentSessionImporter.test.ts.
+#[test]
+fn imported_sessions_keep_message_times_and_resume_their_native_session() {
+    let mut s = State::default();
+    command(&mut s, "import", import("import:codex:session"));
+    let thread = s.thread.clone().unwrap();
+    assert_eq!(thread.title, "Untitled thread");
+    assert_eq!(thread.settled, Some(true));
+    assert_eq!(thread.created_at.as_str(), "2026-01-01T00:00:00.000Z");
+    assert_eq!(thread.updated_at.as_str(), "2026-01-02T00:00:00.000Z");
+    assert_eq!(thread.workspace.unwrap().branch.as_deref(), Some("main"));
+    assert_eq!(
+        s.messages
+            .iter()
+            .map(|m| (m.text.as_str(), m.created_at.as_str(), m.streaming))
+            .collect::<Vec<_>>(),
+        [
+            ("Fix it", "2026-01-01T00:01:00.000Z", false),
+            ("Fixed", "2026-01-01T00:02:00.000Z", false)
+        ]
+    );
+    assert_eq!(
+        s.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["import:codex:session:000000", "import:codex:session:000001"]
+    );
+    assert_eq!(s.native_sessions["codex"], "native-codex-thread");
+    let before = s.clone();
+    assert_eq!(
+        command(&mut s, "again", import("import:codex:session")).reply,
+        Reply::Ignored
+    );
+    assert_eq!(s, before);
+    let step = command(
+        &mut s,
+        "resume",
+        send_message("next", DispatchMode::StartImmediately),
+    );
+    assert!(step.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::Provider(ProviderCommand::Start { native_thread: Some(native), context: None, .. }) if native == "native-codex-thread"
+    )));
+    let mut other = State::default();
+    command(&mut other, "import", import("import:codex:other"));
+    command(
+        &mut other,
+        "switch",
+        Command::SwitchProvider {
+            selection: claude_selection(),
+        },
+    );
+    let step = command(
+        &mut other,
+        "elsewhere",
+        send_message("elsewhere", DispatchMode::StartImmediately),
+    );
+    let (_, history) = start_context(&step).unwrap();
+    assert!(history.contains("Fix it") && history.contains("Fixed"));
+    let mut active = state();
+    assert_eq!(
+        command(&mut active, "import", import("thread")).reply,
+        Reply::Rejected {
+            reason: "thread-has-activity".into()
+        }
+    );
+}
+#[test]
+fn workspace_bindings_are_recorded_and_inherited_by_forks() {
+    let mut s = state();
+    let workspace = Workspace {
+        cwd: "/repo/.worktrees/one".into(),
+        worktree_path: Some("/repo/.worktrees/one".into()),
+        branch: Some("feature".into()),
+    };
+    let step = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "workspace".into(),
+            input: Input::Workspace {
+                workspace: Some(workspace.clone()),
+            },
+        },
+    );
+    s = fold(&s, &step.facts).unwrap();
+    assert_eq!(
+        s.thread.as_ref().unwrap().workspace,
+        Some(workspace.clone())
+    );
+    let (run, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let fork = command(
+        &mut s,
+        "fork",
+        Command::Fork {
+            target: ThreadId::new("fork").unwrap(),
+            through_run: run,
+            title: None,
+        },
+    );
+    let forked = result(
+        &mut s,
+        "forked",
+        EffectResult::NativeForked {
+            command: CommandId::new("fork").unwrap(),
+            native_thread: "fork-native".into(),
+        },
+    );
+    let _ = fork;
+    let child = accept_child(&forked);
+    assert_eq!(child.thread.unwrap().workspace, Some(workspace));
+}
+#[test]
+fn large_text_is_split_across_facts_without_truncation() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let huge = "界".repeat(MAX_FACT_TEXT);
+    let step = provider(
+        &mut s,
+        "huge",
+        &a,
+        ProviderEvent::ItemFinished {
+            key: "output".into(),
+            kind: ProviderItem::Text,
+            text: Some(huge.clone()),
+            status: ItemStatus::Completed,
+        },
+    );
+    assert!(
+        step.facts
+            .iter()
+            .all(|fact| serde_json::to_vec(fact).unwrap().len() < MAX_FACT_TEXT + 4096)
+    );
+    assert!(step.facts.len() > 3);
+    let item = s
+        .items
+        .iter()
+        .find(|item| item.native_key == "output")
+        .unwrap();
+    assert_eq!(item.text, huge);
+    let delta = provider(
+        &mut s,
+        "delta",
+        &a,
+        ProviderEvent::TextDelta {
+            key: "stream".into(),
+            kind: ProviderItem::Text,
+            text: huge.clone(),
+        },
+    );
+    assert!(delta.facts.len() > 3);
+    let error = provider(
+        &mut s,
+        "error",
+        &a,
+        ProviderEvent::ItemFinished {
+            key: "error".into(),
+            kind: ProviderItem::Error {
+                message: "x".repeat(5000),
+                retrying: false,
+                code: Some("c".repeat(200)),
+                class: None,
+                retryable: None,
+            },
+            text: None,
+            status: ItemStatus::Failed,
+        },
+    );
+    let _ = error;
+    let ItemKind::Error { message, code, .. } = &s.items.last().unwrap().kind else {
+        panic!()
+    };
+    assert_eq!(message.encode_utf16().count(), 4096);
+    assert!(message.ends_with('…'));
+    assert_eq!(code.as_ref().unwrap().encode_utf16().count(), 128);
+}
+#[test]
+fn wire_encodings_round_trip_imports_titles_rollbacks_and_workspaces() {
+    let mut s = State::default();
+    let imported = import("import:codex:wire");
+    round_trip(&imported);
+    let step = command(&mut s, "import", imported);
+    round_trip(&step);
+    let regenerate = command(&mut s, "regenerate", Command::RegenerateTitle);
+    round_trip(&regenerate);
+    round_trip(&EffectResult::TitleGenerated {
+        request: CommandId::new("regenerate").unwrap(),
+        title: None,
+    });
+    round_trip(&Input::Workspace {
+        workspace: s.thread.as_ref().unwrap().workspace.clone(),
+    });
+    round_trip(&EffectBody::Rollback {
+        command: CommandId::new("rollback").unwrap(),
+        providers: vec![ProviderRollback {
+            instance: "codex".into(),
+            command: ProviderCommand::Rollback {
+                native_thread: "native".into(),
+                absolute_head: Some("turn".into()),
+            },
+        }],
+        restore: Some(RestoreFiles {
+            scope: None,
+            checkpoint: CheckpointId::new("cp").unwrap(),
+            file_ref: "ref".into(),
+        }),
+        stale_file_refs: vec!["later".into()],
+    });
+    round_trip(&s);
+    assert_eq!(STATE_FORMAT, 1);
 }
