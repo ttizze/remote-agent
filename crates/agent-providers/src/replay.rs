@@ -66,8 +66,87 @@ fn every_reference_transcript_is_unchanged_and_all_native_frames_decode() {
     }
 }
 
+/// T3 replay.ts normalization: values that vary per machine or recorder.
+fn normalized_frame(frame: &Value, ignored_config: &[String]) -> Value {
+    fn walk(value: &Value) -> Value {
+        match value {
+            Value::String(text) if text.starts_with("Context handoff (") => {
+                match (text.find(":\n"), text.find("\n\nUser message:\n")) {
+                    (Some(header), Some(user)) if header < user => Value::String(format!(
+                        "{}<dynamic-summary>{}",
+                        &text[..header + 2],
+                        &text[user..]
+                    )),
+                    _ => value.clone(),
+                }
+            }
+            Value::Array(values) => Value::Array(values.iter().map(walk).collect()),
+            Value::Object(map) => {
+                Value::Object(map.iter().map(|(k, v)| (k.clone(), walk(v))).collect())
+            }
+            _ => value.clone(),
+        }
+    }
+    let mut frame = walk(frame);
+    let method = string(&frame, "method");
+    let params = &mut frame["params"];
+    match method.as_str() {
+        "initialize" => {
+            if params["clientInfo"].is_object() {
+                params["clientInfo"]["version"] = json!("<ignored>");
+            }
+        }
+        "turn/start" => {
+            if let Some(params) = params.as_object_mut() {
+                if params.get("approvalPolicy") == Some(&json!("never")) {
+                    params.remove("approvalPolicy");
+                }
+                if params["sandboxPolicy"]["type"] == "dangerFullAccess" {
+                    params.remove("sandboxPolicy");
+                }
+                if params
+                    .get("collaborationMode")
+                    .is_some_and(|mode| mode["settings"].is_object())
+                {
+                    params["collaborationMode"]["settings"]["developer_instructions"] =
+                        json!("<ignored>");
+                }
+            }
+        }
+        "thread/start" | "thread/resume" | "thread/fork" => {
+            if let Some(params) = params.as_object_mut() {
+                params.remove("cwd");
+                params.remove("model");
+                if let Some(config) = params.get_mut("config").and_then(Value::as_object_mut) {
+                    config.remove("mcp_servers");
+                    for key in ignored_config {
+                        config.remove(key);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    frame
+}
+/// Claude CLI frames in the SDK vocabulary the reference transcripts record.
+fn sdk_frame(frame: &Value) -> Option<Value> {
+    match string(frame, "type").as_str() {
+        "user" => Some(json!({"type":"prompt.offer","message":frame})),
+        "control_request" if frame["request"]["subtype"] == "interrupt" => {
+            Some(json!({"type":"query.interrupt"}))
+        }
+        "control_request" if frame["request"]["subtype"] == "initialize" => None,
+        "control_response" if frame["response"]["subtype"] == "success" => {
+            Some(json!({"type":"permission.response","result":frame["response"]["response"]}))
+        }
+        "control_response" => None,
+        _ => Some(frame.clone()),
+    }
+}
 struct Replay {
     driver: Driver,
+    scenario: String,
     states: BTreeMap<ThreadId, State>,
     root: ThreadId,
     codex: CodexProtocol,
@@ -76,9 +155,14 @@ struct Replay {
     serial: u64,
     owner: Option<RunAttemptId>,
     facts: Vec<Fact>,
-    responses: Vec<Value>,
     provider_commands: Vec<(ThreadId, ProviderCommand)>,
     native_forks: Vec<(ThreadId, CommandId, ProviderCommand)>,
+    /// Outbound frames the translators generated and the transcript has not
+    /// matched yet. Only the strict single-session harness fills it.
+    strict: bool,
+    pending: VecDeque<Value>,
+    context: WireContext,
+    ignored_config: Vec<String>,
 }
 impl Replay {
     fn new(driver: Driver, rows: &[Value]) -> Self {
@@ -99,6 +183,7 @@ impl Replay {
             .collect();
         let mut replay = Self {
             driver,
+            scenario: optional(&rows[0], "scenario").unwrap_or_default(),
             states: BTreeMap::from([(root.clone(), State::default())]),
             root: root.clone(),
             codex: CodexProtocol::default(),
@@ -107,9 +192,23 @@ impl Replay {
             serial: 0,
             owner: None,
             facts: vec![],
-            responses: vec![],
             provider_commands: vec![],
             native_forks: vec![],
+            strict: false,
+            pending: VecDeque::new(),
+            context: WireContext {
+                cwd: "<workspace>".into(),
+                client_name: "T3 Code".into(),
+                client_version: "<ignored>".into(),
+                ..WireContext::default()
+            },
+            ignored_config: rows[0]["metadata"]["recorderThreadConfigKeys"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
         };
         replay.command(
             &root,
@@ -125,6 +224,7 @@ impl Replay {
                 },
                 runtime_mode: RuntimeMode::FullAccess,
                 interaction_mode: InteractionMode::Default,
+                workspace: None,
             },
         );
         replay
@@ -163,6 +263,12 @@ impl Replay {
                 EffectBody::Provider(command) => self
                     .provider_commands
                     .push((thread.clone(), command.clone())),
+                EffectBody::Rollback { providers, .. } => {
+                    for rollback in providers {
+                        self.provider_commands
+                            .push((thread.clone(), rollback.command.clone()));
+                    }
+                }
                 EffectBody::ForkNative { command, provider } => {
                     self.native_forks
                         .push((thread.clone(), command.clone(), provider.clone()))
@@ -196,8 +302,9 @@ impl Replay {
                         String::new()
                     };
                     let output = self.claude.command(&command, &key, &[]).unwrap();
-                    if matches!(command, ProviderCommand::Respond { .. }) {
-                        self.responses.extend(output.outbound);
+                    if self.strict {
+                        self.pending
+                            .extend(output.outbound.iter().filter_map(sdk_frame));
                     }
                     if let Some(attempt) = effect.attempt {
                         for event in output.events {
@@ -209,6 +316,55 @@ impl Replay {
                                 },
                             );
                         }
+                    }
+                }
+                EffectBody::Provider(command)
+                    if *thread == self.root && self.driver == Driver::Codex && self.strict =>
+                {
+                    if matches!(
+                        command,
+                        ProviderCommand::Start { .. } | ProviderCommand::Compact { .. }
+                    ) {
+                        self.owner = effect.attempt.clone();
+                    }
+                    match self.codex.command(&command, &self.context, &[]) {
+                        Ok(output) => {
+                            self.pending.extend(output.outbound);
+                            if let Some(attempt) = effect.attempt.clone() {
+                                for event in output.events {
+                                    self.apply(
+                                        thread,
+                                        Input::Provider {
+                                            attempt: attempt.clone(),
+                                            event: Box::new(event),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                        Err(ProtocolError::Remote {
+                            turn_completed,
+                            message,
+                            ..
+                        }) => {
+                            let message_id = match &command {
+                                ProviderCommand::Steer { message, .. } => Some(message.clone()),
+                                _ => None,
+                            };
+                            let thread = thread.clone();
+                            self.apply(
+                                &thread,
+                                Input::Effect(EffectResult::ProviderFailed {
+                                    attempt: effect.attempt.clone().unwrap(),
+                                    operation: ProviderOperation::Steer,
+                                    message,
+                                    message_id,
+                                    turn_completed,
+                                    session_lost: false,
+                                }),
+                            );
+                        }
+                        Err(error) => panic!("{}: {error}", self.scenario),
                     }
                 }
                 _ => {}
@@ -237,11 +393,15 @@ impl Replay {
                 mode,
                 intent: None,
                 source_plan: None,
+                title_seed: None,
             }),
         );
         assert!(!matches!(reply, Reply::Rejected { .. }), "{reply:?}");
-        if self.driver == Driver::Codex {
-            self.owner = self.state().active_run().and_then(|r| r.attempt.clone());
+        if self.driver == Driver::Codex
+            && !steer
+            && let Some(attempt) = self.state().active_run().and_then(|r| r.attempt.clone())
+        {
+            self.owner = Some(attempt);
         }
     }
     fn receive(&mut self, frame: &Value) {
@@ -253,8 +413,20 @@ impl Replay {
         let output = match self.driver {
             Driver::Codex => self.codex.receive(&frame),
             Driver::Claude => self.claude.receive(&frame),
+        };
+        let output = match output {
+            Ok(output) => output,
+            Err(ProtocolError::Remote { .. }) if frame.get("error").is_some() => return,
+            Err(error) => panic!("{}: {error}", self.scenario),
+        };
+        if self.strict {
+            match self.driver {
+                Driver::Codex => self.pending.extend(output.outbound),
+                Driver::Claude => self
+                    .pending
+                    .extend(output.outbound.iter().filter_map(sdk_frame)),
+            }
         }
-        .unwrap();
         if let Some(owner) = self.owner.clone() {
             let root = self.root.clone();
             for event in output.events {
@@ -268,195 +440,317 @@ impl Replay {
             }
         }
     }
+    fn respond(&mut self, frame: &Value) {
+        let Some(request) = self
+            .state()
+            .requests
+            .iter()
+            .find(|r| r.status == RequestStatus::Pending)
+            .cloned()
+        else {
+            return;
+        };
+        let result = &frame["result"];
+        let decision = match result["behavior"].as_str().or(result["decision"].as_str()) {
+            Some("deny" | "decline") => ApprovalDecision::Decline,
+            Some("cancel") => ApprovalDecision::Cancel,
+            Some("acceptForSession") => ApprovalDecision::AcceptForSession,
+            _ => ApprovalDecision::Accept,
+        };
+        let answers = result["answers"].as_object().map(|a| {
+            a.iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        Answer::Choices(
+                            value["answers"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|v| v.as_str().unwrap().into())
+                                .collect(),
+                        ),
+                    )
+                })
+                .collect()
+        });
+        let root = self.root.clone();
+        self.command(
+            &root,
+            Command::Respond {
+                request: request.id,
+                decision: if answers.is_some() {
+                    None
+                } else {
+                    Some(decision)
+                },
+                answers,
+                attachments: BTreeMap::new(),
+            },
+        );
+    }
+    /// Performs the user action an expected outbound frame implies when the
+    /// translators have nothing left to send.
+    fn user_action(&mut self, rows: &[Value], index: usize) {
+        let frame = &rows[index]["frame"];
+        let method = string(frame, "method");
+        let kind = string(frame, "type");
+        let prompt = |frame: &Value| {
+            if frame["type"] == "prompt.offer" {
+                string(&frame["message"]["message"], "content")
+            } else {
+                frame["params"]["input"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|b| b["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        };
+        match (method.as_str(), kind.as_str()) {
+            ("initialize", _) => {
+                let frame = self.codex.initialize(&self.context);
+                self.pending.push_back(frame);
+            }
+            ("thread/start" | "thread/resume" | "thread/inject_items" | "turn/start", _) => {
+                let start = rows[index..]
+                    .iter()
+                    .find(|row| {
+                        row["type"] == "expect_outbound" && row["frame"]["method"] == "turn/start"
+                    })
+                    .map(|row| prompt(&row["frame"]))
+                    .unwrap_or_default();
+                self.send(start, false);
+                if self.scenario == "queued_turn" && self.state().runs.len() == 1 {
+                    let second = rows[index + 1..]
+                        .iter()
+                        .filter(|row| {
+                            row["type"] == "expect_outbound"
+                                && row["frame"]["method"] == "turn/start"
+                        })
+                        .nth(1)
+                        .map(|row| prompt(&row["frame"]))
+                        .unwrap();
+                    self.send(second, false);
+                }
+            }
+            ("turn/steer", _) => self.send(prompt(frame), true),
+            (_, "prompt.offer") => {
+                let steer = frame["message"]["priority"] == "now";
+                self.send(prompt(frame), steer);
+                if self.scenario == "queued_turn" && self.state().runs.len() == 1 {
+                    let second = rows[index + 1..]
+                        .iter()
+                        .find(|row| {
+                            row["type"] == "expect_outbound"
+                                && row["frame"]["type"] == "prompt.offer"
+                        })
+                        .map(|row| prompt(&row["frame"]))
+                        .unwrap();
+                    self.send(second, false);
+                }
+            }
+            ("turn/interrupt" | "thread/backgroundTerminals/terminate", _)
+            | (_, "query.interrupt") => {
+                let root = self.root.clone();
+                self.command(&root, Command::Stop);
+            }
+            ("thread/compact/start", _) => {
+                let root = self.root.clone();
+                self.command(&root, Command::Compact);
+            }
+            ("", "permission.response") | ("", "") if frame.get("result").is_some() => {
+                self.respond(frame)
+            }
+            _ => {}
+        }
+    }
+    fn expect(&mut self, rows: &[Value], index: usize) {
+        if self.pending.is_empty() {
+            self.user_action(rows, index);
+        }
+        let expected = &rows[index]["frame"];
+        let mut actual = self.pending.pop_front().unwrap_or_else(|| {
+            panic!(
+                "{} {:?} row {index}: expected {expected} but nothing was sent",
+                self.scenario, self.driver
+            )
+        });
+        // The reference recorder offered some prompts without a message UUID.
+        if expected["type"] == "prompt.offer" && expected["message"].get("uuid").is_none() {
+            actual["message"]
+                .as_object_mut()
+                .map(|message| message.remove("uuid"));
+        }
+        assert_eq!(
+            normalized_frame(&actual, &self.ignored_config),
+            normalized_frame(expected, &self.ignored_config),
+            "{} {:?} row {index}",
+            self.scenario,
+            self.driver
+        );
+    }
+    /// A new CLI process: its launch must resume the session the thread holds.
+    fn open_query(&mut self, frame: &Value) {
+        let thread = self.state().thread.clone().unwrap();
+        let instance = &thread.selection.instance;
+        let launch = ClaudeLaunch {
+            model: thread.selection.model.clone(),
+            policy: claude_runtime_query_policy(
+                thread.runtime_mode,
+                thread.interaction_mode,
+                None,
+                None,
+                false,
+            ),
+            native_session: self.state().native_sessions.get(instance).cloned(),
+            new_session: None,
+            resume_at: self.state().native_heads.get(instance).cloned().flatten(),
+            fork: false,
+            additional_directories: vec![],
+            effort: None,
+            disallowed_tools: vec![],
+            mcp_servers: BTreeMap::new(),
+            settings: None,
+            extra_args: BTreeMap::new(),
+        };
+        let args = launch.args();
+        let value = |name: &str| {
+            args.iter()
+                .find_map(|arg| arg.strip_prefix(&format!("--{name}=")).map(str::to_owned))
+                .or_else(|| {
+                    args.iter()
+                        .position(|arg| arg == &format!("--{name}"))
+                        .map(|index| args[index + 1].clone())
+                })
+        };
+        let options = &frame["options"];
+        assert_eq!(value("model").as_deref(), options["model"].as_str());
+        assert_eq!(
+            value("settings").map(|settings| serde_json::from_str::<Value>(&settings).unwrap()),
+            Some(options["settings"].clone())
+        );
+        assert_eq!(
+            value("resume").as_deref(),
+            options["resume"].as_str(),
+            "{}",
+            self.scenario
+        );
+        if options["resume"].is_string() {
+            assert_eq!(
+                value("resume-session-at").as_deref(),
+                options["resumeSessionAt"].as_str(),
+                "{}",
+                self.scenario
+            );
+        }
+        self.claude = ClaudeProtocol::default();
+        for state in self.states.values() {
+            for task in &state.tasks {
+                if let Some(native_task) = &task.native_task {
+                    let parent = task.parent_task.as_ref().and_then(|id| {
+                        self.states
+                            .values()
+                            .flat_map(|state| &state.tasks)
+                            .find(|candidate| &candidate.id == id)
+                            .map(|parent| parent.native_key.as_str())
+                    });
+                    self.claude
+                        .restore_task_route(native_task, &task.native_key, parent, true);
+                }
+            }
+            for (key, work) in &state.background_work {
+                self.claude.restore_task_route(key, &work.tool, None, false);
+            }
+        }
+        let root = self.root.clone();
+        let instance = self
+            .state()
+            .thread
+            .as_ref()
+            .unwrap()
+            .selection
+            .instance
+            .clone();
+        let attempt = self
+            .state()
+            .active_run()
+            .and_then(|run| run.attempt.clone());
+        self.apply(&root, Input::RuntimeOpened { instance, attempt });
+    }
     fn run(scenario: &str, driver: Driver) -> Self {
         let rows = transcript(scenario, driver);
-        let offered: Vec<String> = rows
-            .iter()
-            .filter(|row| row["type"] == "expect_outbound")
-            .filter_map(|row| {
-                let f = &row["frame"];
-                if f["type"] == "prompt.offer" {
-                    Some(string(&f["message"]["message"], "content"))
-                } else if f["method"] == "turn/start" {
-                    Some(
-                        f["params"]["input"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .filter_map(|b| b["text"].as_str())
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    )
-                } else {
-                    None
-                }
-            })
-            .collect();
         let mut replay = Self::new(driver, &rows);
-        for row in &rows {
-            let frame = &row["frame"];
-            if row["type"] == "emit_inbound" {
-                replay.receive(frame);
+        replay.strict = true;
+        // The recorder's explicit runtime policy is an input of the turn.
+        if let Some(start) = rows
+            .iter()
+            .find(|row| row["type"] == "expect_outbound" && row["frame"]["method"] == "turn/start")
+        {
+            let params = &start["frame"]["params"];
+            if !params["approvalPolicy"].is_null() && params["approvalPolicy"] != "never" {
+                replay.context.approval_policy = Some(Json(params["approvalPolicy"].clone()));
             }
-            if row["type"] == "runtime_exit"
-                && let Some(owner) = replay.owner.clone()
+            if params["sandboxPolicy"].is_object()
+                && params["sandboxPolicy"]["type"] != "dangerFullAccess"
             {
-                let root = replay.root.clone();
-                replay.apply(
-                    &root,
-                    Input::Provider {
-                        attempt: owner,
-                        event: Box::new(ProviderEvent::SessionClosed {
-                            error: if row["status"] == "success" {
-                                None
-                            } else {
-                                Some("Provider process exited".into())
-                            },
-                        }),
-                    },
-                );
+                replay.context.sandbox_policy = Some(Json(params["sandboxPolicy"].clone()));
             }
-            if row["type"] != "expect_outbound" {
-                continue;
-            }
-            if driver == Driver::Codex {
-                replay.codex.replay_outbound(frame);
-            }
-            let method = string(frame, "method");
-            let kind = string(frame, "type");
-            if kind == "query.open" {
-                replay.claude = ClaudeProtocol::default();
-                for state in replay.states.values() {
-                    for task in &state.tasks {
-                        if let Some(native_task) = &task.native_task {
-                            let parent = task.parent_task.as_ref().and_then(|id| {
-                                replay
-                                    .states
-                                    .values()
-                                    .flat_map(|state| &state.tasks)
-                                    .find(|candidate| &candidate.id == id)
-                                    .map(|parent| parent.native_key.as_str())
-                            });
-                            replay.claude.restore_task_route(
-                                native_task,
-                                &task.native_key,
-                                parent,
-                                true,
-                            );
-                        }
-                    }
-                    for (key, work) in &state.background_work {
-                        replay
-                            .claude
-                            .restore_task_route(key, &work.tool, None, false);
-                    }
-                }
-                let root = replay.root.clone();
-                replay.apply(
-                    &root,
-                    Input::RuntimeOpened {
-                        instance: replay
-                            .state()
-                            .thread
-                            .as_ref()
-                            .unwrap()
-                            .selection
-                            .instance
-                            .clone(),
-                        attempt: replay
-                            .state()
-                            .active_run()
-                            .and_then(|run| run.attempt.clone()),
-                    },
-                );
-            }
-
-            if method == "turn/start" || method == "turn/steer" || kind == "prompt.offer" {
-                let text = if driver == Driver::Claude {
-                    string(&frame["message"]["message"], "content")
-                } else {
-                    frame["params"]["input"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .filter_map(|b| b["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                };
-                if !(scenario == "queued_turn" && replay.state().runs.len() == 2) {
-                    replay.send(
-                        text,
-                        method == "turn/steer" || frame["message"]["priority"] == "now",
-                    );
-                } else if driver == Driver::Codex {
-                    replay.owner = replay.state().active_run().and_then(|r| r.attempt.clone());
-                }
-                if scenario == "queued_turn" && replay.state().runs.len() == 1 {
-                    replay.send(offered[1].clone(), false);
-                }
-                if driver == Driver::Codex
-                    && let Some(native_thread) = optional(&frame["params"], "threadId")
-                {
-                    let root = replay.root.clone();
-                    let attempt = replay.owner.clone().unwrap();
-                    replay.apply(
-                        &root,
-                        Input::Provider {
-                            attempt,
-                            event: Box::new(ProviderEvent::SessionReady { native_thread }),
-                        },
-                    );
-                }
-            } else if method == "turn/interrupt" || kind == "query.interrupt" {
-                let root = replay.root.clone();
-                replay.command(&root, Command::Stop);
-            } else if (kind == "permission.response"
-                || frame.get("result").is_some() && frame.get("id").is_some())
-                && let Some(request) = replay
-                    .state()
-                    .requests
-                    .iter()
-                    .find(|r| r.status == RequestStatus::Pending)
-                    .cloned()
+            if params["collaborationMode"]["settings"]
+                .get("developer_instructions")
+                .is_some()
             {
+                replay.context.developer_instructions = Some("<recorded>".into());
+            }
+            if params["collaborationMode"]["mode"] == "plan" {
                 let root = replay.root.clone();
-                let decision = if frame["result"]["behavior"] == "deny" {
-                    ApprovalDecision::Decline
-                } else {
-                    ApprovalDecision::Accept
-                };
-                let answers = frame["result"]["answers"].as_object().map(|a| {
-                    a.iter()
-                        .map(|(key, value)| {
-                            (
-                                key.clone(),
-                                Answer::Choices(
-                                    value["answers"]
-                                        .as_array()
-                                        .unwrap()
-                                        .iter()
-                                        .map(|v| v.as_str().unwrap().into())
-                                        .collect(),
-                                ),
-                            )
-                        })
-                        .collect()
-                });
                 replay.command(
                     &root,
-                    Command::Respond {
-                        request: request.id,
-                        decision: if answers.is_some() {
-                            None
-                        } else {
-                            Some(decision)
-                        },
-                        answers,
-                        attachments: BTreeMap::new(),
+                    Command::InteractionMode {
+                        mode: InteractionMode::Plan,
                     },
                 );
             }
         }
+        for (index, row) in rows.iter().enumerate() {
+            let frame = &row["frame"];
+            match row["type"].as_str() {
+                Some("emit_inbound") => replay.receive(frame),
+                Some("runtime_exit") => {
+                    if let Some(owner) = replay.owner.clone() {
+                        let root = replay.root.clone();
+                        replay.apply(
+                            &root,
+                            Input::Provider {
+                                attempt: owner,
+                                event: Box::new(ProviderEvent::SessionClosed {
+                                    error: if row["status"] == "success" {
+                                        None
+                                    } else {
+                                        Some("Provider process exited".into())
+                                    },
+                                }),
+                            },
+                        );
+                    }
+                    if driver == Driver::Codex {
+                        replay.codex = CodexProtocol::default();
+                    }
+                }
+                Some("expect_outbound") => match string(frame, "type").as_str() {
+                    "query.open" => replay.open_query(frame),
+                    "subagent.lookup" | "session.fork" => {}
+                    _ => replay.expect(&rows, index),
+                },
+                _ => {}
+            }
+        }
+        assert!(
+            replay.pending.is_empty(),
+            "{scenario} {driver:?}: unexpected outbound {:?}",
+            replay.pending
+        );
         replay
     }
     fn statuses(&self) -> Vec<RunStatus> {
@@ -782,37 +1076,144 @@ fn background_command_and_monitor_replays_keep_roster_notifications_and_wake_own
         }
     }
 }
+fn request_kind(request: &Request) -> &str {
+    match &request.body {
+        RequestBody::Approval { kind, .. } => kind,
+        RequestBody::Questions { .. } => "user_input",
+    }
+}
+fn has_item(state: &State, kind: fn(&ItemKind) -> bool) -> bool {
+    state.items.iter().any(|item| kind(&item.kind))
+}
+// T3 fixtures/tool_call_read_only_on_request/output.ts.
 #[test]
-fn tool_approval_replays_resolve_the_original_request_once() {
+fn read_only_on_request_replays_ask_once_and_run_the_approved_write() {
+    const PROBE_FILE: &str = ".codex-probe-write-action.txt";
+    const PROBE_CONTENT: &str = "codex app-server approval fixture";
     for driver in [Driver::Codex, Driver::Claude] {
-        for scenario in [
-            "tool_call_read_only_on_request",
-            "tool_call_restricted_granular",
-        ] {
-            let replay = Replay::run(scenario, driver);
-            replay.integrity();
-            assert_eq!(replay.statuses(), vec![RunStatus::Completed]);
-            assert_eq!(replay.state().requests.len(), 1);
-            assert_eq!(replay.state().requests[0].status, RequestStatus::Resolved);
+        let replay = Replay::run("tool_call_read_only_on_request", driver);
+        replay.integrity();
+        assert_eq!(replay.statuses(), vec![RunStatus::Completed]);
+        let state = replay.state();
+        assert_eq!(state.requests.len(), 1, "{driver:?}");
+        let request = &state.requests[0];
+        assert_eq!(request.status, RequestStatus::Resolved);
+        assert_eq!(request.decision, Some(ApprovalDecision::Accept));
+        let kind = request_kind(request);
+        assert!(["command", "file-change"].contains(&kind), "{kind}");
+        let approvals = state
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::ApprovalRequest { request } => Some(request),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(approvals, [&request.id]);
+        let writes = state
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::CommandExecution { command, .. }
+                    if kind == "command" && command.contains(PROBE_FILE) =>
+                {
+                    Some((item.status, command.clone()))
+                }
+                ItemKind::FileChange { changes }
+                    if kind == "file-change" && changes.0.to_string().contains(PROBE_FILE) =>
+                {
+                    Some((item.status, changes.0.to_string()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(!writes.is_empty(), "{driver:?}");
+        assert!(
+            writes
+                .iter()
+                .any(|(status, _)| *status == ItemStatus::Completed)
+        );
+        assert!(
+            writes
+                .iter()
+                .all(|(_, content)| content.contains(PROBE_CONTENT))
+        );
+    }
+}
+// T3 fixtures/tool_call_restricted_granular/output.ts and claude_output.ts.
+#[test]
+fn restricted_granular_replays_resolve_one_request_of_the_reference_kind() {
+    for (driver, kind) in [(Driver::Codex, "file-change"), (Driver::Claude, "command")] {
+        let replay = Replay::run("tool_call_restricted_granular", driver);
+        replay.integrity();
+        assert_eq!(replay.statuses(), vec![RunStatus::Completed]);
+        let state = replay.state();
+        assert_eq!(
+            state.requests.iter().map(request_kind).collect::<Vec<_>>(),
+            [kind]
+        );
+        assert!(
+            state
+                .requests
+                .iter()
+                .all(|r| r.status == RequestStatus::Resolved)
+        );
+        assert!(has_item(state, |k| matches!(
+            k,
+            ItemKind::UserMessage { .. }
+        )));
+        assert!(has_item(state, |k| matches!(
+            k,
+            ItemKind::ApprovalRequest { .. }
+        )));
+        assert!(has_item(state, |k| matches!(
+            k,
+            ItemKind::AssistantMessage { .. }
+        )));
+        if driver == Driver::Claude {
+            assert!(has_item(state, |k| matches!(
+                k,
+                ItemKind::CommandExecution { .. }
+            )));
             assert!(
                 replay
-                    .state()
-                    .items
-                    .iter()
-                    .any(|i| matches!(i.kind, ItemKind::ApprovalRequest { .. }))
+                    .replies(&state.runs[0].id)
+                    .join("\n")
+                    .contains("codex app-server approval fixture")
             );
+        } else {
+            assert!(has_item(state, |k| matches!(
+                k,
+                ItemKind::FileChange { .. }
+            )));
         }
     }
+}
+// T3 fixtures/tool_call_denied_write/claude_output.ts.
+#[test]
+fn denied_write_replay_declines_once_and_fails_the_write() {
     let replay = Replay::run("tool_call_denied_write", Driver::Claude);
     replay.integrity();
+    assert_eq!(replay.statuses(), vec![RunStatus::Completed]);
+    let state = replay.state();
     assert_eq!(
-        replay.state().requests[0].decision,
-        Some(ApprovalDecision::Decline)
+        state.requests.iter().map(request_kind).collect::<Vec<_>>(),
+        ["file-change"]
     );
+    assert_eq!(state.requests[0].status, RequestStatus::Resolved);
+    assert_eq!(state.requests[0].decision, Some(ApprovalDecision::Decline));
+    let writes = state
+        .items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::FileChange { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].status, ItemStatus::Failed);
     assert!(
         replay
-            .replies(&replay.state().runs[0].id)
-            .contains(&"write permission denied".into())
+            .replies(&state.runs[0].id)
+            .join("\n")
+            .contains("write permission denied")
     );
 }
 #[test]
@@ -1348,6 +1749,7 @@ fn native_subagent_threads_refuse_messages_with_the_reference_error_and_no_proje
                 mode: DispatchMode::StartImmediately,
                 intent: None,
                 source_plan: None,
+                title_seed: None,
             }),
         );
         assert_eq!(reply,Reply::Rejected {reason:"This subagent is run by its provider and cannot take messages. Message the parent thread instead.".into()});

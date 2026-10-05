@@ -2,16 +2,24 @@
 mod attachments;
 mod claude;
 mod claude_control;
+mod claude_fork;
+mod claude_models;
 mod codex;
+mod codex_tools;
 mod elicitation;
+mod skills;
 mod stdio;
 use agent_domain::*;
 pub use attachments::*;
 pub use claude::*;
 pub use claude_control::*;
+pub use claude_fork::*;
+pub use claude_models::*;
 pub use codex::*;
+use codex_tools::*;
 pub use elicitation::*;
 use serde_json::Value;
+pub use skills::*;
 pub use stdio::*;
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -20,6 +28,13 @@ pub struct Translation {
     pub outbound: Vec<Value>,
     pub process: Option<ProcessDirective>,
     pub replies: Vec<NativeReply>,
+    /// A native operation that finished without a turn event.
+    pub completion: Option<Completion>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub enum Completion {
+    RolledBack { native_thread: String },
+    Forked { native_thread: String },
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProcessDirective {
@@ -118,7 +133,8 @@ fn item_status(value: &str) -> ItemStatus {
     match value {
         "failed" | "error" => ItemStatus::Failed,
         "interrupted" => ItemStatus::Interrupted,
-        "cancelled" => ItemStatus::Cancelled,
+        "cancelled" | "declined" => ItemStatus::Cancelled,
+        "inProgress" => ItemStatus::Running,
         _ => ItemStatus::Completed,
     }
 }

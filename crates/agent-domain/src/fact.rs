@@ -135,12 +135,31 @@ pub enum FactBody {
         owner: RunAttemptId,
         parent: ThreadId,
         task: NodeId,
+        generation: u64,
     },
     NativeChildTurnBound {
         native_turn: Option<String>,
     },
     ThreadRenamed {
         title: String,
+    },
+    ThreadUnsettled,
+    ThreadImported,
+    WorkspaceBound {
+        workspace: Option<Workspace>,
+    },
+    TitleRequested {
+        request: CommandId,
+    },
+    TitleRequestCleared,
+    RunRestarting {
+        id: RunId,
+        selection: ModelSelection,
+    },
+    ItemMoved {
+        id: TurnItemId,
+        run: RunId,
+        ordinal: Option<u64>,
     },
     ThreadArchived {
         archived: bool,
@@ -327,6 +346,7 @@ pub enum FactBody {
         run: RunId,
     },
     CheckpointCaptured {
+        status: CheckpointStatus,
         scope: Option<CheckpointScope>,
         id: CheckpointId,
         run: Option<RunId>,
@@ -351,6 +371,7 @@ pub enum FactBody {
         parent: ThreadId,
         boundary: u64,
         history: Vec<Item>,
+        messages: Vec<Message>,
     },
     TransferOpened {
         native_fork: Option<String>,
@@ -677,6 +698,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 auto_settle: true,
                 parent: None,
                 fork_boundary: None,
+                workspace: None,
+                title_request: None,
+                imported: false,
             });
         }
         ChildEventDeferred { key, event } => state
@@ -692,7 +716,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             owner,
             parent,
             task,
+            generation,
         } => {
+            state.native_generation = *generation;
             state.native_owner = Some(owner.clone());
             state.native_child_thread = native_thread.clone();
             state.native_child_turn = None;
@@ -711,11 +737,54 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             state.native_turn_usage = None;
         }
         ThreadRenamed { title } => {
+            let thread = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
+            thread.title = title.clone();
+            thread.title_request = None;
+        }
+        ThreadImported => {
             state
                 .thread
                 .as_mut()
                 .ok_or(FoldError::Missing("thread"))?
-                .title = title.clone()
+                .imported = true
+        }
+        WorkspaceBound { workspace } => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .workspace = workspace.clone()
+        }
+        TitleRequested { request } => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .title_request = Some(request.clone())
+        }
+        TitleRequestCleared => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .title_request = None
+        }
+        ThreadUnsettled => {
+            let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
+            t.settled = None;
+            t.settled_at = None;
+        }
+        RunRestarting { id, selection } => {
+            let run = find_mut(&mut state.runs, "run", |r| &r.id == id)?;
+            run.status = RunStatus::Starting;
+            run.selection = selection.clone();
+        }
+        ItemMoved { id, run, ordinal } => {
+            let item = find_mut(&mut state.items, "item", |i| &i.id == id)?;
+            item.run = Some(run.clone());
+            if let Some(ordinal) = ordinal {
+                item.ordinal = *ordinal;
+            }
         }
         ThreadArchived { archived } => {
             state
@@ -960,6 +1029,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 native_thread: None,
                 native_turn: None,
                 native_head: None,
+                accepted: false,
                 usage: None,
                 context_usage: None,
                 turn_usage: None,
@@ -1004,6 +1074,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             let a = find_mut(&mut state.attempts, "attempt", |a| &a.id == attempt)?;
             a.native_turn = native_turn.clone();
             a.status = AttemptStatus::Running;
+            a.accepted = true;
             let run = a.run.clone();
             find_mut(&mut state.runs, "run", |r| r.id == run)?.status = RunStatus::Running;
         }
@@ -1149,6 +1220,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             find_mut(&mut state.plans, "plan", |p| &p.id == id)?.implemented_by = Some(run.clone())
         }
         CheckpointCaptured {
+            status,
             scope,
             id,
             run,
@@ -1156,14 +1228,20 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             native_heads,
             file_ref,
         } => {
-            state.checkpoints.push(Checkpoint {
+            let checkpoint = Checkpoint {
+                status: *status,
                 scope: scope.clone(),
                 id: id.clone(),
                 run: run.clone(),
                 run_ordinal: *run_ordinal,
                 native_heads: native_heads.clone(),
                 file_ref: file_ref.clone(),
-            });
+            };
+            if let Some(existing) = state.checkpoints.iter_mut().find(|c| &c.id == id) {
+                *existing = checkpoint;
+            } else {
+                state.checkpoints.push(checkpoint);
+            }
             if let Some(run) = run {
                 find_mut(&mut state.runs, "run", |r| &r.id == run)?.checkpoint = Some(id.clone());
             }
@@ -1196,13 +1274,26 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 .iter()
                 .find(|c| &c.id == checkpoint)
                 .ok_or(FoldError::Missing("checkpoint"))?;
+            let (target, scope) = (cp.run_ordinal, cp.scope.clone());
+            state.native_heads = cp.native_heads.clone();
             for run in &mut state.runs {
-                if run.ordinal > cp.run_ordinal {
+                if run.ordinal > target
+                    && run.status.terminal()
+                    && run.status != RunStatus::RolledBack
+                {
                     run.status = RunStatus::RolledBack;
                     run.completed_at = Some(at.clone());
+                    state.captures.remove(&run.id);
                 }
             }
-            state.native_heads = cp.native_heads.clone();
+            for checkpoint in &mut state.checkpoints {
+                if checkpoint.scope == scope
+                    && checkpoint.run_ordinal > target
+                    && checkpoint.status == CheckpointStatus::Ready
+                {
+                    checkpoint.status = CheckpointStatus::Stale;
+                }
+            }
             state.rollback = None;
         }
         RollbackFailed { command, message } => {
@@ -1220,11 +1311,13 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             parent,
             boundary,
             history,
+            messages,
         } => {
             let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
             t.parent = Some(parent.clone());
             t.fork_boundary = Some(*boundary);
             state.inherited_items = history.clone();
+            state.inherited_messages = messages.clone();
         }
         TransferOpened {
             native_fork,
@@ -1323,6 +1416,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 result: None,
                 progress: None,
                 delivery: DeliveryState::Pending,
+                generation: 0,
             });
         }
         TaskProgressed {
@@ -1362,6 +1456,16 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             t.started_at = at.clone();
             t.delivery = DeliveryState::Pending;
             t.completed_at = None;
+            t.generation += 1;
+            for item in &mut state.items {
+                if matches!(&item.kind, ItemKind::Subagent { task } if task == id) {
+                    item.status = ItemStatus::Running;
+                    item.run = run.clone();
+                    item.attempt = Some(attempt.clone());
+                    item.started_at = at.clone();
+                    item.completed_at = None;
+                }
+            }
         }
         TaskWakeChanged { id, wake } => {
             find_mut(&mut state.tasks, "task", |t| &t.id == id)?.wake = *wake
@@ -1378,6 +1482,49 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
     }
     Ok(())
 }
+/// Largest text carried by one fact. Longer text is split across appends so
+/// each fact fits a transport frame; nothing is truncated.
+pub const MAX_FACT_TEXT: usize = 1 << 20;
+/// Largest encoded JSON value kept on one fact.
+pub const MAX_FACT_JSON: usize = 4 << 20;
+pub fn text_chunks(text: &str) -> Vec<&str> {
+    let mut chunks = vec![];
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(MAX_FACT_TEXT);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunks.push(&rest[..end]);
+        rest = &rest[end..];
+    }
+    chunks
+}
+/// JSON larger than `MAX_FACT_JSON` is replaced by its size; the item text
+/// keeps the readable output.
+pub fn bounded_json(value: &Json) -> Json {
+    let size = serde_json::to_vec(&value.0).map_or(0, |bytes| bytes.len());
+    if size > MAX_FACT_JSON {
+        Json(serde_json::json!({"omittedBytes": size}))
+    } else {
+        value.clone()
+    }
+}
+/// Reference failure text bounds: UTF-16 units, cut with an ellipsis.
+pub fn bounded_failure_text(text: &str, max: usize) -> String {
+    let units = text.encode_utf16().collect::<Vec<_>>();
+    if units.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max - 1;
+    if (0xDC00..=0xDFFF).contains(&units[end]) {
+        end -= 1;
+    }
+    String::from_utf16_lossy(&units[..end]) + "…"
+}
+/// Version of the folded `State` and `Fact` encodings. Stored snapshots with
+/// another value are rebuilt from facts.
+pub const STATE_FORMAT: u32 = 1;
 pub fn fold(initial: &State, facts: &[Fact]) -> Result<State, FoldError> {
     let mut state = initial.clone();
     for fact in facts {

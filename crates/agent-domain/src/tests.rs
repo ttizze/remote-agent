@@ -39,6 +39,7 @@ fn state() -> State {
             selection: selection(),
             runtime_mode: RuntimeMode::FullAccess,
             interaction_mode: InteractionMode::Default,
+            workspace: None,
         },
     );
     s
@@ -59,6 +60,7 @@ fn send_message(key: &str, mode: DispatchMode) -> Command {
         mode,
         intent: None,
         source_plan: None,
+        title_seed: None,
     })
 }
 fn provider(s: &mut State, key: &str, attempt: &RunAttemptId, event: ProviderEvent) -> Step {
@@ -105,6 +107,15 @@ fn running(s: &mut State, key: &str) -> (RunId, RunAttemptId) {
             native_turn: Some(key.into()),
         },
     );
+    (run, attempt)
+}
+/// A run whose provider has not accepted the turn yet, so completions queue.
+fn starting(s: &mut State, key: &str) -> (RunId, RunAttemptId) {
+    let Reply::Run(run) = command(s, key, send_message(key, DispatchMode::StartImmediately)).reply
+    else {
+        panic!()
+    };
+    let attempt = s.active_run().unwrap().attempt.clone().unwrap();
     (run, attempt)
 }
 fn finish(s: &mut State, attempt: &RunAttemptId) {
@@ -183,8 +194,10 @@ fn steering_preserves_run_and_attempt_and_records_the_input_intent() {
         EffectBody::Provider(ProviderCommand::Steer { .. })
     ));
 }
+// T3 SelectionRestart.integration.test.ts and RunExecutionService.test.ts: a superseded
+// attempt gets no interrupt rows and no subagent cascade.
 #[test]
-fn restart_supersedes_attempt_and_interrupts_native_children() {
+fn restart_supersedes_attempt_and_leaves_native_children_to_their_provider() {
     let mut s = state();
     let (run, a) = running(&mut s, "first");
     provider(
@@ -200,13 +213,44 @@ fn restart_supersedes_attempt_and_interrupts_native_children() {
             model: None,
         },
     );
-    command(
+    let restart = command(
         &mut s,
         "restart",
         send_message("restart", DispatchMode::RestartActive { run }),
     );
-    assert_eq!(s.attempts[0].status, AttemptStatus::Superseded);
-    assert_eq!(s.tasks[0].status, ItemStatus::Interrupted);
+    assert_eq!(
+        s.attempts.iter().map(|a| a.status).collect::<Vec<_>>(),
+        [AttemptStatus::Superseded, AttemptStatus::Pending]
+    );
+    assert_eq!(s.runs[0].status, RunStatus::Starting);
+    assert_eq!(s.tasks[0].status, ItemStatus::Running);
+    assert!(!restart.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::SendToThread { command, .. } if matches!(command.as_ref(), Command::Stop)
+    )));
+    assert!(!s.items.iter().any(|item| matches!(
+        item.kind,
+        ItemKind::RunInterruptRequest | ItemKind::RunInterruptResult { .. }
+    )));
+    let next = s.runs[0].attempt.clone().unwrap();
+    let routed = provider(
+        &mut s,
+        "child-output",
+        &next,
+        ProviderEvent::Child {
+            key: "child".into(),
+            event: Box::new(ProviderEvent::TextDelta {
+                key: "child-text".into(),
+                kind: ProviderItem::Text,
+                text: "still working".into(),
+            }),
+        },
+    );
+    assert!(routed.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::SendToThread { command, .. }
+            if matches!(command.as_ref(), Command::NativeInput { attempt, .. } if attempt == &a)
+    )));
     let before = s.clone();
     let late = provider(
         &mut s,
@@ -220,6 +264,75 @@ fn restart_supersedes_attempt_and_interrupts_native_children() {
     );
     assert_eq!(late.reply, Reply::Ignored);
     assert_eq!(s, before);
+}
+fn claude_selection() -> ModelSelection {
+    ModelSelection {
+        instance: "claude".into(),
+        driver: Driver::Claude,
+        model: "claude-sonnet-4-6".into(),
+        options: BTreeMap::new(),
+    }
+}
+// T3 CommandPolicy.test.ts: providers without interrupt-and-restart reject a required restart.
+#[test]
+fn restart_and_steering_respect_capabilities_and_maintenance_turns() {
+    let mut s = state();
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider {
+            selection: claude_selection(),
+        },
+    );
+    let (run, _) = running(&mut s, "first");
+    let mut restart = send_message("restart", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut restart {
+        message.intent = Some(DeliveryIntent::Restart);
+    }
+    assert_eq!(
+        command(&mut s, "restart", restart).reply,
+        Reply::Rejected {
+            reason: "restart-unsupported".into()
+        }
+    );
+    let mut compact = send_message(
+        "compact-steer",
+        DispatchMode::SteerActive { run: run.clone() },
+    );
+    if let Command::Send(message) = &mut compact {
+        message.text = " /Compact ".into();
+    }
+    assert_eq!(
+        command(&mut s, "compact-steer", compact).reply,
+        Reply::Rejected {
+            reason: "maintenance-must-run-separately".into()
+        }
+    );
+    let mut s = state();
+    let mut logout = send_message("logout", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut logout {
+        message.text = "/logout".into();
+    }
+    command(&mut s, "logout", logout);
+    let run = s.runs[0].id.clone();
+    let a = s.runs[0].attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "started",
+        &a,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    assert_eq!(
+        command(
+            &mut s,
+            "steer",
+            send_message("steer", DispatchMode::SteerActive { run })
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "maintenance-in-progress".into()
+        }
+    );
 }
 #[test]
 fn stop_during_start_emits_interrupt_even_without_native_turn() {
@@ -283,6 +396,7 @@ fn completed_steer_becomes_one_followup_on_the_original_selection() {
         message: "completed".into(),
         message_id: Some(MessageId::new("steer").unwrap()),
         turn_completed: true,
+        session_lost: false,
     };
     result(&mut s, "fallback", failure.clone());
     result(&mut s, "fallback-retry", failure);
@@ -304,6 +418,7 @@ fn failed_control_operation_keeps_live_native_work_authoritative() {
             message: "transport error".into(),
             message_id: None,
             turn_completed: false,
+            session_lost: false,
         },
     );
     assert_eq!(s.runs[0].status, RunStatus::Running);
@@ -472,6 +587,7 @@ fn checkpoint(s: &mut State, run: &RunId, attempt: &RunAttemptId, key: &str) -> 
             })
         })
         .map(|ordinal| CapturedBaseline {
+            status: CheckpointStatus::Ready,
             checkpoint: CheckpointId::new(format!("{key}-baseline-{ordinal}")).unwrap(),
             ordinal,
             file_ref: format!("baseline-{ordinal}"),
@@ -488,6 +604,7 @@ fn checkpoint(s: &mut State, run: &RunId, attempt: &RunAttemptId, key: &str) -> 
         s,
         key,
         EffectResult::CheckpointCaptured {
+            status: CheckpointStatus::Ready,
             baselines,
             run: run.clone(),
             attempt: Some(attempt.clone()),
@@ -626,7 +743,7 @@ fn recovery_keeps_lost_work_for_its_provider_until_a_completed_non_compact_turn(
         "after-compact",
         send_message("continue", DispatchMode::StartImmediately),
     );
-    assert!(start.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start { text, .. }) if text == "Note: the T3 server restarted, and this background work was cancelled before it finished. It will not report back:\n- subagent: Background subagent test\n\nUser message:\ncontinue")));
+    assert!(start.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start { text, note, .. }) if provider_prompt(text, note.as_deref(), None) == "Note: the T3 server restarted, and this background work was cancelled before it finished. It will not report back:\n- subagent: Background subagent test\n\nUser message:\ncontinue")));
     let delivered = s.active_run().unwrap().attempt.clone().unwrap();
     provider(
         &mut s,
@@ -740,6 +857,7 @@ fn restart_continuation_precedes_held_queue_and_carries_notes_across_an_unaccept
                     description: "sleep 20".into(),
                     status: None,
                     summary: None,
+                    exit_code: None,
                 },
             );
         }
@@ -1013,6 +1131,7 @@ fn recovered_native_children_reject_old_output_and_remain_provider_owned() {
             owner: owner.clone(),
             parent: ThreadId::new("parent").unwrap(),
             task: NodeId::new("task").unwrap(),
+            generation: 0,
         },
     );
     provider(
@@ -1170,6 +1289,7 @@ fn merge_back_supersedes_pending_delta_and_excludes_inherited_history() {
         "merge",
         Command::MergeBack {
             target: ThreadId::new("thread").unwrap(),
+            through_run: None,
         },
     );
     let EffectBody::SendToThread {
@@ -1344,6 +1464,7 @@ fn plan_followup_preserves_attachments_and_consumes_the_proposal() {
             mode: DispatchMode::StartImmediately,
             intent: None,
             source_plan: Some(plan),
+            title_seed: None,
         }),
     );
     assert_eq!(s.plans[0].implemented_by, Some(s.runs[1].id.clone()));
@@ -1436,7 +1557,7 @@ fn approvals_resolve_once_and_questions_keep_attachment_answers() {
 #[test]
 fn cancelled_delegated_wake_stays_disposed_after_reconciliation() {
     let mut s = state();
-    let (_, a) = running(&mut s, "first");
+    let (_, a) = starting(&mut s, "first");
     let task = NodeId::new("task").unwrap();
     command(
         &mut s,
@@ -1458,6 +1579,7 @@ fn cancelled_delegated_wake_stays_disposed_after_reconciliation() {
         &mut s,
         "task-result",
         Command::TaskResult {
+            generation: None,
             source_message,
             context: None,
             task: task.clone(),
@@ -1734,7 +1856,7 @@ fn automatic_delivery_obeys_negotiated_turn_capabilities() {
 #[test]
 fn automatic_completion_delivery_precedes_visible_queued_messages() {
     let mut s = state();
-    running(&mut s, "parent");
+    starting(&mut s, "parent");
     command(
         &mut s,
         "visible-first",
@@ -1766,6 +1888,7 @@ fn automatic_completion_delivery_precedes_visible_queued_messages() {
         &mut s,
         "result",
         Command::TaskResult {
+            generation: None,
             source_message,
             context: None,
             task: task.clone(),
@@ -1841,8 +1964,9 @@ fn visible_items_sort_by_authoritative_ordinal_and_keep_inherited_rows() {
     );
 }
 
+// T3 CheckpointCaptureService.test.ts: a capture without a readable workspace still settles the run.
 #[test]
-fn failed_capture_is_retryable_and_stopped_capture_keeps_its_terminal_status() {
+fn failed_capture_settles_the_run_and_stopped_capture_keeps_its_terminal_status() {
     let mut s = state();
     let (first, a) = running(&mut s, "baseline");
     finish(&mut s, &a);
@@ -1860,25 +1984,190 @@ fn failed_capture_is_retryable_and_stopped_capture_keeps_its_terminal_status() {
     );
     assert_eq!(s.runs[1].status, RunStatus::Interrupted);
     assert_eq!(s.captures.get(&second), Some(&RunStatus::Interrupted));
-    result(
-        &mut s,
-        "capture-failed",
-        EffectResult::CheckpointFailed {
-            run: second.clone(),
-            attempt: Some(b.clone()),
-            message: "temporary failure".into(),
-        },
-    );
-    assert_eq!(s.captures.get(&second), Some(&RunStatus::Interrupted));
     command(
         &mut s,
         "next",
         send_message("next", DispatchMode::StartImmediately),
     );
     assert_eq!(s.runs[2].status, RunStatus::Queued);
-    checkpoint(&mut s, &second, &b, "stopped-cp");
+    result(
+        &mut s,
+        "capture-error",
+        EffectResult::CheckpointCaptured {
+            status: CheckpointStatus::Error,
+            baselines: vec![],
+            run: second.clone(),
+            attempt: Some(b.clone()),
+            checkpoint: CheckpointId::new("stopped-cp").unwrap(),
+            file_ref: "stopped-cp".into(),
+        },
+    );
+    assert!(s.captures.is_empty());
     assert_eq!(s.runs[1].status, RunStatus::Interrupted);
+    assert_eq!(
+        s.runs[1].checkpoint.as_ref().unwrap().as_str(),
+        "stopped-cp"
+    );
+    assert_eq!(
+        s.checkpoints.last().unwrap().status,
+        CheckpointStatus::Error
+    );
     assert_eq!(s.runs[2].status, RunStatus::Starting);
+    let (third, c) = (s.runs[2].id.clone(), s.runs[2].attempt.clone().unwrap());
+    provider(
+        &mut s,
+        "third-started",
+        &c,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &c);
+    result(
+        &mut s,
+        "not-git",
+        EffectResult::CheckpointCaptured {
+            status: CheckpointStatus::Missing,
+            baselines: vec![],
+            run: third,
+            attempt: Some(c),
+            checkpoint: CheckpointId::new("missing-cp").unwrap(),
+            file_ref: String::new(),
+        },
+    );
+    assert_eq!(s.runs[2].status, RunStatus::Completed);
+    assert_eq!(
+        command(
+            &mut s,
+            "rollback-missing",
+            Command::Rollback {
+                checkpoint: CheckpointId::new("missing-cp").unwrap(),
+                restore_files: false,
+            },
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "checkpoint-not-ready".into()
+        }
+    );
+}
+// T3 CheckpointRollbackService.ts: rolled-back captures are discarded and later checkpoints become stale.
+#[test]
+fn rollback_discards_pending_captures_and_invalidates_later_checkpoints() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp = checkpoint(&mut s, &first, &a, "cp-first");
+    let (second, b) = running(&mut s, "second");
+    finish(&mut s, &b);
+    let later = checkpoint(&mut s, &second, &b, "cp-second");
+    let (third, c) = running(&mut s, "third");
+    command(&mut s, "stop-third", Command::Stop);
+    provider(
+        &mut s,
+        "stopped",
+        &c,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Interrupted,
+            native_head: None,
+        },
+    );
+    assert!(s.captures.contains_key(&third));
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    let rollback = command(
+        &mut s,
+        "rollback",
+        Command::Rollback {
+            checkpoint: cp,
+            restore_files: true,
+        },
+    );
+    let [effect] = rollback.effects.as_slice() else {
+        panic!("{:?}", rollback.effects)
+    };
+    let EffectBody::Rollback {
+        command: id,
+        providers,
+        restore,
+        stale_file_refs,
+    } = &effect.body
+    else {
+        panic!()
+    };
+    assert_eq!(id.as_str(), "rollback");
+    assert_eq!(providers.len(), 1);
+    assert_eq!(restore.as_ref().unwrap().file_ref, "cp-first");
+    assert_eq!(stale_file_refs, &vec!["cp-second".to_string()]);
+    result(
+        &mut s,
+        "rolled-back",
+        EffectResult::RollbackFinished {
+            command: CommandId::new("rollback").unwrap(),
+            bindings: vec![],
+        },
+    );
+    assert!(s.captures.is_empty());
+    assert_eq!(s.runs[1].status, RunStatus::RolledBack);
+    assert_eq!(s.runs[2].status, RunStatus::RolledBack);
+    assert_eq!(s.runs[3].status, RunStatus::Queued);
+    assert_eq!(
+        s.checkpoints.iter().find(|c| c.id == later).unwrap().status,
+        CheckpointStatus::Stale
+    );
+    assert_eq!(
+        command(
+            &mut s,
+            "rollback-stale",
+            Command::Rollback {
+                checkpoint: later,
+                restore_files: true,
+            },
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "checkpoint-not-ready".into()
+        }
+    );
+    command(&mut s, "resume", Command::ResumeQueue);
+    assert_eq!(s.runs[3].status, RunStatus::Starting);
+    let _ = second;
+}
+#[test]
+fn rollback_without_provider_rewind_or_file_restore_still_reports_one_result() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp = checkpoint(&mut s, &first, &a, "cp-first");
+    let step = command(
+        &mut s,
+        "rollback",
+        Command::Rollback {
+            checkpoint: cp,
+            restore_files: false,
+        },
+    );
+    assert!(matches!(
+        &step.effects[..],
+        [Effect {
+            body: EffectBody::Rollback {
+                providers,
+                restore: None,
+                ..
+            },
+            ..
+        }] if providers.is_empty()
+    ));
+    result(
+        &mut s,
+        "done",
+        EffectResult::RollbackFinished {
+            command: CommandId::new("rollback").unwrap(),
+            bindings: vec![],
+        },
+    );
+    assert!(s.rollback.is_none());
 }
 
 #[test]
@@ -1971,8 +2260,39 @@ fn rollback_resets_post_boundary_sessions_and_uses_replacement_native_identity()
     let (first, a) = running(&mut s, "first");
     finish(&mut s, &a);
     let cp = checkpoint(&mut s, &first, &a, "cp-first");
-    s.native_sessions
-        .insert("later-provider".into(), "native-later".into());
+    let mut later = selection();
+    later.instance = "later-provider".into();
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider { selection: later },
+    );
+    let Reply::Run(second) = command(
+        &mut s,
+        "second",
+        send_message("second", DispatchMode::StartImmediately),
+    )
+    .reply
+    else {
+        panic!()
+    };
+    let b = s.runs[1].attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "later-session",
+        &b,
+        ProviderEvent::SessionReady {
+            native_thread: "native-later".into(),
+        },
+    );
+    provider(
+        &mut s,
+        "later-started",
+        &b,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &b);
+    checkpoint(&mut s, &second, &b, "cp-second");
     let step = command(
         &mut s,
         "rollback",
@@ -1981,9 +2301,21 @@ fn rollback_resets_post_boundary_sessions_and_uses_replacement_native_identity()
             restore_files: false,
         },
     );
-    assert!(step.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Rollback {native_thread,absolute_head:None}) if native_thread == "native-later")));
+    let EffectBody::Rollback { providers, .. } = &step.effects[0].body else {
+        panic!()
+    };
+    assert_eq!(
+        providers,
+        &vec![ProviderRollback {
+            instance: "later-provider".into(),
+            command: ProviderCommand::Rollback {
+                native_thread: "native-later".into(),
+                absolute_head: None,
+            },
+        }]
+    );
     let binding = NativeBinding {
-        instance: "codex".into(),
+        instance: "later-provider".into(),
         thread: "native-replacement".into(),
         head: None,
     };
@@ -2060,6 +2392,7 @@ fn async_question_answer_steers_the_current_turn_and_rejects_blank_answers_atomi
 }
 
 #[test]
+// T3 ProviderTurnStartService.ts: an uncertain native delivery continues in a fresh native thread.
 fn context_delivery_is_pending_until_acceptance_and_ambiguous_delivery_is_not_repeated() {
     let mut s = state();
     let (_, a) = running(&mut s, "original");
@@ -2109,6 +2442,7 @@ fn context_delivery_is_pending_until_acceptance_and_ambiguous_delivery_is_not_re
             message: "connection lost".into(),
             message_id: None,
             turn_completed: false,
+            session_lost: false,
         },
     );
     let retry = command(
@@ -2116,37 +2450,30 @@ fn context_delivery_is_pending_until_acceptance_and_ambiguous_delivery_is_not_re
         "retry",
         send_message("retry", DispatchMode::StartImmediately),
     );
-    assert!(!retry.effects.iter().any(|effect| matches!(
-        effect.body,
-        EffectBody::Provider(ProviderCommand::Start { .. })
-    )));
-    assert!(s.items.iter().any(
-        |item| matches!(&item.kind,ItemKind::Error {message,..} if message==HANDOFF_UNCERTAIN_ERROR)
-    ));
-    let step = ThreadMachine::step(
-        &s,
-        &InputEnvelope {
-            at: at(),
-            key: "replace-native".into(),
-            input: Input::NativeSessionReset {
-                instance: "claude".into(),
-            },
-        },
-    );
-    s = fold(&s, &step.facts).unwrap();
-    let accepted = command(
-        &mut s,
-        "fresh",
-        send_message("fresh", DispatchMode::StartImmediately),
-    );
-    assert!(accepted.effects.iter().any(|effect| matches!(
-        effect.body,
-        EffectBody::Provider(ProviderCommand::Start {
-            native_thread: None,
-            context: Some(_),
-            ..
+    assert!(retry.facts.iter().any(|fact| matches!(&fact.body, FactBody::NativeSessionCleared { instance } if instance == "claude")));
+    let history = retry
+        .effects
+        .iter()
+        .find_map(|effect| match &effect.body {
+            EffectBody::Provider(ProviderCommand::Start {
+                native_thread: None,
+                context: Some(history),
+                ..
+            }) => Some(render_history(history)),
+            _ => None,
         })
-    )));
+        .unwrap();
+    assert!(history.contains("original") && history.contains("continue"));
+    assert_eq!(
+        s.items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::Error { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ["connection lost"]
+    );
     let a = s.active_run().unwrap().attempt.clone().unwrap();
     provider(
         &mut s,
@@ -2319,7 +2646,7 @@ fn late_native_usage_moves_the_baseline_without_billing_the_live_turn() {
 #[test]
 fn delegated_notifications_report_the_original_count_labels_and_child_links() {
     let mut s = state();
-    let (run, a) = running(&mut s, "parent");
+    let (run, a) = starting(&mut s, "parent");
     let ids = ["a", "b", "c"].map(|id| NodeId::new(id).unwrap());
     for (index, prompt) in ["Review src/math.ts", "Write tests", "Update docs"]
         .into_iter()
@@ -2347,6 +2674,7 @@ fn delegated_notifications_report_the_original_count_labels_and_child_links() {
             &mut s,
             &format!("finish-{task}"),
             Command::TaskResult {
+                generation: None,
                 source_message,
                 context: None,
                 task: task.clone(),
@@ -2399,10 +2727,12 @@ fn delegated_notifications_report_the_original_count_labels_and_child_links() {
     );
 }
 
+// T3 Orchestrator.ts:8722 and :7333: a queued sibling joins the parent run's wake, and
+// cancelling that wake disposes the whole cohort.
 #[test]
-fn cancelling_one_delegated_delivery_disposes_only_its_cohort_and_parent_stop_disposes_the_rest() {
+fn queued_siblings_share_one_wake_and_cancelling_it_disposes_the_cohort() {
     let mut s = state();
-    let (_, a) = running(&mut s, "parent");
+    let (_, a) = starting(&mut s, "parent");
     let mut deliveries = vec![];
     for id in ["a", "b"] {
         let task = NodeId::new(id).unwrap();
@@ -2426,6 +2756,7 @@ fn cancelling_one_delegated_delivery_disposes_only_its_cohort_and_parent_stop_di
             &mut s,
             &format!("finish-{id}"),
             Command::TaskResult {
+                generation: None,
                 source_message,
                 context: None,
                 task: task.clone(),
@@ -2433,39 +2764,44 @@ fn cancelling_one_delegated_delivery_disposes_only_its_cohort_and_parent_stop_di
                 result: "Done".into(),
             },
         );
-        let Reply::Run(delivery) = command(
-            &mut s,
-            &format!("wake-{id}"),
-            Command::AcceptTaskWake {
-                task_ids: vec![task],
-            },
-        )
-        .reply
-        else {
-            panic!()
-        };
-        deliveries.push(delivery);
+        deliveries.push(
+            command(
+                &mut s,
+                &format!("wake-{id}"),
+                Command::AcceptTaskWake {
+                    task_ids: vec![task],
+                },
+            )
+            .reply,
+        );
     }
-    command(
-        &mut s,
-        "cancel-one",
-        Command::CancelQueued {
-            run: deliveries[0].clone(),
-        },
-    );
-    assert_eq!(s.tasks[0].delivery, DeliveryState::Disposed);
-    assert_eq!(s.tasks[1].delivery, DeliveryState::Claimed);
-    command(&mut s, "stop", Command::Stop);
-    assert_eq!(s.tasks[1].delivery, DeliveryState::Disposed);
-    assert_eq!(s.tasks[1].status, ItemStatus::Completed);
+    let Reply::Run(wake) = deliveries[0].clone() else {
+        panic!("{deliveries:?}")
+    };
+    assert_eq!(deliveries[1], Reply::Accepted);
+    assert_eq!(s.runs.len(), 2);
+    let message = s.message(&s.runs[1].message).unwrap();
     assert_eq!(
-        s.runs
-            .iter()
-            .find(|run| run.id == deliveries[1])
-            .unwrap()
-            .status,
-        RunStatus::Cancelled
+        message.text,
+        "Delegated tasks a, b reached terminal states. Use task_status with each taskId to read the results."
     );
+    assert!(
+        s.tasks
+            .iter()
+            .all(|task| task.delivery == DeliveryState::Claimed)
+    );
+    command(&mut s, "cancel", Command::CancelQueued { run: wake });
+    assert!(
+        s.tasks
+            .iter()
+            .all(|task| task.delivery == DeliveryState::Disposed)
+    );
+    assert!(
+        s.tasks
+            .iter()
+            .all(|task| task.status == ItemStatus::Completed)
+    );
+    command(&mut s, "stop", Command::Stop);
     finish(&mut s, &a);
     let step = ThreadMachine::step(
         &s,
@@ -2511,6 +2847,7 @@ fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_s
     assert_eq!(s.runs[0].status, RunStatus::Waiting);
     assert!(done.effects.iter().any(|effect|matches!(&effect.body,EffectBody::CaptureCheckpoint {scope:captured,native_baseline_heads,..} if captured==&scope && native_baseline_heads.is_empty())));
     let missing = EffectResult::CheckpointCaptured {
+        status: CheckpointStatus::Ready,
         run: run.clone(),
         attempt: Some(a.clone()),
         checkpoint: CheckpointId::new("captured").unwrap(),
@@ -2544,6 +2881,7 @@ fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_s
     let mut captured = missing;
     if let EffectResult::CheckpointCaptured { baselines, .. } = &mut captured {
         baselines.push(CapturedBaseline {
+            status: CheckpointStatus::Ready,
             checkpoint: CheckpointId::new("initial").unwrap(),
             ordinal: 0,
             file_ref: "before".into(),
@@ -2566,7 +2904,7 @@ fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_s
             restore_files: true,
         },
     );
-    assert!(rollback.effects.iter().any(|effect|matches!(&effect.body,EffectBody::RestoreCheckpoint {scope:Some(scope),file_ref,..} if scope.cwd=="/workspace/one" && file_ref=="before")));
+    assert!(rollback.effects.iter().any(|effect|matches!(&effect.body,EffectBody::Rollback {restore:Some(RestoreFiles {scope:Some(scope),file_ref,..}),..} if scope.cwd=="/workspace/one" && file_ref=="before")));
 }
 
 #[test]
@@ -2598,6 +2936,7 @@ fn interrupt_failure_keeps_the_root_and_children_live_until_provider_confirmatio
             message: "temporary RPC failure".into(),
             message_id: None,
             turn_completed: false,
+            session_lost: false,
         },
     );
     assert_eq!(s.runs[0].status, RunStatus::Running);
@@ -2684,9 +3023,2199 @@ proptest! {
         let (_,attempt)=running(&mut s,"run");
         let operation=[ProviderOperation::Steer,ProviderOperation::Interrupt,ProviderOperation::Respond,ProviderOperation::SetModel][op];
         for i in 0..failures {
-            result(&mut s,&format!("failed-{i}"),EffectResult::ProviderFailed{attempt:attempt.clone(),operation,message:"RPC failed".into(),message_id:None,turn_completed:false});
+            result(&mut s,&format!("failed-{i}"),EffectResult::ProviderFailed{attempt:attempt.clone(),operation,message:"RPC failed".into(),message_id:None,turn_completed:false,session_lost:false});
             prop_assert_eq!(s.runs[0].status,RunStatus::Running);
             prop_assert_eq!(s.attempts[0].status,AttemptStatus::Running);
         }
     }
+}
+fn round_trip<T>(value: &T)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let json = serde_json::to_string(value).unwrap();
+    assert_eq!(&serde_json::from_str::<T>(&json).unwrap(), value);
+    let bytes = postcard::to_allocvec(value).unwrap();
+    assert_eq!(&postcard::from_bytes::<T>(&bytes).unwrap(), value);
+}
+fn captured_image() -> Attachment {
+    Attachment {
+        kind: AttachmentKind::Image,
+        source: Some(CapturedWindow {
+            app_name: "Editor".into(),
+            window_title: "main.rs".into(),
+            accessible_text: Some("fn main".into()),
+            accessibility: Some(Accessibility::ElementTree {
+                coordinate_space: "window".into(),
+                image_size: ImageSize {
+                    width: 800,
+                    height: 600,
+                },
+                truncated: false,
+                root: Box::new(AccessibilityNode {
+                    role: "window".into(),
+                    name: Some("main.rs".into()),
+                    value: None,
+                    description: None,
+                    bounds: Some(Bounds {
+                        x: -4,
+                        y: 0,
+                        width: 800,
+                        height: 600,
+                    }),
+                    state: Some(Json(
+                        serde_json::json!({"focused":true,"items":[1,2.5,null]}),
+                    )),
+                    actions: vec!["press".into()],
+                    children: vec![],
+                }),
+            }),
+        }),
+        id: "capture".into(),
+        name: "capture.png".into(),
+        mime_type: "image/png".into(),
+        path: "/tmp/capture.png".into(),
+        size: 10,
+    }
+}
+#[test]
+fn wire_encodings_round_trip_state_facts_commands_and_effects() {
+    round_trip(&Accessibility::FlatText {
+        text: "text".into(),
+        truncated: true,
+    });
+    let mut s = state();
+    let mut steps = vec![];
+    let send = Command::Send(SendMessage {
+        created_by: MessageAuthor::User,
+        creation_source: "client".into(),
+        id: MessageId::new("captured").unwrap(),
+        text: "Look at this window".into(),
+        attachments: vec![captured_image()],
+        selection: None,
+        mode: DispatchMode::StartImmediately,
+        intent: Some(DeliveryIntent::Auto),
+        source_plan: None,
+        title_seed: None,
+    });
+    round_trip(&send);
+    steps.push(command(&mut s, "captured", send));
+    let attempt = s.runs[0].attempt.clone().unwrap();
+    for (key, event) in [
+        (
+            "ready",
+            ProviderEvent::SessionReady {
+                native_thread: "native".into(),
+            },
+        ),
+        (
+            "turn",
+            ProviderEvent::TurnStarted {
+                native_turn: Some("turn".into()),
+            },
+        ),
+        (
+            "tool",
+            ProviderEvent::ItemFinished {
+                key: "tool".into(),
+                kind: ProviderItem::Tool {
+                    presentation: ToolPresentation {
+                        title: Some("Read".into()),
+                        source: Some(Json(serde_json::json!({"key":"mcp:x"}))),
+                        surface: Some("browser".into()),
+                        icon: None,
+                    },
+                    name: "read".into(),
+                    input: Json(serde_json::json!({"path":"a"})),
+                    output: Some(Json(serde_json::json!([{"text":"b"}]))),
+                },
+                text: Some("b".into()),
+                status: ItemStatus::Completed,
+            },
+        ),
+        (
+            "approval",
+            ProviderEvent::RequestOpened {
+                owner_path: vec![],
+                key: "1".into(),
+                body: RequestBody::Approval {
+                    kind: "command".into(),
+                    title: "ls".into(),
+                    detail: None,
+                    options: vec![ApprovalOption {
+                        label: "Approve".into(),
+                        decision: ApprovalDecision::Accept,
+                    }],
+                    input: Json(serde_json::json!({"command":"ls"})),
+                },
+                capability: ResponseCapability::Live,
+            },
+        ),
+        (
+            "plan",
+            ProviderEvent::Plan {
+                kind: PlanKind::Todo,
+                key: "todo".into(),
+                markdown: String::new(),
+                steps: vec![PlanStep {
+                    text: "step".into(),
+                    status: "pending".into(),
+                }],
+            },
+        ),
+        (
+            "child",
+            ProviderEvent::SubagentStarted {
+                background: true,
+                native_thread: None,
+                key: "agent".into(),
+                parent: None,
+                prompt: "child".into(),
+                model: None,
+            },
+        ),
+    ] {
+        round_trip(&event);
+        steps.push(provider(&mut s, key, &attempt, event));
+    }
+    finish(&mut s, &attempt);
+    for step in &steps {
+        round_trip(step);
+        for fact in &step.facts {
+            round_trip(fact);
+        }
+        for effect in &step.effects {
+            round_trip(effect);
+            if let EffectBody::SendToThread { command, .. } = &effect.body {
+                round_trip(command.as_ref());
+            }
+        }
+    }
+    round_trip(&s);
+    assert!(!s.items.is_empty() && !s.requests.is_empty() && !s.tasks.is_empty());
+}
+fn switch_instance(s: &mut State, key: &str, instance: &str) {
+    let mut target = selection();
+    target.instance = instance.into();
+    command(s, key, Command::SwitchProvider { selection: target });
+}
+fn start_context(step: &Step) -> Option<(Option<String>, String)> {
+    step.effects.iter().find_map(|effect| match &effect.body {
+        EffectBody::Provider(ProviderCommand::Start {
+            native_thread,
+            context,
+            ..
+        }) => Some((
+            native_thread.clone(),
+            context.as_ref().map(render_history).unwrap_or_default(),
+        )),
+        _ => None,
+    })
+}
+// T3 ProviderTurnStartService.ts: a failed native resume continues in a fresh session with full history.
+#[test]
+fn lost_native_session_restarts_the_attempt_with_portable_history() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "earlier work");
+    finish(&mut s, &a);
+    command(
+        &mut s,
+        "resume",
+        send_message("resume", DispatchMode::StartImmediately),
+    );
+    let first = s.active_run().unwrap().attempt.clone().unwrap();
+    let step = result(
+        &mut s,
+        "lost",
+        EffectResult::ProviderFailed {
+            attempt: first.clone(),
+            operation: ProviderOperation::Start,
+            message: "thread not found".into(),
+            message_id: None,
+            turn_completed: false,
+            session_lost: true,
+        },
+    );
+    let (native, history) = start_context(&step).unwrap();
+    assert_eq!(native, None);
+    assert!(history.contains("earlier work") && history.contains("full_thread_summary"));
+    let run = s.active_run().unwrap();
+    assert_eq!(run.status, RunStatus::Starting);
+    assert_ne!(run.attempt.as_ref(), Some(&first));
+    assert_eq!(
+        s.attempts.iter().find(|a| a.id == first).unwrap().status,
+        AttemptStatus::Failed
+    );
+    assert!(
+        !s.items
+            .iter()
+            .any(|i| matches!(i.kind, ItemKind::Error { .. }))
+    );
+    let again = s.active_run().unwrap().attempt.clone().unwrap();
+    let step = result(
+        &mut s,
+        "lost-again",
+        EffectResult::ProviderFailed {
+            attempt: again,
+            operation: ProviderOperation::Start,
+            message: "spawn failed".into(),
+            message_id: None,
+            turn_completed: false,
+            session_lost: true,
+        },
+    );
+    assert!(step.effects.is_empty());
+    assert_eq!(s.runs[1].status, RunStatus::Failed);
+}
+// T3 ContextHandoffDelivery.ts: only a delivery recorded for a concrete native thread is uncertain.
+#[test]
+fn a_handoff_that_failed_before_a_native_thread_existed_is_delivered_again() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "original");
+    finish(&mut s, &a);
+    switch_instance(&mut s, "switch", "other");
+    command(
+        &mut s,
+        "first",
+        send_message("first", DispatchMode::StartImmediately),
+    );
+    let attempt = s.active_run().unwrap().attempt.clone().unwrap();
+    result(
+        &mut s,
+        "spawn-failed",
+        EffectResult::ProviderFailed {
+            attempt,
+            operation: ProviderOperation::Start,
+            message: "spawn failed".into(),
+            message_id: None,
+            turn_completed: false,
+            session_lost: false,
+        },
+    );
+    assert_eq!(
+        s.transfers[0].delivery.as_ref().unwrap().native_thread,
+        None
+    );
+    let retry = command(
+        &mut s,
+        "retry",
+        send_message("retry", DispatchMode::StartImmediately),
+    );
+    let (native, history) = start_context(&retry).unwrap();
+    assert_eq!(native, None);
+    assert!(history.contains("original"));
+}
+// T3 ProviderTurnStartService.ts: inputs the provider never accepted are handed to the same session.
+#[test]
+fn inputs_that_never_reached_the_native_session_are_handed_back_to_it() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    command(
+        &mut s,
+        "Please rename the module",
+        send_message("Please rename the module", DispatchMode::StartImmediately),
+    );
+    let attempt = s.active_run().unwrap().attempt.clone().unwrap();
+    result(
+        &mut s,
+        "start-failed",
+        EffectResult::ProviderFailed {
+            attempt,
+            operation: ProviderOperation::Start,
+            message: "overloaded".into(),
+            message_id: None,
+            turn_completed: false,
+            session_lost: false,
+        },
+    );
+    let step = command(
+        &mut s,
+        "continue",
+        send_message("continue", DispatchMode::StartImmediately),
+    );
+    let (native, history) = start_context(&step).unwrap();
+    assert_eq!(native.as_deref(), Some("native-thread"));
+    assert!(history.contains("Please rename the module"));
+    assert!(history.contains("run-status=failed"));
+    assert!(!history.contains("[Historical user; user_message; thread=thread; run=run:5:first"));
+    let delivered = s.active_run().unwrap().attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "accepted",
+        &delivered,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &delivered);
+    let next = command(
+        &mut s,
+        "next",
+        send_message("next", DispatchMode::StartImmediately),
+    );
+    assert_eq!(start_context(&next).unwrap().1, "");
+}
+// T3 ProviderTurnStartService.ts: without telemetry, prior native attachments count against the window.
+#[test]
+fn native_occupancy_estimate_counts_inputs_and_attachments_that_reached_the_session() {
+    let outcome = |images: usize| {
+        let mut s = state();
+        let mut send = send_message("with images", DispatchMode::StartImmediately);
+        if let Command::Send(message) = &mut send {
+            message.attachments = (0..images)
+                .map(|index| {
+                    let mut image = captured_image();
+                    image.id = index.to_string();
+                    image.source = None;
+                    image
+                })
+                .collect();
+        }
+        command(&mut s, "with images", send);
+        let a = s.active_run().unwrap().attempt.clone().unwrap();
+        provider(
+            &mut s,
+            "session",
+            &a,
+            ProviderEvent::SessionReady {
+                native_thread: "native-thread".into(),
+            },
+        );
+        provider(
+            &mut s,
+            "started",
+            &a,
+            ProviderEvent::TurnStarted { native_turn: None },
+        );
+        finish(&mut s, &a);
+        switch_instance(&mut s, "away", "other");
+        let (_, b) = running(&mut s, "elsewhere");
+        finish(&mut s, &b);
+        switch_instance(&mut s, "back", "codex");
+        let step = ThreadMachine::step(
+            &s,
+            &InputEnvelope {
+                at: at(),
+                key: "policy".into(),
+                input: Input::HandoffPolicy {
+                    instance: "codex".into(),
+                    model_window: Some(60_000),
+                    token_cap: 16_000,
+                },
+            },
+        );
+        s = fold(&s, &step.facts).unwrap();
+        let step = command(
+            &mut s,
+            "return",
+            send_message("return", DispatchMode::StartImmediately),
+        );
+        start_context(&step).is_some()
+    };
+    assert!(outcome(0));
+    assert!(!outcome(6));
+}
+fn accept_child(step: &Step) -> State {
+    let accept = step
+        .effects
+        .iter()
+        .find_map(|effect| match &effect.body {
+            EffectBody::SendToThread { command, .. }
+                if matches!(command.as_ref(), Command::AcceptFork { .. }) =>
+            {
+                Some(command.as_ref().clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let mut child = State::default();
+    command(&mut child, "accept", accept);
+    child
+}
+// T3 ProjectionStore.ts: a fork of a fork keeps the inherited prefix and its message fields.
+#[test]
+fn forking_a_fork_keeps_the_ancestor_conversation_and_its_messages() {
+    let mut s = state();
+    let mut send = send_message("ancestor request", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut send {
+        message.attachments = vec![captured_image()];
+    }
+    command(&mut s, "ancestor request", send);
+    let a = s.active_run().unwrap().attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "started",
+        &a,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &a);
+    let run = s.runs[0].id.clone();
+    let fork = command(
+        &mut s,
+        "fork",
+        Command::Fork {
+            target: ThreadId::new("fork").unwrap(),
+            through_run: run,
+            title: None,
+        },
+    );
+    let mut child = accept_child(&fork);
+    let (child_run, b) = running(&mut child, "child request");
+    finish(&mut child, &b);
+    let grandchild = command(
+        &mut child,
+        "fork-again",
+        Command::Fork {
+            target: ThreadId::new("grandchild").unwrap(),
+            through_run: child_run,
+            title: None,
+        },
+    );
+    let EffectBody::ForkNative { .. } = &grandchild.effects[0].body else {
+        panic!("{:?}", grandchild.effects)
+    };
+    let forked = result(
+        &mut child,
+        "forked",
+        EffectResult::NativeForked {
+            command: CommandId::new("fork-again").unwrap(),
+            native_thread: "grandchild-native".into(),
+        },
+    );
+    let grandchild = accept_child(&forked);
+    let texts = grandchild
+        .visible_items()
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::UserMessage { .. }))
+        .map(|item| item.text.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["ancestor request", "child request"]);
+    assert_eq!(
+        grandchild
+            .visible_items()
+            .iter()
+            .filter(|item| matches!(item.kind, ItemKind::Fork { .. }))
+            .count(),
+        2
+    );
+    let ItemKind::UserMessage { message } = &grandchild.inherited_items[0].kind else {
+        panic!()
+    };
+    let message = grandchild.message(message).unwrap();
+    assert_eq!(message.attachments, vec![captured_image()]);
+    assert_eq!(message.intent, InputIntent::TurnStart);
+    assert_eq!(message.created_by, MessageAuthor::User);
+    let Some(Transfer { history, .. }) = grandchild.transfers.first() else {
+        panic!()
+    };
+    assert!(render_history(history).contains("ancestor request"));
+}
+// T3 CommandPolicy.ts: unsuccessful sources fork from bounded portable history; T3 ThreadForkService.ts statuses.
+#[test]
+fn unsuccessful_and_cancelled_runs_fork_from_bounded_portable_history() {
+    let mut s = state();
+    let (failed, a) = running(&mut s, "failed request");
+    provider(
+        &mut s,
+        "failed",
+        &a,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Failed,
+            native_head: None,
+        },
+    );
+    let (_, b) = running(&mut s, "later answer");
+    finish(&mut s, &b);
+    let (_, c) = running(&mut s, "still running");
+    let fork = command(
+        &mut s,
+        "fork",
+        Command::Fork {
+            target: ThreadId::new("fork").unwrap(),
+            through_run: failed,
+            title: None,
+        },
+    );
+    assert!(
+        !fork
+            .effects
+            .iter()
+            .any(|effect| matches!(effect.body, EffectBody::ForkNative { .. }))
+    );
+    let child = accept_child(&fork);
+    let history = render_history(&child.transfers[0].history);
+    assert!(history.contains("failed request") && !history.contains("later answer"));
+    assert_eq!(child.transfers[0].native_fork, None);
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    let queued = s.runs[3].id.clone();
+    command(
+        &mut s,
+        "cancel",
+        Command::CancelQueued {
+            run: queued.clone(),
+        },
+    );
+    let _ = c;
+    assert!(matches!(
+        command(
+            &mut s,
+            "fork-cancelled",
+            Command::Fork {
+                target: ThreadId::new("fork-cancelled").unwrap(),
+                through_run: queued,
+                title: None,
+            },
+        )
+        .reply,
+        Reply::Thread(_)
+    ));
+}
+#[test]
+fn a_failed_native_fork_still_creates_the_fork_with_portable_history() {
+    let mut s = state();
+    let (run, a) = running(&mut s, "source");
+    finish(&mut s, &a);
+    command(
+        &mut s,
+        "fork",
+        Command::Fork {
+            target: ThreadId::new("fork").unwrap(),
+            through_run: run,
+            title: None,
+        },
+    );
+    recover(&mut s);
+    assert!(!s.pending_forks.is_empty());
+    let failed = result(
+        &mut s,
+        "fork-failed",
+        EffectResult::ForkFailed {
+            command: CommandId::new("fork").unwrap(),
+            message: "transcript unavailable".into(),
+        },
+    );
+    assert!(s.pending_forks.is_empty());
+    let child = accept_child(&failed);
+    assert_eq!(child.transfers[0].native_fork, None);
+    assert!(child.native_sessions.is_empty());
+    assert!(render_history(&child.transfers[0].history).contains("source"));
+    assert!(
+        result(
+            &mut s,
+            "late-success",
+            EffectResult::NativeForked {
+                command: CommandId::new("fork").unwrap(),
+                native_thread: "late".into(),
+            },
+        )
+        .effects
+        .is_empty()
+    );
+}
+// T3 Orchestrator.ts merge-back admission.
+#[test]
+fn merge_back_requires_a_fork_of_the_target_and_a_finished_source() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "plain");
+    finish(&mut s, &a);
+    assert_eq!(
+        command(
+            &mut s,
+            "merge",
+            Command::MergeBack {
+                target: ThreadId::new("other").unwrap(),
+                through_run: None,
+            },
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "not-a-fork-of-target".into()
+        }
+    );
+    let run = s.runs[0].id.clone();
+    let fork = command(
+        &mut s,
+        "fork",
+        Command::Fork {
+            target: ThreadId::new("fork").unwrap(),
+            through_run: run,
+            title: None,
+        },
+    );
+    let forked = result(
+        &mut s,
+        "forked",
+        EffectResult::NativeForked {
+            command: CommandId::new("fork").unwrap(),
+            native_thread: "fork-native".into(),
+        },
+    );
+    let _ = fork;
+    let mut child = accept_child(&forked);
+    let merge = |child: &mut State, key: &str, through_run| {
+        command(
+            child,
+            key,
+            Command::MergeBack {
+                target: ThreadId::new("thread").unwrap(),
+                through_run,
+            },
+        )
+        .reply
+    };
+    assert_eq!(
+        merge(&mut child, "empty", None),
+        Reply::Rejected {
+            reason: "no-stable-source-run".into()
+        }
+    );
+    let (running_run, _) = running(&mut child, "unfinished");
+    assert_eq!(
+        merge(&mut child, "running", Some(running_run)),
+        Reply::Rejected {
+            reason: "merge-back-source-not-finished".into()
+        }
+    );
+}
+fn native_root(events: Vec<ProviderEvent>) -> ProviderEvent {
+    ProviderEvent::NativeOutput {
+        echoed_prompts: vec![],
+        acknowledged_prompt: None,
+        root: true,
+        result: Some(NativeResult {
+            origin: None,
+            turn_count: 1,
+        }),
+        events,
+    }
+}
+// T3 ClaudeAdapterV2.ts: a result after Stop finalizes the turn as interrupted.
+#[test]
+fn a_stopped_claude_turn_finishes_on_its_wrapped_result() {
+    let mut s = state();
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider {
+            selection: claude_selection(),
+        },
+    );
+    let (_, a) = running(&mut s, "first");
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    command(&mut s, "stop", Command::Stop);
+    provider(
+        &mut s,
+        "result",
+        &a,
+        native_root(vec![
+            ProviderEvent::TurnUsage(normalize_claude_turn_usage(
+                "success",
+                Some(&serde_json::json!({"input_tokens":4,"output_tokens":2})),
+                RunStatus::Completed,
+            )),
+            ProviderEvent::TurnFinished {
+                status: RunStatus::Completed,
+                native_head: None,
+            },
+        ]),
+    );
+    assert_eq!(s.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(s.attempts[0].status, AttemptStatus::Interrupted);
+    assert_eq!(
+        s.attempts[0].turn_usage.as_ref().unwrap().status,
+        UsageStatus::Partial
+    );
+    assert!(s.runs[1].queue_held);
+    assert!(s.items.iter().any(
+        |item| matches!(item.kind, ItemKind::RunInterruptResult { .. })
+            && item.status == ItemStatus::Interrupted
+    ));
+}
+fn fail_with(s: &mut State, attempt: &RunAttemptId, key: &str, class: &str) {
+    provider(
+        s,
+        &format!("{key}-error"),
+        attempt,
+        ProviderEvent::ItemFinished {
+            key: format!("{key}-error"),
+            kind: ProviderItem::Error {
+                message: class.into(),
+                retry: None,
+                code: None,
+                class: Some(class.into()),
+                retryable: None,
+            },
+            text: None,
+            status: ItemStatus::Failed,
+        },
+    );
+    provider(
+        s,
+        &format!("{key}-failed"),
+        attempt,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Failed,
+            native_head: None,
+        },
+    );
+}
+// T3 runtimeLayer.test.ts "handles a queued message after a %s failure".
+#[test]
+fn provider_failures_hold_the_queue_and_usage_limits_block_it() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    fail_with(&mut s, &a, "first", "provider_error");
+    assert_eq!(s.runs[1].status, RunStatus::Queued);
+    assert!(s.runs[1].queue_held);
+    command(&mut s, "resume", Command::ResumeQueue);
+    assert_eq!(s.runs[1].status, RunStatus::Starting);
+
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    fail_with(&mut s, &a, "first", "usage_limit");
+    assert_eq!(s.runs[1].status, RunStatus::Queued);
+    assert!(!s.runs[1].queue_held);
+    assert_eq!(
+        command(&mut s, "resume", Command::ResumeQueue).reply,
+        Reply::Rejected {
+            reason: "usage-limited".into()
+        }
+    );
+    command(
+        &mut s,
+        "new",
+        send_message("new", DispatchMode::StartImmediately),
+    );
+    assert_eq!(s.runs[2].status, RunStatus::Starting);
+    assert_eq!(s.runs[1].status, RunStatus::Queued);
+}
+fn delegate(s: &mut State, key: &str) -> NodeId {
+    let task = NodeId::new(key).unwrap();
+    command(
+        s,
+        key,
+        Command::Delegate {
+            task: task.clone(),
+            child: ThreadId::new(format!("child-{key}")).unwrap(),
+            prompt: "task prompt".into(),
+            selection: selection(),
+            wake: CompletionWake::Always,
+        },
+    );
+    task
+}
+fn complete_task(s: &mut State, key: &str, task: &NodeId) -> Step {
+    let source_message = s
+        .tasks
+        .iter()
+        .find(|candidate| &candidate.id == task)
+        .and_then(|task| task.original_message.clone());
+    command(
+        s,
+        key,
+        Command::TaskResult {
+            generation: None,
+            source_message,
+            context: None,
+            task: task.clone(),
+            status: ItemStatus::Completed,
+            result: "done".into(),
+        },
+    )
+}
+// T3 Orchestrator.ts archive: queued work and completion delivery are cancelled, sessions detach.
+#[test]
+fn archive_cancels_queued_work_and_detaches_without_unarchive_resuming() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let task = delegate(&mut s, "task");
+    command(
+        &mut s,
+        "queued",
+        send_message("queued", DispatchMode::QueueAfterActive),
+    );
+    let archive = command(&mut s, "archive", Command::Archive { archived: true });
+    assert_eq!(s.runs[1].status, RunStatus::Cancelled);
+    assert_eq!(s.runs[0].status, RunStatus::Running);
+    assert_eq!(s.tasks[0].delivery, DeliveryState::Disposed);
+    assert!(archive.effects.iter().any(|effect| effect.body
+        == EffectBody::DetachSessions {
+            reason: "Thread archived.".into(),
+            revoke_credentials: true
+        }));
+    assert!(
+        archive
+            .effects
+            .iter()
+            .any(|effect| effect.body == EffectBody::CleanupTerminals)
+    );
+    assert_eq!(
+        command(&mut s, "again", Command::Archive { archived: true }).reply,
+        Reply::Rejected {
+            reason: "thread-already-archived".into()
+        }
+    );
+    finish(&mut s, &a);
+    complete_task(&mut s, "task-done", &task);
+    let unarchive = command(&mut s, "unarchive", Command::Archive { archived: false });
+    assert!(unarchive.effects.is_empty());
+    assert_eq!(s.runs.len(), 2);
+}
+// T3 runtimeLayer.test.ts settle cases.
+#[test]
+fn settle_rejects_blocked_work_and_cancels_automatic_deliveries() {
+    let mut s = state();
+    let (_, a) = starting(&mut s, "first");
+    let settle = |s: &mut State, key: &str| {
+        command(
+            s,
+            key,
+            Command::Settle {
+                settled: true,
+                at: None,
+            },
+        )
+    };
+    assert_eq!(
+        settle(&mut s, "active").reply,
+        Reply::Rejected {
+            reason: "thread-has-active-work".into()
+        }
+    );
+    provider(
+        &mut s,
+        "question",
+        &a,
+        ProviderEvent::RequestOpened {
+            owner_path: vec![],
+            key: "async".into(),
+            body: RequestBody::Questions {
+                questions: vec![Question {
+                    required: true,
+                    id: "q".into(),
+                    header: "Question".into(),
+                    question: "Which?".into(),
+                    multiple: false,
+                    options: vec![],
+                }],
+            },
+            capability: ResponseCapability::Message,
+        },
+    );
+    let task = delegate(&mut s, "task");
+    complete_task(&mut s, "task-done", &task);
+    command(
+        &mut s,
+        "wake",
+        Command::AcceptTaskWake {
+            task_ids: vec![task],
+        },
+    );
+    let wake = s.runs.last().unwrap().id.clone();
+    recover(&mut s);
+    let held = s.runs.iter().find(|run| run.id == wake).unwrap();
+    assert!(held.status == RunStatus::Queued && held.queue_held);
+    assert_eq!(s.requests[0].status, RequestStatus::Pending);
+    let mut user = s.clone();
+    command(
+        &mut user,
+        "user-queued",
+        send_message("user", DispatchMode::QueueAfterActive),
+    );
+    assert_eq!(
+        settle(&mut user, "blocked").reply,
+        Reply::Rejected {
+            reason: "thread-has-active-work".into()
+        }
+    );
+    let settled = settle(&mut s, "settle");
+    assert_eq!(settled.reply, Reply::Accepted);
+    assert_eq!(
+        s.runs.iter().find(|run| run.id == wake).unwrap().status,
+        RunStatus::Cancelled
+    );
+    let request = &s.requests[0];
+    assert_eq!(request.status, RequestStatus::Resolved);
+    assert_eq!(request.decision, Some(ApprovalDecision::Cancel));
+    assert!(s.items.iter().any(
+        |item| matches!(item.kind, ItemKind::UserInputRequest { .. })
+            && item.status == ItemStatus::Cancelled
+    ));
+    assert!(settled.effects.iter().any(|effect| effect.body
+        == EffectBody::DetachSessions {
+            reason: "Thread settled.".into(),
+            revoke_credentials: false
+        }));
+    assert_eq!(s.thread.as_ref().unwrap().settled, Some(true));
+}
+// T3 Orchestrator.ts dispatchMessage: a message re-engages a settled or snoozed thread.
+#[test]
+fn sending_a_message_clears_settled_and_snoozed_state() {
+    let mut s = state();
+    command(
+        &mut s,
+        "settle",
+        Command::Settle {
+            settled: true,
+            at: None,
+        },
+    );
+    command(
+        &mut s,
+        "unsettle-snooze",
+        Command::Settle {
+            settled: false,
+            at: None,
+        },
+    );
+    command(
+        &mut s,
+        "snooze",
+        Command::Snooze {
+            until: Some(Timestamp::parse("2026-10-06T00:00:00Z").unwrap()),
+        },
+    );
+    command(
+        &mut s,
+        "message",
+        send_message("message", DispatchMode::StartImmediately),
+    );
+    let thread = s.thread.as_ref().unwrap();
+    assert_eq!(thread.settled, None);
+    assert_eq!(thread.settled_at, None);
+    assert_eq!(thread.snoozed_until, None);
+}
+// T3 SteeringCompletion.integration.test.ts:563 and :638.
+#[test]
+fn dispatch_saves_the_requested_selection_and_late_steers_use_it() {
+    let mut s = state();
+    let mut other = selection();
+    other.model = "gpt-6-sol".into();
+    let (run, a) = running(&mut s, "first");
+    let mut steer = send_message("steer", DispatchMode::SteerActive { run: run.clone() });
+    if let Command::Send(message) = &mut steer {
+        message.selection = Some(other.clone());
+    }
+    command(&mut s, "steer", steer);
+    assert_eq!(s.runs[0].selection, selection());
+    assert_eq!(s.thread.as_ref().unwrap().selection, other);
+    finish(&mut s, &a);
+    result(
+        &mut s,
+        "missed",
+        EffectResult::ProviderFailed {
+            attempt: a,
+            operation: ProviderOperation::Steer,
+            message: "turn already completed".into(),
+            message_id: Some(MessageId::new("steer").unwrap()),
+            turn_completed: true,
+            session_lost: false,
+        },
+    );
+    assert_eq!(s.runs[1].selection, other);
+    assert_eq!(s.runs[1].status, RunStatus::Starting);
+    let item = s
+        .items
+        .iter()
+        .find(|item| matches!(&item.kind, ItemKind::UserMessage { message } if message.as_str() == "steer"))
+        .unwrap();
+    assert_eq!(item.run.as_ref(), Some(&s.runs[1].id));
+    assert_eq!(
+        s.messages
+            .iter()
+            .filter(|m| m.id.as_str() == "steer")
+            .count(),
+        1
+    );
+    rollback_free_check(&s);
+
+    let mut s = state();
+    let mut start = send_message("start", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut start {
+        message.selection = Some(other.clone());
+    }
+    command(&mut s, "start", start);
+    assert_eq!(s.thread.as_ref().unwrap().selection, other);
+    let mut queued = send_message("queued", DispatchMode::QueueAfterActive);
+    if let Command::Send(message) = &mut queued {
+        message.selection = Some(selection());
+    }
+    command(&mut s, "queued", queued);
+    assert_eq!(s.thread.as_ref().unwrap().selection, other);
+    let a = s.runs[0].attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "started",
+        &a,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &a);
+    assert_eq!(s.thread.as_ref().unwrap().selection, selection());
+}
+fn rollback_free_check(s: &State) {
+    assert!(s.visible_items().iter().all(|item| {
+        item.run
+            .as_ref()
+            .is_none_or(|run| s.runs.iter().any(|r| &r.id == run))
+    }));
+}
+// T3 Orchestrator.ts:4609: a proposed plan is consumed when its implementation is accepted.
+#[test]
+fn a_proposed_plan_is_consumed_once_at_acceptance() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "plan");
+    provider(
+        &mut s,
+        "plan",
+        &a,
+        ProviderEvent::Plan {
+            kind: PlanKind::Proposed,
+            key: "proposal".into(),
+            markdown: "Do it".into(),
+            steps: vec![],
+        },
+    );
+    provider(
+        &mut s,
+        "todo",
+        &a,
+        ProviderEvent::Plan {
+            kind: PlanKind::Todo,
+            key: "todo".into(),
+            markdown: String::new(),
+            steps: vec![],
+        },
+    );
+    let proposal = s.plans[0].id.clone();
+    let todo = s.plans[1].id.clone();
+    let implement = |key: &str, plan: &PlanId| {
+        let mut send = send_message(key, DispatchMode::QueueAfterActive);
+        if let Command::Send(message) = &mut send {
+            message.source_plan = Some(plan.clone());
+        }
+        send
+    };
+    assert_eq!(
+        command(&mut s, "todo-plan", implement("todo-plan", &todo)).reply,
+        Reply::Rejected {
+            reason: "plan-not-found".into()
+        }
+    );
+    command(&mut s, "first", implement("first", &proposal));
+    assert!(s.plans[0].implemented_by.is_some());
+    assert_eq!(
+        command(&mut s, "second", implement("second", &proposal)).reply,
+        Reply::Rejected {
+            reason: "plan-not-active".into()
+        }
+    );
+}
+// T3 ThreadDeletion.test.ts: deletion cancels requests and queues session, terminal and attachment cleanup.
+#[test]
+fn deletion_cancels_pending_requests_and_releases_thread_resources() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    provider(
+        &mut s,
+        "approval",
+        &a,
+        ProviderEvent::RequestOpened {
+            owner_path: vec![],
+            key: "1".into(),
+            body: RequestBody::Approval {
+                kind: "command".into(),
+                title: "ls".into(),
+                detail: None,
+                options: vec![],
+                input: Json(serde_json::json!({})),
+            },
+            capability: ResponseCapability::Live,
+        },
+    );
+    let task = delegate(&mut s, "task");
+    let deleted = command(&mut s, "delete", Command::Delete);
+    assert_eq!(s.requests[0].status, RequestStatus::Cancelled);
+    assert_eq!(s.requests[0].capability, ResponseCapability::NotResumable);
+    assert_eq!(
+        s.tasks.iter().find(|t| t.id == task).unwrap().delivery,
+        DeliveryState::Disposed
+    );
+    let kinds = deleted
+        .effects
+        .iter()
+        .filter_map(|effect| match &effect.body {
+            EffectBody::DetachSessions {
+                reason,
+                revoke_credentials: true,
+            } => Some(reason.as_str()),
+            EffectBody::CleanupTerminals => Some("terminals"),
+            EffectBody::DeleteAttachments { .. } => Some("attachments"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(kinds, ["Thread deleted.", "terminals", "attachments"]);
+}
+// T3 ProviderEventIngestor.test.ts: only native questions are dismissed when their turn ends.
+#[test]
+fn message_capable_questions_stay_answerable_after_their_turn_ends() {
+    for status in [
+        RunStatus::Completed,
+        RunStatus::Interrupted,
+        RunStatus::Failed,
+    ] {
+        let mut s = state();
+        let (_, a) = running(&mut s, "first");
+        for (key, capability) in [
+            ("message", ResponseCapability::Message),
+            ("live", ResponseCapability::Live),
+        ] {
+            provider(
+                &mut s,
+                key,
+                &a,
+                ProviderEvent::RequestOpened {
+                    owner_path: vec![],
+                    key: key.into(),
+                    body: RequestBody::Questions {
+                        questions: vec![Question {
+                            required: true,
+                            id: "q".into(),
+                            header: "Question".into(),
+                            question: "Which?".into(),
+                            multiple: false,
+                            options: vec![],
+                        }],
+                    },
+                    capability,
+                },
+            );
+        }
+        provider(
+            &mut s,
+            "end",
+            &a,
+            ProviderEvent::TurnFinished {
+                status,
+                native_head: None,
+            },
+        );
+        assert_eq!(
+            s.requests.iter().map(|r| r.status).collect::<Vec<_>>(),
+            [RequestStatus::Pending, RequestStatus::Cancelled],
+            "{status:?}"
+        );
+        let request = s.requests[0].id.clone();
+        let answer = command(
+            &mut s,
+            "answer",
+            Command::Respond {
+                request,
+                decision: None,
+                answers: Some(Answers::from([("q".into(), Answer::Text("Blue".into()))])),
+                attachments: BTreeMap::new(),
+            },
+        );
+        assert!(matches!(answer.reply, Reply::Run(_)));
+        assert_eq!(s.messages.last().unwrap().text, "Which?\nBlue");
+    }
+}
+fn delegate_with(s: &mut State, key: &str, wake: CompletionWake) -> NodeId {
+    let task = NodeId::new(key).unwrap();
+    command(
+        s,
+        key,
+        Command::Delegate {
+            task: task.clone(),
+            child: ThreadId::new(format!("child-{key}")).unwrap(),
+            prompt: format!("prompt {key}"),
+            selection: selection(),
+            wake,
+        },
+    );
+    task
+}
+// T3 Orchestrator.ts:4570: an always-wake completion steers into a running parent turn.
+#[test]
+fn always_completions_steer_into_the_running_parent_and_are_delivered_with_it() {
+    let mut s = state();
+    let (run, a) = running(&mut s, "parent");
+    let task = delegate_with(&mut s, "task", CompletionWake::Always);
+    let done = complete_task(&mut s, "done", &task);
+    let Some(EffectBody::SendToThread { command: wake, .. }) =
+        done.effects.iter().map(|e| &e.body).find(|body| {
+            matches!(body, EffectBody::SendToThread { command, .. } if matches!(command.as_ref(), Command::AcceptTaskWake { .. }))
+        })
+    else {
+        panic!("{:?}", done.effects)
+    };
+    let steered = command(&mut s, "wake", *wake.clone());
+    assert_eq!(steered.reply, Reply::Run(run.clone()));
+    assert!(steered.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::Provider(ProviderCommand::Steer { text, .. }) if text.starts_with("Delegated task task reached")
+    )));
+    assert_eq!(s.runs.len(), 1);
+    assert_eq!(s.tasks[0].delivery, DeliveryState::Claimed);
+    let message = s.messages.last().unwrap();
+    assert_eq!(message.intent, InputIntent::Steer);
+    assert!(message.notification.is_some());
+    finish(&mut s, &a);
+    assert_eq!(s.tasks[0].delivery, DeliveryState::Delivered);
+    assert_eq!(s.runs.len(), 1);
+}
+// T3 DelegatedCompletionDelivery.test.ts:1211: settled-only waits only for its spawning run.
+#[test]
+fn settled_only_completion_waits_only_for_its_spawning_run() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "spawning");
+    let task = delegate_with(&mut s, "task", CompletionWake::SettledOnly);
+    let early = complete_task(&mut s, "early", &task);
+    assert!(!early.effects.iter().any(|e| matches!(&e.body, EffectBody::SendToThread { command, .. } if matches!(command.as_ref(), Command::AcceptTaskWake { .. }))));
+    let mut other = state();
+    std::mem::swap(&mut other, &mut s);
+    let mut s = other;
+    command(
+        &mut s,
+        "queued",
+        send_message("continuation", DispatchMode::QueueAfterActive),
+    );
+    let ended = provider(
+        &mut s,
+        "spawning-done",
+        &a,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Completed,
+            native_head: None,
+        },
+    );
+    assert_eq!(s.runs[1].status, RunStatus::Starting);
+    let wake = ended
+        .effects
+        .iter()
+        .find_map(|e| match &e.body {
+            EffectBody::SendToThread { command, .. }
+                if matches!(command.as_ref(), Command::AcceptTaskWake { .. }) =>
+            {
+                Some(command.as_ref().clone())
+            }
+            _ => None,
+        })
+        .expect("the spawning run ended");
+    command(&mut s, "wake", wake);
+    assert_eq!(s.tasks[0].delivery, DeliveryState::Claimed);
+    assert_eq!(s.runs.last().unwrap().status, RunStatus::Queued);
+}
+// T3 SubagentProjection.test.ts: the failure wins over progress messages.
+#[test]
+fn delegated_results_use_the_failure_or_latest_answer() {
+    let mut s = state();
+    let (run, a) = running(&mut s, "child task");
+    for (key, text) in [("one", "Investigating…"), ("two", "Final answer")] {
+        provider(
+            &mut s,
+            key,
+            &a,
+            ProviderEvent::ItemFinished {
+                key: key.into(),
+                kind: ProviderItem::Text,
+                text: Some(text.into()),
+                status: ItemStatus::Completed,
+            },
+        );
+    }
+    let record = s.runs[0].clone();
+    let mut completed = record.clone();
+    completed.status = RunStatus::Completed;
+    assert_eq!(
+        delegated_result(&completed, &s.items, &s.messages),
+        "Final answer"
+    );
+    fail_with(&mut s, &a, "auth", "provider_error");
+    let failed = s.runs.iter().find(|r| r.id == run).unwrap();
+    assert_eq!(
+        delegated_result(failed, &s.items, &s.messages),
+        "provider_error"
+    );
+    let mut empty = state();
+    let (_, b) = running(&mut empty, "quiet");
+    finish(&mut empty, &b);
+    assert_eq!(
+        delegated_result(&empty.runs[0], &empty.items, &empty.messages),
+        "Child task completed without an assistant result."
+    );
+    let mut stopped = empty.runs[0].clone();
+    stopped.status = RunStatus::Interrupted;
+    assert_eq!(
+        delegated_result(&stopped, &[], &[]),
+        "Child task ended with status interrupted."
+    );
+}
+// T3 ClaudeAdapterV2.ts:4166 and :4315: a resumed native task reopens its card, and a
+// result of the previous generation cannot complete it.
+#[test]
+fn a_resumed_native_task_reopens_its_card_and_rejects_stale_results() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let start = ProviderEvent::SubagentStarted {
+        background: false,
+        native_thread: None,
+        key: "child".into(),
+        parent: None,
+        prompt: "Hello".into(),
+        model: None,
+    };
+    provider(&mut s, "spawn", &a, start.clone());
+    provider(
+        &mut s,
+        "done",
+        &a,
+        ProviderEvent::SubagentFinished {
+            key: "child".into(),
+            status: ItemStatus::Completed,
+            result: "first".into(),
+        },
+    );
+    finish(&mut s, &a);
+    let (second, b) = running(&mut s, "second");
+    let reopened = provider(&mut s, "reopen", &b, start);
+    let card = s
+        .items
+        .iter()
+        .find(|item| matches!(item.kind, ItemKind::Subagent { .. }))
+        .unwrap();
+    assert_eq!(card.status, ItemStatus::Running);
+    assert_eq!(card.run.as_ref(), Some(&second));
+    assert_eq!(card.completed_at, None);
+    assert!(reopened.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::SendToThread { command, .. }
+            if matches!(command.as_ref(), Command::BindNativeChild { generation: 1, .. })
+    )));
+    let task = s.tasks[0].id.clone();
+    let stale = command(
+        &mut s,
+        "stale",
+        Command::TaskResult {
+            generation: Some(0),
+            source_message: None,
+            context: None,
+            task: task.clone(),
+            status: ItemStatus::Completed,
+            result: "old".into(),
+        },
+    );
+    assert_eq!(stale.reply, Reply::Ignored);
+    assert_eq!(s.tasks[0].status, ItemStatus::Running);
+    command(
+        &mut s,
+        "current",
+        Command::TaskResult {
+            generation: Some(1),
+            source_message: None,
+            context: None,
+            task,
+            status: ItemStatus::Completed,
+            result: "second".into(),
+        },
+    );
+    assert_eq!(s.tasks[0].status, ItemStatus::Completed);
+    assert_eq!(s.tasks[0].result.as_deref(), Some("second"));
+}
+// T3 Orchestrator.ts:7402, :7228 and :7077.
+#[test]
+fn queued_edits_are_validated_and_automatic_deliveries_are_fixed() {
+    let mut s = state();
+    let (_, a) = starting(&mut s, "parent");
+    command(
+        &mut s,
+        "user",
+        send_message("user", DispatchMode::QueueAfterActive),
+    );
+    let user = s.runs[1].id.clone();
+    let edit = |s: &mut State, key: &str, run: &RunId, text: &str| {
+        command(
+            s,
+            key,
+            Command::EditQueued {
+                run: run.clone(),
+                text: text.into(),
+                attachments: None,
+            },
+        )
+        .reply
+    };
+    assert_eq!(
+        edit(&mut s, "blank", &user, "   "),
+        Reply::Rejected {
+            reason: "empty-message".into()
+        }
+    );
+    let task = delegate_with(&mut s, "task", CompletionWake::Always);
+    complete_task(&mut s, "done", &task);
+    command(
+        &mut s,
+        "wake",
+        Command::AcceptTaskWake {
+            task_ids: vec![task],
+        },
+    );
+    let wake = s.runs.last().unwrap().id.clone();
+    assert_eq!(
+        edit(&mut s, "edit-wake", &wake, "changed"),
+        Reply::Rejected {
+            reason: "automatic-delivery-not-editable".into()
+        }
+    );
+    for (key, run, before, reason) in [
+        (
+            "move-wake",
+            &wake,
+            None,
+            "automatic-delivery-not-reorderable",
+        ),
+        (
+            "ahead",
+            &user,
+            Some(wake.clone()),
+            "cannot-reorder-ahead-of-automatic-delivery",
+        ),
+    ] {
+        assert_eq!(
+            command(
+                &mut s,
+                key,
+                Command::ReorderQueued {
+                    run: run.clone(),
+                    before,
+                },
+            )
+            .reply,
+            Reply::Rejected {
+                reason: reason.into()
+            }
+        );
+    }
+    provider(
+        &mut s,
+        "accepted",
+        &a,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    let active = s.runs[0].id.clone();
+    assert_eq!(
+        command(
+            &mut s,
+            "promote",
+            Command::PromoteToSteer {
+                queued: wake,
+                active,
+            },
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "automatic-delivery-not-promotable".into()
+        }
+    );
+}
+// T3 Orchestrator.ts:6866 and :7022: cancel needs no answers and closes the card as cancelled.
+#[test]
+fn declined_requests_and_dismissed_questions_close_their_cards_as_cancelled() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let question = |capability, key: &str| ProviderEvent::RequestOpened {
+        owner_path: vec![],
+        key: key.into(),
+        body: RequestBody::Questions {
+            questions: vec![Question {
+                required: true,
+                id: "q".into(),
+                header: "Question".into(),
+                question: "Which?".into(),
+                multiple: false,
+                options: vec![],
+            }],
+        },
+        capability,
+    };
+    provider(
+        &mut s,
+        "live",
+        &a,
+        question(ResponseCapability::Live, "live"),
+    );
+    provider(
+        &mut s,
+        "message",
+        &a,
+        question(ResponseCapability::Message, "message"),
+    );
+    provider(
+        &mut s,
+        "approval",
+        &a,
+        ProviderEvent::RequestOpened {
+            owner_path: vec![],
+            key: "approval".into(),
+            body: RequestBody::Approval {
+                kind: "command".into(),
+                title: "rm".into(),
+                detail: None,
+                options: vec![],
+                input: Json(serde_json::json!({})),
+            },
+            capability: ResponseCapability::Live,
+        },
+    );
+    let ids = s.requests.iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+    let cancel = command(
+        &mut s,
+        "cancel-live",
+        Command::Respond {
+            request: ids[0].clone(),
+            decision: Some(ApprovalDecision::Cancel),
+            answers: None,
+            attachments: BTreeMap::new(),
+        },
+    );
+    assert!(cancel.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::Provider(ProviderCommand::Respond {
+            decision: Some(ApprovalDecision::Cancel),
+            answers: None,
+            ..
+        })
+    )));
+    command(
+        &mut s,
+        "decline",
+        Command::Respond {
+            request: ids[2].clone(),
+            decision: Some(ApprovalDecision::Decline),
+            answers: None,
+            attachments: BTreeMap::new(),
+        },
+    );
+    assert_eq!(
+        command(
+            &mut s,
+            "dismiss-live",
+            Command::DismissQuestion {
+                request: ids[0].clone()
+            },
+        )
+        .reply,
+        Reply::Rejected {
+            reason: "question-already-answered".into()
+        }
+    );
+    command(
+        &mut s,
+        "dismiss",
+        Command::DismissQuestion {
+            request: ids[1].clone(),
+        },
+    );
+    assert!(
+        s.requests
+            .iter()
+            .all(|r| r.status == RequestStatus::Resolved)
+    );
+    assert_eq!(s.requests[1].decision, Some(ApprovalDecision::Cancel));
+    let cards = s
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.kind,
+                ItemKind::UserInputRequest { .. } | ItemKind::ApprovalRequest { .. }
+            )
+        })
+        .map(|item| item.status)
+        .collect::<Vec<_>>();
+    assert_eq!(cards, [ItemStatus::Cancelled; 3]);
+    assert_eq!(s.messages.len(), 1);
+}
+// T3 orchestrationV2.ts:2878 and SubagentProjection.ts:28: a delegation needs a task.
+#[test]
+fn delegation_requires_a_task_and_titles_the_child_from_it() {
+    let mut s = state();
+    running(&mut s, "parent");
+    let delegate = |s: &mut State, key: &str, prompt: &str| {
+        command(
+            s,
+            key,
+            Command::Delegate {
+                task: NodeId::new(key).unwrap(),
+                child: ThreadId::new(format!("child-{key}")).unwrap(),
+                prompt: prompt.into(),
+                selection: selection(),
+                wake: CompletionWake::SettledOnly,
+            },
+        )
+    };
+    assert_eq!(
+        delegate(&mut s, "blank", "  \n ").reply,
+        Reply::Rejected {
+            reason: "task-required".into()
+        }
+    );
+    assert!(s.tasks.is_empty());
+    let long = "x".repeat(80);
+    let step = delegate(&mut s, "long", &format!("  {long}  "));
+    let Some(Command::AcceptDelegation { title, message, .. }) =
+        step.effects.iter().find_map(|e| match &e.body {
+            EffectBody::SendToThread { command, .. } => Some(command.as_ref()),
+            _ => None,
+        })
+    else {
+        panic!()
+    };
+    assert_eq!(title, &format!("{}...", "x".repeat(69)));
+    assert_eq!(message.text, long);
+}
+// The streaming shortcut applies the same ownership checks as ordinary output.
+#[test]
+fn stale_streaming_output_cannot_reach_a_newer_attempt() {
+    let mut s = state();
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider {
+            selection: claude_selection(),
+        },
+    );
+    let (_, a) = running(&mut s, "first");
+    command(&mut s, "stop", Command::Stop);
+    provider(
+        &mut s,
+        "stopped",
+        &a,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Interrupted,
+            native_head: None,
+        },
+    );
+    let (_, b) = running(&mut s, "second");
+    provider(
+        &mut s,
+        "open",
+        &b,
+        ProviderEvent::ItemStarted {
+            key: "block".into(),
+            kind: ProviderItem::Text,
+        },
+    );
+    let before = s.clone();
+    let stale = provider(
+        &mut s,
+        "stale",
+        &a,
+        ProviderEvent::NativeOutput {
+            echoed_prompts: vec![],
+            acknowledged_prompt: None,
+            root: true,
+            result: None,
+            events: vec![ProviderEvent::TextDelta {
+                key: "block".into(),
+                kind: ProviderItem::Text,
+                text: "stale".into(),
+            }],
+        },
+    );
+    assert_eq!(stale.reply, Reply::Ignored);
+    assert_eq!(s, before);
+}
+fn title_effect(step: &Step) -> Option<(CommandId, Option<MessageId>)> {
+    step.effects.iter().find_map(|effect| match &effect.body {
+        EffectBody::GenerateTitle { request, message } => Some((request.clone(), message.clone())),
+        _ => None,
+    })
+}
+// T3 ThreadLaunchService.test.ts and ThreadTitleRegenerationService.test.ts.
+#[test]
+fn titles_are_generated_once_and_a_rename_supersedes_the_request() {
+    let mut s = state();
+    let mut first = send_message("first", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut first {
+        message.title_seed = Some("Generate my title".into());
+    }
+    let step = command(&mut s, "first", first);
+    let (request, message) = title_effect(&step).unwrap();
+    assert_eq!(message.unwrap().as_str(), "first");
+    assert_eq!(s.thread.as_ref().unwrap().title, "Generate my title");
+    command(
+        &mut s,
+        "rename",
+        Command::Rename {
+            title: "Keep my title".into(),
+        },
+    );
+    let before = s.clone();
+    let stale = result(
+        &mut s,
+        "stale",
+        EffectResult::TitleGenerated {
+            request: request.clone(),
+            title: Some("Stale generated title".into()),
+        },
+    );
+    assert_eq!(stale.reply, Reply::Ignored);
+    assert_eq!(s, before);
+    let regenerate = command(&mut s, "regenerate", Command::RegenerateTitle);
+    let (request, message) = title_effect(&regenerate).unwrap();
+    assert_eq!(message, None);
+    result(
+        &mut s,
+        "fallback",
+        EffectResult::TitleGenerated {
+            request,
+            title: Some("New thread".into()),
+        },
+    );
+    assert_eq!(s.thread.as_ref().unwrap().title, "Keep my title");
+    assert_eq!(s.thread.as_ref().unwrap().title_request, None);
+    let regenerate = command(&mut s, "again", Command::RegenerateTitle);
+    let (request, _) = title_effect(&regenerate).unwrap();
+    result(
+        &mut s,
+        "fresh",
+        EffectResult::TitleGenerated {
+            request,
+            title: Some("Fresh title".into()),
+        },
+    );
+    assert_eq!(s.thread.as_ref().unwrap().title, "Fresh title");
+    let later = command(
+        &mut s,
+        "later",
+        send_message("later", DispatchMode::QueueAfterActive),
+    );
+    assert_eq!(title_effect(&later), None);
+
+    let mut s = state();
+    let mut compact = send_message("compact", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut compact {
+        message.text = "/compact".into();
+    }
+    assert_eq!(title_effect(&command(&mut s, "compact", compact)), None);
+    let a = s.runs[0].attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "started",
+        &a,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &a);
+    let step = command(
+        &mut s,
+        "real",
+        send_message("real", DispatchMode::StartImmediately),
+    );
+    assert!(title_effect(&step).is_some());
+    command(&mut s, "archive", Command::Archive { archived: true });
+    assert_eq!(s.thread.as_ref().unwrap().title_request, None);
+}
+fn import(thread: &str) -> Command {
+    Command::Import {
+        thread: ThreadId::new(thread).unwrap(),
+        project: "project".into(),
+        title: "  ".into(),
+        selection: selection(),
+        workspace: Some(Workspace {
+            cwd: "/repo".into(),
+            worktree_path: None,
+            branch: Some("main".into()),
+        }),
+        created_at: Timestamp::parse("2026-01-01T00:00:00Z").unwrap(),
+        updated_at: Timestamp::parse("2026-01-02T00:00:00Z").unwrap(),
+        messages: vec![
+            ImportedMessage {
+                role: Role::User,
+                text: "Fix it".into(),
+                at: Timestamp::parse("2026-01-01T00:01:00Z").unwrap(),
+            },
+            ImportedMessage {
+                role: Role::Assistant,
+                text: "Fixed".into(),
+                at: Timestamp::parse("2026-01-01T00:02:00Z").unwrap(),
+            },
+        ],
+        native: NativeBinding {
+            instance: "codex".into(),
+            thread: "native-codex-thread".into(),
+            head: None,
+        },
+    }
+}
+// T3 AgentSessionImporter.test.ts.
+#[test]
+fn imported_sessions_keep_message_times_and_resume_their_native_session() {
+    let mut s = State::default();
+    command(&mut s, "import", import("import:codex:session"));
+    let thread = s.thread.clone().unwrap();
+    assert_eq!(thread.title, "Untitled thread");
+    assert_eq!(thread.settled, Some(true));
+    assert_eq!(thread.created_at.as_str(), "2026-01-01T00:00:00.000Z");
+    assert_eq!(thread.updated_at.as_str(), "2026-01-02T00:00:00.000Z");
+    assert_eq!(thread.workspace.unwrap().branch.as_deref(), Some("main"));
+    assert_eq!(
+        s.messages
+            .iter()
+            .map(|m| (m.text.as_str(), m.created_at.as_str(), m.streaming))
+            .collect::<Vec<_>>(),
+        [
+            ("Fix it", "2026-01-01T00:01:00.000Z", false),
+            ("Fixed", "2026-01-01T00:02:00.000Z", false)
+        ]
+    );
+    assert_eq!(
+        s.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["import:codex:session:000000", "import:codex:session:000001"]
+    );
+    assert_eq!(s.native_sessions["codex"], "native-codex-thread");
+    let before = s.clone();
+    assert_eq!(
+        command(&mut s, "again", import("import:codex:session")).reply,
+        Reply::Ignored
+    );
+    assert_eq!(s, before);
+    let step = command(
+        &mut s,
+        "resume",
+        send_message("next", DispatchMode::StartImmediately),
+    );
+    assert!(step.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::Provider(ProviderCommand::Start { native_thread: Some(native), context: None, .. }) if native == "native-codex-thread"
+    )));
+    let mut other = State::default();
+    command(&mut other, "import", import("import:codex:other"));
+    command(
+        &mut other,
+        "switch",
+        Command::SwitchProvider {
+            selection: claude_selection(),
+        },
+    );
+    let step = command(
+        &mut other,
+        "elsewhere",
+        send_message("elsewhere", DispatchMode::StartImmediately),
+    );
+    let (_, history) = start_context(&step).unwrap();
+    assert!(history.contains("Fix it") && history.contains("Fixed"));
+    let mut active = state();
+    assert_eq!(
+        command(&mut active, "import", import("thread")).reply,
+        Reply::Rejected {
+            reason: "thread-has-activity".into()
+        }
+    );
+}
+#[test]
+fn workspace_bindings_are_recorded_and_inherited_by_forks() {
+    let mut s = state();
+    let workspace = Workspace {
+        cwd: "/repo/.worktrees/one".into(),
+        worktree_path: Some("/repo/.worktrees/one".into()),
+        branch: Some("feature".into()),
+    };
+    let step = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "workspace".into(),
+            input: Input::Workspace {
+                workspace: Some(workspace.clone()),
+            },
+        },
+    );
+    s = fold(&s, &step.facts).unwrap();
+    assert_eq!(
+        s.thread.as_ref().unwrap().workspace,
+        Some(workspace.clone())
+    );
+    let (run, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let fork = command(
+        &mut s,
+        "fork",
+        Command::Fork {
+            target: ThreadId::new("fork").unwrap(),
+            through_run: run,
+            title: None,
+        },
+    );
+    let forked = result(
+        &mut s,
+        "forked",
+        EffectResult::NativeForked {
+            command: CommandId::new("fork").unwrap(),
+            native_thread: "fork-native".into(),
+        },
+    );
+    let _ = fork;
+    let child = accept_child(&forked);
+    assert_eq!(child.thread.unwrap().workspace, Some(workspace));
+}
+#[test]
+fn large_text_is_split_across_facts_without_truncation() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let huge = "界".repeat(MAX_FACT_TEXT);
+    let step = provider(
+        &mut s,
+        "huge",
+        &a,
+        ProviderEvent::ItemFinished {
+            key: "output".into(),
+            kind: ProviderItem::Text,
+            text: Some(huge.clone()),
+            status: ItemStatus::Completed,
+        },
+    );
+    assert!(
+        step.facts
+            .iter()
+            .all(|fact| serde_json::to_vec(fact).unwrap().len() < MAX_FACT_TEXT + 4096)
+    );
+    assert!(step.facts.len() > 3);
+    let item = s
+        .items
+        .iter()
+        .find(|item| item.native_key == "output")
+        .unwrap();
+    assert_eq!(item.text, huge);
+    let delta = provider(
+        &mut s,
+        "delta",
+        &a,
+        ProviderEvent::TextDelta {
+            key: "stream".into(),
+            kind: ProviderItem::Text,
+            text: huge.clone(),
+        },
+    );
+    assert!(delta.facts.len() > 3);
+    let error = provider(
+        &mut s,
+        "error",
+        &a,
+        ProviderEvent::ItemFinished {
+            key: "error".into(),
+            kind: ProviderItem::Error {
+                message: "x".repeat(5000),
+                retry: None,
+                code: Some("c".repeat(200)),
+                class: None,
+                retryable: None,
+            },
+            text: None,
+            status: ItemStatus::Failed,
+        },
+    );
+    let _ = error;
+    let ItemKind::Error { message, code, .. } = &s.items.last().unwrap().kind else {
+        panic!()
+    };
+    assert_eq!(message.encode_utf16().count(), 4096);
+    assert!(message.ends_with('…'));
+    assert_eq!(code.as_ref().unwrap().encode_utf16().count(), 128);
+}
+#[test]
+fn wire_encodings_round_trip_imports_titles_rollbacks_and_workspaces() {
+    let mut s = State::default();
+    let imported = import("import:codex:wire");
+    round_trip(&imported);
+    let step = command(&mut s, "import", imported);
+    round_trip(&step);
+    let regenerate = command(&mut s, "regenerate", Command::RegenerateTitle);
+    round_trip(&regenerate);
+    round_trip(&EffectResult::TitleGenerated {
+        request: CommandId::new("regenerate").unwrap(),
+        title: None,
+    });
+    round_trip(&Input::Workspace {
+        workspace: s.thread.as_ref().unwrap().workspace.clone(),
+    });
+    round_trip(&EffectBody::Rollback {
+        command: CommandId::new("rollback").unwrap(),
+        providers: vec![ProviderRollback {
+            instance: "codex".into(),
+            command: ProviderCommand::Rollback {
+                native_thread: "native".into(),
+                absolute_head: Some("turn".into()),
+            },
+        }],
+        restore: Some(RestoreFiles {
+            scope: None,
+            checkpoint: CheckpointId::new("cp").unwrap(),
+            file_ref: "ref".into(),
+        }),
+        stale_file_refs: vec!["later".into()],
+    });
+    round_trip(&s);
+    assert_eq!(STATE_FORMAT, 1);
+}
+// T3 CodexAdapterV2.test.ts:3805: a command outliving its turn reports back and wakes the thread.
+#[test]
+fn a_retained_command_keeps_its_row_and_wakes_the_thread_when_it_finishes() {
+    const COMMAND: &str = "sleep 20 && echo CODEX_BG_WAKE_DONE";
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let command_item = ProviderItem::Command {
+        command: COMMAND.into(),
+        cwd: None,
+        exit_code: None,
+    };
+    provider(
+        &mut s,
+        "started",
+        &a,
+        ProviderEvent::ItemStarted {
+            key: "call-bg".into(),
+            kind: command_item.clone(),
+        },
+    );
+    provider(
+        &mut s,
+        "retained",
+        &a,
+        ProviderEvent::BackgroundTask {
+            key: "call-bg".into(),
+            tool: "call-bg".into(),
+            kind: BackgroundKind::Command,
+            description: COMMAND.into(),
+            status: None,
+            summary: None,
+            exit_code: None,
+        },
+    );
+    finish(&mut s, &a);
+    let row = |s: &State| {
+        s.items
+            .iter()
+            .find(|item| item.native_key == "call-bg")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&s).status, ItemStatus::Running);
+    let detail = format!(
+        "Background command completed (exit 0): {COMMAND}\n\nOutput tail:\nCODEX_BG_WAKE_DONE"
+    );
+    for (key, event) in [
+        (
+            "late-output",
+            ProviderEvent::ItemFinished {
+                key: "call-bg".into(),
+                kind: command_item,
+                text: Some("CODEX_BG_WAKE_DONE\n".into()),
+                status: ItemStatus::Completed,
+            },
+        ),
+        (
+            "late-report",
+            ProviderEvent::BackgroundTask {
+                key: "call-bg".into(),
+                tool: "call-bg".into(),
+                kind: BackgroundKind::Command,
+                description: COMMAND.into(),
+                status: Some(ItemStatus::Completed),
+                summary: Some(detail.clone()),
+                exit_code: Some(0),
+            },
+        ),
+        (
+            "wake",
+            ProviderEvent::Wake {
+                text: detail.clone(),
+                detail: Some(COMMAND.into()),
+            },
+        ),
+    ] {
+        provider(&mut s, key, &a, event);
+    }
+    assert_eq!(row(&s).status, ItemStatus::Completed);
+    assert_eq!(row(&s).text, "CODEX_BG_WAKE_DONE\n");
+    assert!(s.background_work.is_empty());
+    let wake = s.runs.last().unwrap();
+    assert_eq!(wake.status, RunStatus::Starting);
+    let message = s.message(&wake.message).unwrap();
+    assert_eq!(message.text, detail);
+    assert_eq!(
+        message.notification,
+        Some(Notification {
+            source: NotificationSource::Native(BackgroundKind::Command),
+            child_thread: None,
+            outcome: NotificationOutcome::Completed,
+            summary: format!("Command \"{COMMAND}\" finished (exit 0)"),
+            detail: Some(COMMAND.into()),
+        })
+    );
+    assert!(s.wake_reports.is_empty());
+}
+// T3 ClaudeAdapterV2.ts:5309: a roster snapshot replaces the session's background work.
+#[test]
+fn background_rosters_replace_work_and_usage_limits_render_their_wait() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let entry = |key: &str| BackgroundEntry {
+        key: key.into(),
+        tool: key.into(),
+        kind: BackgroundKind::Command,
+        description: key.into(),
+    };
+    provider(
+        &mut s,
+        "roster",
+        &a,
+        ProviderEvent::BackgroundRoster {
+            tasks: vec![entry("one"), entry("two")],
+        },
+    );
+    assert_eq!(s.background_work.len(), 2);
+    finish(&mut s, &a);
+    provider(
+        &mut s,
+        "replaced",
+        &a,
+        ProviderEvent::BackgroundRoster {
+            tasks: vec![entry("two")],
+        },
+    );
+    assert_eq!(s.background_work.keys().collect::<Vec<_>>(), ["two"]);
+    let (_, b) = running(&mut s, "second");
+    provider(
+        &mut s,
+        "limit",
+        &b,
+        ProviderEvent::ItemFinished {
+            key: "usage-limit:five_hour".into(),
+            kind: ProviderItem::UsageLimit {
+                limit: Some("five_hour".into()),
+                resets_at: Some(at().millis() / 1000 + 7200),
+            },
+            text: None,
+            status: ItemStatus::Completed,
+        },
+    );
+    assert!(s.items.iter().any(|item| matches!(&item.kind, ItemKind::SystemNotice { message }
+        if message == "Claude usage limit reached. This turn is paused until the 5-hour limit resets in 2h.")));
 }

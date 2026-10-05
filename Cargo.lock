@@ -161,6 +161,7 @@ name = "agent-domain"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "postcard",
  "proptest",
  "serde",
  "serde_json",

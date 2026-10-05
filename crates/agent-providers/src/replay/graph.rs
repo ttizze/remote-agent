@@ -70,6 +70,7 @@ impl GraphReplay {
                 vec![]
             } else {
                 vec![CapturedBaseline {
+                    status: CheckpointStatus::Ready,
                     checkpoint: CheckpointId::new(format!("{thread}-baseline")).unwrap(),
                     ordinal: 0,
                     file_ref: "baseline".into(),
@@ -79,6 +80,7 @@ impl GraphReplay {
             let reply = self.replay.apply(
                 &thread,
                 Input::Effect(EffectResult::CheckpointCaptured {
+                    status: CheckpointStatus::Ready,
                     baselines,
                     run: run.id.clone(),
                     attempt: run.attempt,
@@ -134,8 +136,9 @@ impl GraphReplay {
             );
         } else {
             let wire = CodexProtocol::default()
-                .command(provider, &wire_context())
-                .unwrap();
+                .command(provider, &wire_context(), &[])
+                .unwrap()
+                .outbound;
             assert_eq!(wire[0]["method"], "thread/fork");
             if let Some(head) = head {
                 assert_eq!(wire[0]["params"]["lastTurnId"], head);
@@ -296,7 +299,8 @@ impl GraphReplay {
                     self.replay.command(
                         &source,
                         Command::MergeBack {
-                            target: thread.clone()
+                            target: thread.clone(),
+                            through_run: None,
                         }
                     ),
                     Reply::Accepted

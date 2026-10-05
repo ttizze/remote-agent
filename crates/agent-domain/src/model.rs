@@ -27,6 +27,7 @@ values! {
     BackgroundKind { Command, Monitor, Subagent, BackgroundTask }
     AttachmentKind { Image, File }
     PlanKind { Proposed, Todo }
+    CheckpointStatus { Ready, Missing, Error, Stale }
 }
 impl RunStatus {
     pub fn blocking(self) -> bool {
@@ -72,7 +73,7 @@ pub struct CapturedWindow {
     pub accessibility: Option<Accessibility>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "format", rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
 pub enum Accessibility {
     FlatText {
         text: String,
@@ -133,6 +134,22 @@ pub struct Thread {
     pub auto_settle: bool,
     pub parent: Option<ThreadId>,
     pub fork_boundary: Option<u64>,
+    pub workspace: Option<Workspace>,
+    /// The pending title generation; a rename or a newer request supersedes it.
+    pub title_request: Option<CommandId>,
+    pub imported: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub cwd: String,
+    pub worktree_path: Option<String>,
+    pub branch: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedMessage {
+    pub role: Role,
+    pub text: String,
+    pub at: Timestamp,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
@@ -179,6 +196,8 @@ pub struct Attempt {
     pub native_thread: Option<String>,
     pub native_turn: Option<String>,
     pub native_head: Option<String>,
+    /// The provider accepted the turn, so its input reached native history.
+    pub accepted: bool,
     pub usage: Option<TokenUsage>,
     pub context_usage: Option<ContextUsage>,
     pub turn_usage: Option<TurnTokenUsage>,
@@ -200,6 +219,9 @@ pub struct TokenUsage {
 pub struct ToolPresentation {
     pub title: Option<String>,
     pub source: Option<Json>,
+    /// `browser` or `computer` for tools that act on those surfaces.
+    pub surface: Option<String>,
+    pub icon: Option<Json>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ItemKind {
@@ -257,7 +279,7 @@ pub enum ItemKind {
     },
     Error {
         message: String,
-        retrying: bool,
+        retry: Option<RetryProgress>,
         code: Option<String>,
         class: Option<String>,
         retryable: Option<bool>,
@@ -268,6 +290,13 @@ pub enum ItemKind {
     Notification {
         notification: Notification,
     },
+}
+/// A provider retry that is still in progress or has resolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryProgress {
+    pub attempt: u64,
+    pub max_attempts: Option<u64>,
+    pub delay_ms: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Item {
@@ -390,6 +419,7 @@ pub struct CheckpointScope {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CapturedBaseline {
+    pub status: CheckpointStatus,
     pub checkpoint: CheckpointId,
     pub ordinal: u64,
     pub file_ref: String,
@@ -397,6 +427,7 @@ pub struct CapturedBaseline {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoint {
+    pub status: CheckpointStatus,
     pub scope: Option<CheckpointScope>,
     pub id: CheckpointId,
     pub run: Option<RunId>,
@@ -425,6 +456,9 @@ pub struct Task {
     pub progress: Option<String>,
     pub wake: CompletionWake,
     pub delivery: DeliveryState,
+    /// Incremented when a native task is resumed; results of an earlier
+    /// generation are stale.
+    pub generation: u64,
 }
 impl Task {
     pub fn app_owned(&self) -> bool {
@@ -527,6 +561,7 @@ pub struct State {
     pub tasks: Vec<Task>,
     pub transfers: Vec<Transfer>,
     pub inherited_items: Vec<Item>,
+    pub inherited_messages: Vec<Message>,
     pub rollback: Option<PendingRollback>,
     /// Captures that can be replayed after process loss, including their terminal status.
     pub captures: BTreeMap<RunId, RunStatus>,
@@ -536,6 +571,7 @@ pub struct State {
     pub stopping: BTreeSet<RunAttemptId>,
     pub native_owner: Option<RunAttemptId>,
     pub native_parent: Option<(ThreadId, NodeId)>,
+    pub native_generation: u64,
     pub native_child_thread: Option<String>,
     pub native_child_turn: Option<String>,
     pub native_context_usage: Option<ContextUsage>,
@@ -555,6 +591,13 @@ pub struct State {
     pub usage_baselines: BTreeMap<String, UsageCounters>,
 }
 impl State {
+    /// A local message, or one referenced by an inherited fork item.
+    pub fn message(&self, id: &MessageId) -> Option<&Message> {
+        self.messages
+            .iter()
+            .chain(&self.inherited_messages)
+            .find(|message| &message.id == id)
+    }
     pub fn active_run(&self) -> Option<&Run> {
         self.runs
             .iter()
@@ -633,6 +676,8 @@ pub struct SendMessage {
     pub mode: DispatchMode,
     pub intent: Option<DeliveryIntent>,
     pub source_plan: Option<PlanId>,
+    /// Shown as the title while the first message's title is generated.
+    pub title_seed: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DispatchMode {
@@ -656,10 +701,25 @@ pub enum Command {
         selection: ModelSelection,
         runtime_mode: RuntimeMode,
         interaction_mode: InteractionMode,
+        workspace: Option<Workspace>,
+    },
+    /// A native session imported with its original message times. It is
+    /// settled and bound to the native session.
+    Import {
+        thread: ThreadId,
+        project: String,
+        title: String,
+        selection: ModelSelection,
+        workspace: Option<Workspace>,
+        created_at: Timestamp,
+        updated_at: Timestamp,
+        messages: Vec<ImportedMessage>,
+        native: NativeBinding,
     },
     Rename {
         title: String,
     },
+    RegenerateTitle,
     Archive {
         archived: bool,
     },
@@ -757,12 +817,16 @@ pub enum Command {
         interaction_mode: InteractionMode,
         boundary: u64,
         history: Vec<Item>,
+        messages: Vec<Message>,
+        workspace: Option<Workspace>,
         checkpoint_scope: Option<CheckpointScope>,
         context: HistoricalContext,
         native: Option<NativeBinding>,
     },
+    /// Without `through_run`, the latest completed run is the boundary.
     MergeBack {
         target: ThreadId,
+        through_run: Option<RunId>,
     },
     AcceptTransfer {
         id: ContextTransferId,
@@ -785,6 +849,7 @@ pub enum Command {
         selection: ModelSelection,
         runtime_mode: RuntimeMode,
         interaction_mode: InteractionMode,
+        workspace: Option<Workspace>,
         origin: Delegation,
         message: SendMessage,
     },
@@ -795,6 +860,8 @@ pub enum Command {
     },
     TaskResult {
         source_message: Option<MessageId>,
+        /// The native child generation that produced this result.
+        generation: Option<u64>,
         context: Option<TaskResultContext>,
         task: NodeId,
         status: ItemStatus,
@@ -820,6 +887,7 @@ pub enum Command {
         owner: RunAttemptId,
         parent: ThreadId,
         task: NodeId,
+        generation: u64,
     },
     NativeInput {
         attempt: RunAttemptId,
@@ -856,9 +924,14 @@ pub enum ProviderItem {
     Notice {
         message: String,
     },
+    /// A rejected usage window; `resets_at` is in Unix seconds.
+    UsageLimit {
+        limit: Option<String>,
+        resets_at: Option<i64>,
+    },
     Error {
         message: String,
-        retrying: bool,
+        retry: Option<RetryProgress>,
         code: Option<String>,
         class: Option<String>,
         retryable: Option<bool>,
@@ -988,10 +1061,24 @@ pub enum ProviderEvent {
         description: String,
         status: Option<ItemStatus>,
         summary: Option<String>,
+        exit_code: Option<i64>,
     },
+    /// The complete background roster of the native session.
+    BackgroundRoster {
+        tasks: Vec<BackgroundEntry>,
+    },
+    /// The provider asks for a turn that reports finished background work.
     Wake {
         text: String,
+        detail: Option<String>,
     },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundEntry {
+    pub key: String,
+    pub tool: String,
+    pub kind: BackgroundKind,
+    pub description: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeResult {
@@ -1005,13 +1092,16 @@ pub enum ProviderCommand {
         selection: ModelSelection,
         runtime_mode: RuntimeMode,
         interaction_mode: InteractionMode,
+        /// The user's text; compose the native prompt with `provider_prompt`.
         text: String,
+        note: Option<String>,
         attachments: Vec<Attachment>,
         native_thread: Option<String>,
         resume_at: Option<String>,
         context: Option<HistoricalContext>,
     },
     Steer {
+        message: MessageId,
         text: String,
         attachments: Vec<Attachment>,
     },
@@ -1062,10 +1152,14 @@ pub enum EffectBody {
         native_baseline_heads: BTreeMap<String, Option<String>>,
         run: RunId,
     },
-    RestoreCheckpoint {
-        scope: Option<CheckpointScope>,
-        checkpoint: CheckpointId,
-        file_ref: String,
+    /// One rollback request: provider rewinds, then the optional file
+    /// restore, then removal of stale checkpoint references. It reports one
+    /// `RollbackFinished` or `RollbackFailed`.
+    Rollback {
+        command: CommandId,
+        providers: Vec<ProviderRollback>,
+        restore: Option<RestoreFiles>,
+        stale_file_refs: Vec<String>,
     },
     PrepareWorkspace {
         run: RunId,
@@ -1077,9 +1171,29 @@ pub enum EffectBody {
     DeleteAttachments {
         paths: Vec<String>,
     },
-    GenerateTitle {
-        text: String,
+    /// Detach this thread's provider sessions, which stops their background work.
+    DetachSessions {
+        reason: String,
+        revoke_credentials: bool,
     },
+    CleanupTerminals,
+    /// Generate a title from the initial message, or from the conversation
+    /// when `message` is absent.
+    GenerateTitle {
+        request: CommandId,
+        message: Option<MessageId>,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderRollback {
+    pub instance: String,
+    pub command: ProviderCommand,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestoreFiles {
+    pub scope: Option<CheckpointScope>,
+    pub checkpoint: CheckpointId,
+    pub file_ref: String,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectResult {
@@ -1097,18 +1211,18 @@ pub enum EffectResult {
         message: String,
         message_id: Option<MessageId>,
         turn_completed: bool,
+        /// A start could not resume its native session; start a fresh one.
+        session_lost: bool,
     },
+    /// A capture that could not read the workspace reports `Missing` or
+    /// `Error`; the run still finishes.
     CheckpointCaptured {
+        status: CheckpointStatus,
         baselines: Vec<CapturedBaseline>,
         run: RunId,
         attempt: Option<RunAttemptId>,
         checkpoint: CheckpointId,
         file_ref: String,
-    },
-    CheckpointFailed {
-        run: RunId,
-        attempt: Option<RunAttemptId>,
-        message: String,
     },
     RollbackFinished {
         bindings: Vec<NativeBinding>,
@@ -1118,8 +1232,10 @@ pub enum EffectResult {
         command: CommandId,
         message: String,
     },
+    /// `None` keeps the current title.
     TitleGenerated {
-        title: String,
+        request: CommandId,
+        title: Option<String>,
     },
 }
 values! { ProviderOperation { Start, Steer, Interrupt, Respond, Compact, SetModel } }
@@ -1141,6 +1257,9 @@ pub enum Input {
     },
     NativeSessionReset {
         instance: String,
+    },
+    Workspace {
+        workspace: Option<Workspace>,
     },
     Command {
         id: CommandId,

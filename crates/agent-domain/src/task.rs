@@ -14,6 +14,51 @@ pub struct DelegatedTaskStatus {
     pub latest_terminal_summary: Option<String>,
     pub latest_terminal_result_context_transfer_id: Option<ContextTransferId>,
 }
+/// A terminal child run's result: its failure, else its latest assistant
+/// answer, else a status fallback.
+pub fn delegated_result(run: &Run, items: &[Item], messages: &[Message]) -> String {
+    let failure = (run.status == RunStatus::Failed)
+        .then(|| {
+            items
+                .iter()
+                .filter(|item| item.run.as_ref() == Some(&run.id))
+                .filter_map(|item| match &item.kind {
+                    ItemKind::Error { message, .. } => Some((item.ordinal, message.clone())),
+                    _ => None,
+                })
+                .max_by_key(|(ordinal, _)| *ordinal)
+                .map(|(_, message)| message)
+        })
+        .flatten();
+    let message = messages
+        .iter()
+        .filter(|message| {
+            message.run.as_ref() == Some(&run.id)
+                && message.role == Role::Assistant
+                && !message.text.trim().is_empty()
+        })
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+        .map(|message| message.text.clone());
+    let item = items
+        .iter()
+        .filter(|item| {
+            item.run.as_ref() == Some(&run.id)
+                && matches!(item.kind, ItemKind::AssistantMessage { .. })
+                && !item.text.trim().is_empty()
+        })
+        .max_by_key(|item| item.ordinal)
+        .map(|item| item.text.clone());
+    failure.or(message).or(item).unwrap_or_else(|| {
+        if run.status == RunStatus::Completed {
+            "Child task completed without an assistant result.".into()
+        } else {
+            format!(
+                "Child task ended with status {}.",
+                serde_json::to_value(run.status).unwrap().as_str().unwrap()
+            )
+        }
+    })
+}
 /// The task's original outcome is independent of subsequent child follow-ups.
 /// The caller supplies committed child runs/items and the parent's transfers.
 pub fn delegated_task_status(
@@ -59,18 +104,7 @@ pub fn delegated_task_status(
             })
             .map(|transfer| transfer.id.clone())
     };
-    let summary = |run: &Run| {
-        let text = child_items
-            .iter()
-            .filter(|item| {
-                item.run.as_ref() == Some(&run.id)
-                    && matches!(item.kind, ItemKind::AssistantMessage { .. })
-            })
-            .map(|item| item.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        (!text.is_empty()).then_some(text)
-    };
+    let summary = |run: &Run| Some(delegated_result(run, child_items, child_messages));
     DelegatedTaskStatus {
         child_run_id: original.map(|run| run.id.clone()),
         status: task.status,

@@ -31,11 +31,11 @@ enum Pending {
     Initialize,
     Thread {
         start: Value,
-        history: Option<HistoricalContext>,
+        history: Option<InlineHistory>,
     },
     Inject {
         start: Value,
-        history: HistoricalContext,
+        history: InlineHistory,
     },
     RevertRead {
         thread: String,
@@ -52,7 +52,57 @@ enum Pending {
         before: Option<String>,
         visited: BTreeSet<Option<String>>,
     },
+    Revert {
+        thread: String,
+    },
+    Terminate {
+        thread: String,
+        process: String,
+    },
+    TerminalList {
+        thread: String,
+        process: String,
+    },
     Operation(String),
+}
+impl Pending {
+    fn operation(&self) -> String {
+        match self {
+            Pending::Initialize => "initialize".into(),
+            Pending::Thread { .. } => "thread/start".into(),
+            Pending::Inject { .. } => "thread/inject_items".into(),
+            Pending::RevertRead { .. } => "thread/read".into(),
+            Pending::RevertResume { .. } => "thread/resume".into(),
+            Pending::RevertPage { .. } => "thread/turns/list".into(),
+            Pending::Revert { .. } => "thread/revert".into(),
+            Pending::Terminate { .. } => "thread/backgroundTerminals/terminate".into(),
+            Pending::TerminalList { .. } => "thread/backgroundTerminals/list".into(),
+            Pending::Operation(operation) => operation.clone(),
+        }
+    }
+}
+/// A command execution the native turn has not completed.
+#[derive(Debug, Clone)]
+struct RunningCommand {
+    thread: String,
+    turn: String,
+    command: String,
+    output: String,
+    process: Option<String>,
+}
+/// Final answers of one native turn: later duplicates and empty completions
+/// after an answer are not new answers.
+#[derive(Debug, Default)]
+struct FinalAnswers {
+    first: Option<String>,
+    texts: BTreeSet<String>,
+}
+/// Historical context for injection, and the complete prompt text used when
+/// the native thread cannot inject it.
+#[derive(Debug, Clone)]
+struct InlineHistory {
+    history: HistoricalContext,
+    inline_text: String,
 }
 /// One native app-server session's RPC correlation, with no application entities.
 #[derive(Debug, Default)]
@@ -62,11 +112,22 @@ pub struct CodexProtocol {
     thread: Option<String>,
     turns: BTreeMap<String, String>,
     reasoning_parts: BTreeMap<String, BTreeMap<(String, u64), String>>,
-    processes: BTreeMap<String, BTreeSet<String>>,
     interrupt_pending: BTreeSet<String>,
     stop_before_thread: bool,
     /// Native child thread -> native parent, used solely to route notifications.
     children: BTreeMap<String, String>,
+    /// Pending server request ID -> method, to shape the reply.
+    server_requests: BTreeMap<String, String>,
+    running: BTreeMap<String, RunningCommand>,
+    /// Completed turns that still own running commands.
+    settled: BTreeSet<String>,
+    /// Threads whose work the user stopped; their late completions do not wake.
+    stopping: BTreeSet<String>,
+    final_answers: BTreeMap<String, FinalAnswers>,
+    deferred: BTreeSet<String>,
+    async_messages: BTreeSet<String>,
+    retries: BTreeMap<String, RetryProgress>,
+    failures: BTreeMap<String, (String, Option<String>, String)>,
 }
 impl CodexProtocol {
     fn request(&mut self, method: &str, params: Value, pending: Pending) -> Value {
@@ -77,11 +138,13 @@ impl CodexProtocol {
     pub fn initialize(&mut self, context: &WireContext) -> Value {
         self.request("initialize",json!({"capabilities":{"experimentalApi":true,"optOutNotificationMethods":["turn/diff/updated"]},"clientInfo":{"name":context.client_name,"title":context.client_name,"version":context.client_version}}),Pending::Initialize)
     }
+    /// Image bytes are prepared by the resource owner; paths are never sent.
     pub fn command(
         &mut self,
         command: &ProviderCommand,
         context: &WireContext,
-    ) -> Result<Vec<Value>, ProtocolError> {
+        images: &[PreparedImage],
+    ) -> Result<Translation, ProtocolError> {
         let frame = match command {
             ProviderCommand::Start {
                 resume_interrupted_turn,
@@ -89,21 +152,32 @@ impl CodexProtocol {
                 runtime_mode,
                 interaction_mode,
                 text,
+                note,
                 attachments,
                 native_thread,
                 context: handoff,
                 ..
             } => {
-                let mut input = vec![];
-                if !resume_interrupted_turn {
-                    for file in attachments {
-                        if native_image(file) {
-                            input.push(json!({"type":"localImage","path":file.path}));
-                        }
-                    }
-                    let text = attachment_text(text, attachments);
-                    input.push(json!({"type":"text","text":text}));
-                }
+                let input = if *resume_interrupted_turn {
+                    vec![]
+                } else {
+                    codex_input(
+                        &provider_prompt(text, note.as_deref(), None),
+                        attachments,
+                        images,
+                    )?
+                };
+                let handoff = handoff.as_ref().map(|history| InlineHistory {
+                    history: history.clone(),
+                    inline_text: attachment_text(
+                        &codex_skill_mention_text(&provider_prompt(
+                            text,
+                            note.as_deref(),
+                            Some(history),
+                        )),
+                        attachments,
+                    ),
+                });
                 let (approval, reviewer, sandbox) = codex_runtime(*runtime_mode);
                 let mut start = json!({"input":input,"cwd":context.cwd,"model":selection.model,"summary":"detailed","approvalPolicy":approval,"approvalsReviewer":reviewer,"sandboxPolicy":{"type":sandbox}});
                 if let Some(policy) = &context.approval_policy {
@@ -138,7 +212,7 @@ impl CodexProtocol {
                     .filter(|id| native_thread.as_ref() == Some(id))
                 {
                     start["threadId"] = json!(thread);
-                    self.start_or_inject(start, handoff.clone())
+                    self.start_or_inject(start, handoff)
                 } else if let Some(thread) = native_thread {
                     let mut params = context.thread_params(Some(&selection.model));
                     params["threadId"] = json!(thread);
@@ -148,7 +222,7 @@ impl CodexProtocol {
                         params,
                         Pending::Thread {
                             start,
-                            history: handoff.clone(),
+                            history: handoff,
                         },
                     )
                 } else {
@@ -157,12 +231,14 @@ impl CodexProtocol {
                         context.thread_params(Some(&selection.model)),
                         Pending::Thread {
                             start,
-                            history: handoff.clone(),
+                            history: handoff,
                         },
                     )
                 }
             }
-            ProviderCommand::Steer { text, attachments } => {
+            ProviderCommand::Steer {
+                text, attachments, ..
+            } => {
                 let thread = self
                     .thread
                     .as_ref()
@@ -175,7 +251,7 @@ impl CodexProtocol {
                         message: "No active turn".into(),
                         turn_completed: true,
                     })?;
-                let input = json!([{"type":"text","text":attachment_text(text,attachments)}]);
+                let input = codex_input(text, attachments, images)?;
                 self.request(
                     "turn/steer",
                     json!({"threadId":thread,"expectedTurnId":turn,"input":input}),
@@ -186,9 +262,23 @@ impl CodexProtocol {
                 native_thread,
                 native_turn,
             } => {
+                let mut output = Translation::default();
+                if self
+                    .pending
+                    .values()
+                    .any(|p| matches!(p, Pending::Thread { .. }))
+                {
+                    self.stop_before_thread = true;
+                }
                 let thread = native_thread.as_ref().or(self.thread.as_ref()).cloned();
                 if let Some(thread) = thread {
-                    let turn = native_turn.as_ref().or(self.turns.get(&thread)).cloned();
+                    // A completed turn is not interrupted again; only its
+                    // retained commands are stopped.
+                    let active = self.turns.get(&thread).cloned();
+                    let turn = match native_turn {
+                        Some(turn) => active.filter(|active| active == turn),
+                        None => active,
+                    };
                     if self.pending.values().any(|pending| matches!(pending,Pending::Inject {start,..} if start["threadId"] == thread)) {
                         self.stop_before_thread = true;
                     }
@@ -200,16 +290,23 @@ impl CodexProtocol {
                     {
                         self.interrupt_pending.insert(thread.clone());
                     }
-                    return Ok(self.interrupt(&thread, turn.as_deref()));
+                    self.stopping.insert(thread.clone());
+                    output.outbound = self.interrupt(&thread, turn.as_deref());
+                    let untracked = self
+                        .running
+                        .iter()
+                        .filter(|(_, command)| {
+                            command.thread == thread
+                                && command.process.is_none()
+                                && self.settled.contains(&command.turn)
+                        })
+                        .map(|(item, _)| item.clone())
+                        .collect::<Vec<_>>();
+                    for item in untracked {
+                        output.events.extend(self.stop_command(&item));
+                    }
                 }
-                if self
-                    .pending
-                    .values()
-                    .any(|p| matches!(p, Pending::Thread { .. }))
-                {
-                    self.stop_before_thread = true;
-                }
-                return Ok(vec![]);
+                return Ok(output);
             }
             ProviderCommand::Respond {
                 native_key,
@@ -219,7 +316,11 @@ impl CodexProtocol {
             } => {
                 let id: Value = serde_json::from_str(native_key)
                     .map_err(|_| ProtocolError::Invalid("invalid native request id".into()))?;
-                let result = if let Some(answers) = answers {
+                let question = self.server_requests.remove(native_key).as_deref()
+                    == Some("item/tool/requestUserInput");
+                let result = if question {
+                    json!({"answers":answers.iter().flatten().map(|(k,v)| (k.clone(),json!({"answers":v.choices()}))).collect::<BTreeMap<_,_>>()})
+                } else if let Some(answers) = answers {
                     json!({"answers":answers.iter().map(|(k,v)| (k.clone(),json!({"answers":v.choices()}))).collect::<BTreeMap<_,_>>()})
                 } else if let Some(payload) = input
                     .as_ref()
@@ -290,10 +391,76 @@ impl CodexProtocol {
             }
             // Codex selection/runtime parameters are authoritative on turn/start.
             ProviderCommand::SetModel { .. } | ProviderCommand::SetRuntimeMode { .. } => {
-                return Ok(vec![]);
+                return Ok(Translation::default());
             }
         };
-        Ok(vec![frame])
+        Ok(Translation {
+            outbound: vec![frame],
+            ..Translation::default()
+        })
+    }
+    /// Ends a retained command that the user stopped.
+    fn stop_command(&mut self, item: &str) -> Vec<ProviderEvent> {
+        let Some(command) = self.running.remove(item) else {
+            return vec![];
+        };
+        let events = vec![
+            ProviderEvent::ItemFinished {
+                key: item.into(),
+                kind: ProviderItem::Command {
+                    command: command.command.clone(),
+                    cwd: None,
+                    exit_code: None,
+                },
+                text: (!command.output.is_empty()).then_some(command.output),
+                status: ItemStatus::Interrupted,
+            },
+            ProviderEvent::BackgroundTask {
+                key: item.into(),
+                tool: item.into(),
+                kind: BackgroundKind::Command,
+                description: command.command,
+                status: Some(ItemStatus::Cancelled),
+                summary: None,
+                exit_code: None,
+            },
+        ];
+        self.release_settled(&command.turn);
+        self.route(events, Some(&command.thread))
+    }
+    fn release_settled(&mut self, turn: &str) {
+        if !self.running.values().any(|command| command.turn == turn) {
+            self.settled.remove(turn);
+        }
+    }
+    /// A retry item resolves when the provider produces output again.
+    fn resolve_retry(&mut self, turn: &str, status: ItemStatus) -> Option<ProviderEvent> {
+        let retry = self.retries.remove(turn)?;
+        let (message, code, class) = self.failures.get(turn).cloned().unwrap_or_default();
+        Some(ProviderEvent::ItemFinished {
+            key: format!("terminal-failure:{turn}"),
+            kind: ProviderItem::Error {
+                message,
+                retry: Some(retry),
+                code,
+                class: Some(class),
+                retryable: Some(true),
+            },
+            text: None,
+            status,
+        })
+    }
+    fn route(&self, events: Vec<ProviderEvent>, thread: Option<&String>) -> Vec<ProviderEvent> {
+        match thread.filter(|thread| self.thread.as_ref() != Some(*thread)) {
+            Some(thread) => child_events(events, thread, &self.children).unwrap_or_default(),
+            None => events,
+        }
+    }
+    fn process_item(&self, process: &str) -> Option<String> {
+        self.running
+            .iter()
+            .find(|(_, command)| command.process.as_deref() == Some(process))
+            .map(|(item, _)| item.clone())
     }
     fn revert_page(
         &mut self,
@@ -310,9 +477,9 @@ impl CodexProtocol {
         }
         Ok(self.request("thread/turns/list",json!({"threadId":thread,"cursor":cursor,"limit":100,"sortDirection":"desc","itemsView":"summary"}),Pending::RevertPage {thread,head,before,visited}))
     }
-    fn start_or_inject(&mut self, start: Value, history: Option<HistoricalContext>) -> Value {
+    fn start_or_inject(&mut self, start: Value, history: Option<InlineHistory>) -> Value {
         if let Some(history) = history {
-            self.request("thread/inject_items",json!({"threadId":start["threadId"],"items":history_response_items(&history.messages,&history.context)}),Pending::Inject {start,history})
+            self.request("thread/inject_items",json!({"threadId":start["threadId"],"items":history_response_items(&history.history.messages,&history.history.context)}),Pending::Inject {start,history})
         } else {
             self.request("turn/start", start, Pending::Operation("turn/start".into()))
         }
@@ -326,12 +493,20 @@ impl CodexProtocol {
                 Pending::Operation("turn/interrupt".into()),
             ));
         }
-        let processes = self.processes.get(thread).cloned().unwrap_or_default();
+        let processes = self
+            .running
+            .values()
+            .filter(|command| command.thread == thread)
+            .filter_map(|command| command.process.clone())
+            .collect::<BTreeSet<_>>();
         for process in processes {
             outbound.push(self.request(
                 "thread/backgroundTerminals/terminate",
                 json!({"threadId":thread,"processId":process}),
-                Pending::Operation("thread/backgroundTerminals/terminate".into()),
+                Pending::Terminate {
+                    thread: thread.into(),
+                    process,
+                },
             ));
         }
         outbound
@@ -352,7 +527,7 @@ impl CodexProtocol {
                     if std::mem::take(&mut self.stop_before_thread) {
                         return Ok(output);
                     }
-                    prepend_inline_history(&mut start, &history);
+                    replace_input_text(&mut start, history.inline_text);
                     output.outbound.push(self.request(
                         "turn/start",
                         start,
@@ -361,15 +536,15 @@ impl CodexProtocol {
                     return Ok(output);
                 }
                 let message = string(error, "message");
-                let operation = match pending {
-                    Pending::Initialize => "initialize".into(),
-                    Pending::Thread { .. } => "thread/start".into(),
-                    Pending::Inject { .. } => "thread/inject_items".into(),
-                    Pending::RevertRead { .. } => "thread/read".into(),
-                    Pending::RevertResume { .. } => "thread/resume".into(),
-                    Pending::RevertPage { .. } => "thread/turns/list".into(),
-                    Pending::Operation(operation) => operation,
-                };
+                if let Pending::Terminate { process, .. } = &pending
+                    && (message.contains("ProcessExited") || message.contains("InputStreamEnded"))
+                {
+                    if let Some(item) = self.process_item(process) {
+                        output.events = self.stop_command(&item);
+                    }
+                    return Ok(output);
+                }
+                let operation = pending.operation();
                 return Err(ProtocolError::Remote {
                     turn_completed: completed_steer_error(&message),
                     operation,
@@ -379,15 +554,7 @@ impl CodexProtocol {
             let result = &frame["result"];
             output.replies.push(NativeReply {
                 request: id.to_string(),
-                operation: match &pending {
-                    Pending::Initialize => "initialize".into(),
-                    Pending::Thread { .. } => "thread/start".into(),
-                    Pending::Inject { .. } => "thread/inject_items".into(),
-                    Pending::RevertRead { .. } => "thread/read".into(),
-                    Pending::RevertResume { .. } => "thread/resume".into(),
-                    Pending::RevertPage { .. } => "thread/turns/list".into(),
-                    Pending::Operation(operation) => operation.clone(),
-                },
+                operation: pending.operation(),
                 result: Json(result.clone()),
             });
             match pending {
@@ -467,8 +634,12 @@ impl CodexProtocol {
                                 output.outbound.push(self.request(
                                     "thread/revert",
                                     json!({"threadId":thread,"beforeTurnId":before}),
-                                    Pending::Operation("thread/revert".into()),
+                                    Pending::Revert { thread },
                                 ));
+                            } else {
+                                output.completion = Some(Completion::RolledBack {
+                                    native_thread: thread,
+                                });
                             }
                             return Ok(output);
                         }
@@ -488,9 +659,59 @@ impl CodexProtocol {
                         output.outbound.push(self.request(
                             "thread/revert",
                             json!({"threadId":thread,"beforeTurnId":before}),
-                            Pending::Operation("thread/revert".into()),
+                            Pending::Revert { thread },
                         ));
+                    } else {
+                        output.completion = Some(Completion::RolledBack {
+                            native_thread: thread,
+                        });
                     }
+                }
+                Pending::Revert { thread } => {
+                    output.completion = Some(Completion::RolledBack {
+                        native_thread: thread,
+                    });
+                }
+                Pending::Terminate { thread, process } => {
+                    if result["terminated"] == false {
+                        output.outbound.push(self.request(
+                            "thread/backgroundTerminals/list",
+                            json!({"threadId":thread}),
+                            Pending::TerminalList { thread, process },
+                        ));
+                    } else if let Some(item) = self.process_item(&process) {
+                        output.events = self.stop_command(&item);
+                    }
+                }
+                Pending::TerminalList { thread, process } => {
+                    let listed = result["data"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|terminal| terminal["processId"].as_str() == Some(process.as_str()));
+                    if listed {
+                        return Err(ProtocolError::Remote {
+                            operation: "thread/backgroundTerminals/terminate".into(),
+                            message: format!(
+                                "Codex background terminal {process} remained active after termination."
+                            ),
+                            turn_completed: false,
+                        });
+                    }
+                    if let Some(cursor) = optional(result, "nextCursor") {
+                        output.outbound.push(self.request(
+                            "thread/backgroundTerminals/list",
+                            json!({"threadId":thread,"cursor":cursor}),
+                            Pending::TerminalList { thread, process },
+                        ));
+                    } else if let Some(item) = self.process_item(&process) {
+                        output.events = self.stop_command(&item);
+                    }
+                }
+                Pending::Operation(operation) if operation == "thread/fork" => {
+                    output.completion = Some(Completion::Forked {
+                        native_thread: required(&result["thread"], "id")?,
+                    });
                 }
                 Pending::Operation(operation) => {
                     if operation == "turn/start"
@@ -510,6 +731,24 @@ impl CodexProtocol {
         let p = &frame["params"];
         let native_thread = optional(p, "threadId");
         let mut events = vec![];
+        let resumes_output = matches!(
+            method.as_str(),
+            "item/agentMessage/delta"
+                | "item/reasoning/summaryTextDelta"
+                | "item/reasoning/textDelta"
+                | "item/plan/delta"
+                | "turn/plan/updated"
+        ) || method == "item/started"
+            && !matches!(
+                p["item"]["type"].as_str(),
+                Some("contextCompaction" | "userMessage" | "subAgentActivity")
+            );
+        if resumes_output
+            && let Some(turn) = optional(p, "turnId")
+            && let Some(recovered) = self.resolve_retry(&turn, ItemStatus::Completed)
+        {
+            events.push(recovered);
+        }
         match method.as_str() {
             "thread/started" => {
                 let thread = required(&p["thread"], "id")?;
@@ -529,6 +768,12 @@ impl CodexProtocol {
                     if self.interrupt_pending.remove(thread) {
                         output.outbound.extend(self.interrupt(thread, Some(&turn)));
                     }
+                    // Each turn names the native thread it continues.
+                    if self.thread.as_ref() == Some(thread) {
+                        events.push(ProviderEvent::SessionReady {
+                            native_thread: thread.clone(),
+                        });
+                    }
                 }
                 events.push(ProviderEvent::TurnStarted {
                     native_turn: Some(turn),
@@ -536,20 +781,118 @@ impl CodexProtocol {
             }
             "turn/completed" => {
                 let turn = &p["turn"];
+                let turn_id = string(turn, "id");
+                let status = terminal(&string(turn, "status"));
                 if let Some(thread) = &native_thread {
                     self.turns.remove(thread);
                     self.interrupt_pending.remove(thread);
                 }
+                self.final_answers.remove(&turn_id);
+                if status == RunStatus::Failed {
+                    let error = &turn["error"];
+                    let recorded = self.failures.remove(&turn_id);
+                    let message = optional(error, "message");
+                    let code = codex_error_code(&error["codexErrorInfo"]);
+                    let (message, code, class) = match recorded {
+                        Some(recorded)
+                            if message.as_ref().is_none_or(|m| *m == recorded.0)
+                                && code.as_ref().is_none_or(|c| Some(c) == recorded.1.as_ref()) =>
+                        {
+                            recorded
+                        }
+                        _ => {
+                            let class = if matches!(
+                                code.as_deref(),
+                                Some("usageLimitExceeded" | "rateLimitExceeded")
+                            ) {
+                                "usage_limit"
+                            } else {
+                                "provider_error"
+                            };
+                            (
+                                message.unwrap_or_else(|| "Provider turn failed.".into()),
+                                code,
+                                class.into(),
+                            )
+                        }
+                    };
+                    events.push(ProviderEvent::ItemFinished {
+                        key: format!("terminal-failure:{turn_id}"),
+                        kind: ProviderItem::Error {
+                            message,
+                            retry: self.retries.remove(&turn_id),
+                            code,
+                            class: Some(class),
+                            retryable: None,
+                        },
+                        text: None,
+                        status: ItemStatus::Failed,
+                    });
+                } else if let Some(stopped) = self.resolve_retry(
+                    &turn_id,
+                    match status {
+                        RunStatus::Completed => ItemStatus::Completed,
+                        RunStatus::Cancelled => ItemStatus::Cancelled,
+                        _ => ItemStatus::Interrupted,
+                    },
+                ) {
+                    events.push(stopped);
+                }
+                self.failures.remove(&turn_id);
+                let running = self
+                    .running
+                    .iter()
+                    .filter(|(_, command)| command.turn == turn_id)
+                    .map(|(item, command)| (item.clone(), command.command.clone()))
+                    .collect::<Vec<_>>();
+                if status == RunStatus::Completed && !running.is_empty() {
+                    // Commands still running outlive the turn as background work.
+                    self.settled.insert(turn_id.clone());
+                    for (item, command) in running {
+                        events.push(ProviderEvent::BackgroundTask {
+                            key: item.clone(),
+                            tool: item,
+                            kind: BackgroundKind::Command,
+                            description: command,
+                            status: None,
+                            summary: None,
+                            exit_code: None,
+                        });
+                    }
+                } else {
+                    self.running.retain(|_, command| command.turn != turn_id);
+                }
                 events.push(ProviderEvent::TurnFinished {
-                    status: terminal(&string(turn, "status")),
+                    status,
                     native_head: optional(turn, "id"),
                 });
             }
-            "item/agentMessage/delta" => events.push(ProviderEvent::TextDelta {
-                key: required(p, "itemId")?,
-                kind: ProviderItem::Text,
-                text: string(p, "delta"),
-            }),
+            "item/agentMessage/delta" => {
+                let key = required(p, "itemId")?;
+                if !self.deferred.contains(&key) && !self.async_messages.contains(&key) {
+                    events.push(ProviderEvent::TextDelta {
+                        key,
+                        kind: ProviderItem::Text,
+                        text: string(p, "delta"),
+                    });
+                }
+            }
+            "model/rerouted" | "thread/settings/updated" => {
+                let model = if method == "model/rerouted" {
+                    string(p, "toModel")
+                } else {
+                    string(&p["threadSettings"], "model")
+                };
+                if !model.trim().is_empty()
+                    && native_thread
+                        .as_ref()
+                        .is_some_and(|thread| self.children.contains_key(thread))
+                {
+                    events.push(ProviderEvent::ModelObserved {
+                        model: model.trim().into(),
+                    });
+                }
+            }
             "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
                 let delta = string(p, "delta");
                 if !delta.is_empty() {
@@ -637,22 +980,134 @@ impl CodexProtocol {
                 let item = &p["item"];
                 let key = required(item, "id")?;
                 let completed = method == "item/completed";
-                if string(item, "type") == "commandExecution"
-                    && let (Some(thread), Some(process)) =
-                        (&native_thread, optional(item, "processId"))
-                {
-                    if completed {
-                        if let Some(processes) = self.processes.get_mut(thread) {
-                            processes.remove(&process);
-                        }
-                    } else {
-                        self.processes
-                            .entry(thread.clone())
-                            .or_default()
-                            .insert(process);
-                    }
-                }
+                let turn_id = string(p, "turnId");
                 match string(item, "type").as_str() {
+                    "commandExecution" => {
+                        let (kind, text) = codex_item("commandExecution", item).unwrap();
+                        if !completed {
+                            if item_status(&string(item, "status")) == ItemStatus::Running
+                                && let Some(thread) = &native_thread
+                            {
+                                self.running.insert(
+                                    key.clone(),
+                                    RunningCommand {
+                                        thread: thread.clone(),
+                                        turn: turn_id.clone(),
+                                        command: string(item, "command"),
+                                        output: string(item, "aggregatedOutput"),
+                                        process: optional(item, "processId"),
+                                    },
+                                );
+                            }
+                            events.push(ProviderEvent::ItemStarted { key, kind });
+                        } else {
+                            let status = item_status(&string(item, "status"));
+                            let retained = self.running.remove(&key);
+                            events.push(ProviderEvent::ItemFinished {
+                                key: key.clone(),
+                                kind,
+                                text: text.clone(),
+                                status,
+                            });
+                            if let Some(retained) =
+                                retained.filter(|command| self.settled.contains(&command.turn))
+                            {
+                                let exit_code = item["exitCode"].as_i64();
+                                let detail = background_command_detail(
+                                    &retained.command,
+                                    exit_code,
+                                    text.as_deref().unwrap_or_default(),
+                                );
+                                events.push(ProviderEvent::BackgroundTask {
+                                    key: key.clone(),
+                                    tool: key,
+                                    kind: BackgroundKind::Command,
+                                    description: retained.command.clone(),
+                                    status: Some(match exit_code {
+                                        Some(0) => ItemStatus::Completed,
+                                        Some(_) => ItemStatus::Failed,
+                                        None => ItemStatus::Pending,
+                                    }),
+                                    summary: Some(detail.clone()),
+                                    exit_code,
+                                });
+                                if !self.stopping.contains(&retained.thread) {
+                                    events.push(ProviderEvent::Wake {
+                                        text: detail,
+                                        detail: Some(retained.command),
+                                    });
+                                }
+                                self.release_settled(&retained.turn);
+                            }
+                        }
+                    }
+                    "agentMessage" => {
+                        let asynchronous = item["delivery"] == "async";
+                        let questions = item["questions"].as_array().filter(|q| !q.is_empty());
+                        if asynchronous {
+                            self.async_messages.insert(key.clone());
+                            if completed && let Some(questions) = questions {
+                                events.push(ProviderEvent::RequestOpened {
+                                    owner_path: vec![],
+                                    key: format!("async:{key}"),
+                                    body: RequestBody::Questions {
+                                        questions: async_questions(questions),
+                                    },
+                                    capability: ResponseCapability::Message,
+                                });
+                            }
+                        } else {
+                            let final_answer = item["phase"] != "commentary";
+                            if !completed {
+                                if final_answer {
+                                    let answers =
+                                        self.final_answers.entry(turn_id.clone()).or_default();
+                                    let first = answers.first.get_or_insert_with(|| key.clone());
+                                    if *first != key || !answers.texts.is_empty() {
+                                        self.deferred.insert(key.clone());
+                                    }
+                                }
+                                if !self.deferred.contains(&key) {
+                                    events.push(ProviderEvent::ItemStarted {
+                                        key,
+                                        kind: ProviderItem::Text,
+                                    });
+                                }
+                            } else {
+                                self.deferred.remove(&key);
+                                let text = string(item, "text");
+                                let answers =
+                                    self.final_answers.entry(turn_id.clone()).or_default();
+                                let repeated = final_answer
+                                    && !answers.texts.is_empty()
+                                    && (text.is_empty() || answers.texts.contains(&text));
+                                if !repeated {
+                                    if final_answer {
+                                        answers.texts.insert(text.clone());
+                                    }
+                                    events.push(ProviderEvent::ItemFinished {
+                                        key,
+                                        kind: ProviderItem::Text,
+                                        text: Some(text),
+                                        status: ItemStatus::Completed,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    "dynamicToolCall" | "mcpToolCall" => {
+                        let kind = codex_tool(item);
+                        events.push(if completed {
+                            ProviderEvent::ItemFinished {
+                                key,
+                                kind,
+                                text: None,
+                                status: item_status(&string(item, "status")),
+                            }
+                        } else {
+                            ProviderEvent::ItemStarted { key, kind }
+                        });
+                    }
                     "reasoning" => {
                         if completed {
                             let mut parts = self.reasoning_parts.remove(&key).unwrap_or_default();
@@ -700,13 +1155,16 @@ impl CodexProtocol {
                     }
                     "subAgentActivity" => {
                         let child = required(item, "agentThreadId")?;
-                        self.children.insert(
-                            child.clone(),
-                            native_thread
-                                .clone()
-                                .filter(|p| self.thread.as_ref() != Some(p))
-                                .unwrap_or_default(),
-                        );
+                        if string(item, "kind") == "started" {
+                            self.children.entry(child.clone()).or_insert_with(|| {
+                                native_thread
+                                    .clone()
+                                    .filter(|p| self.thread.as_ref() != Some(p))
+                                    .unwrap_or_default()
+                            });
+                        } else if !self.children.contains_key(&child) {
+                            return Ok(output);
+                        }
                         match string(item, "kind").as_str() {
                             "started" => events.push(ProviderEvent::SubagentStarted {
                                 background: false,
@@ -718,7 +1176,7 @@ impl CodexProtocol {
                                 prompt: String::new(),
                                 model: optional(item, "model"),
                             }),
-                            "completed" | "closed" => {
+                            "completed" | "closed" | "interrupted" => {
                                 events.push(ProviderEvent::SubagentFinished {
                                     key: child,
                                     status: ItemStatus::Completed,
@@ -742,13 +1200,17 @@ impl CodexProtocol {
                             .map(str::to_owned)
                             .collect::<Vec<_>>();
                         for child in receivers {
-                            self.children.insert(
-                                child.clone(),
-                                native_thread
-                                    .clone()
-                                    .filter(|p| self.thread.as_ref() != Some(p))
-                                    .unwrap_or_default(),
-                            );
+                            // Only a spawn assigns a parent; other calls address known children.
+                            if tool == "spawnAgent" {
+                                self.children.entry(child.clone()).or_insert_with(|| {
+                                    native_thread
+                                        .clone()
+                                        .filter(|p| self.thread.as_ref() != Some(p))
+                                        .unwrap_or_default()
+                                });
+                            } else if !self.children.contains_key(&child) {
+                                continue;
+                            }
                             if matches!(tool.as_str(), "spawnAgent" | "sendInput" | "resumeAgent") {
                                 events.push(ProviderEvent::SubagentStarted {
                                     background: false,
@@ -761,19 +1223,15 @@ impl CodexProtocol {
                                     model: optional(item, "model"),
                                 });
                             }
-                            let status = &item["agentsStates"][&child];
+                            let state = &item["agentsStates"][&child];
                             if completed
-                                && status
-                                    .get("status")
-                                    .and_then(Value::as_str)
-                                    .is_some_and(|s| {
-                                        matches!(s, "completed" | "errored" | "shutdown")
-                                    })
+                                && let Some(status) =
+                                    state["status"].as_str().and_then(collab_terminal_status)
                             {
                                 events.push(ProviderEvent::SubagentFinished {
                                     key: child,
-                                    status: item_status(&string(status, "status")),
-                                    result: string(status, "message"),
+                                    status,
+                                    result: string(state, "message"),
                                 });
                             }
                         }
@@ -800,17 +1258,24 @@ impl CodexProtocol {
                     }
                 }
             }
-            "item/tool/requestUserInput" => events.push(ProviderEvent::RequestOpened {
-                owner_path: vec![],
-                key: frame["id"].to_string(),
-                body: RequestBody::Questions {
-                    questions: questions(&p["questions"]),
-                },
-                capability: ResponseCapability::Live,
-            }),
-            "serverRequest/resolved" => events.push(ProviderEvent::RequestClosed {
-                key: p["requestId"].to_string(),
-            }),
+            "item/tool/requestUserInput" => {
+                self.server_requests
+                    .insert(frame["id"].to_string(), method.clone());
+                events.push(ProviderEvent::RequestOpened {
+                    owner_path: vec![],
+                    key: frame["id"].to_string(),
+                    body: RequestBody::Questions {
+                        questions: questions(&p["questions"]),
+                    },
+                    capability: ResponseCapability::Live,
+                })
+            }
+            "serverRequest/resolved" => {
+                self.server_requests.remove(&p["requestId"].to_string());
+                events.push(ProviderEvent::RequestClosed {
+                    key: p["requestId"].to_string(),
+                })
+            }
             "item/commandExecution/requestApproval"
             | "item/fileChange/requestApproval"
             | "item/permissions/requestApproval"
@@ -881,20 +1346,48 @@ impl CodexProtocol {
                 });
             }
             "error" => {
-                let retrying = p["willRetry"].as_bool().unwrap_or(false);
-                let message = string(&p["error"], "message");
-                events.push(ProviderEvent::ItemFinished {
-                    key: String::new(),
-                    kind: ProviderItem::Error {
-                        message,
-                        retrying,
-                        code: optional(&p["error"], "codexErrorInfo"),
-                        class: Some("provider_error".into()),
-                        retryable: retrying.then_some(true),
-                    },
-                    text: None,
-                    status: ItemStatus::Failed,
-                });
+                let error = &p["error"];
+                let turn = string(p, "turnId");
+                let message = optional(error, "additionalDetails")
+                    .map(|details| details.trim().to_owned())
+                    .filter(|details| !details.is_empty())
+                    .unwrap_or_else(|| string(error, "message"));
+                let code = codex_error_code(&error["codexErrorInfo"]);
+                let class = match code.as_deref() {
+                    Some("usageLimitExceeded" | "rateLimitExceeded") => "usage_limit",
+                    Some(code)
+                        if code.starts_with("http") || code.starts_with("responseStream") =>
+                    {
+                        "transport_error"
+                    }
+                    _ => "provider_error",
+                };
+                self.failures
+                    .insert(turn.clone(), (message.clone(), code.clone(), class.into()));
+                if p["willRetry"] == true {
+                    let previous = self.retries.get(&turn).cloned();
+                    let progress = retry_progress(&string(error, "message"));
+                    let retry = RetryProgress {
+                        attempt: progress
+                            .map(|(attempt, _)| attempt)
+                            .unwrap_or_else(|| previous.as_ref().map_or(1, |r| r.attempt + 1)),
+                        max_attempts: progress
+                            .and_then(|(_, max)| max)
+                            .or(previous.and_then(|r| r.max_attempts)),
+                        delay_ms: None,
+                    };
+                    self.retries.insert(turn.clone(), retry.clone());
+                    events.push(ProviderEvent::ItemStarted {
+                        key: format!("terminal-failure:{turn}"),
+                        kind: ProviderItem::Error {
+                            message,
+                            retry: Some(retry),
+                            code,
+                            class: Some(class.into()),
+                            retryable: Some(true),
+                        },
+                    });
+                }
             }
             // Account, process and diagnostic notifications do not alter a conversation.
             _ => {}
@@ -921,19 +1414,37 @@ impl CodexProtocol {
         Ok(output)
     }
 }
-fn prepend_inline_history(start: &mut Value, history: &HistoricalContext) {
-    if let Some(inputs) = start["input"].as_array_mut() {
-        for input in inputs {
-            if input["type"] == "text" {
-                input["text"] = json!(format!(
-                    "{}\n\n{}",
-                    render_history(history),
-                    string(input, "text")
-                ));
-                break;
-            }
-        }
+fn replace_input_text(start: &mut Value, text: String) {
+    let inputs = start["input"]
+        .as_array_mut()
+        .expect("turn input is an array");
+    inputs.retain(|input| input["type"] != "text");
+    inputs.insert(0, json!({"type":"text","text":text}));
+}
+/// Text first, then native images as data URLs, as the reference adapter sends them.
+fn codex_input(
+    text: &str,
+    attachments: &[Attachment],
+    images: &[PreparedImage],
+) -> Result<Vec<Value>, ProtocolError> {
+    let mut input = vec![];
+    let text = attachment_text(&codex_skill_mention_text(text), attachments);
+    if !text.is_empty() {
+        input.push(json!({"type":"text","text":text}));
     }
+    for file in attachments.iter().filter(|file| native_image(file)) {
+        let image = images
+            .iter()
+            .find(|image| image.attachment_id == file.id)
+            .ok_or_else(|| ProtocolError::Invalid(format!("missing prepared image {}", file.id)))?;
+        input.push(json!({"type":"image","url":format!("data:{};base64,{}", image.mime_type, image.base64)}));
+    }
+    if input.is_empty() {
+        return Err(ProtocolError::Invalid(
+            "Turn requires non-empty text or attachments.".into(),
+        ));
+    }
+    Ok(input)
 }
 fn codex_runtime(mode: RuntimeMode) -> (&'static str, &'static str, &'static str) {
     match mode {
@@ -941,6 +1452,97 @@ fn codex_runtime(mode: RuntimeMode) -> (&'static str, &'static str, &'static str
         RuntimeMode::AutoAcceptEdits => ("on-request", "user", "workspaceWrite"),
         RuntimeMode::Auto => ("on-request", "auto_review", "workspaceWrite"),
         RuntimeMode::FullAccess => ("never", "user", "dangerFullAccess"),
+    }
+}
+fn codex_error_code(info: &Value) -> Option<String> {
+    match info {
+        Value::String(code) => Some(code.clone()),
+        Value::Object(map) => map.keys().next().cloned(),
+        _ => None,
+    }
+}
+/// `N/M` progress in a retry message.
+fn retry_progress(message: &str) -> Option<(u64, Option<u64>)> {
+    let bytes = message.as_bytes();
+    let slash = (0..bytes.len()).find(|&i| {
+        bytes[i] == b'/'
+            && message[..i]
+                .trim_end()
+                .ends_with(|c: char| c.is_ascii_digit())
+            && message[i + 1..]
+                .trim_start()
+                .starts_with(|c: char| c.is_ascii_digit())
+    })?;
+    let left = message[..slash].trim_end();
+    let start = left
+        .rfind(|c: char| !c.is_ascii_digit())
+        .map_or(0, |i| i + 1);
+    let right = message[slash + 1..].trim_start();
+    let end = right
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(right.len());
+    Some((left[start..].parse().ok()?, right[..end].parse().ok()))
+}
+fn collab_terminal_status(status: &str) -> Option<ItemStatus> {
+    Some(match status {
+        "completed" => ItemStatus::Completed,
+        "interrupted" => ItemStatus::Interrupted,
+        "errored" | "notFound" => ItemStatus::Failed,
+        "shutdown" => ItemStatus::Cancelled,
+        _ => return None,
+    })
+}
+fn async_questions(questions: &[Value]) -> Vec<Question> {
+    questions
+        .iter()
+        .enumerate()
+        .map(|(index, question)| {
+            let nonblank = |value: Option<&str>, fallback: &str| {
+                value
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(fallback)
+                    .to_owned()
+            };
+            Question {
+                required: true,
+                id: index.to_string(),
+                header: "Question".into(),
+                question: nonblank(question["title"].as_str(), "Choose an answer."),
+                multiple: false,
+                options: question["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|label| QuestionOption {
+                        label: label.into(),
+                        description: Some(label.into()),
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+fn background_command_detail(command: &str, exit_code: Option<i64>, output: &str) -> String {
+    let command = if command.chars().count() > 200 {
+        format!("{}...", command.chars().take(200).collect::<String>())
+    } else {
+        command.into()
+    };
+    let exit = exit_code.map_or(String::new(), |code| format!(" (exit {code})"));
+    let output = output.trim_end();
+    let tail = if output.chars().count() > 1000 {
+        let skip = output.chars().count() - 1000;
+        format!("...{}", output.chars().skip(skip).collect::<String>())
+    } else {
+        output.into()
+    };
+    let header = format!("Background command completed{exit}: {command}");
+    if tail.is_empty() {
+        header
+    } else {
+        format!("{header}\n\nOutput tail:\n{tail}")
     }
 }
 fn codex_item(kind: &str, item: &Value) -> Option<(ProviderItem, Option<String>)> {
@@ -969,17 +1571,7 @@ fn codex_item(kind: &str, item: &Value) -> Option<(ProviderItem, Option<String>)
             },
             None,
         ),
-        "dynamicToolCall" | "mcpToolCall" => (
-            ProviderItem::Tool {
-                presentation: ToolPresentation::default(),
-                name: optional(item, "tool")
-                    .or_else(|| optional(item, "toolName"))
-                    .unwrap_or_default(),
-                input: Json(item["arguments"].clone()),
-                output: item.get("result").cloned().map(Json),
-            },
-            None,
-        ),
+        "dynamicToolCall" | "mcpToolCall" => (codex_tool(item), None),
         "contextCompaction" => (
             ProviderItem::Compaction {
                 before: item["beforeTokenCount"].as_u64(),

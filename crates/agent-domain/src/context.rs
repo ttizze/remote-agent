@@ -5,8 +5,6 @@ use std::collections::BTreeSet;
 
 pub const DEFAULT_HANDOFF_TOKEN_CAP: u64 = 16_000;
 pub const HANDOFF_BUDGET_ERROR: &str = "Insufficient context allowance for the provider handoff. Compact the target conversation or use a larger-context model; the current request has not been truncated.";
-pub const HANDOFF_UNCERTAIN_ERROR: &str =
-    "Historical context delivery is uncertain; replace the native thread before retrying.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextUsage {
@@ -72,6 +70,15 @@ pub fn context_usage_for_handoff(
         auto_compact_threshold: None,
     })
 }
+pub fn attachment_allowance(attachments: &[Attachment]) -> u64 {
+    attachments
+        .iter()
+        .map(|attachment| match attachment.kind {
+            AttachmentKind::Image => 8192,
+            AttachmentKind::File => 4096,
+        })
+        .sum()
+}
 pub fn handoff_budget(
     token_cap: u64,
     user_text: &str,
@@ -89,14 +96,8 @@ pub fn handoff_budget(
                 .and_then(|usage| usage.auto_compact_threshold)
                 .unwrap_or(u64::MAX),
         );
-    let current = serde_json::to_string(user_text).unwrap().len() as u64
-        + attachments
-            .iter()
-            .map(|attachment| match attachment.kind {
-                AttachmentKind::Image => 8192,
-                AttachmentKind::File => 4096,
-            })
-            .sum::<u64>();
+    let current =
+        serde_json::to_string(user_text).unwrap().len() as u64 + attachment_allowance(attachments);
     let native = usage.map_or(native_context_estimate, |usage| usage.used_tokens);
     token_cap.min(64_000).min(
         window
@@ -137,6 +138,25 @@ pub fn render_history(history: &HistoricalContext) -> String {
         .chain(history.messages.iter().map(attributed))
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+/// The native prompt: inline history, then the restart note, then the user's text.
+pub fn provider_prompt(
+    text: &str,
+    note: Option<&str>,
+    history: Option<&HistoricalContext>,
+) -> String {
+    let context = history
+        .map(render_history)
+        .into_iter()
+        .chain(note.map(str::to_owned))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if context.is_empty() {
+        text.to_owned()
+    } else {
+        format!("{context}\n\nUser message:\n{text}")
+    }
 }
 pub fn history_cost(messages: &[HistoricalMessage], context: &str) -> usize {
     let rendered = std::iter::once(context.to_string())

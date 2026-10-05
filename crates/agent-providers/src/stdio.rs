@@ -5,18 +5,21 @@ use tokio::{
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
 };
 
+/// `line` keeps a partially read frame when the caller cancels this future,
+/// so the next call continues the same frame.
 pub async fn read_frame(
     reader: &mut (impl AsyncBufRead + Unpin),
+    line: &mut Vec<u8>,
 ) -> Result<Option<Value>, io::Error> {
     loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).await? == 0 {
+        if reader.read_until(b'\n', line).await? == 0 && line.is_empty() {
             return Ok(None);
         }
-        if line.trim().is_empty() {
+        let frame = std::mem::take(line);
+        if frame.trim_ascii().is_empty() {
             continue;
         }
-        return serde_json::from_str(&line)
+        return serde_json::from_slice(&frame)
             .map(Some)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
     }
@@ -37,6 +40,7 @@ pub struct StdioProcess {
     pub input: ChildStdin,
     pub output: BufReader<ChildStdout>,
     pub stderr: ChildStderr,
+    line: Vec<u8>,
 }
 impl StdioProcess {
     pub fn spawn(
@@ -45,16 +49,22 @@ impl StdioProcess {
         cwd: &Path,
         environment: &std::collections::BTreeMap<String, String>,
     ) -> io::Result<Self> {
-        let mut child = Command::new(executable)
-            .args(args)
-            .current_dir(cwd)
-            .env_clear()
-            .envs(environment)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+        Self::from_child(
+            Command::new(executable)
+                .args(args)
+                .current_dir(cwd)
+                .env_clear()
+                .envs(environment)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()?,
+        )
+    }
+    /// Adopts a child spawned by another supervisor. Its stdin, stdout and
+    /// stderr must be piped.
+    pub fn from_child(mut child: Child) -> io::Result<Self> {
         Ok(Self {
             input: child
                 .stdin
@@ -71,13 +81,14 @@ impl StdioProcess {
                 .take()
                 .ok_or_else(|| io::Error::other("missing provider stderr"))?,
             child,
+            line: Vec::new(),
         })
     }
     pub async fn send(&mut self, frame: &Value) -> io::Result<()> {
         write_frame(&mut self.input, frame).await
     }
     pub async fn next_frame(&mut self) -> io::Result<Option<Value>> {
-        read_frame(&mut self.output).await
+        read_frame(&mut self.output, &mut self.line).await
     }
     pub async fn close(mut self) -> io::Result<std::process::ExitStatus> {
         drop(self.input);
