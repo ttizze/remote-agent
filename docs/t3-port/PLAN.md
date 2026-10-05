@@ -171,3 +171,8 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 
 - 2026-10-05: R2 の下書き復元は Host の rollback 完了 sequence と成功状態を確認してから、操作後の入力へ追記する。fork/merge は navigation だけ行い、両側の下書きを移動しない。モデルや mode は text 編集の payload に含めず core の現在値を保持する。mobile は list で開始し、保存済み selection を visit しない。Store の revision は Store ID 内だけで比較する。配送 Unknown は同じ ID で再試行し、利用者の「Stop retrying」で未確認 command を外せる。
 - 2026-10-05: 固定 T3 Sidebar の Pinned/Active は通常表示では高さ0の drag marker、Working/Snoozed は既定で折り畳み、選択中の行だけ残す。hero と Edit from here の文言も固定ソースに合わせる。desktop terminal entity の終了は共通 Store へ Detach を送り、Browser は同じウィンドウ内で保持する。
+
+- 2026-10-05: R2 の連続出力は assistant/reasoning/plan/command の suffix と byte offset を event 化し、replay を冪等化する。不変 projection collection と device state を Arc で共有し、変更 collection だけ owner が更新する。wire event が増えたため ALPN を streams/8 に上げる。
+- 2026-10-05: Claude prompt の admission は process supervisor が送信直前に判断し、UUID echo/result の所有権を追跡する。CLI が early echo を出す時だけ confirmation 前の root output を保留し、result-only/旧 echo mode は停止させない。
+- 2026-10-05: R2 で前回 D20 の shelf header の判断を撤回する。固定 T3 の Pinned/Active は通常見えない drag marker、Working/Snoozed は既定 collapsed とし、開いている thread の行を保持する。
+- 2026-10-05: R2 の AttachmentCleanup は thread ID を hash した Host 所有 directory の削除に置き換える。任意 workspace のアップロードは会話 asset と混同しない。添付の claim/表示/入力は次の M2 で実装し、同じ thread directory を利用する。

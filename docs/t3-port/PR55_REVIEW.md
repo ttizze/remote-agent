@@ -1,6 +1,6 @@
-# PR #55 M1 レビュー対応
+# PR #55 レビュー対応
 
-対象: b52a2be1 のレビューを M2 中断時点 aacd3737 と照合する。M2/M3 の残りは再開しない。ID は /tmp/pr55-review/ の各文書の番号。全87件を照合した。以下の「検証」は対応するテスト群とコード確認を示し、native UI の操作テストを実行したという意味ではない。
+初回の対象: b52a2be1 のレビューを M2 中断時点 aacd3737 と照合した（以下は当時の記録）。ID は /tmp/pr55-review/ の各文書の番号。全87件を照合した。以下の「検証」は対応するテスト群とコード確認を示し、native UI の操作テストを実行したという意味ではない。
 
 | 指摘 | 対応・根拠 | 検証 |
 | --- | --- | --- |
@@ -99,7 +99,7 @@
 - 全 target の初回テストに、harness=false の手動 WebKit 単体 probe が混入して一度実行された。通常 nextest では ignored として列挙するよう修正し、最終実行では skip。実 provider E2E と Simulator UI テストは実施していない。
 - browser bridge は macOS のローダー内で実行開始が遅れることを確認し、初回 initialize だけ30秒の起動枠を設けた。起動後の RPC/cancel は3〜5秒の検証期限を維持する。
 
-## 最終検証
+## 初回の最終検証
 
 実装・テスト commit: `08b882ec`。この後の変更は検証記録の文書のみ。
 
@@ -126,13 +126,51 @@
 | O18（rate limit / unknown block） | 正常な rate limit status と未対応の content block は空の UI 行を作らない | normalize の status/block 回帰テスト |
 | H9, H10, H11 | explicit worktree の launch も project 登録を検証。launch の lock は command ごと。snapshot の frame size を送信前に検証し型付き failure を返す | explicit workspace、lock identity、oversized subscription |
 
-残る R2 指摘（Claude の echo/steer 所有権、transfer 再試行、連続 stream の差分化、core の下書き/送信/再開、desktop と mobile の更新・操作・保存回復）は引き続き修正中。最終検証と対応理由の全表は完了時に更新する。
+追加の R2 対応:
 
-R2 core/client の追加対応（最終 native 検証は後段で実施）:
+| 指摘 | 対応・根拠 | 回帰検証 |
+|---|---|---|
+| O7 | lag 時に native turn を interrupt してから app run を終端化。interrupt に失敗した server は停止 | 実際の模擬 JSON-RPC による `lag_interrupts_the_native_turn_before_failing_its_app_run` |
+| O10 / 前回 O4 | prompt の書込み admission を Claude supervisor が所有。run/stop/terminal を送信直前に検証し、UUID echo と result の所有権を追跡。再利用 process も CLI の echo mode を保持 | supervisor admission、early echo、foreign result、result-only/legacy mode |
+| O12 | compact 中の steer/restart を共通 presentation と decider で拒否。adapter は compact/expected-active-id の終了競合を分類 | maintenance decider と provider 終了状態の回帰テスト |
+| O18 の fork/transfer | native context 喪失時は固定 fork history から portable handoff。入力前に失敗した run に束縛された未消費 transfer は Pending に戻し、新 run へ一度だけ再束縛。Ready handoff を supersede | `returning_provider_handoff_ignores_placeholders_and_recovers_fork_baseline` / `failed_start_rebinds_unconsumed_transfer_and_merge_coverage_is_incremental` |
+| 前回 O12 | timer flush ごとに assistant/reasoning/plan/command の追加文字列だけ event にする。offset で replay を冪等化し、message/plan/detail を同時更新 | 24回の実 timer flush、3種類の stream、Unicode/replay/plan-detail の projector tests |
+| C1, C2 | fork/merge receipt は両方の下書きを保持。最新 Completed/Waiting run を core で選び、後続 active work がある時は拒否。run ID を送信 | `context_receipts_preserve_both_drafts_and_pending_context_blocks_duplicates` と merge source tests |
+| C3, C4 | rollback 成功・stream 確認後だけ現在の下書きへ復元文を追記。履歴外 message は turn item から取得。before-run checkpoint ID で欠番と queue reorder を扱う | 成功/失敗/遅い stream/既存下書き、checkpoint gap/parent tests |
+| C5 / 前回 C3 / D1, D5 | plan source ref、launch、fork、merge を core の pending 判定に含め、二重操作を no-op。native はその可否を表示 | `implement_follow_up_pending_blocks_same_thread_and_new_thread_submissions` と context duplicate tests |
+| C6 / 前回 C8 / D6 | 不変 projection collection、draft map、pending list を共有。terminal は共有 deque と保持 byte counter。desktop presentation は16msで集約し background 計算 | unchanged collection の共有、terminal snapshot/8MiB bound、desktop compile/unit tests |
+| C7 / 前回 C4 | queue edit は毎回実際の queued text から開始。Cancel/確定 Save で buffer 除去。Save 待ち中の新しい入力は編集を維持 | queue cancel/reopen、`typing_during_queue_save_remains_in_the_queue_editor` |
+| C8 | mobile cold start は一覧画面として選択を外し、保存 draft は保持。bindings も Mobile source を明示 | `mobile_cold_start_keeps_drafts_without_visiting_saved_selection` |
+| C9 | Unknown delivery に Stop retrying を提供。active retry も cancellation token で止め、遅い成功 receipt による画面遷移を抑止 | unknown delivery + `discarded_delivery_cancels_retry_and_ignores_late_receipts` |
+| C10 / 前回 C14 | reuse 前に期限付き HostStatus probe。owner loop を待たせない | healthy reuse、応答しない接続、同じ command ID の retry/order を loopback fixture で検証 |
+| C11, C12, C13 | background 失敗は global banner にしない。header も core の snooze expiry。dictation preparation は専用 FIFO | background visit、expired snooze、満杯 channel の dictation preparation |
+| D2 | Terminal entity の Drop で Detach を送信 | native compile、Host の attach/detach unit tests（UI 操作テストは実施せず） |
+| D3, D8 | thread/cwd 変更でも Browser entity を保持。draft key が同じ cwd 更新では pending draft を保持 | native compile、draft receipt/context unit tests |
+| D4 / M11 | EditDraft は text/baseText のみ渡し、owner が現在の model/mode を保持。desktop は composer base と比較 | `text_edits_preserve_newer_model_and_mode_choices`、入力 FIFO/遅い receipt tests |
+| D7 | transcription cancellation を owner へ届け、遅い transcript を捨てる | `cancelled_dictation_cannot_append_a_late_transcript` |
+| D9, D10 / 前回 D20 | 固定 Sidebar.tsx を再確認。Pinned/Active は通常 header を表示しない。Working/Snoozed は既定 collapsed、選択行は保持。hero を中央へ、project を headline/breadcrumb に使用 | T3 source 照合、desktop compile/unit tests |
+| D11 / 前回 D18 | rename Enter/Escape/Cancel、T3 revert 文言、terminal admission、model display name、独立 preferences 回復。sidebar Wake/Snooze を提供 | core persistence/presentation tests、desktop compile |
+| M1, M2 | snapshot 比較は Store ID と revision の組。pairing swap は旧 presentation task と表示を reset。既存 Host の再 pairing は保存状態を再読込 | Store 間 revision 回帰テスト、native build/source wiring |
+| M3 | snapshot/preferences を独立して decode し、破損部分だけ回復・通知。Host を使用可能にし、正常状態を再保存。旧形式 migration/default を加えない | core recovery tests、Android 実ファイル回復・再保存 JVM test |
+| M4 | request drawer を native ScrollView/verticalScroll にする | Swift/Kotlin lint と native build（UI 操作テストは実施せず） |
+| M5 | markdown の非同期 layout 成長でも末尾追従を維持。判定は core の純粋関数 | `follow_stream_resize` の単体テスト、iOS compile |
+| M6 | file editor に DraftRevision を適用し、遅い receipt で keystroke を戻さない | Swift/Kotlin input guard unit tests、core file receipt tests |
+| M7 | Android Browser の poll/user request を Mutex で直列受付。poll 中の user input を早期 return で捨てない | Android compile、browser bridge integration tests |
+| M8 と minor | Android Markdown/diff を background 計算。interaction choices と provider kind を core から使用 | Swift/Kotlin lint、Android compile |
+| M9, M10 | delete 前に表示中 ID を捕捉して receipt で一覧へ。composer canEdit を適用 | native compile、core selection/presentation tests |
+| H8 | AttachmentCleanup の no-op を削除。Host 所有の thread 別 asset directory を冪等に削除し、他 thread と symlink の参照先は保持。M2 の添付保存も同じ directory を使用する | `attachment_cleanup_is_idempotent_and_keeps_other_thread_assets` |
 
-- C1/C2/C3/C5/C7、D1/D4/D5/D8、M11: fork/merge の下書き保持、merge 対象 run の共通判定、成功後 rollback text の追記、plan/fork/merge の pending guard、queue buffer の除去、text-only 編集へ変更。core の成功/失敗/遅い receipt/二重操作回帰テストを追加。
-- C8/C9/C10/C11/C12/C13: mobile cold-start の hidden visit を防止、Unknown の Stop retrying、resume の HostStatus probe、background banner 抑止、snooze 共通判定、dictation の FIFO preparation とキャンセル後の transcript 抑止。
-- M1/M2/M3/M4/M5/M6/M7/M8/M9/M10: Store ID を含む snapshot 順序、pairing 時の task reset・既存 Host 保存の再読込、独立した保存 component 回復、request scroll、Markdown 成長時の bottom follow、file edit revision、browser user action の直列受付、Markdown/diff の background parse、delete の選択捕捉、canEdit。
-- D2/D3/D7/D9/D10/D11 と前回 D18/D20: terminal detach、Browser 保持、dictation cancellation、T3 shelf と hero、rename Enter/Cancel/Escape、revert copy、terminal admission、model display name、独立 preferences 回復、sidebar Wake/Snooze。
+前回の確認結果への補足:
 
-この段階の Rust 検証: agent-core 74/74、desktop 18 passed/1 ignored。mobile build/lint と追加 regression は最終検証に含める。
+- O3/O4/O7/O8/O12、C3/C4/C8/C14、D4/D8/D9/D12/D13/D18/D20、M2/M3/M8/M10/M13/M14/M18 の「部分的修正」「残る不具合」「判断が誤り」は上記で修正。特に前回 D20 の「T3 が Pinned/Active header を残す」という根拠は誤りだったため撤回する。
+- それ以外の前回指摘は修正済みのコードを再確認し、余分な変更をしない。C16 の ActiveReorder は固定 T3 Working-shelf ordering と一致するため変更しない。M15 の Chats cwd が空という推測も現行 Host と一致せず、既存 admission を維持する。D8 の Hosts 管理接続を独立させる判断は維持する。
+- UI の操作確認は行っていない。純粋な判断/非同期 state/transport/provider RPC/file recovery の回帰テストと、native の lint・単体テスト・compile を区別して記録した。
+
+### R2 最終検証
+
+- `scripts/dev-env.sh just unit-tests`: **352件通過、5件 skip**。standalone agent-peer の5テスト群も通過。初回は macOS loader の子プロセス起動遅延で13件が timeout。稼働 Host には触れず、テスト用 supervisor/Host の CLI 起動確認後、`NEXTEST_TEST_THREADS=4` で全体を再実行して通過した。期限と判定は変更していない。
+- workspace/agent-peer の全 target Clippy `-D warnings`、両 fmt、actionlint、`git diff --check` 通過。
+- 最後の cleanup は Host 4件の focused regression、Claude prompt 所有権は5件、長い steer text 保持は orchestration の targeted regression も通過。全体検証後の追加はこの長文 steer regression と保存本文の非切詰めのみ。
+- iOS: swiftformat/Swiftlint strict、native unit **2件**、Rust bindings と generic Simulator destination のアプリ **build 成功**。Simulator 起動/操作なし。
+- Android: ktfmt/detekt、JVM unit **3件**、arm64-v8a/x86_64 **assembleDebug 成功**。
+- R2 実装 commit は `08b680e9` から `4cec8e2e` まで（末尾 ID は git log を参照）。M2 の残りと M3 はこのレビュー修正には含めない。
