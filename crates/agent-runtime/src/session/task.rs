@@ -116,9 +116,6 @@ pub(crate) struct Task {
     pub(crate) line: Vec<u8>,
     pub(crate) owner: Option<RunAttemptId>,
     pub(crate) handshake: bool,
-    /// A `thread/resume` of a turn start awaits its reply. The translator
-    /// reports its rejection as a `thread/start` failure.
-    pub(crate) resuming: bool,
     pub(crate) attempts: HashSet<RunAttemptId>,
     pub(crate) replies: Vec<ReplyWaiter>,
     pub(crate) completion: Option<oneshot::Sender<Result<Completion, String>>>,
@@ -304,19 +301,11 @@ impl Task {
             }
         }
         for frame in &outbound {
-            match frame["method"].as_str() {
-                Some("thread/resume") => self.resuming = self.completion.is_none(),
-                Some("thread/start") => self.resuming = false,
-                _ => {}
-            }
             write_frame(&mut self.input, frame)
                 .await
                 .map_err(|error| SessionError::Io(error.to_string()))?;
         }
         for reply in replies {
-            if reply.operation == "thread/start" {
-                self.resuming = false;
-            }
             if reply.operation == "turn/steer" {
                 self.steers.pop_front();
             }
@@ -378,7 +367,6 @@ impl Task {
                 } else {
                     None
                 };
-                let resumed = operation == "thread/start" && std::mem::take(&mut self.resuming);
                 let Some((operation, session_lost)) = failed_operation(&operation) else {
                     tracing::warn!(thread = %self.key.thread, %operation, %message,
                         "provider rejected an operation nobody waits for");
@@ -393,7 +381,7 @@ impl Task {
                     message,
                     message_id,
                     turn_completed,
-                    session_lost: session_lost || resumed,
+                    session_lost,
                 });
                 if let Err(error) = self.input(failed).await {
                     tracing::warn!(thread = %self.key.thread, %error, "could not record a provider failure");

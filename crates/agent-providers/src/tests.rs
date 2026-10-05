@@ -328,6 +328,31 @@ fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume
     assert_eq!(resume.outbound[0]["params"]["cwd"], "/workspace");
 }
 #[test]
+fn codex_rejected_resume_and_start_name_their_own_operation() {
+    for (native_thread, method) in [(Some("saved"), "thread/resume"), (None, "thread/start")] {
+        let mut start = codex_start();
+        if let ProviderCommand::Start {
+            native_thread: n, ..
+        } = &mut start
+        {
+            *n = native_thread.map(Into::into);
+        }
+        let mut protocol = CodexProtocol::default();
+        let sent = protocol
+            .command(&start, &wire_context(), &[])
+            .unwrap()
+            .outbound;
+        assert_eq!(sent[0]["method"], method);
+        let rejected = protocol.receive(
+            &json!({"id":sent[0]["id"],"error":{"code":-32600,"message":"thread not found"}}),
+        );
+        assert!(
+            matches!(&rejected, Err(ProtocolError::Remote { operation, .. }) if operation == method),
+            "{rejected:?}"
+        );
+    }
+}
+#[test]
 fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start() {
     use serde_json::json;
     let mut protocol = CodexProtocol::default();

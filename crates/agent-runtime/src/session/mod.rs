@@ -788,7 +788,6 @@ impl SessionManager {
             line: Vec::new(),
             owner: None,
             handshake: false,
-            resuming: false,
             attempts: HashSet::new(),
             replies: Vec::new(),
             completion: None,

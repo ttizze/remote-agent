@@ -30,6 +30,7 @@ impl WireContext {
 enum Pending {
     Initialize,
     Thread {
+        resume: bool,
         start: Value,
         history: Option<InlineHistory>,
     },
@@ -69,6 +70,7 @@ impl Pending {
     fn operation(&self) -> String {
         match self {
             Pending::Initialize => "initialize".into(),
+            Pending::Thread { resume: true, .. } => "thread/resume".into(),
             Pending::Thread { .. } => "thread/start".into(),
             Pending::Inject { .. } => "thread/inject_items".into(),
             Pending::RevertRead { .. } => "thread/read".into(),
@@ -221,6 +223,7 @@ impl CodexProtocol {
                         "thread/resume",
                         params,
                         Pending::Thread {
+                            resume: true,
                             start,
                             history: handoff,
                         },
@@ -230,6 +233,7 @@ impl CodexProtocol {
                         "thread/start",
                         context.thread_params(Some(&selection.model)),
                         Pending::Thread {
+                            resume: false,
                             start,
                             history: handoff,
                         },
@@ -559,7 +563,9 @@ impl CodexProtocol {
             });
             match pending {
                 Pending::Initialize => output.outbound.push(json!({"method":"initialized"})),
-                Pending::Thread { mut start, history } => {
+                Pending::Thread {
+                    mut start, history, ..
+                } => {
                     let thread = required(&result["thread"], "id")?;
                     self.thread = Some(thread.clone());
                     output.events.push(ProviderEvent::SessionReady {
@@ -1593,6 +1599,7 @@ impl CodexProtocol {
             let pending = match method.as_str() {
                 "initialize" => Pending::Initialize,
                 "thread/start" | "thread/resume" => Pending::Thread {
+                    resume: method == "thread/resume",
                     start: Value::Null,
                     history: None,
                 },
