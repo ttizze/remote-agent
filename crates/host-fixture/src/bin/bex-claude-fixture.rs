@@ -183,7 +183,7 @@ fn main() {
                 .and_then(|value| value["email"].as_str().map(str::to_owned)),
         })).unwrap();
     }
-    let path = format!("claude-session-{session}.json");
+    let path = format!("claude-session-{session}.jsonl");
     let history = Path::new(&std::env::var_os("CLAUDE_CONFIG_DIR").unwrap())
         .join("projects")
         .join("fixture-native-project")
@@ -275,7 +275,16 @@ fn main() {
                 let bytes = serde_json::to_vec(&inputs).unwrap();
                 fs::create_dir_all(history.parent().unwrap()).unwrap();
                 fs::write(&history, &bytes).unwrap();
-                fs::write(&path, bytes).unwrap();
+                // Append: Windows cannot truncate a file that Git's workspace review maps.
+                let mut trace = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .unwrap();
+                let written = trace.metadata().unwrap().len() > 0;
+                for input in &inputs[if written { inputs.len() - 1 } else { 0 }..] {
+                    writeln!(trace, "{input}").unwrap();
+                }
                 emit(json!({"type":"system","subtype":"init","session_id":session}));
                 output(session_state(&session, "running"));
                 let text = content

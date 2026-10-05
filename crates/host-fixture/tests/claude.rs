@@ -85,6 +85,15 @@ async fn send(store: &Store, text: &str, client_id: &str) -> agent_protocol::ses
     store.snapshot().navigation.thread_id.clone().unwrap()
 }
 
+/// Read the inputs the Claude fixture appended to its workspace trace.
+fn session_inputs(path: impl AsRef<Path>) -> serde_json::Value {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect()
+}
+
 async fn until(store: &Store, condition: impl Fn(&Snapshot) -> bool) -> Arc<Snapshot> {
     let mut updates = store.subscribe();
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -261,10 +270,8 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
                 .unwrap();
             completed(&store, &id, 1, "completed").await;
             let session = &id.id;
-            let inputs: Value = serde_json::from_slice(
-                &std::fs::read(root.path().join(format!("claude-session-{session}.json"))).unwrap(),
-            )
-            .unwrap();
+            let inputs =
+                session_inputs(root.path().join(format!("claude-session-{session}.jsonl")));
             assert_eq!(inputs[0]["model"], model);
             assert_eq!(inputs[0]["effort"], effort);
         }
@@ -340,7 +347,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                         assert_eq!(user.client_input_id.as_deref(), Some(format!("client-{number}").as_str()));
                         assert!(matches!(user.body(), agent_protocol::items::ItemBody::UserMessage { content, .. } if content.first() == Some(&agent_protocol::items::MessagePart::Text { text: format!("message {number}") })));
                         let session = &id.id;
-                        let inputs: Value = serde_json::from_slice(&std::fs::read(Path::new(&cwd).join(format!("claude-session-{session}.json"))).unwrap()).unwrap();
+                        let inputs = session_inputs(Path::new(&cwd).join(format!("claude-session-{session}.jsonl")));
                         assert_eq!(inputs.as_array().unwrap().len(), number + 1);
                         assert_eq!(inputs[number]["effort"], "low");
                         assert_eq!(inputs[number]["content"].as_array().unwrap().len(), if attachment == "none" { 1 } else { 2 });
@@ -1214,13 +1221,9 @@ async fn consecutive_claude_inputs_reuse_one_native_process() {
     send(&store, "second", "reuse-2").await;
     let snapshot = completed(&store, &id, 2, "completed").await;
     let native = &id.id;
-    let inputs: Value = serde_json::from_slice(
-        &std::fs::read(
-            Path::new(&snapshot.navigation.cwd).join(format!("claude-session-{native}.json")),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let inputs = session_inputs(
+        Path::new(&snapshot.navigation.cwd).join(format!("claude-session-{native}.jsonl")),
+    );
     assert!(inputs[0]["pid"].is_u64());
     assert_eq!(
         inputs[0]["pid"], inputs[1]["pid"],
@@ -1283,14 +1286,14 @@ async fn deleted_claude_worktree_restarts_the_retained_process_and_continues_the
         let id = send(&store, "first", "before-removal").await;
         let snapshot = completed(&store, &id, 1, "completed").await;
         let cwd = snapshot.navigation.cwd.clone();
-        let inputs_path = Path::new(&cwd).join(format!("claude-session-{}.json", id.id));
-        let before: Value = serde_json::from_slice(&std::fs::read(&inputs_path).unwrap()).unwrap();
+        let inputs_path = Path::new(&cwd).join(format!("claude-session-{}.jsonl", id.id));
+        let before = session_inputs(&inputs_path);
         std::fs::remove_dir_all(&cwd).unwrap();
         assert_eq!(send(&store, "second", "after-removal").await, id);
         let snapshot = completed(&store, &id, 2, "completed").await;
         assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
         assert_eq!(snapshot.navigation.cwd, cwd);
-        let after: Value = serde_json::from_slice(&std::fs::read(&inputs_path).unwrap()).unwrap();
+        let after = session_inputs(&inputs_path);
         assert_ne!(
             before[0]["pid"], after[1]["pid"],
             "deleted cwd must not reuse the retained process"
@@ -1492,7 +1495,7 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         send(&store, "back to native account", "account-fourth").await;
         completed(&store, &thread, 4, "completed").await;
         let homes = std::fs::read_to_string(root.join("claude-auth-homes.jsonl")).unwrap();
-        let homes: Vec<Value> = homes.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let homes: Vec<Value> = homes.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect();
         assert_eq!(homes.iter().map(|home| home["credentialsHome"].as_str().unwrap()).collect::<Vec<_>>(),
             [native.to_str().unwrap(), profile.to_str().unwrap(), profile.to_str().unwrap(), native.to_str().unwrap()]);
         assert_eq!(homes.iter().map(|home| home["account"].as_str().unwrap()).collect::<Vec<_>>(),
@@ -1726,10 +1729,7 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
                 .iter()
                 .any(|item| item_text(item) == Some("reply 4: after stop"))
         );
-        let inputs: Value = serde_json::from_slice(
-            &std::fs::read(root.path().join(format!("claude-session-{}.json", id.id))).unwrap(),
-        )
-        .unwrap();
+        let inputs = session_inputs(root.path().join(format!("claude-session-{}.jsonl", id.id)));
         assert_eq!(inputs[3]["effort"], "high");
         assert_ne!(inputs[2]["pid"], inputs[3]["pid"]);
         store.close().await.unwrap();
@@ -1885,13 +1885,10 @@ async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
     send(&store, "after completion", "last").await;
     completed(&store, &id, 3, "completed").await;
     let native_id = &id.id;
-    let inputs: Vec<Value> = serde_json::from_slice(
-        &std::fs::read(
-            Path::new(&snapshot.navigation.cwd).join(format!("claude-session-{native_id}.json")),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let inputs = session_inputs(
+        Path::new(&snapshot.navigation.cwd).join(format!("claude-session-{native_id}.jsonl")),
+    );
+    let inputs = inputs.as_array().unwrap();
     assert_eq!(inputs.len(), 5);
     assert!(inputs.iter().all(|input| input["pid"] == inputs[0]["pid"]));
     send(&store, "wait", "before-live-refresh").await;

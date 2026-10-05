@@ -180,10 +180,7 @@ async fn scenarios(provider: ProviderKind) {
     local.peer.call(&invoke).await.unwrap();
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
     if provider == ProviderKind::Claude {
-        let received: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(root.join(format!("claude-session-{}.json", session.id))).unwrap(),
-        )
-        .unwrap();
+        let received = session_inputs(root.join(format!("claude-session-{}.jsonl", session.id)));
         let text = received.as_array().unwrap().last().unwrap()["content"]
             .as_array()
             .unwrap()
@@ -432,6 +429,15 @@ async fn scenarios(provider: ProviderKind) {
         .unwrap();
     local.close().await;
     host.close().await.unwrap();
+}
+
+/// Read the inputs the Claude fixture appended to its workspace trace.
+fn session_inputs(path: impl AsRef<Path>) -> serde_json::Value {
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
