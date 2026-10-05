@@ -176,6 +176,7 @@ pub struct Attempt {
     pub native_turn: Option<String>,
     pub native_head: Option<String>,
     pub usage: Option<TokenUsage>,
+    pub context_usage: Option<ContextUsage>,
     pub started_at: Timestamp,
     pub completed_at: Option<Timestamp>,
 }
@@ -407,13 +408,14 @@ pub struct Task {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transfer {
+    pub instance: String,
+    pub delivery: Option<ContextDelivery>,
     pub id: ContextTransferId,
     pub kind: TransferKind,
     pub source: ThreadId,
     pub target: ThreadId,
     pub boundary: u64,
-    pub text: String,
-    pub consumed_by: Option<RunId>,
+    pub history: HistoricalContext,
     pub superseded: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -505,6 +507,8 @@ pub struct State {
     pub prompt_ordinal: u64,
     pub pending_forks: BTreeMap<CommandId, PendingFork>,
     pub native_sessions: BTreeMap<String, String>,
+    pub handoff_token_cap: Option<u64>,
+    pub context_windows: BTreeMap<String, u64>,
 }
 impl State {
     pub fn active_run(&self) -> Option<&Run> {
@@ -682,7 +686,7 @@ pub enum Command {
         interaction_mode: InteractionMode,
         boundary: u64,
         history: Vec<Item>,
-        context: String,
+        context: HistoricalContext,
         native: Option<NativeBinding>,
     },
     MergeBack {
@@ -693,7 +697,7 @@ pub enum Command {
         kind: TransferKind,
         source: ThreadId,
         boundary: u64,
-        text: String,
+        history: HistoricalContext,
     },
     Delegate {
         task: NodeId,
@@ -778,6 +782,8 @@ pub enum ProviderItem {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderEvent {
+    ContextUsage(ContextUsage),
+    ContextInjected,
     AssistantCursor {
         key: String,
     },
@@ -911,7 +917,7 @@ pub enum ProviderCommand {
         attachments: Vec<Attachment>,
         native_thread: Option<String>,
         resume_at: Option<String>,
-        context: String,
+        context: Option<HistoricalContext>,
     },
     Steer {
         text: String,
@@ -1023,6 +1029,14 @@ pub enum EffectResult {
 values! { ProviderOperation { Start, Steer, Interrupt, Respond, Compact, SetModel } }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Input {
+    HandoffPolicy {
+        instance: String,
+        model_window: Option<u64>,
+        token_cap: u64,
+    },
+    NativeSessionReset {
+        instance: String,
+    },
     Command {
         id: CommandId,
         command: Box<Command>,

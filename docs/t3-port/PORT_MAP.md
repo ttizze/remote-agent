@@ -1096,3 +1096,9 @@ Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機�
 | `Notification.test.ts` の background report | 空、単独、混在、件数表示、command の exit code、monitor の更新文言を pure function で確認。delegated completion の表示は core の接続し直しでも使用する。 |
 
 `provider/userInputAttachments.test.ts` の choices 保持、引用付き path、入力非変更、特殊キーの期待値は `agent-domain/src/answers.rs` に移植した。結合後の添付上限も command 前に検証する。実ファイルの存在・読み取り確認は段階 3 の attachment effect に属する。
+
+| 追加の T3 外部挙動テスト | 新設計の検証 |
+| --- | --- |
+| `ContextHandoffBudget.test.ts` | `agent-domain/src/context.rs`。Unicode、JSON escaping、selected/omitted の桁境界、roles/order、画像 1〜100 件、model switch 時の occupancy、marker 圧縮、重複排除、omitted IDs、予算不足の期待値を保持。 |
+| `ContextHandoffDelivery.ts` の配送境界 | domain の pending/injected/inline と provider の RPC テスト。受け付け前の消費をやめ、曖昧な配送失敗では同じ native session に再送しない。DB/outbox の実行順序は段階 3。 |
+| `ClaudeAdapterV2.test.ts` の context usage | input 42,000 + cache creation 2,000 + cache read 5,000 + output 1,000 = 50,000、window 200,000 を翻訳イベントで検証。 |

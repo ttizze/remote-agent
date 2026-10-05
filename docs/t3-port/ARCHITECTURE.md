@@ -116,3 +116,6 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-05: 正規化された native TextDelta と plan の追記も、既存項目がある場合は scratch projection を複製せず offset 付きの事実だけを返す。別 provider instance の終了済み attempt の root 出力は、現在の run を更新しない。
 - 2026-10-05: 質問の回答は text と choices を区別し、添付の引用付き参照を T3 と同じ形で追加する。ファイルの可用性確認は段階 3 の effect executor の責務とし、domain には確認済みの path を渡す。message 型の質問回答は server 作成の通常発言として Auto の配送規則に従う。
 - 2026-10-05: native session の現在の ID は instance ごとに fold が所有する。rollback 成功結果には作り直した native binding を含め、後続ターンはその ID を使う。checkpoint に head がない後発 instance も絶対先頭へ rollback する。
+- 2026-10-06: context handoff は役割・出典・status を持つ歴史項目の固定 snapshot とする。予算、画像/file の見積もり、項目を丸ごと省略する優先順位、取得用 coverage は T3 の ContextHandoffBudget/Delivery に従う。上限は T3 の 16k tokens/64k bytes と同じで、現在のユーザー入力は切り詰めない。
+- 2026-10-06: history delivery は provider effect より前に pending を記録する。Codex の injection 成功は turn/start の前に injected として fold し、明示的な -32601 だけ inline に切り替える。inline は入力の受け付け後に確定する。pending のまま失敗した native session には再送せず、Host から session reset を受けた後に再試行する。native RPC reply の事実を確定してから次の outbound を送る順序は段階 3 で守る。
+- 2026-10-06: handoff の設定値と既知の model window は明示的な HandoffPolicy 入力で受ける。context occupancy とターンの課金用 usage は別に扱い、Codex は last、Claude は assistant snapshot の cache read/write を含む値を context budget に使う。

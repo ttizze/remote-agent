@@ -19,6 +19,7 @@ struct MessageCursor {
 #[derive(Debug, Default)]
 pub struct ClaudeProtocol {
     pub control: ClaudeControl,
+    selected_context_window: Option<u64>,
     messages: BTreeMap<String, MessageCursor>,
     current: BTreeMap<String, String>,
     tools: BTreeMap<String, (String, Value)>,
@@ -43,11 +44,13 @@ impl ClaudeProtocol {
         let mut result = Translation::default();
         match command {
             ProviderCommand::Start {
+                selection,
                 text,
                 attachments,
                 context,
                 ..
             } => {
+                self.selected_context_window = Some(claude_context_window(&selection.model));
                 self.text_seen.remove("");
                 self.authentication_failed.remove("");
                 self.usage_limited.remove("");
@@ -58,10 +61,10 @@ impl ClaudeProtocol {
                     .events
                     .push(ProviderEvent::TurnStarted { native_turn: None });
                 result.outbound.push(claude_user_message(
-                    &if context.is_empty() || text.trim() == "/compact" {
+                    &if context.is_none() || text.trim() == "/compact" {
                         text.clone()
                     } else {
-                        format!("{context}\n\n{text}")
+                        format!("{}\n\n{text}", render_history(context.as_ref().unwrap()))
                     },
                     attachments,
                     user_uuid,
@@ -532,7 +535,19 @@ impl ClaudeProtocol {
                     }
                 }
                 if let Some(usage) = message.get("usage") {
-                    events.push(ProviderEvent::Usage(claude_usage(usage)));
+                    let window = self
+                        .observed_models
+                        .get(&route)
+                        .map(|model| claude_context_window(model))
+                        .or(self.selected_context_window)
+                        .unwrap_or(200_000);
+                    let usage = claude_usage(usage, window);
+                    events.push(ProviderEvent::ContextUsage(ContextUsage {
+                        used_tokens: usage.total,
+                        max_tokens: usage.max,
+                        auto_compact_threshold: None,
+                    }));
+                    events.push(ProviderEvent::Usage(usage));
                 }
             }
             "user" => {
@@ -675,7 +690,10 @@ impl ClaudeProtocol {
                         status: ItemStatus::Failed,
                     });
                 }
-                events.push(ProviderEvent::Usage(claude_usage(&frame["usage"])));
+                events.push(ProviderEvent::Usage(claude_usage(
+                    &frame["usage"],
+                    self.selected_context_window.unwrap_or(200_000),
+                )));
                 if aborted {
                     events.push(ProviderEvent::TurnAborted {
                         reason: string(frame, "terminal_reason"),
@@ -823,18 +841,25 @@ fn claude_result_text(content: &Value) -> String {
             .join("\n")
     })
 }
-fn claude_usage(usage: &Value) -> TokenUsage {
+pub fn claude_context_window(model: &str) -> u64 {
+    if matches!(model, "claude-opus-4-6" | "claude-opus-4-7") {
+        1_000_000
+    } else {
+        200_000
+    }
+}
+fn claude_usage(usage: &Value, window: u64) -> TokenUsage {
     let input = usage["input_tokens"].as_u64().unwrap_or(0);
     let cached_input = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
     let cache_creation = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
     let output = usage["output_tokens"].as_u64().unwrap_or(0);
     TokenUsage {
-        input,
+        input: input + cached_input + cache_creation,
         cached_input,
         output,
         reasoning_output: 0,
         total: input + cached_input + cache_creation + output,
-        max: None,
+        max: Some(window),
     }
 }
 pub fn claude_user_message(

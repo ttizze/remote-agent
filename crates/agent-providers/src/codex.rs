@@ -13,6 +13,11 @@ enum Pending {
     Initialize,
     Thread {
         start: Value,
+        history: Option<HistoricalContext>,
+    },
+    Inject {
+        start: Value,
+        history: HistoricalContext,
     },
     RevertRead {
         thread: String,
@@ -64,12 +69,7 @@ impl CodexProtocol {
                         input.push(json!({"type":"localImage","path":file.path}));
                     }
                 }
-                let text = if handoff.is_empty() {
-                    text.clone()
-                } else {
-                    format!("{handoff}\n\n{text}")
-                };
-                let text = attachment_text(&text, attachments);
+                let text = attachment_text(text, attachments);
                 input.push(json!({"type":"text","text":text}));
                 let (approval, reviewer, sandbox) = codex_runtime(*runtime_mode);
                 let mut start = json!({"input":input,"cwd":context.cwd,"model":selection.model,"summary":"detailed","approvalPolicy":approval,"approvalsReviewer":reviewer,"sandboxPolicy":{"type":sandbox}});
@@ -85,14 +85,14 @@ impl CodexProtocol {
                 if let Some(thread) = self
                     .thread
                     .clone()
-                    .filter(|id| native_thread.as_ref().is_none_or(|native| native == id))
+                    .filter(|id| native_thread.as_ref() == Some(id))
                 {
                     start["threadId"] = json!(thread);
-                    self.request("turn/start", start, Pending::Operation("turn/start".into()))
+                    self.start_or_inject(start, handoff.clone())
                 } else if let Some(thread) = native_thread {
-                    self.request("thread/resume",json!({"threadId":thread,"excludeTurns":true,"model":selection.model,"cwd":context.cwd}),Pending::Thread { start })
+                    self.request("thread/resume",json!({"threadId":thread,"excludeTurns":true,"model":selection.model,"cwd":context.cwd}),Pending::Thread { start, history: handoff.clone() })
                 } else {
-                    self.request("thread/start",json!({"model":selection.model,"cwd":context.cwd,"config":{"tools.update_plan.enabled":true}}),Pending::Thread { start })
+                    self.request("thread/start",json!({"model":selection.model,"cwd":context.cwd,"config":{"tools.update_plan.enabled":true}}),Pending::Thread { start, history: handoff.clone() })
                 }
             }
             ProviderCommand::Steer { text, attachments } => {
@@ -122,6 +122,9 @@ impl CodexProtocol {
                 let thread = native_thread.as_ref().or(self.thread.as_ref()).cloned();
                 if let Some(thread) = thread {
                     let turn = native_turn.as_ref().or(self.turns.get(&thread)).cloned();
+                    if self.pending.values().any(|pending| matches!(pending,Pending::Inject {start,..} if start["threadId"] == thread)) {
+                        self.stop_before_thread = true;
+                    }
                     if turn.is_none()
                         && self
                             .pending
@@ -201,6 +204,13 @@ impl CodexProtocol {
         };
         Ok(vec![frame])
     }
+    fn start_or_inject(&mut self, start: Value, history: Option<HistoricalContext>) -> Value {
+        if let Some(history) = history {
+            self.request("thread/inject_items",json!({"threadId":start["threadId"],"items":history_response_items(&history.messages,&history.context)}),Pending::Inject {start,history})
+        } else {
+            self.request("turn/start", start, Pending::Operation("turn/start".into()))
+        }
+    }
     fn interrupt(&mut self, thread: &str, turn: Option<&str>) -> Vec<Value> {
         let mut outbound = vec![];
         if let Some(turn) = turn {
@@ -230,10 +240,22 @@ impl CodexProtocol {
                 return Ok(output);
             };
             if let Some(error) = frame.get("error") {
+                if error["code"] == -32601
+                    && let Pending::Inject { mut start, history } = pending
+                {
+                    prepend_inline_history(&mut start, &history);
+                    output.outbound.push(self.request(
+                        "turn/start",
+                        start,
+                        Pending::Operation("turn/start".into()),
+                    ));
+                    return Ok(output);
+                }
                 let message = string(error, "message");
                 let operation = match pending {
                     Pending::Initialize => "initialize".into(),
                     Pending::Thread { .. } => "thread/start".into(),
+                    Pending::Inject { .. } => "thread/inject_items".into(),
                     Pending::RevertRead { .. } => "thread/read".into(),
                     Pending::Operation(operation) => operation,
                 };
@@ -249,6 +271,7 @@ impl CodexProtocol {
                 operation: match &pending {
                     Pending::Initialize => "initialize".into(),
                     Pending::Thread { .. } => "thread/start".into(),
+                    Pending::Inject { .. } => "thread/inject_items".into(),
                     Pending::RevertRead { .. } => "thread/read".into(),
                     Pending::Operation(operation) => operation.clone(),
                 },
@@ -256,7 +279,7 @@ impl CodexProtocol {
             });
             match pending {
                 Pending::Initialize => output.outbound.push(json!({"method":"initialized"})),
-                Pending::Thread { mut start } => {
+                Pending::Thread { mut start, history } => {
                     let thread = required(&result["thread"], "id")?;
                     self.thread = Some(thread.clone());
                     output.events.push(ProviderEvent::SessionReady {
@@ -265,6 +288,12 @@ impl CodexProtocol {
                     let stopped = std::mem::take(&mut self.stop_before_thread);
                     if !start.is_null() && !stopped {
                         start["threadId"] = json!(thread);
+                        output.outbound.push(self.start_or_inject(start, history));
+                    }
+                }
+                Pending::Inject { start, .. } => {
+                    output.events.push(ProviderEvent::ContextInjected);
+                    if !std::mem::take(&mut self.stop_before_thread) {
                         output.outbound.push(self.request(
                             "turn/start",
                             start,
@@ -378,7 +407,12 @@ impl CodexProtocol {
                     .collect(),
             }),
             "thread/tokenUsage/updated" => {
-                let usage = &p["tokenUsage"]["total"];
+                let usage = &p["tokenUsage"]["last"];
+                events.push(ProviderEvent::ContextUsage(ContextUsage {
+                    used_tokens: usage["totalTokens"].as_u64().unwrap_or(0),
+                    max_tokens: p["tokenUsage"]["modelContextWindow"].as_u64(),
+                    auto_compact_threshold: None,
+                }));
                 events.push(ProviderEvent::Usage(TokenUsage {
                     input: usage["inputTokens"].as_u64().unwrap_or(0),
                     cached_input: usage["cachedInputTokens"].as_u64().unwrap_or(0),
@@ -633,6 +667,20 @@ impl CodexProtocol {
         Ok(output)
     }
 }
+fn prepend_inline_history(start: &mut Value, history: &HistoricalContext) {
+    if let Some(inputs) = start["input"].as_array_mut() {
+        for input in inputs {
+            if input["type"] == "text" {
+                input["text"] = json!(format!(
+                    "{}\n\n{}",
+                    render_history(history),
+                    string(input, "text")
+                ));
+                break;
+            }
+        }
+    }
+}
 fn codex_runtime(mode: RuntimeMode) -> (&'static str, &'static str, &'static str) {
     match mode {
         RuntimeMode::ApprovalRequired => ("untrusted", "user", "readOnly"),
@@ -707,9 +755,10 @@ impl CodexProtocol {
             let method = string(frame, "method");
             let pending = match method.as_str() {
                 "initialize" => Pending::Initialize,
-                "thread/start" | "thread/resume" | "thread/fork" => {
-                    Pending::Thread { start: Value::Null }
-                }
+                "thread/start" | "thread/resume" | "thread/fork" => Pending::Thread {
+                    start: Value::Null,
+                    history: None,
+                },
                 _ => Pending::Operation(method),
             };
             self.next_id = self.next_id.max(id);

@@ -1,4 +1,5 @@
 use crate::*;
+use serde_json::json;
 #[test]
 fn sdk_version_matches_the_reference_lock() {
     assert_eq!(CLAUDE_SDK_VERSION, "0.3.276");
@@ -90,7 +91,7 @@ fn codex_start() -> ProviderCommand {
         attachments: vec![],
         native_thread: None,
         resume_at: None,
-        context: String::new(),
+        context: None,
     }
 }
 fn wire_context() -> WireContext {
@@ -122,7 +123,11 @@ fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start()
         .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"root"}}}))
         .unwrap();
     assert!(ready.outbound.is_empty());
-    let next = protocol.command(&codex_start(), &wire_context()).unwrap();
+    let mut next_command = codex_start();
+    if let ProviderCommand::Start { native_thread, .. } = &mut next_command {
+        *native_thread = Some("root".into());
+    }
+    let next = protocol.command(&next_command, &wire_context()).unwrap();
     assert_eq!(next[0]["method"], "turn/start");
     assert_eq!(next[0]["params"]["approvalsReviewer"], "auto_review");
     assert_eq!(next[0]["params"]["approvalPolicy"], "on-request");
@@ -215,4 +220,100 @@ fn initialize_recovers_pending_requests_once_and_preserves_reply_correlation() {
     let unknown = control.receive(&json!({"type":"control_request","request_id":"unknown-dialog","request":{"subtype":"request_user_dialog","dialog_kind":"future_dialog"}})).unwrap().unwrap();
     assert!(unknown.events.is_empty());
     assert!(unknown.outbound.is_empty());
+}
+
+#[test]
+fn native_history_injection_preserves_roles_and_only_explicit_unsupported_uses_inline() {
+    let history = select_history(
+        &[HistoricalMessage {
+            role: Role::Assistant,
+            text: "日本語\n  Keep indentation.".into(),
+            thread: "source".into(),
+            run: Some("run".into()),
+            item: "item".into(),
+            provider_thread: Some("source-native".into()),
+            status: "completed".into(),
+            kind: "assistant_message".into(),
+            run_status: None,
+        }],
+        "Recover source history",
+        0,
+        16_000,
+    );
+    for error in [None, Some(-32601), Some(-32000)] {
+        let mut protocol = CodexProtocol::default();
+        let mut command = codex_start();
+        if let ProviderCommand::Start { context, .. } = &mut command {
+            *context = Some(history.clone());
+        }
+        let start = protocol.command(&command, &wire_context()).unwrap();
+        let ready = protocol
+            .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
+            .unwrap();
+        let inject = &ready.outbound[0];
+        assert_eq!(inject["method"], "thread/inject_items");
+        assert_eq!(inject["params"]["items"][0]["role"], "user");
+        assert_eq!(inject["params"]["items"][1]["role"], "assistant");
+        assert!(
+            inject["params"]["items"][1]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("日本語\n  Keep indentation.")
+        );
+        let response = match error {
+            Some(code) => {
+                json!({"id":inject["id"],"error":{"code":code,"message":"unsupported or lost"}})
+            }
+            None => json!({"id":inject["id"],"result":{}}),
+        };
+        let result = protocol.receive(&response);
+        if error == Some(-32000) {
+            assert!(
+                matches!(result,Err(ProtocolError::Remote {operation,..}) if operation=="thread/inject_items")
+            );
+            continue;
+        }
+        let result = result.unwrap();
+        assert_eq!(result.outbound[0]["method"], "turn/start");
+        let text = result.outbound[0]["params"]["input"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert_eq!(text.contains("Keep indentation."), error.is_some());
+        assert_eq!(
+            result.events.contains(&ProviderEvent::ContextInjected),
+            error.is_none()
+        );
+    }
+}
+
+#[test]
+fn assistant_context_usage_includes_cache_reads_and_creation_in_the_reference_window() {
+    let mut protocol = ClaudeProtocol::default();
+    let mut command = codex_start();
+    if let ProviderCommand::Start { selection, .. } = &mut command {
+        selection.driver = Driver::Claude;
+        selection.model = "claude-sonnet-4-6".into();
+    }
+    protocol.command(&command, "prompt", &[]).unwrap();
+    let output=protocol.receive(&json!({"type":"assistant","uuid":"assistant","message":{"id":"message","model":"claude-sonnet-4-6","content":[],"usage":{"input_tokens":42_000,"cache_creation_input_tokens":2000,"cache_read_input_tokens":5000,"output_tokens":1000}}})).unwrap();
+    let events = match &output.events[0] {
+        ProviderEvent::NativeOutput { events, .. } => events,
+        _ => &output.events,
+    };
+    assert!(events.contains(&ProviderEvent::ContextUsage(ContextUsage {
+        used_tokens: 50_000,
+        max_tokens: Some(200_000),
+        auto_compact_threshold: None
+    })));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ProviderEvent::Usage(TokenUsage {
+            input: 49_000,
+            cached_input: 5000,
+            output: 1000,
+            total: 50_000,
+            max: Some(200_000),
+            ..
+        })
+    )));
 }

@@ -585,7 +585,7 @@ fn fork_history_and_provider_context_are_fixed_at_creation() {
     else {
         panic!()
     };
-    assert!(context.is_empty());
+    assert!(context.is_none());
     assert_eq!(native_thread.as_deref(), Some("fork-native"));
     assert!(
         child
@@ -647,8 +647,8 @@ fn merge_back_supersedes_pending_delta_and_excludes_inherited_history() {
     command(&mut parent, "accept-merge", *accept.clone());
     command(&mut parent, "duplicate", *accept.clone());
     assert_eq!(parent.transfers.len(), 1);
-    assert!(parent.transfers[0].text.contains("child-marker"));
-    assert!(!parent.transfers[0].text.contains("parent-marker"));
+    assert!(render_history(&parent.transfers[0].history).contains("child-marker"));
+    assert!(!render_history(&parent.transfers[0].history).contains("parent-marker"));
 }
 #[test]
 fn compact_keeps_pending_handoff_for_the_next_real_prompt() {
@@ -668,7 +668,7 @@ fn compact_keeps_pending_handoff_for_the_next_real_prompt() {
         compact.effects[0].body,
         EffectBody::Provider(ProviderCommand::Compact { .. })
     ));
-    assert!(s.transfers[0].consumed_by.is_none());
+    assert!(s.transfers[0].delivery.is_none());
 }
 #[test]
 fn plan_followup_preserves_attachments_and_consumes_the_proposal() {
@@ -1390,4 +1390,200 @@ fn async_question_answer_steers_the_current_turn_and_rejects_blank_answers_atomi
     assert_eq!(s.requests[0].status, RequestStatus::Resolved);
     assert!(step.effects.iter().any(|effect| matches!(&effect.body,EffectBody::Provider(ProviderCommand::Steer {text,..}) if text == "Which?\nOption One")));
     assert_eq!(s.messages.last().unwrap().creation_source, "server");
+}
+
+#[test]
+fn context_delivery_is_pending_until_acceptance_and_ambiguous_delivery_is_not_repeated() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "original");
+    finish(&mut s, &a);
+    let mut target = selection();
+    target.instance = "claude".into();
+    target.driver = Driver::Claude;
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider { selection: target },
+    );
+    let step = command(
+        &mut s,
+        "offer",
+        send_message("continue", DispatchMode::StartImmediately),
+    );
+    assert!(step.effects.iter().any(|effect|matches!(&effect.body,EffectBody::Provider(ProviderCommand::Start {context:Some(history),..}) if render_history(history).contains("original"))));
+    assert_eq!(
+        s.transfers[0].delivery.as_ref().unwrap().status,
+        ContextDeliveryStatus::Pending
+    );
+    let a = s.active_run().unwrap().attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "bound",
+        &a,
+        ProviderEvent::SessionReady {
+            native_thread: "new-native".into(),
+        },
+    );
+    assert_eq!(
+        s.transfers[0]
+            .delivery
+            .as_ref()
+            .unwrap()
+            .native_thread
+            .as_deref(),
+        Some("new-native")
+    );
+    result(
+        &mut s,
+        "lost",
+        EffectResult::ProviderFailed {
+            attempt: a,
+            operation: ProviderOperation::Start,
+            message: "connection lost".into(),
+            message_id: None,
+            turn_completed: false,
+        },
+    );
+    let retry = command(
+        &mut s,
+        "retry",
+        send_message("retry", DispatchMode::StartImmediately),
+    );
+    assert!(!retry.effects.iter().any(|effect| matches!(
+        effect.body,
+        EffectBody::Provider(ProviderCommand::Start { .. })
+    )));
+    assert!(s.items.iter().any(
+        |item| matches!(&item.kind,ItemKind::Error {message,..} if message==HANDOFF_UNCERTAIN_ERROR)
+    ));
+    let step = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "replace-native".into(),
+            input: Input::NativeSessionReset {
+                instance: "claude".into(),
+            },
+        },
+    );
+    s = fold(&s, &step.facts).unwrap();
+    let accepted = command(
+        &mut s,
+        "fresh",
+        send_message("fresh", DispatchMode::StartImmediately),
+    );
+    assert!(accepted.effects.iter().any(|effect| matches!(
+        effect.body,
+        EffectBody::Provider(ProviderCommand::Start {
+            native_thread: None,
+            context: Some(_),
+            ..
+        })
+    )));
+    let a = s.active_run().unwrap().attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "ready",
+        &a,
+        ProviderEvent::SessionReady {
+            native_thread: "replacement-native".into(),
+        },
+    );
+    provider(
+        &mut s,
+        "accepted",
+        &a,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    assert_eq!(
+        s.transfers[0].delivery.as_ref().unwrap().status,
+        ContextDeliveryStatus::Inline
+    );
+    finish(&mut s, &a);
+    let next = command(
+        &mut s,
+        "next",
+        send_message("next", DispatchMode::StartImmediately),
+    );
+    assert!(next.effects.iter().any(|effect| matches!(
+        &effect.body,
+        EffectBody::Provider(ProviderCommand::Start { context: None, .. })
+    )));
+}
+
+#[test]
+fn injected_context_is_durable_before_turn_start_and_budget_failure_preserves_input() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "original");
+    finish(&mut s, &a);
+    let mut target = selection();
+    target.instance = "target".into();
+    command(
+        &mut s,
+        "switch",
+        Command::SwitchProvider { selection: target },
+    );
+    command(
+        &mut s,
+        "offer",
+        send_message("continue", DispatchMode::StartImmediately),
+    );
+    let a = s.active_run().unwrap().attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "bound",
+        &a,
+        ProviderEvent::SessionReady {
+            native_thread: "target-native".into(),
+        },
+    );
+    provider(&mut s, "injected", &a, ProviderEvent::ContextInjected);
+    assert_eq!(
+        s.transfers[0].delivery.as_ref().unwrap().status,
+        ContextDeliveryStatus::Injected
+    );
+    provider(
+        &mut s,
+        "accepted",
+        &a,
+        ProviderEvent::TurnStarted {
+            native_turn: Some("turn".into()),
+        },
+    );
+    assert_eq!(
+        s.transfers[0].delivery.as_ref().unwrap().status,
+        ContextDeliveryStatus::Injected
+    );
+    finish(&mut s, &a);
+    let mut next = selection();
+    next.instance = "small-window".into();
+    command(&mut s, "small", Command::SwitchProvider { selection: next });
+    let step = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "policy".into(),
+            input: Input::HandoffPolicy {
+                instance: "small-window".into(),
+                model_window: Some(20_000),
+                token_cap: 16_000,
+            },
+        },
+    );
+    s = fold(&s, &step.facts).unwrap();
+    let text = "界".repeat(30_000);
+    let mut send = send_message("large", DispatchMode::StartImmediately);
+    if let Command::Send(message) = &mut send {
+        message.text = text.clone();
+    }
+    let step = command(&mut s, "large", send);
+    assert!(!step.effects.iter().any(|effect| matches!(
+        effect.body,
+        EffectBody::Provider(ProviderCommand::Start { .. })
+    )));
+    assert_eq!(s.messages.last().unwrap().text, text);
+    assert_eq!(s.transfers.last().unwrap().delivery, None);
+    assert!(s.items.iter().any(
+        |item| matches!(&item.kind,ItemKind::Error {message,..} if message==HANDOFF_BUDGET_ERROR)
+    ));
 }

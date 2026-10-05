@@ -9,6 +9,18 @@ pub struct Fact {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FactBody {
+    HandoffPolicyChanged {
+        instance: String,
+        model_window: Option<u64>,
+        token_cap: u64,
+    },
+    NativeSessionCleared {
+        instance: String,
+    },
+    ContextUsageRecorded {
+        attempt: RunAttemptId,
+        usage: ContextUsage,
+    },
     TaskNamed {
         id: NodeId,
         title: String,
@@ -308,12 +320,13 @@ pub enum FactBody {
         kind: TransferKind,
         source: ThreadId,
         target: ThreadId,
+        instance: String,
         boundary: u64,
-        text: String,
+        history: HistoricalContext,
     },
-    TransferConsumed {
+    TransferDeliveryChanged {
         id: ContextTransferId,
-        run: RunId,
+        delivery: ContextDelivery,
     },
     TaskNativeBound {
         id: NodeId,
@@ -389,6 +402,27 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
     let at = &fact.at;
     use FactBody::*;
     match &fact.body {
+        HandoffPolicyChanged {
+            instance,
+            model_window,
+            token_cap,
+        } => {
+            state.handoff_token_cap = Some((*token_cap).clamp(1024, 64_000));
+            if let Some(window) = model_window {
+                state.context_windows.insert(instance.clone(), *window);
+            } else {
+                state.context_windows.remove(instance);
+            }
+        }
+        NativeSessionCleared { instance } => {
+            state.native_sessions.remove(instance);
+            state.native_heads.remove(instance);
+        }
+        ContextUsageRecorded { attempt, usage } => {
+            find_mut(&mut state.attempts, "attempt", |a| &a.id == attempt)?.context_usage =
+                Some(usage.clone());
+        }
+
         TaskNamed { id, title } => {
             find_mut(&mut state.tasks, "task", |t| &t.id == id)?.title = Some(title.clone())
         }
@@ -812,6 +846,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 native_turn: None,
                 native_head: None,
                 usage: None,
+                context_usage: None,
                 started_at: at.clone(),
                 completed_at: None,
             });
@@ -835,6 +870,14 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             state
                 .native_sessions
                 .insert(instance, native_thread.clone());
+            for transfer in &mut state.transfers {
+                if let Some(delivery) = &mut transfer.delivery
+                    && &delivery.attempt == attempt
+                    && delivery.status == ContextDeliveryStatus::Pending
+                {
+                    delivery.native_thread = Some(native_thread.clone());
+                }
+            }
         }
         TurnBound {
             attempt,
@@ -1068,14 +1111,16 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             kind,
             source,
             target,
+            instance,
             boundary,
-            text,
+            history,
         } => {
             for transfer in &mut state.transfers {
                 if transfer.source == *source
                     && transfer.target == *target
                     && transfer.kind == *kind
-                    && transfer.consumed_by.is_none()
+                    && transfer.instance == *instance
+                    && transfer.delivery.is_none()
                 {
                     transfer.superseded = true;
                 }
@@ -1085,15 +1130,18 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 kind: *kind,
                 source: source.clone(),
                 target: target.clone(),
+                instance: instance.clone(),
                 boundary: *boundary,
-                text: text.clone(),
-                consumed_by: None,
+                history: history.clone(),
+                delivery: None,
                 superseded: false,
             });
         }
-        TransferConsumed { id, run } => {
-            find_mut(&mut state.transfers, "transfer", |t| &t.id == id)?.consumed_by =
-                Some(run.clone())
+        TransferDeliveryChanged { id, delivery } => {
+            find_mut(&mut state.transfers, "transfer", |transfer| {
+                &transfer.id == id
+            })?
+            .delivery = Some(delivery.clone());
         }
         TaskNativeBound { id, native_task } => {
             find_mut(&mut state.tasks, "task", |t| &t.id == id)?.native_task =

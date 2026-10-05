@@ -231,52 +231,234 @@ impl Decision {
             .native_sessions
             .get(&run.selection.instance)
             .cloned();
-        let context = self
-            .state
-            .transfers
-            .iter()
-            .filter(|t| !t.superseded && t.consumed_by.is_none() && t.target == thread.id)
-            .map(|t| t.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        // /compact remains a native command, even when context is waiting.
+        // Native compaction defers portable context until the next ordinary input.
         if message.text.trim() == "/compact" {
             self.effect(
                 Some(attempt),
                 EffectBody::Provider(ProviderCommand::Compact { native_thread }),
             );
+            return;
+        }
+        let transfers = self
+            .state
+            .transfers
+            .iter()
+            .filter(|transfer| {
+                !transfer.superseded
+                    && transfer.target == thread.id
+                    && transfer.instance == run.selection.instance
+                    && transfer.delivery.as_ref().is_none_or(|delivery| {
+                        delivery.native_thread != native_thread
+                            || delivery.status == ContextDeliveryStatus::Pending
+                    })
+            })
+            .collect::<Vec<_>>();
+        if transfers.iter().any(|transfer| {
+            transfer.delivery.as_ref().is_some_and(|delivery| {
+                delivery.native_thread == native_thread
+                    && delivery.status == ContextDeliveryStatus::Pending
+            })
+        }) {
+            self.fail_start(id, &attempt, HANDOFF_UNCERTAIN_ERROR);
+            return;
+        }
+        let context = if transfers.is_empty() {
+            None
         } else {
-            let transfers = self
+            let previous = self
+                .state
+                .attempts
+                .iter()
+                .rev()
+                .filter(|previous| {
+                    previous.id != attempt && previous.native_thread == native_thread
+                })
+                .find_map(|previous| {
+                    let previous_run = self.state.runs.iter().find(|r| {
+                        r.id == previous.run
+                            && r.selection.instance == run.selection.instance
+                            && r.status != RunStatus::RolledBack
+                    })?;
+                    previous
+                        .context_usage
+                        .as_ref()
+                        .map(|usage| (usage, previous_run.selection == run.selection))
+                });
+            let model_window = self
+                .state
+                .context_windows
+                .get(&run.selection.instance)
+                .copied();
+            let usage = context_usage_for_handoff(
+                native_thread.is_some(),
+                previous.is_some_and(|(_, same)| same),
+                false,
+                previous.map(|(usage, _)| usage),
+                model_window,
+            );
+            let estimate = if native_thread.is_some() {
+                self.state
+                    .visible_items()
+                    .into_iter()
+                    .filter(|item| {
+                        item.run.as_ref().is_some_and(|id| {
+                            self.state.runs.iter().any(|r| {
+                                &r.id == id && r.selection.instance == run.selection.instance
+                            })
+                        })
+                    })
+                    .map(|item| item.text.len() as u64)
+                    .sum()
+            } else {
+                0
+            };
+            let budget = handoff_budget(
+                self.state
+                    .handoff_token_cap
+                    .unwrap_or(DEFAULT_HANDOFF_TOKEN_CAP),
+                &message.text,
+                &message.attachments,
+                usage.as_ref(),
+                estimate,
+                model_window,
+            );
+            let delivered = self
                 .state
                 .transfers
                 .iter()
-                .filter(|t| !t.superseded && t.consumed_by.is_none() && t.target == thread.id)
-                .map(|t| t.id.clone())
-                .collect::<Vec<_>>();
-            self.effect(
-                Some(attempt),
-                EffectBody::Provider(ProviderCommand::Start {
-                    selection: run.selection.clone(),
-                    runtime_mode: thread.runtime_mode,
-                    interaction_mode: thread.interaction_mode,
-                    text: message.text,
-                    attachments: message.attachments,
-                    native_thread,
-                    resume_at: self
-                        .state
-                        .native_heads
-                        .get(&run.selection.instance)
-                        .cloned()
-                        .flatten(),
-                    context,
-                }),
-            );
-            for id in transfers {
-                self.fact(FactBody::TransferConsumed {
-                    id,
-                    run: run.id.clone(),
-                });
+                .filter_map(|transfer| transfer.delivery.as_ref())
+                .filter(|delivery| {
+                    delivery.native_thread == native_thread
+                        && delivery.status != ContextDeliveryStatus::Pending
+                })
+                .flat_map(|delivery| delivery.item_ids.clone())
+                .collect();
+            match combine_handoffs(&transfers, &thread.id, &delivered, budget) {
+                Ok(context) => Some(context),
+                Err(message) => {
+                    self.fail_start(id, &attempt, message);
+                    return;
+                }
             }
+        };
+        if let Some(context) = &context {
+            let deliveries = transfers
+                .iter()
+                .map(|transfer| {
+                    (
+                        transfer.id.clone(),
+                        ContextDelivery {
+                            attempt: attempt.clone(),
+                            run: run.id.clone(),
+                            native_thread: native_thread.clone(),
+                            status: ContextDeliveryStatus::Pending,
+                            item_ids: context
+                                .messages
+                                .iter()
+                                .filter(|message| {
+                                    transfer
+                                        .history
+                                        .messages
+                                        .iter()
+                                        .any(|candidate| candidate.item == message.item)
+                                })
+                                .map(|message| message.item.clone())
+                                .collect(),
+                            omitted_item_ids: transfer
+                                .history
+                                .omitted_item_ids
+                                .iter()
+                                .cloned()
+                                .chain(
+                                    context
+                                        .omitted_item_ids
+                                        .iter()
+                                        .filter(|id| {
+                                            transfer
+                                                .history
+                                                .messages
+                                                .iter()
+                                                .any(|message| &message.item == *id)
+                                        })
+                                        .cloned(),
+                                )
+                                .collect(),
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            for (id, delivery) in deliveries {
+                self.fact(FactBody::TransferDeliveryChanged { id, delivery });
+            }
+        }
+        self.effect(
+            Some(attempt),
+            EffectBody::Provider(ProviderCommand::Start {
+                selection: run.selection.clone(),
+                runtime_mode: thread.runtime_mode,
+                interaction_mode: thread.interaction_mode,
+                text: message.text,
+                attachments: message.attachments,
+                native_thread,
+                resume_at: self
+                    .state
+                    .native_heads
+                    .get(&run.selection.instance)
+                    .cloned()
+                    .flatten(),
+                context,
+            }),
+        );
+    }
+    fn fail_start(&mut self, run: &RunId, attempt: &RunAttemptId, message: &str) {
+        let key = self.key("handoff-failure", attempt.as_str());
+        self.provider(
+            attempt,
+            &ProviderEvent::ItemFinished {
+                key,
+                kind: ProviderItem::Error {
+                    message: message.into(),
+                    retrying: false,
+                    code: None,
+                    class: Some("context_handoff".into()),
+                    retryable: Some(true),
+                },
+                text: None,
+                status: ItemStatus::Failed,
+            },
+        );
+        self.finish(run, RunStatus::Failed, false);
+    }
+    fn complete_context_delivery(&mut self, attempt: &RunAttemptId, status: ContextDeliveryStatus) {
+        let deliveries = self
+            .state
+            .transfers
+            .iter()
+            .filter_map(|transfer| {
+                transfer
+                    .delivery
+                    .as_ref()
+                    .filter(|delivery| {
+                        &delivery.attempt == attempt
+                            && delivery.status == ContextDeliveryStatus::Pending
+                    })
+                    .map(|delivery| {
+                        let mut delivery = delivery.clone();
+                        delivery.status = status;
+                        let instance = self
+                            .state
+                            .runs
+                            .iter()
+                            .find(|run| run.id == delivery.run)
+                            .map(|run| &run.selection.instance);
+                        delivery.native_thread = instance
+                            .and_then(|instance| self.state.native_sessions.get(instance).cloned());
+                        (transfer.id.clone(), delivery)
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (id, delivery) in deliveries {
+            self.fact(FactBody::TransferDeliveryChanged { id, delivery });
         }
     }
     fn promote(&mut self) {
@@ -602,7 +784,7 @@ impl Decision {
                         .get(&target.selection.instance)
                         .cloned(),
                     resume_at: None,
-                    context: String::new(),
+                    context: None,
                 };
                 self.effect(Some(next), EffectBody::Provider(command));
             } else {
@@ -926,7 +1108,17 @@ impl Decision {
                         source: t.id.clone(),
                         target: t.id,
                         boundary: self.state.runs.iter().map(|r| r.ordinal).max().unwrap_or(0),
-                        text: context_text(self.state.visible_items().into_iter()),
+                        instance: selection.instance.clone(),
+                        history: prepare_history(
+                            &self.state,
+                            &self
+                                .state
+                                .visible_items()
+                                .into_iter()
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                            self.state.runs.iter().map(|r| r.ordinal).max().unwrap_or(0),
+                        ),
                     });
                 }
                 self.fact(FactBody::ModelSelected {
@@ -1391,7 +1583,7 @@ impl Decision {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                let context = context_text(history.iter());
+                let context = prepare_history(&self.state, &history, run.ordinal);
                 let child_command = Box::new(AcceptFork {
                     thread: target.clone(),
                     parent: thread.id,
@@ -1487,7 +1679,8 @@ impl Decision {
                         source: parent.clone(),
                         target: thread.clone(),
                         boundary: *boundary,
-                        text: context.clone(),
+                        instance: selection.instance.clone(),
+                        history: context.clone(),
                     });
                 }
                 Reply::Thread(thread.clone())
@@ -1502,14 +1695,24 @@ impl Decision {
                     .map(|r| r.ordinal)
                     .max()
                     .unwrap_or(0);
-                let text = context_text(self.state.items.iter().filter(|i| {
-                    i.run.as_ref().is_none_or(|id| {
-                        self.state
-                            .runs
-                            .iter()
-                            .any(|r| &r.id == id && r.status != RunStatus::RolledBack)
-                    })
-                }));
+                let history = prepare_history(
+                    &self.state,
+                    &self
+                        .state
+                        .items
+                        .iter()
+                        .filter(|i| {
+                            i.run.as_ref().is_none_or(|id| {
+                                self.state
+                                    .runs
+                                    .iter()
+                                    .any(|r| &r.id == id && r.status != RunStatus::RolledBack)
+                            })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    boundary,
+                );
                 self.effect(
                     None,
                     EffectBody::SendToThread {
@@ -1519,7 +1722,7 @@ impl Decision {
                             kind: TransferKind::MergeBack,
                             source: thread.id.clone(),
                             boundary,
-                            text,
+                            history,
                         }),
                     },
                 );
@@ -1530,14 +1733,14 @@ impl Decision {
                 kind,
                 source,
                 boundary,
-                text,
+                history,
             } => {
                 if self.state.transfers.iter().any(|t| {
                     t.id == *id
                         || (t.kind == *kind
                             && t.source == *source
                             && t.boundary == *boundary
-                            && t.text == *text
+                            && t.history == *history
                             && !t.superseded)
                 }) {
                     return Reply::Accepted;
@@ -1548,7 +1751,15 @@ impl Decision {
                     source: source.clone(),
                     target: self.state.thread.as_ref().unwrap().id.clone(),
                     boundary: *boundary,
-                    text: text.clone(),
+                    instance: self
+                        .state
+                        .thread
+                        .as_ref()
+                        .unwrap()
+                        .selection
+                        .instance
+                        .clone(),
+                    history: history.clone(),
                 });
                 Reply::Accepted
             }
@@ -2065,6 +2276,19 @@ impl Decision {
                     self.finish(&run.id, RunStatus::Interrupted, true);
                 }
             }
+            ContextUsage(usage) => {
+                if !child {
+                    self.fact(FactBody::ContextUsageRecorded {
+                        attempt: attempt.clone(),
+                        usage: usage.clone(),
+                    });
+                }
+            }
+            ContextInjected => {
+                if !child {
+                    self.complete_context_delivery(attempt, ContextDeliveryStatus::Injected);
+                }
+            }
             SessionReady { native_thread } => {
                 if !child {
                     self.fact(FactBody::SessionBound {
@@ -2074,6 +2298,9 @@ impl Decision {
                 }
             }
             TurnStarted { native_turn } => {
+                if !child {
+                    self.complete_context_delivery(attempt, ContextDeliveryStatus::Inline);
+                }
                 if child {
                     self.fact(FactBody::NativeChildTurnBound {
                         native_turn: native_turn.clone(),
@@ -3339,6 +3566,24 @@ impl ThreadMachine {
                     reply: reply.clone(),
                 });
                 reply
+            }
+            Input::HandoffPolicy {
+                instance,
+                model_window,
+                token_cap,
+            } => {
+                decision.fact(FactBody::HandoffPolicyChanged {
+                    instance: instance.clone(),
+                    model_window: *model_window,
+                    token_cap: *token_cap,
+                });
+                Reply::Accepted
+            }
+            Input::NativeSessionReset { instance } => {
+                decision.fact(FactBody::NativeSessionCleared {
+                    instance: instance.clone(),
+                });
+                Reply::Accepted
             }
             Input::Provider { attempt, event } => decision.provider(attempt, event),
             Input::Effect(result) => decision.effect_result(result),
