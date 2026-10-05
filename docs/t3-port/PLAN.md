@@ -134,3 +134,5 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 - 2026-10-05: M1 の棚は計画に指定された5種類を表示し、固定 T3 の Working shelf 有効時の分類と順序を採用する。T3 の設定既定値は無効だが、全設定を扱う M3 で切替を公開する。Pinned の移動は共通層で T3 の base26 fractional key を計算し、未採番の列だけ必要時に採番する。Snoozed は解除予定順、Settled は終了・settle 時刻順で、改名では順序を変えない。
 - 2026-10-05: GPUI の旧会話 UI と補助状態を削除し、共通の ConversationView を描画する。下書きの widget 編集は revision で遅い receipt から保護し、共通 owner は snapshot を publish してから receipt を完了する。履歴追加時は先頭の表示位置を保持し、末尾近くを見ている場合だけ新着へ追従する。
 - 2026-10-05: files のバイナリ転送と音声入力は会話以外の機能として残す。転送は共通 owner の task が既存の hash／size 検証付き iroh transfer を呼ぶ。音声の転記は録音開始時の下書きに追記し、新しい入力を上書きしない。端末の保存先は orchestration 専用にして旧会話形式を読まない。
+- 2026-10-05: SwiftUI の旧 conversation presentation・side chat・media import を削除し、共通 ConversationView と棚を直接描画する。M1 の基本設定には接続・provider accounts・既存 worktree 設定を残す。キューはシート、承認と質問はカード、下書きは native widget の revision で保護する。T3 と同じ DM Sans 3書体を両モバイルが共有する静的資産として同梱し、OFL と取得元・hash を記録する。
+- 2026-10-05: user-input.dismiss は固定 T3 と同じく message 応答の質問にだけ表示する。構造化質問は回答または stop、承認は decision の選択を使う。files の保存は編集開始時の revision を共通 owner に保持し、再読込で楽観ロックの基準を変えない。保存中の追加入力は receipt 後も保持する。

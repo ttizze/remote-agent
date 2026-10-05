@@ -11,7 +11,7 @@ enum SnapshotFiles {
         let directory = try FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true
-        ).appendingPathComponent("snapshots", isDirectory: true)
+        ).appendingPathComponent("orchestration", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let name = Data(host.utf8).base64EncodedString()
             .replacingOccurrences(of: "/", with: "_")
@@ -32,12 +32,16 @@ enum SnapshotFiles {
 
     static func withModelPreferences(_ persisted: Data) throws -> Data {
         try applyModelPreferences(persisted: persisted,
-                                  defaults: UserDefaults.standard.data(forKey: "bex.model-defaults") ?? Data())
+                                  defaults: UserDefaults.standard
+                                      .data(forKey: "bex.orchestration-model-defaults") ?? Data())
     }
 
     static func save(_ host: String, snapshot: AgentCore.Snapshot) async throws {
         try await Task.detached(priority: .utility) {
-            try UserDefaults.standard.set(snapshot.serializeModelPreferences(), forKey: "bex.model-defaults")
+            try UserDefaults.standard.set(
+                snapshot.serializeModelPreferences(),
+                forKey: "bex.orchestration-model-defaults"
+            )
             try snapshot.serializeLocalState().write(to: location(host), options: .atomic)
         }.value
     }
@@ -80,7 +84,7 @@ enum DeviceIdentity {
 }
 
 @MainActor
-final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
+final class DictationRecorder: NSObject, ObservableObject, @preconcurrency AVAudioRecorderDelegate {
     @Published private(set) var isRecording = false
     @Published private(set) var requestingPermission = false
     @Published private(set) var levels: [Float] = Array(repeating: 0, count: 40)
@@ -132,7 +136,7 @@ final class DictationRecorder: NSObject, ObservableObject, AVAudioRecorderDelega
         requestID = id
         self.completion = completion
         requestingPermission = true
-        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+        AVAudioApplication.requestRecordPermission { [weak self] granted in
             DispatchQueue.main.async {
                 guard let self, self.requestID == id else { return }
                 self.requestingPermission = false
@@ -286,4 +290,32 @@ struct FileShareSheet: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_: UIActivityViewController, context _: Context) {}
+}
+
+/// Runs `body` with a fresh private temporary directory and removes the
+/// directory when `body` fails, so partial files never outlive an error.
+func inTemporaryDirectory<T>(_ body: (URL) throws -> T) throws -> T {
+    let directory = try makeTemporaryDirectory()
+    do {
+        return try body(directory)
+    } catch {
+        try? FileManager.default.removeItem(at: directory)
+        throw error
+    }
+}
+
+func inTemporaryDirectory<T>(_ body: (URL) async throws -> T) async throws -> T {
+    let directory = try makeTemporaryDirectory()
+    do {
+        return try await body(directory)
+    } catch {
+        try? FileManager.default.removeItem(at: directory)
+        throw error
+    }
+}
+
+private func makeTemporaryDirectory() throws -> URL {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    return directory
 }

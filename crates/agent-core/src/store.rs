@@ -1170,20 +1170,36 @@ impl Owner {
                 None
             }
             Intent::ListFiles { path } => Some(Call::ListFiles(op::ListFiles { path })),
-            Intent::ReadFile { path } => Some(Call::ReadFile(op::ListFiles { path })),
-            Intent::EditFile { path, text } => {
-                self.state.workspace.file_drafts.insert(path, text);
-                None
+            Intent::ReadFile {
+                path,
+                discard_draft,
+            } => {
+                if discard_draft {
+                    self.state.workspace.file_drafts.remove(&path);
+                }
+                Some(Call::ReadFile(op::ListFiles { path }))
             }
-            Intent::SaveFile { path } => {
+            Intent::EditFile { path, text } => {
                 let file = self
                     .state
                     .workspace
                     .file
                     .as_ref()
-                    .filter(|f| f.path == path)
-                    .ok_or_else(|| invalid("Open the file before saving"))?;
-                let text = self
+                    .filter(|file| file.path == path)
+                    .ok_or_else(|| invalid("Open the file before editing"))?;
+                self.state
+                    .workspace
+                    .file_drafts
+                    .entry(path)
+                    .and_modify(|draft| draft.text = text.clone())
+                    .or_insert(crate::state::FileDraft {
+                        text,
+                        revision: file.revision.clone(),
+                    });
+                None
+            }
+            Intent::SaveFile { path } => {
+                let draft = self
                     .state
                     .workspace
                     .file_drafts
@@ -1192,8 +1208,8 @@ impl Owner {
                     .ok_or_else(|| invalid("File has no edits"))?;
                 Some(Call::WriteFile(op::WriteFile {
                     path,
-                    revision: file.revision.clone(),
-                    text,
+                    revision: draft.revision,
+                    text: draft.text,
                 }))
             }
             Intent::ReviewWorkspace { cwd } => {
@@ -1463,6 +1479,17 @@ impl Owner {
                     Reply::Projects(projects) => self.state.projects = projects,
                     Reply::Files(files) => self.state.workspace.directory = Some(files),
                     Reply::File(file) => {
+                        if let Call::WriteFile(written) = &call
+                            && let Some(draft) =
+                                self.state.workspace.file_drafts.get_mut(&file.path)
+                            && draft.revision == written.revision
+                        {
+                            if draft.text == written.text {
+                                self.state.workspace.file_drafts.remove(&file.path);
+                            } else {
+                                draft.revision = file.revision.clone();
+                            }
+                        }
                         self.state.workspace.file = Some(file);
                     }
                     Reply::Review(review) => self.state.workspace.review = Some(review),
@@ -1769,6 +1796,67 @@ mod tests {
             epoch: 0,
             source: CreationSource::Desktop,
         }
+    }
+    #[test]
+    fn file_reload_and_save_receipts_preserve_edits_and_their_base_revision() {
+        let file = m::FileContent {
+            path: "/file".into(),
+            revision: "v1".into(),
+            text: "original".into(),
+            size: 8,
+        };
+        let mut owner = owner(Snapshot {
+            workspace: crate::state::Workspace {
+                file: Some(file.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        owner
+            .prepare(Intent::EditFile {
+                path: file.path.clone(),
+                text: "edit".into(),
+            })
+            .unwrap();
+        let mut updated = file.clone();
+        updated.revision = "external".into();
+        owner.finished(JobResult {
+            call: Call::ReadFile(op::ListFiles {
+                path: file.path.clone(),
+            }),
+            result: Ok(Reply::File(updated)),
+            complete: None,
+            sent: None,
+            launched: None,
+        });
+        let (call, _, _) = owner
+            .prepare(Intent::SaveFile {
+                path: file.path.clone(),
+            })
+            .unwrap();
+        let Some(Call::WriteFile(written)) = call else {
+            panic!("expected file write")
+        };
+        assert_eq!(written.revision, "v1");
+        owner
+            .prepare(Intent::EditFile {
+                path: file.path.clone(),
+                text: "typed during save".into(),
+            })
+            .unwrap();
+        let mut saved = file.clone();
+        saved.revision = "v2".into();
+        saved.text = written.text.clone();
+        owner.finished(JobResult {
+            call: Call::WriteFile(written),
+            result: Ok(Reply::File(saved)),
+            complete: None,
+            sent: None,
+            launched: None,
+        });
+        let draft = &owner.state.workspace.file_drafts[&file.path];
+        assert_eq!(draft.text, "typed during save");
+        assert_eq!(draft.revision, "v2");
     }
     #[test]
     fn delayed_submission_receipt_preserves_new_text_and_model_changes() {

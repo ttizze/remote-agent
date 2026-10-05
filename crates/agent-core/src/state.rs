@@ -175,10 +175,15 @@ impl Snapshot {
 pub struct Workspace {
     pub directory: Option<crate::models::FileList>,
     pub file: Option<crate::models::FileContent>,
-    pub file_drafts: BTreeMap<String, String>,
+    pub file_drafts: BTreeMap<String, FileDraft>,
     pub review: Option<crate::models::WorkspaceReview>,
     pub worktree_settings: Option<crate::models::WorktreeSettings>,
     pub worktrees: Vec<crate::models::Worktree>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileDraft {
+    pub text: String,
+    pub revision: String,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct Terminal {
@@ -334,6 +339,7 @@ pub enum Intent {
     },
     ReadFile {
         path: String,
+        discard_draft: bool,
     },
     EditFile {
         path: String,

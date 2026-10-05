@@ -7,11 +7,6 @@ struct BexSwiftUIRoot: View {
 
     var body: some View {
         BexScreen(model: model)
-            .onChange(of: model.screen) { screen in
-                if screen != .thread {
-                    model.sideChatRequest = nil
-                }
-            }
             .sheet(isPresented: $model.isScanning) {
                 BexQrScannerSheet { model.scanned($0) }
                     .interactiveDismissDisabled()
@@ -66,6 +61,7 @@ private struct BexScreen: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .preferredColorScheme(.dark)
+        .tint(T3.color("mobilePrimaryText")).font(T3.font()).background(T3.color("canvas"))
     }
 
     private var pairingScreen: some View {
@@ -108,7 +104,7 @@ private struct PairingScreen: View {
                             .font(.system(size: hostName == nil ? 36 : 24, weight: .medium))
                             .foregroundStyle(Color.accentColor)
                             .frame(width: hostName == nil ? 72 : 32, height: hostName == nil ? 72 : 32)
-                            .background(Color(UIColor.secondarySystemGroupedBackground))
+                            .background(T3.color("surface"))
                             .clipShape(RoundedRectangle(cornerRadius: 28))
                         Text("どこでも、\nこれひとつで。")
                             .font(.system(size: hostName == nil ? 34 : 28, weight: .bold))
@@ -162,7 +158,7 @@ private struct PairingScreen: View {
                         .font(.footnote)
                         .padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(UIColor.secondarySystemGroupedBackground))
+                        .background(T3.color("surface"))
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                     } else {
                         VStack(spacing: 16) {
@@ -200,7 +196,7 @@ private struct PairingScreen: View {
                             }
                         }
                         .padding(16)
-                        .background(Color(UIColor.secondarySystemGroupedBackground))
+                        .background(T3.color("surface"))
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                     }
                     if connecting {
@@ -229,7 +225,7 @@ private struct PairingScreen: View {
             }
             .scrollDismissesKeyboard(.interactively)
         }
-        .background(Color(UIColor.systemGroupedBackground).ignoresSafeArea())
+        .background(T3.color("canvas").ignoresSafeArea())
         .navigationTitle("Bex")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -277,7 +273,7 @@ private struct ProfilesScreen: View {
                             }
                             .padding(20)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(UIColor.secondarySystemGroupedBackground))
+                            .background(T3.color("surface"))
                             .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
                         .buttonStyle(.plain)
@@ -303,7 +299,7 @@ private struct ProfilesScreen: View {
                 .frame(minHeight: geometry.size.height, alignment: .top)
             }
         }
-        .background(Color(UIColor.systemGroupedBackground).ignoresSafeArea())
+        .background(T3.color("canvas").ignoresSafeArea())
         .safeAreaInset(edge: .top, spacing: 0) {
             SettingsScopeBar { Text("すべてのプロジェクト") } environment: { Text("このiPhone") }
         }
@@ -330,7 +326,7 @@ struct BexNotice: View {
 
     var body: some View {
         Text(text)
-            .foregroundColor(.red)
+            .foregroundColor(T3.color("errorForeground"))
             .accessibilityIdentifier("notice")
     }
 }
@@ -382,7 +378,7 @@ struct BufferedTextInput<Content: View>: View {
             text = $0
             value = $0
         })
-        content(input).onChange(of: value) { _ in
+        content(input).onChange(of: value) { _, _ in
             if text != value {
                 text = value
             }

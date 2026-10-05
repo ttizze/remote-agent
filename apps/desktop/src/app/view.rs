@@ -150,7 +150,7 @@ impl Desktop {
             }
         }
         v_flex()
-            .w(px(240.))
+            .w(px(palette().sidebar_width))
             .flex_shrink_0()
             .h_full()
             .bg(color("sidebar"))
@@ -158,7 +158,7 @@ impl Desktop {
             .border_color(color("sidebarBorder"))
             .child(
                 h_flex()
-                    .h(px(52.))
+                    .h(px(palette().header_height))
                     .px_3()
                     .gap_2()
                     .child(div().flex_1().font_semibold().child("Bex"))
@@ -474,7 +474,7 @@ impl Desktop {
         let archived = chat.archived;
         let auto_settle = chat.auto_settle;
         let mut header = h_flex()
-            .h(px(52.))
+            .h(px(palette().header_height))
             .flex_shrink_0()
             .px_4()
             .gap_2()
@@ -619,7 +619,7 @@ impl Desktop {
     fn timeline(&self, conversation: &ConversationView, cx: &Context<Self>) -> AnyElement {
         let mut content = v_flex()
             .w_full()
-            .max_w(px(736.))
+            .max_w(px(palette().chat_max_width))
             .mx_auto()
             .px_5()
             .py_6()
@@ -890,17 +890,19 @@ impl Desktop {
                                 .child("Reply in the composer"),
                         );
                     }
-                    body = body.child(
-                        self.action(
-                            SharedString::from(format!("dismiss-{request}")),
-                            "Dismiss",
-                            Intent::DismissInput {
-                                request_id: request.clone(),
-                            },
-                            cx,
-                        )
-                        .disabled(!row.actionable),
-                    );
+                    if row.response_mode_message {
+                        body = body.child(
+                            self.action(
+                                SharedString::from(format!("dismiss-{request}")),
+                                "Dismiss without answering",
+                                Intent::DismissInput {
+                                    request_id: request.clone(),
+                                },
+                                cx,
+                            )
+                            .disabled(!row.actionable),
+                        );
+                    }
                 }
             }
             RowKind::Plan => {
@@ -935,7 +937,7 @@ impl Desktop {
         let composer = &conversation.composer;
         let mut content = v_flex()
             .w_full()
-            .max_w(px(736.))
+            .max_w(px(palette().chat_max_width))
             .mx_auto()
             .px_5()
             .pb_4()
@@ -1333,7 +1335,7 @@ impl Desktop {
     }
     fn panel_view(&self, cx: &Context<Self>) -> AnyElement {
         let mut body = v_flex()
-            .w(px(540.))
+            .w(px(palette().panel_width))
             .flex_shrink_0()
             .h_full()
             .border_l_1()
@@ -1412,6 +1414,7 @@ impl Desktop {
                             } else {
                                 Intent::ReadFile {
                                     path: entry.path.clone(),
+                                    discard_draft: false,
                                 }
                             },
                             cx,

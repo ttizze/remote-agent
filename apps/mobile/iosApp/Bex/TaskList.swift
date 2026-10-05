@@ -4,266 +4,132 @@ import SwiftUI
 struct ThreadsScreen: View {
     @ObservedObject var model: BexAppViewModel
     @State private var search = ""
-    @State private var expandedProjectIds = Set<String>()
+    @State private var collapsed: Set<ShelfKind> = []
+    @State private var settledLimit: UInt32 = 10
+    @State private var showArchive = false
     @State private var showingSettings = false
+    @State private var addingProject = false
+    @State private var projectPath = ""
 
     var body: some View {
-        let groupedThreads = Dictionary(grouping: model.list?.threads ?? [], by: \.projectId)
-        let projects = model.list?.projects ?? []
-        let chats = groupedThreads[nil] ?? []
-        List {
-            if let notice = model.list?.notice {
-                BexNotice(text: notice).taskListRowStyle()
-            }
-            if model.threadLoadState == .failed {
-                Section {
-                    if let error = model.notice {
-                        BexNotice(text: error)
-                            .taskListRowStyle()
+        TimelineView(.periodic(from: .now, by: 1)) { clock in
+            let now = Int64(clock.date.timeIntervalSince1970 * 1000)
+            let shelves = (try? model.snapshot.shelves(nowMillis: now, settledLimit: settledLimit)) ?? []
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(T3.color("textMuted"))
+                        TextField("Search threads", text: $search).font(T3.font(14))
+                            .onChange(of: search) { _, query in model.perform(.search(query: query)) }
+                        Menu {
+                            Button("All projects") { model.perform(.filterProject(projectId: nil)) }
+                            ForEach(model.snapshot.projects(), id: \.id) { project in
+                                Button(project.name) { model.perform(.filterProject(projectId: project.id)) }
+                            }
+                        } label: { Image(systemName: "folder") }
+                        Button { addingProject = true } label: { Image(systemName: "folder.badge.plus") }
+                        Button { model.openNewThread() } label: { Image(systemName: "square.and.pencil") }
                     }
-                    Button("再試行") { model.refreshTaskList() }
-                        .accessibilityIdentifier("tasks.retry")
-                        .taskListRowStyle()
-                }
-                .listSectionSeparator(.hidden)
-            }
-            if let notice = model.notice {
-                Section {
-                    BexNotice(text: notice)
-                        .taskListRowStyle()
-                }
-                .listSectionSeparator(.hidden)
-            }
-
-            Section {
-                Text("プロジェクト")
-                    .font(.title2.weight(.bold))
-                    .textCase(nil)
-                    .foregroundColor(.primary)
-                    .accessibilityIdentifier("tasks.projects")
-                    .taskListRowStyle()
-            }
-            .listSectionSeparator(.hidden)
-
-            ForEach(projects, id: \.id) { project in
-                Section {
-                    HStack(spacing: 16) {
+                    .padding(10).background(T3.color("sidebarControlSurface"), in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.vertical, 10)
+                    if let error = model.notice {
+                        BexNotice(text: error).padding(.vertical, 8)
+                    }
+                    if model.isConnecting {
+                        ProgressView("Connecting…").padding(.vertical)
+                    }
+                    ForEach(shelves, id: \.kind) { shelf in
                         Button {
-                            if expandedProjectIds.contains(project.id) {
-                                expandedProjectIds.remove(project.id)
-                            } else {
-                                expandedProjectIds.insert(project.id)
+                            if collapsed.remove(shelf.kind) == nil {
+                                collapsed.insert(shelf.kind)
                             }
                         } label: {
-                            HStack(spacing: 16) {
-                                Image(systemName: "folder")
-                                    .font(.title3).frame(width: 24)
-                                Text(project.name).font(.title3).lineLimit(1)
-                                Spacer(minLength: 0)
+                            HStack {
+                                Image(systemName: collapsed.contains(shelf.kind) ? "chevron.right" : "chevron.down")
+                                    .font(.system(size: 10))
+                                Text(shelf.title).font(T3.font(13, weight: .medium))
+                                Text("\(shelf.total)").font(T3.font(11)).foregroundStyle(T3.color("textMuted"))
+                                Spacer()
+                            }.foregroundStyle(T3.color("sidebarForeground")).frame(height: 34)
+                        }.buttonStyle(.plain)
+                        if !collapsed.contains(shelf.kind) {
+                            ForEach(shelf.rows, id: \.id) { row in card(row, settled: shelf.kind == .settled) }
+                            if shelf.hasMore {
+                                Button("Load 25 more") { settledLimit += 25 }.font(T3.font(13)).padding(.vertical, 12)
                             }
-                            .frame(minHeight: 44)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("tasks.project.\(project.id)")
-                        .accessibilityValue(expandedProjectIds.contains(project.id) ? "開いています" : "閉じています")
-                        Button { model.openNewThread(cwd: project.roots.first?.path ?? "") } label: {
-                            Image(systemName: "square.and.pencil").font(.title3)
-                                .foregroundColor(.secondary).frame(width: 44, height: 44)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("\(project.name)で新しいタスク")
-                        .accessibilityIdentifier("tasks.new.project.\(project.id)")
-                    }
-                    .taskListRowStyle()
-                    if expandedProjectIds.contains(project.id) {
-                        let threads = groupedThreads[project.id] ?? []
-                        ForEach(threads, id: \.id) { thread in
-                            ThreadListRow(thread: thread, indented: true) { model.openThread(thread.id) }
-                        }
-                        if (model.list?.moreProjectIds ?? []).contains(project.id) {
-                            Button("もっと見る") { model.expandTaskList(projectId: project.id) }
-                                .padding(.leading, 40)
-                                .disabled(model.loadingThreads)
-                                .accessibilityIdentifier("tasks.project.\(project.id).more")
-                                .taskListRowStyle()
                         }
                     }
-                }
-                .listSectionSeparator(.hidden)
-            }
-
-            if model.list?.hasMoreProjects == true {
-                Section {
-                    Button("もっと見る") { model.expandTaskList(projects: true) }
-                        .disabled(model.loadingThreads)
-                        .accessibilityIdentifier("tasks.projects.more")
-                        .taskListRowStyle()
-                }
-                .listSectionSeparator(.hidden)
-            }
-
-            if model.threadLoadState == .ready, (model.list?.projects ?? []).isEmpty {
-                Section {
-                    Text("Codexに登録されたプロジェクトはありません")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .taskListRowStyle()
-                }
-                .listSectionSeparator(.hidden)
-            }
-
-            Section {
-                if model.threadLoadState == .ready, chats.isEmpty {
-                    Text("プロジェクトに属さないチャットはありません")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .accessibilityIdentifier("tasks.empty")
-                        .taskListRowStyle()
-                } else {
-                    ForEach(chats, id: \.id) { thread in
-                        ThreadListRow(thread: thread) { model.openThread(thread.id) }
-                    }
-                    if model.list?.hasMoreChats == true {
-                        Button("もっと見る") { model.expandTaskList() }
-                            .disabled(model.loadingThreads)
-                            .accessibilityIdentifier("tasks.chats.more")
-                            .taskListRowStyle()
-                    }
-                }
-            } header: {
-                Text("チャット")
-                    .font(.title3.weight(.semibold))
-                    .textCase(nil)
-                    .foregroundColor(.primary)
-            }
-            .listSectionSeparator(.hidden)
-        }
-        .onChange(of: model.threadLoadState) { _, state in
-            if state == .ready {
-                model.recordListViewUpdate()
+                    DisclosureGroup("Archived", isExpanded: $showArchive) {
+                        ForEach((try? model.snapshot.archivedThreads(nowMillis: now)) ?? [], id: \.id) { row in card(
+                            row,
+                            settled: false
+                        ) }
+                    }.font(T3.font(13)).padding(.vertical, 12)
+                }.padding(.horizontal, 20).padding(.bottom, 28)
             }
         }
-        .onAppear {
-            if model.threadLoadState == .ready {
-                model.recordListViewUpdate()
-            }
-        }
-        .listStyle(.plain)
-        .environment(\.defaultMinListRowHeight, 52)
-        .background(Color(UIColor.systemBackground))
-        .accessibilityIdentifier("tasks.list")
-        .searchable(text: $search, placement: .toolbar, prompt: "チャットを検索")
-        .refreshable { model.refreshTaskList() }
-        .task(id: search) {
-            do { try await Task.sleep(nanoseconds: 200_000_000) } catch { return }
-            model.searchTaskList(search)
-        }
-        .navigationBarBackButtonHidden(true)
-        .navigationTitle("リモート")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            DefaultToolbarItem(kind: .search, placement: .bottomBar)
-            ToolbarSpacer(.flexible, placement: .bottomBar)
-            ToolbarItem(placement: .principal) {
-                VStack(spacing: 1) {
-                    Text("リモート").font(.headline)
-                    HStack(spacing: 5) {
-                        if model.isConnecting || model.threadLoadState == .loading {
-                            ProgressView().controlSize(.mini)
-                                .accessibilityLabel(model.isConnecting ? "接続中" : "読み込み中")
-                                .accessibilityIdentifier("connection.progress")
-                        } else {
-                            Circle().fill(model.isConnected ? Color.green : Color.secondary).frame(width: 6, height: 6)
-                        }
-                        Image(systemName: "laptopcomputer")
-                        Text(model.selectedProfileName ?? "PC Host").lineLimit(1)
-                    }
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel(
-                        "\(model.selectedProfileName ?? "PC Host")、\(model.isConnected ? "接続済み" : "未接続")"
-                    )
-                }
-            }
-            ToolbarItem(placement: .bottomBar) {
-                Button { model.openNewThread(cwd: "") } label: {
-                    Image(systemName: "square.and.pencil")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.primary)
-                .accessibilityLabel("プロジェクトなしで新しいタスク")
-                .accessibilityIdentifier("tasks.new.chat")
-            }
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button { model.showProfiles() } label: { Image(systemName: "line.3.horizontal") }
-                    .accessibilityLabel("PC一覧")
-                    .accessibilityIdentifier("tasks.hosts")
-            }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                Menu {
-                    Button { showingSettings = true } label: { Label("設定", systemImage: "gearshape") }
-                        .accessibilityIdentifier("tasks.settings")
-                    Button { model.refreshTaskList() } label: { Label("更新", systemImage: "arrow.clockwise") }
-                        .disabled(model.threadLoadState == .loading)
-                        .accessibilityIdentifier("tasks.refresh")
-                } label: { Image(systemName: "ellipsis") }
-                    .accessibilityLabel("その他")
-                    .accessibilityIdentifier("tasks.menu")
-            }
-        }
+        .background(T3.color("sidebar")).foregroundStyle(T3.color("text"))
+        .navigationTitle(model.selectedProfileName ?? "Bex").navigationBarTitleDisplayMode(.inline)
+        .toolbar { Button { showingSettings = true } label: { Image(systemName: "gearshape") } }
         .sheet(isPresented: $showingSettings) { SettingsSheet(model: model) }
-    }
-}
-
-extension View {
-    func taskListRowStyle() -> some View {
-        listRowSeparator(.hidden)
-            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-            .listRowBackground(Color.clear)
-    }
-}
-
-private struct ThreadListRow: View {
-    let thread: ThreadSummary
-    var indented = false
-    let open: () -> Void
-
-    private var accessibilityID: String {
-        "\(thread.id.provider == .codex ? "codex" : "claude"):\(thread.id.id)"
+        .alert("Add project", isPresented: $addingProject) {
+            TextField("Absolute path on Host", text: $projectPath).textInputAutocapitalization(.never)
+            Button("Add") { model.perform(.registerProject(path: projectPath)); projectPath = "" }
+            Button("Cancel", role: .cancel) {}
+        }
+        .onAppear { model.recordListViewUpdate() }
     }
 
-    var body: some View {
-        Button(action: open) {
-            HStack(spacing: 10) {
-                Text(thread.title).font(.title3).foregroundColor(.primary).lineLimit(1)
-                Spacer()
-                if thread.active {
-                    ProgressView().controlSize(.small)
-                        .accessibilityIdentifier("tasks.running.\(accessibilityID)")
-                } else if thread.unread {
-                    Circle().fill(Color.white).frame(width: 8, height: 8)
-                        .accessibilityLabel("完了・未確認")
-                        .accessibilityIdentifier("tasks.completed.\(accessibilityID)")
+    private func card(_ row: ThreadRow, settled: Bool) -> some View {
+        Button { model.openThread(row.id) } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(row.provider == "claude" ? "claude" : "openai").resizable().scaledToFit().frame(
+                    width: 16,
+                    height: 16
+                )
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(row.title).font(T3.font(14, weight: row.unread ? .bold : .medium)).lineLimit(1)
+                    if !row.slim {
+                        Text(row.preview).font(T3.font(12)).foregroundStyle(T3.color("textMuted")).lineLimit(1)
+                        HStack(spacing: 6) {
+                            Text(row.status).foregroundStyle(T3.status(row.tone))
+                            if let duration = row
+                                .durationMs {
+                                Text("\(duration / 1000)s").monospacedDigit().foregroundStyle(T3.color("textMuted"))
+                            }
+                            if let wake = row.wakeLabel {
+                                Text(wake).foregroundStyle(T3.color("textMuted"))
+                            }
+                            Spacer()
+                            Text(model.snapshot.projects().first { $0.id == row.projectId }?.name ?? "")
+                                .foregroundStyle(T3.color("textMuted"))
+                        }.font(T3.font(11))
+                        if let branch = row
+                            .branch {
+                            Text(branch).font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(T3.color("textMuted")).lineLimit(1)
+                        }
+                    }
                 }
-                if let status = thread.worktreeStatus {
-                    let unmerged = status == .unmerged
-                    Image(unmerged ? "GitDiff" : "GitMerge")
-                        .resizable()
-                        .frame(width: 18, height: 18)
-                        .foregroundStyle(unmerged ? .orange : .purple)
-                        .accessibilityLabel(unmerged ? "main に未反映の変更あり" : "main にマージ済み")
-                        .accessibilityIdentifier(
-                            "tasks.\(unmerged ? "unmerged" : "merged").\(accessibilityID)"
-                        )
+                Spacer(minLength: 0)
+                if row.unread {
+                    Circle().fill(T3.color("accent")).frame(width: 5, height: 5)
                 }
             }
-            .padding(.leading, indented ? 40 : 0)
-            .contentShape(Rectangle())
+            .foregroundStyle(T3.color("sidebarForeground")).padding(.horizontal, 12).padding(
+                .vertical,
+                row.slim ? 8 : 12
+            )
+            .frame(maxWidth: .infinity, minHeight: row.slim ? 36 : 82, alignment: .leading)
+            .background(T3.color(row.selected ? "mobileSelected" : "surface"), in: RoundedRectangle(cornerRadius: 10))
         }
-        .accessibilityIdentifier("tasks.row.\(accessibilityID)")
-        .accessibilityValue(thread.active ? "実行中" : thread.unread ? "完了・未確認" : "")
-        .taskListRowStyle()
+        .buttonStyle(.plain).padding(.bottom, 1)
+        .contextMenu { ThreadActions(
+            model: model,
+            id: row.id,
+            pinned: row.pinned,
+            archived: row.archived,
+            settled: settled
+        ) }
     }
 }

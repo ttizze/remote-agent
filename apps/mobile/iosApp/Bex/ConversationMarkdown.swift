@@ -1,162 +1,80 @@
 import AgentCore
 import SwiftUI
 import UIKit
-import UniformTypeIdentifiers
 
-/// Shared Markdown semantics render as native selectable content.
 struct ConversationMarkdown: View {
-    let blocks: [ConversationMarkdownContent.Part]
-    let media: ConversationMediaAccess
-    let selection: ConversationSelectionActions
-    @ScaledMetric(relativeTo: .body) private var tableColumnWidth = 220.0
-    @State private var linkTarget: URL?
-    @State private var previewURL: URL?
-    @State private var previewDirectory: URL?
-    @State private var linkError: String?
+    let source: String
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ForEach(blocks) { part in
-                if let path = part.visualizationPath {
-                    ConversationVisualization(path: path, media: media)
-                } else if !part.tableRows.isEmpty {
-                    table(part)
-                } else if let block = part.image, let imageURL = block.imageURL {
-                    image(block, url: imageURL)
-                } else if part.isCode {
-                    ConversationMarkdownCodeBlock(part: part, selection: selection)
-                } else {
-                    AssistantSelectableText(blocks: part.blocks, actions: selection)
-                }
-            }
-            if let linkError {
-                Text(linkError).font(.caption).foregroundColor(.red)
-            }
-        }
-        .font(.system(size: 18))
-        .tint(.accentColor)
-        .environment(\.openURL, OpenURLAction { url in
-            if url.scheme == "https" || url.scheme == "http" {
-                return .systemAction
-            }
-            do {
-                linkError = nil
-                linkTarget = try conversationFileURL(url.absoluteString, cwd: media.cwd)
-            } catch { linkError = "リンクを開けません: \(error.localizedDescription)" }
-            return .handled
-        })
-        .sheet(isPresented: Binding(get: { previewURL != nil }, set: {
-            if !$0 {
-                previewURL = nil
-            }
-        })) {
-            if let url = previewURL {
-                ConversationPreview(
-                    url: url,
-                    isImage: UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) == true
-                ) {
-                    previewURL = nil
-                }
-            }
-        }
-        .onChange(of: previewURL) { value in
-            if value == nil, let directory = previewDirectory {
-                try? FileManager.default.removeItem(at: directory)
-                previewDirectory = nil
-            }
-        }
-        .task(id: linkTarget) {
-            guard let target = linkTarget else { return }
-            do {
-                let downloaded = try await media.download(target.path)
-                guard !Task.isCancelled else {
-                    try? FileManager.default.removeItem(at: downloaded.deletingLastPathComponent())
-                    return
-                }
-                previewDirectory = downloaded.deletingLastPathComponent()
-                previewURL = downloaded
-            } catch {
-                if !Task.isCancelled {
-                    linkError = error.localizedDescription
-                }
-            }
-            linkTarget = nil
-        }
-    }
-
-    private func image(_ block: ConversationMarkdownContent.Block, url: URL) -> some View {
-        ConversationImage(
-            source: SessionImage(reference: url.scheme == nil ? url.path : url.absoluteString),
-            label: block.runs.map(\.text).joined(),
-            identifier: "markdown.image.\(block.id)",
-            media: media
-        )
-    }
-
-    private func table(_ part: ConversationMarkdownContent.Part) -> some View {
-        let rows = part.tableRows
-        return ScrollView(.horizontal) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(rows.indices, id: \.self) { row in
-                    HStack(alignment: .top, spacing: 0) {
-                        ForEach(rows[row].indices, id: \.self) { column in
-                            VStack(alignment: .leading, spacing: 0) {
-                                ForEach(rows[row][column]) { block in
-                                    if let url = block.imageURL {
-                                        image(block, url: url)
-                                    } else {
-                                        AssistantSelectableText(blocks: [block], actions: selection)
-                                    }
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(markdownBlocks(source: source).enumerated()), id: \.offset) { _, block in
+                switch block {
+                case let .paragraph(runs, style):
+                    if style.code {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Spacer(); Button("Copy") { UIPasteboard.general.string = runs.map(\.text).joined() }
+                                    .font(T3.font(11))
+                            }
+                            ScrollView(.horizontal) { Text(runs.map(\.text).joined()).font(.system(
+                                size: 13,
+                                design: .monospaced
+                            )).textSelection(.enabled) }
+                        }.padding(12).background(T3.color("codeBackground"), in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(T3.color("border")))
+                    } else {
+                        HStack(alignment: .top, spacing: 8) {
+                            if let marker = style
+                                .marker {
+                                Text(marker).font(T3.font(16)).foregroundStyle(T3.color("textMuted"))
+                            }
+                            Text(attributed(runs, header: style.header)).lineSpacing(4).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }.padding(.leading, style.quoted ? 12 : 0)
+                            .overlay(alignment: .leading) {
+                                if style.quoted {
+                                    Rectangle().fill(T3.color("border")).frame(width: 2)
                                 }
                             }
-                            .frame(width: tableColumnWidth)
-                            .padding(10)
-                            .accessibilityIdentifier("markdown.cell.\(part.id).\(row).\(column)")
-                        }
                     }
-                    .background(row == 0 ? Color(UIColor.secondarySystemBackground) : Color.clear)
-                    Divider()
+                case let .table(_, rows):
+                    ScrollView(.horizontal) {
+                        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 10) {
+                            ForEach(Array(rows.enumerated()), id: \.offset) { _, cells in
+                                GridRow { ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in Text(attributed(
+                                    cell.runs,
+                                    header: nil
+                                )).font(T3.font(12)).textSelection(.enabled) } }
+                            }
+                        }.padding(12).background(T3.color("surface"), in: RoundedRectangle(cornerRadius: 8))
+                    }
+                case let .visualization(path):
+                    Text(path).font(T3.font(12)).foregroundStyle(T3.color("textMuted")).textSelection(.enabled)
                 }
             }
-            .overlay(Rectangle().stroke(Color(UIColor.separator), lineWidth: 0.5))
-        }
-    }
-}
-
-private struct ConversationMarkdownCodeBlock: View {
-    let part: ConversationMarkdownContent.Part
-    let selection: ConversationSelectionActions
-    @State private var copied = false
-
-    private var text: String {
-        part.blocks
-            .map { $0.runs.map(\.text).joined() }
-            .joined(separator: "\n")
+        }.tint(T3.color("mobileMarkdownLink"))
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Spacer(minLength: 0)
-                Button {
-                    UIPasteboard.general.string = text
-                    copied = true
-                } label: {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                }
-                .font(.system(size: 19))
-                .foregroundColor(.secondary)
-                .buttonStyle(.plain)
-                .accessibilityLabel(copied ? "コピーしました" : "コードをコピー")
-                .accessibilityIdentifier("markdown.code.copy.\(part.id)")
+    private func attributed(_ runs: [MarkdownRun], header: UInt8?) -> AttributedString {
+        var result = AttributedString()
+        let size: CGFloat = header == 1 ? 21 : header == 2 ? 19 : header == 3 ? 17 : header != nil ? 15 : 16
+        for run in runs {
+            var text = AttributedString(run.text)
+            text.font = run.code ? .system(size: 13, design: .monospaced) : T3.font(
+                size,
+                weight: run.strong || header != nil ? .bold : .regular
+            )
+            if run.emphasis {
+                text.inlinePresentationIntent = .emphasized
             }
-            .padding(.horizontal, 8)
-            .padding(.top, 4)
-            ScrollView(.horizontal) {
-                AssistantSelectableText(blocks: part.blocks, actions: selection)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .padding(12)
+            if run.strikethrough {
+                text.strikethroughStyle = .single
             }
+            if let link = run.link, let url = URL(string: link),
+               ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") {
+                text.link = url
+            }
+            result += text
         }
-        .background(Color(UIColor.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+        return result
     }
 }

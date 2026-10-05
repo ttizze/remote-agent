@@ -18,7 +18,7 @@ struct FileEditorSheet: View {
     }
 
     private var revision: String {
-        snapshot.fileDraft(path: entry.path)?.revision ?? file?.revision ?? ""
+        file?.revision ?? ""
     }
 
     private var savedText: String {
@@ -59,7 +59,7 @@ struct FileEditorSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
                         busy = true; error = nil
-                        perform(.saveFile(SaveFile(path: entry.path))) { _, result in
+                        perform(.saveFile(path: entry.path)) { _, result in
                             busy = false
                             if case let .failure(failure) = result {
                                 error = failure.localizedDescription
@@ -83,16 +83,12 @@ struct FileEditorSheet: View {
 
     private func load(restoreDraft: Bool) {
         busy = true; error = nil
-        perform(.readFile(ReadFile(path: entry.path, discardDraft: !restoreDraft))) { snapshot, result in
+        perform(.readFile(path: entry.path, discardDraft: !restoreDraft)) { _, result in
             busy = false
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
             }
             initialized = true
-            if let file = snapshot.file(), file.path == entry.path,
-               (snapshot.fileDraft(path: entry.path)?.revision ?? file.revision) != file.revision {
-                error = "ホストのファイルが変更されています。下書きは保持しました。再読込すると下書きを破棄します。"
-            }
         }
     }
 }

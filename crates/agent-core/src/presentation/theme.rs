@@ -22,7 +22,7 @@ pub fn theme(dark: bool) -> Theme {
         colors,
         header_height: 52.,
         chat_max_width: 736.,
-        sidebar_width: 240.,
+        sidebar_width: 256.,
         panel_width: 540.,
         prompt_size: 14.,
         code_size: 13.,
@@ -30,6 +30,12 @@ pub fn theme(dark: bool) -> Theme {
     }
 }
 const LIGHT: &[(&str, &str)] = &[
+    ("mobileUserBubble", "#efeff1"),
+    ("mobileComposer", "#f4f4f5"),
+    ("mobileGroupedCard", "#f4f4f5"),
+    ("mobileSelected", "#ffffff"),
+    ("mobilePrimaryText", "#1b4ed8"),
+    ("mobileMarkdownLink", "#1b4ed8"),
     ("canvas", "#fcfcfc"),
     ("chrome", "#fcfcfc"),
     ("toolbar", "#fcfcfc"),
@@ -91,6 +97,12 @@ const LIGHT: &[(&str, &str)] = &[
     ("terminalScrollbarHover", "#bdbdbd"),
 ];
 const DARK: &[(&str, &str)] = &[
+    ("mobileUserBubble", "#161616"),
+    ("mobileComposer", "#1a1b1b"),
+    ("mobileGroupedCard", "#1a1b1b"),
+    ("mobileSelected", "#1a1b1b"),
+    ("mobilePrimaryText", "#4b7cf3"),
+    ("mobileMarkdownLink", "#3b70f1"),
     ("canvas", "#0a0a0a"),
     ("chrome", "#0a0a0a"),
     ("toolbar", "#0a0a0a"),

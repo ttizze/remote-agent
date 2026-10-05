@@ -85,11 +85,13 @@ pub(crate) struct Desktop {
     tick: Option<tokio_util::task::AbortOnDropHandle<()>>,
     _subscriptions: Vec<Subscription>,
 }
-pub(crate) fn color(role: &str) -> Rgba {
+fn palette() -> &'static agent_core::presentation::theme::Theme {
     static THEME: OnceLock<agent_core::presentation::theme::Theme> = OnceLock::new();
-    let palette = THEME.get_or_init(|| agent_core::presentation::theme::theme(true));
+    THEME.get_or_init(|| agent_core::presentation::theme::theme(true))
+}
+pub(crate) fn color(role: &str) -> Rgba {
     rgb(u32::from_str_radix(
-        palette
+        palette()
             .colors
             .get(role)
             .map_or("ffffff", |v| v.trim_start_matches('#')),
@@ -99,9 +101,9 @@ pub(crate) fn color(role: &str) -> Rgba {
 }
 pub(crate) fn apply_theme(cx: &mut App) {
     let theme = gpui_kit::component::Theme::global_mut(cx);
-    theme.font_size = px(14.);
-    theme.mono_font_size = px(13.);
-    theme.radius = px(10.);
+    theme.font_size = px(palette().prompt_size);
+    theme.mono_font_size = px(palette().code_size);
+    theme.radius = px(palette().radius);
     for (target, role) in [
         (&mut theme.colors.background, "canvas"),
         (&mut theme.colors.foreground, "text"),
@@ -478,6 +480,7 @@ impl Desktop {
                 .workspace
                 .file_drafts
                 .get(&file.path)
+                .map(|draft| &draft.text)
                 .unwrap_or(&file.text);
             if self.editor_path.as_ref() != Some(&file.path) || self.editor_value != *text {
                 self.editor_path = Some(file.path.clone());

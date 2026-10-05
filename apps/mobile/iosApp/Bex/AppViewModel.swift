@@ -7,22 +7,23 @@ import UIKit
 final class BexAppViewModel: ObservableObject {
     @Published private(set) var snapshot = AgentCore.Snapshot.empty()
     @Published var screen: AppScreen = .profiles
-    @Published var sideChatRequest: SideChatRequest?
-    @Published var composerFocusRequest: UUID?
     @Published var isScanning = false
-    @Published var transferError: String?
-    @Published var transferring = false
     @Published var isConnecting = false
     @Published var pairingError: String?
     @Published private(set) var pairingInvitation: Invitation?
     @Published var notice: String?
     @Published var profiles: [HostProfile] = []
     @Published private(set) var selectedProfileId: String?
-    @Published private(set) var conversation: ConversationPresentation?
-    private(set) var list: ThreadList?
-    private(set) var models: [Model] = []
-    private var presentationTask: Task<Void, Never>?
-    private var pendingPresentation: ConversationPresentationInput?
+    @Published var composerText = ""
+    var draftRevision: UInt64 = 0
+    var pendingDraft: UInt64?
+    var conversation: ConversationView {
+        snapshot.conversation()
+    }
+
+    var models: [Model] {
+        snapshot.models()
+    }
 
     private(set) var store: AgentStore?
     private var initialization: Task<Void, Never>?
@@ -82,6 +83,8 @@ final class BexAppViewModel: ObservableObject {
     /// Save and stop the current Host's work; the caller shuts down the returned store.
     private func detachStore() -> AgentStore? {
         persist()
+        draftRevision += 1
+        pendingDraft = nil
         connection?.cancel()
         observation?.cancel()
         cancelInitialization()
@@ -125,7 +128,6 @@ final class BexAppViewModel: ObservableObject {
             )
             initialization = nil
             publish(owner.snapshot())
-            perform(.showThreadList)
             let queued = pending
             pending.removeAll()
             for (intent, complete) in queued {
@@ -204,7 +206,6 @@ final class BexAppViewModel: ObservableObject {
                     pairingInvitation = nil
                     isConnecting = false
                     observe(owner, host: id)
-                    perform(.loadHostName(LoadHostName()))
                     try? await old?.shutdown()
                 } catch {
                     guard !Task.isCancelled else { return }
@@ -238,8 +239,10 @@ final class BexAppViewModel: ObservableObject {
                     if case let .failure(error) = result {
                         notice = snapshot.error() ?? error.localizedDescription
                     }
+                    completion(result)
+                } else {
+                    completion(.failure(CancellationError()))
                 }
-                completion(result)
             }
         } catch { completion(.failure(error)) }
     }
@@ -255,7 +258,7 @@ extension BexAppViewModel {
         notice = nil
         connection = Task { [weak self] in
             let started = ProcessInfo.processInfo.systemUptime
-            recordScene(UIApplication.shared.applicationState == .active ? 1 : 2)
+            self?.recordScene(UIApplication.shared.applicationState == .active ? 1 : 2)
             owner.recordConnectionEvent(phase: .uiConnectStart, value: afterForeground ? 1 : 0)
             do {
                 let identityStarted = ProcessInfo.processInfo.systemUptime
@@ -271,7 +274,6 @@ extension BexAppViewModel {
                 let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1_000_000
                 owner.recordConnectionEvent(phase: .uiConnectReady, value: UInt64(elapsed))
                 publish(owner.snapshot())
-                perform(.loadHostName(LoadHostName()))
                 notice = snapshot.error()
                 isConnecting = false
             } catch {
@@ -316,54 +318,14 @@ extension BexAppViewModel {
         if snapshot.error() != next.error() {
             notice = next.error()
         }
-        let listChanged = !next.listUnchanged(other: snapshot)
-        if listChanged {
-            list = next.threadList()
-            if list != nil {
-                store?.recordConnectionEvent(phase: .listPublished, value: next.connected() ? 1 : 0)
-            }
-        }
-        if !next.modelsUnchanged(other: snapshot) {
-            models = next.models()
-        }
-        let changed = !next.conversationUnchanged(other: snapshot)
-        let source = next.conversationSource()
         snapshot = next
-        if changed {
-            projectConversation(source)
+        if pendingDraft == nil {
+            composerText = next.draft().text
         }
         persistence?.cancel()
-        if listChanged {
-            // Completion badges can outlive the process; do not debounce their write.
-            persist()
-        } else {
-            persistence = Task { [weak self] in
-                do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
-                self?.persist()
-            }
-        }
-    }
-
-    private func projectConversation(_ source: AgentCore.Thread?) {
-        if conversation?.id != source?.id() {
-            conversation = nil
-        }
-        pendingPresentation = ConversationPresentationInput(source: source, snapshot: snapshot, host: selectedProfileId)
-        guard presentationTask == nil else { return }
-        presentationTask = Task { [weak self] in
-            while let self, let input = pendingPresentation {
-                pendingPresentation = nil
-                let previous = conversation
-                let rendered = await Task.detached(priority: .userInitiated) {
-                    ConversationPresentation.project(input.source, snapshot: input.snapshot, previous: previous)
-                }.value
-                if selectedProfileId == input.host, snapshot.conversationUnchanged(other: input.snapshot) {
-                    conversation = rendered
-                }
-                // Coalesce updates off MainActor before publishing parsed, stably sized rows.
-                try? await Task.sleep(nanoseconds: 100_000_000)
-            }
-            self?.presentationTask = nil
+        persistence = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
+            self?.persist()
         }
     }
 
