@@ -64,11 +64,7 @@ pub fn response_frame(response: Response) -> io::Result<Vec<u8>> {
         return Ok(bytes);
     }
     encode(Response::<()>::Failure {
-        error: crate::error::RpcFailure {
-            code: "response_too_large".into(),
-            message: "RPC response exceeds the transfer limit".into(),
-            delivery: crate::error::Delivery::Unknown,
-        },
+        error: crate::conversation::ConversationError::ResponseTooLarge.into(),
     })
 }
 // Host handlers return domain results; each serializes directly.
@@ -86,6 +82,12 @@ results! {
     ShellStream(::orchestration::ShellStreamItem), ThreadStream(::orchestration::ThreadStreamItem),
     Projection(::orchestration::ThreadProjection), TurnItem(Option<::orchestration::TurnItem>),
     ThreadHistory(::orchestration::ThreadHistoryPage), Search(Vec<::orchestration::SearchMatch>), Projects(Vec<crate::models::Project>),
+    Committed(crate::conversation::Committed), Launched(crate::conversation::Launched),
+    ThreadUpdate(crate::conversation::ThreadUpdate), ShellUpdate(crate::conversation::ShellUpdate),
+    ThreadSnapshot(crate::conversation::ThreadSnapshot), HistoryRow(Option<crate::conversation::HistoryRow>),
+    HistoryPage(crate::conversation::HistoryPage), SearchMatches(Vec<crate::conversation::SearchMatch>),
+    Diff(crate::conversation::TurnDiff), SessionScan(crate::conversation::SessionScan),
+    ImportCounts(crate::conversation::ImportCounts),
     Browser(crate::browser::BrowserFrame),
     PermissionSettings(crate::permissions::PermissionSettings),
     Models(crate::operations::ModelPage), WorktreeSettings(crate::models::WorktreeSettings),
