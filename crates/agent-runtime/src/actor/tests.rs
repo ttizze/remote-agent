@@ -681,6 +681,7 @@ async fn subscribe_replays_the_gap_or_sends_a_snapshot() {
     let mut replay = handle
         .subscribe(ThreadSubscribe {
             after_global_seq: Some(start),
+            request_completion_marker: true,
             ..Default::default()
         })
         .await
@@ -694,7 +695,13 @@ async fn subscribe_replays_the_gap_or_sends_a_snapshot() {
         ThreadUpdate::Synchronized
     ));
 
-    let mut fresh = handle.subscribe(ThreadSubscribe::default()).await.unwrap();
+    let mut fresh = handle
+        .subscribe(ThreadSubscribe {
+            request_completion_marker: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     let ThreadUpdate::Snapshot(view) = fresh.updates.recv().await.unwrap() else {
         panic!()
     };
@@ -724,8 +731,8 @@ async fn closes_a_subscriber_that_falls_behind() {
     let handle = created(&h.context, &id).await;
     let mut slow = handle
         .subscribe(ThreadSubscribe {
-            after_global_seq: None,
             capacity: 4,
+            ..ThreadSubscribe::default()
         })
         .await
         .unwrap();

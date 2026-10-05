@@ -1,15 +1,18 @@
 mod coalesce;
 mod registry;
-mod subscribe;
 
 pub use coalesce::COALESCE_LIMIT;
 pub use registry::*;
-pub use subscribe::*;
 
+use crate::sync::{
+    RESUME_MAX_REPLAY_FACTS, ResumeInput, ResumePlan, ThreadSnapshot, ThreadSubscribe,
+    ThreadSubscription, ThreadUpdate, client_facts, decide_resume, replay_encoded_bytes,
+    replay_raw_payload_safe,
+};
 use crate::{
     Clock, CommitBatch, RuntimeError, SNAPSHOT_INTERVAL, Settlement, ShellProjector, ShellRow,
-    Store, StoreError, SystemClock, ThreadHead, ThreadRecordShell, attachment_paths, envelope_key,
-    needs_recovery, search_changes,
+    Store, StoreError, StoredFact, SystemClock, ThreadHead, ThreadRecordShell, attachment_paths,
+    envelope_key, needs_recovery, search_changes,
 };
 use agent_domain::{
     Command, CommandId, EffectResult, FactBody, Input, InputEnvelope, ModelSelection,
@@ -19,6 +22,12 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
+
+#[derive(Debug, Clone)]
+pub struct ThreadView {
+    pub state: Arc<State>,
+    pub head: ThreadHead,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Committed {
@@ -94,7 +103,6 @@ pub struct ActorContext {
     pub store: Store,
     pub clock: Arc<dyn Clock>,
     pub shell: Arc<dyn ShellProjector>,
-    pub resume: Arc<dyn ResumePolicy>,
     pub handoff: Arc<dyn HandoffCatalog>,
     pub residency: Arc<dyn Residency>,
     pub mailbox: usize,
@@ -105,7 +113,6 @@ impl ActorContext {
             store,
             clock: Arc::new(SystemClock),
             shell: Arc::new(ThreadRecordShell),
-            resume: Arc::new(BoundedReplay),
             handoff: Arc::new(NoHandoffCatalog),
             residency: Arc::new(NoResidency),
             mailbox: 1024,
@@ -604,7 +611,7 @@ impl Actor {
                     self.snapshot_due = false;
                 }
                 if !outcome.facts.is_empty() {
-                    self.publish(ThreadUpdate::Facts(outcome.facts.clone()));
+                    self.publish(ThreadUpdate::Facts(client_facts(&outcome.facts)));
                     self.queue_handoff(&outcome.facts);
                 }
                 Ok(Committed {
@@ -703,41 +710,68 @@ impl Actor {
     ) -> Result<ThreadSubscription, RuntimeError> {
         let (sender, updates) = mpsc::channel(options.capacity.max(4));
         let replay = match options.after_global_seq {
-            Some(after) => {
-                let thread = self.thread.clone();
-                let gap = self
-                    .context
-                    .store
-                    .blocking(move |store| store.fact_gap(&thread, after))
-                    .await?;
-                let resume = ResumeGap {
-                    after,
-                    high_water: self.head.global_seq,
-                    gap,
-                };
-                (self.context.resume.decide(&resume) == ResumeDecision::Replay).then_some(after)
-            }
+            Some(after) => self.replay(after).await?,
             None => None,
         };
         let first = match replay {
-            Some(after) => {
-                let thread = self.thread.clone();
-                let facts = self
-                    .context
-                    .store
-                    .blocking(move |store| store.facts_after(Some(&thread), after))
-                    .await?;
-                (!facts.is_empty()).then(|| ThreadUpdate::Facts(facts.into()))
-            }
-            None => Some(ThreadUpdate::Snapshot(self.view())),
+            Some(facts) => (!facts.is_empty()).then_some(ThreadUpdate::Facts(facts)),
+            None => Some(ThreadUpdate::Snapshot(ThreadSnapshot::build(
+                &self.state,
+                self.head,
+                options.accept_bounded_snapshot,
+            ))),
         };
-        for update in first.into_iter().chain([ThreadUpdate::Synchronized]) {
+        let marker = options
+            .request_completion_marker
+            .then_some(ThreadUpdate::Synchronized);
+        for update in first.into_iter().chain(marker) {
             sender
                 .try_send(update)
                 .expect("a new subscription has room for its first updates");
         }
         self.subscribers.push(sender);
         Ok(ThreadSubscription { updates })
+    }
+
+    /// The facts after `after`, or `None` when a snapshot should replace them.
+    async fn replay(&self, after: u64) -> Result<Option<Arc<[StoredFact]>>, RuntimeError> {
+        let high_water = self.head.global_seq;
+        if after > high_water {
+            return Ok(None);
+        }
+        let thread = self.thread.clone();
+        let gap = self
+            .context
+            .store
+            .blocking(move |store| store.fact_gap(&thread, after))
+            .await?;
+        // A recreated thread replaces its replay with a snapshot unless it is deleted.
+        let live = self
+            .state
+            .thread
+            .as_ref()
+            .is_some_and(|thread| thread.deleted_at.is_none());
+        if gap.facts > RESUME_MAX_REPLAY_FACTS
+            || !replay_raw_payload_safe(gap.bytes)
+            || gap.contains_created && live
+        {
+            return Ok(None);
+        }
+        let thread = self.thread.clone();
+        let facts: Arc<[StoredFact]> = self
+            .context
+            .store
+            .blocking(move |store| store.facts_after(Some(&thread), after))
+            .await?
+            .into();
+        let facts = client_facts(&facts);
+        let plan = decide_resume(ResumeInput {
+            after,
+            high_water,
+            replay_facts: facts.len() as u64,
+            replay_encoded_bytes: replay_encoded_bytes(&facts),
+        });
+        Ok(matches!(plan, ResumePlan::Replay { .. }).then_some(facts))
     }
 
     /// The single timer: the delay until `snoozed_until`, if any.
