@@ -1,353 +1,188 @@
 import AgentCore
-import PhotosUI
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ThreadScreen: View {
     @ObservedObject var model: BexAppViewModel
-    let conversation: ConversationPresentation?
-    var isSideChat = false
-    var openTools: ((WorkspaceTab?, Bool) -> Void)?
-    @StateObject var dictation = DictationRecorder()
-    @State var sendRecordedText = false
-    @State var importing = false
-    @State var showingPhotos = false
-    @State var selectedPhotos: [PhotosPickerItem] = []
-    @State var showingCamera = false
-    @State var preparingMedia = false
-    @State var showingModelSettings = false
-    @State var isVisible = false
-    @State var isFollowingLatest = true
-    @State var visibleHistoryRows: (threadId: SessionRef?, rowIds: Set<String>)?
-    @State var latestHistoryRowVisible = false
-    @State var expandedItemIds = Set<String>()
-    @State var activityExpansionOverrides = [String: ActivityExpansion]()
-    @FocusState var composerFocused: Bool
+    let openTools: (WorkspaceTab?, Bool) -> Void
+    @State private var showingQueue = false
+    @State private var showingAgents = false
+    @State private var renaming = false
+    @State private var title = ""
+    @State private var nearBottom = true
+    @State private var firstVisible: String?
+    @State private var initialScroll = true
 
     var body: some View {
-        chatContent
-            .onDisappear {
-                isVisible = false
-                dictation.cancel()
-            }
-            .onChange(of: model.composerFocusRequest) { _ in
-                if model.isShowingSideChat == isSideChat {
-                    composerFocused = true
-                }
-            }
-            .onChange(of: model.draftKey) { _ in dictation.cancel() }
-            .onChange(of: model.isConnected) {
-                if !$0 {
-                    dictation.cancel()
-                }
-            }
-            .fileImporter(isPresented: $importing, allowedContentTypes: [.item]) { result in
-                Task {
-                    do { try await model.attach(result.get()) } catch {
-                        model.transferError = error.localizedDescription
-                    }
-                }
-            }
-            .photosPicker(isPresented: $showingPhotos, selection: $selectedPhotos,
-                          selectionBehavior: .ordered, matching: .any(of: [.images, .videos]),
-                          preferredItemEncoding: .compatible)
-            .onChange(of: selectedPhotos) { _, items in
-                guard !items.isEmpty else { return }
-                selectedPhotos = []
-                preparingMedia = true
-                model.transferError = nil
-                let draftKey = model.draftKey
-                Task { await importPhotos(items, draftKey: draftKey) }
-            }
-            .fullScreenCover(isPresented: $showingCamera) {
-                ChatCameraPicker { result in
-                    showingCamera = false
-                    Task {
-                        do {
-                            if let url = try result.get() {
-                                try await model.attach(url, temporaryDirectory: url.deletingLastPathComponent())
-                            }
-                        } catch { model.transferError = error.localizedDescription }
-                    }
-                }.ignoresSafeArea()
-            }
-            .sheet(isPresented: $showingModelSettings) { ModelSettingsSheet(model: model) }
-            .onAppear {
-                isVisible = true
-                if model.isNewThread {
-                    composerFocused = true
-                }
-                loadVisibleHistory()
-            }
-            .onChange(of: model.isNewThread) {
-                if $0 {
-                    composerFocused = true
-                }
-            }
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    if !isSideChat {
-                        HStack(spacing: 0) {
-                            Button { composerFocused = false; openTools?(nil, false) } label: {
-                                Image(systemName: "square.grid.2x2").frame(width: 44, height: 44)
-                            }
-                            .accessibilityLabel("ツールを開く")
-                            .accessibilityIdentifier("task.tools")
-                            if !model.isNewThread {
-                                conversationActions
-                            }
-                        }
-                    }
-                }
-            }
-    }
-
-    private var chatContent: some View {
-        ScrollViewReader { proxy in
-            VStack(spacing: 0) {
-                if let notice = model.notice {
-                    BexNotice(text: notice).padding(.horizontal).padding(.top, 8)
-                }
-                if let thread = conversation {
-                    let rows = conversationRows(thread.rows, expansion: activityExpansionOverrides)
-                    let lastRowId = rows.last?.id
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(rows) { row in
-                                conversationRow(row)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .id(row.id)
-                            }
-                        }
-                        .scrollTargetLayout()
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 6)
-                        .background(ConversationScrollToTop {
-                            isFollowingLatest = false
-                        })
-                    }
-                    .defaultScrollAnchor(.bottom, for: .initialOffset)
-                    .defaultScrollAnchor(.bottom, for: .alignment)
-                    // Tail updates preserve a detached reader; prepends retain native offset correction.
-                    .transaction(value: lastRowId) { transaction in
-                        if !isFollowingLatest {
-                            transaction.scrollContentOffsetAdjustmentBehavior = .disabled
-                        }
-                    }
-                    .accessibilityIdentifier("task.detail")
-                    .accessibilityValue(threadAccessibilityValue(thread))
-                    .buttonStyle(.plain)
-                    .simultaneousGesture(DragGesture(minimumDistance: 1).onChanged { gesture in
-                        guard abs(gesture.translation.height) > abs(gesture.translation.width) else { return }
-                        if isFollowingLatest {
-                            isFollowingLatest = false
-                        }
-                        loadVisibleHistory()
-                    }.onEnded { gesture in
-                        if gesture.translation.height < -abs(gesture.translation.width), latestHistoryRowVisible {
-                            isFollowingLatest = true
-                            followLatest(to: lastRowId, using: proxy)
-                        }
-                    })
-                    .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { visible in
-                        let rowIds = Set(visible)
-                        if visibleHistoryRows?.threadId != thread.id || visibleHistoryRows?.rowIds != rowIds {
-                            visibleHistoryRows = (thread.id, rowIds)
-                        }
-                        loadVisibleHistory()
-                    }
-                    .onScrollGeometryChange(for: ConversationScrollMetrics.self) { geometry in
-                        ConversationScrollMetrics(
-                            content: geometry.contentSize,
-                            container: geometry.containerSize,
-                            latestVisible: geometry.containerSize.height > 0 && geometry.contentSize.height > 0 &&
-                                geometry.contentSize.height - geometry.visibleRect.maxY <= 80
-                        )
-                    } action: { old, new in
-                        latestHistoryRowVisible = new.latestVisible
-                        if old.content != new.content || old.container != new.container {
-                            followLatest(to: lastRowId, using: proxy)
-                        }
-                        loadVisibleHistory()
-                    }
-                    .onChange(of: thread.id, initial: true) {
-                        expandedItemIds.removeAll()
-                        activityExpansionOverrides.removeAll()
-                        isFollowingLatest = true
-                        followLatest(to: lastRowId, using: proxy)
-                    }
-                    .onChange(of: lastRowId) { followLatest(to: lastRowId, using: proxy) }
-                    .overlay(alignment: .bottom) {
-                        if !latestHistoryRowVisible {
-                            Button {
-                                isFollowingLatest = true
-                                withAnimation { followLatest(to: lastRowId, using: proxy) }
-                            } label: {
-                                Image(systemName: "arrow.down").font(.title3.weight(.medium))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 44, height: 44)
-                                    .background(Color(white: 0.19), in: Circle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("最新のメッセージへ")
-                            .accessibilityIdentifier("task.latest")
-                            .padding(.bottom, 6)
-                        }
-                    }
-                    .onChange(of: model.loadingHistory) {
-                        if !$0 {
-                            loadVisibleHistory()
-                        }
-                    }
-                } else if model.isNewThread {
-                    Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .accessibilityIdentifier("task.empty")
-                } else if let id = model.selectedThreadId, model.notice != nil {
-                    Button("再試行") { model.openThread(id) }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .accessibilityIdentifier("task.retry")
-                } else {
-                    ProgressView("タスクを読み込み中…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .accessibilityIdentifier("task.loading")
-                }
-            }
-            .background(Color(UIColor.systemBackground))
-            .safeAreaInset(edge: .bottom, spacing: 0) { composer }
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    if !isSideChat, !model.isNewThread {
-                        Button {
-                            if let thread = conversation,
-                               let first = conversationRows(thread.rows, expansion: activityExpansionOverrides).first {
-                                isFollowingLatest = false
-                                withAnimation { proxy.scrollTo(first.id, anchor: .top) }
-                            }
-                        } label: {
-                            conversationTitle
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("会話の先頭へ")
-                        .accessibilityIdentifier("task.top")
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Conversation navigation
-extension ThreadScreen {
-    private var project: Project? {
-        let directory = model.selectedDirectory
-        return model.list?.projects.first { $0.roots.contains { $0.path == directory } }
-    }
-
-    var conversationTitle: some View {
-        let directory = model.selectedDirectory
-        return VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Text(conversation?.title ?? (model.isNewThread ? "チャット" : "タスク"))
-                    .font(.headline).lineLimit(1)
-                if model.isConnecting {
-                    ProgressView().controlSize(.small)
-                        .accessibilityLabel("接続中")
-                        .accessibilityIdentifier("connection.progress")
-                }
-            }
-            Text([
-                project?.name ?? (directory.isEmpty ? "" : URL(fileURLWithPath: directory).lastPathComponent),
-                model.selectedProfileName ?? "Mac"
-            ].filter { !$0.isEmpty }.joined(separator: " · "))
-                .font(.subheadline).foregroundColor(.secondary).lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    var conversationActions: some View {
-        HStack(spacing: 0) {
-            Button { model.openNewThread(cwd: model.selectedDirectory) } label: {
-                Image(systemName: "square.and.pencil").font(.title2).frame(width: 44, height: 44)
-            }.accessibilityLabel("新しい会話").accessibilityIdentifier("task.new")
-            Menu {
-                Button { openTools?(.files, true) } label: {
-                    Label("変更を表示", systemImage: "plus.forwardslash.minus")
-                }
-                Button {
-                    if let id = model.selectedThreadId {
-                        model.openThread(id)
-                    }
-                } label: { Label("更新", systemImage: "arrow.clockwise") }
-            } label: {
-                Image(systemName: "ellipsis").font(.title2.weight(.semibold)).frame(width: 44, height: 44)
-            }
-            .accessibilityLabel("その他")
-            .accessibilityIdentifier("task.more")
-        }
-        .buttonStyle(.plain)
-    }
-
-    var newThreadContext: some View {
-        let directory = model.selectedDirectory
-        return VStack(alignment: .leading, spacing: 4) {
-            Menu {
-                ForEach(model.profiles, id: \.id) { profile in
-                    Button { model.openNewThread(on: profile.id) } label: {
-                        if profile.id == model.selectedProfileId {
-                            Label(profile.name, systemImage: "checkmark")
-                        } else {
-                            Text(profile.name)
-                        }
-                    }
-                }
-            } label: {
-                contextLabel(model.selectedProfileName ?? "環境を選択", icon: "laptopcomputer")
-                if model.isConnecting {
-                    ProgressView().controlSize(.small)
-                }
-            }
-            .accessibilityLabel("環境: \(model.selectedProfileName ?? "未選択")")
-            .accessibilityIdentifier("task.environment")
-            Menu {
-                Button { model.openNewThread(cwd: "") } label: {
-                    Label("チャット", systemImage: "bubble.left.and.bubble.right")
-                }
-                ForEach(model.list?.projects ?? [], id: \.id) { project in
-                    ForEach(project.roots, id: \.path) { root in
-                        Button { model.openNewThread(cwd: root.path) } label: {
-                            Label(project.roots.count == 1 ? project.name : root.path,
-                                  systemImage: root.path == directory ? "checkmark" : "folder")
-                        }
-                    }
-                }
-                if model.list?.hasMoreProjects == true {
-                    Button("さらにプロジェクトを読み込む") { model.expandTaskList(projects: true) }
-                }
-            } label: {
-                contextLabel(
-                    project?.name ?? (directory.isEmpty ? "チャット" : URL(fileURLWithPath: directory).lastPathComponent),
-                    icon: directory.isEmpty ? "bubble.left.and.bubble.right" : "folder"
+        let conversation = model.conversation
+        VStack(spacing: 0) {
+            if let notice = model.notice {
+                BexNotice(text: notice).font(T3Theme.font(12)).padding(.horizontal, 20).padding(
+                    .vertical,
+                    6
                 )
             }
-            .accessibilityLabel("フォルダ: \(project?.name ?? (directory.isEmpty ? "チャット" : directory))")
-            .accessibilityIdentifier("task.folder")
+            ScrollViewReader { reader in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 14) {
+                        if conversation.hasMoreHistory {
+                            Button("Load earlier messages") { model.loadOlderHistory() }.font(T3Theme.font(13))
+                                .frame(maxWidth: .infinity)
+                        }
+                        if conversation.loading, conversation.rows.isEmpty {
+                            ProgressView().frame(maxWidth: .infinity)
+                        }
+                        ForEach(conversation.rows, id: \.id) { row in
+                            ConversationRow(
+                                perform: { model.perform($0) },
+                                downloadAttachment: model.downloadAttachment,
+                                row: row
+                            ).equatable().id(row.id)
+                        }
+                        Color.clear.frame(height: 1).id("conversation-bottom")
+                    }
+                    .scrollTargetLayout().padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 20)
+                    .frame(maxWidth: 736).frame(maxWidth: .infinity)
+                }
+                .scrollPosition(id: $firstVisible, anchor: .top)
+                .onScrollGeometryChange(for: ConversationScroll.self) { geometry in
+                    ConversationScroll(
+                        height: geometry.contentSize.height,
+                        nearBottom: geometry.contentSize.height - geometry.contentOffset.y - geometry.containerSize
+                            .height < 80
+                    )
+                } action: { old, next in
+                    if followStreamResize(
+                        wasFollowing: nearBottom,
+                        initial: initialScroll,
+                        previousHeight: old.height,
+                        nextHeight: next.height
+                    ) {
+                        reader.scrollTo("conversation-bottom", anchor: .bottom)
+                    } else {
+                        nearBottom = next.nearBottom
+                    }
+                }
+                .onChange(of: conversation.rows) { old, next in
+                    if old.first?.id != next.first?.id && old.last?.id == next.last?.id && next.count > old.count {
+                        if let first = old.first?.id {
+                            reader.scrollTo(first, anchor: .top)
+                        }
+                    } else if nearBottom || initialScroll {
+                        reader.scrollTo("conversation-bottom", anchor: .bottom)
+                        if !next.isEmpty {
+                            initialScroll = false
+                        }
+                    }
+                }
+                .onChange(of: conversation.threadId) { _, _ in renaming = false; initialScroll = true; reader.scrollTo(
+                    "conversation-bottom",
+                    anchor: .bottom
+                ) }
+                .onAppear { reader.scrollTo("conversation-bottom", anchor: .bottom) }
+            }
+            if !conversation.requests.isEmpty {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        ForEach(conversation.requests, id: \.id) { request in
+                            ConversationRequest(model: model, row: request)
+                        }
+                    }.padding(.horizontal, 20)
+                }.frame(maxHeight: 280)
+            }
+            ConversationComposer(model: model, showQueue: { showingQueue = true }, showAgents: { showingAgents = true })
         }
-        .font(.title3)
-        .foregroundColor(.secondary)
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .disabled(model.transferring || preparingMedia || model.sending || dictation.isRecording || dictation
-            .requestingPermission || model.transcribing)
-    }
-
-    func contextLabel(_ title: String, icon: String) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon).frame(width: 28)
-            Text(title).lineLimit(1).truncationMode(.middle)
-            Image(systemName: "chevron.up.chevron.down").font(.caption.weight(.semibold))
+        .background(T3Theme.color("canvas")).foregroundStyle(T3Theme.color("text"))
+        .navigationTitle(conversation.title).navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 2) {
+                    Text(conversation.project).font(T3Theme.font(11)).foregroundStyle(T3Theme.color("textMuted"))
+                    Text(conversation.title).font(T3Theme.font(14, weight: .medium)).lineLimit(1)
+                }.onTapGesture { title = conversation.title; renaming = conversation.threadId != nil }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    if let id = conversation.threadId {
+                        if conversation.canMergeBack {
+                            Button("Merge back to source") { model.perform(.mergeBack) }
+                        }
+                        ThreadActions(
+                            model: model,
+                            id: id,
+                            pinned: conversation.pinned,
+                            archived: conversation.archived,
+                            settled: conversation.settled
+                        )
+                        if conversation.snoozed {
+                            Button("Unsnooze") { model.perform(.thread(
+                                threadId: id,
+                                action: .unsnooze
+                            )) }
+                        }
+                        Toggle(
+                            "Auto-settle",
+                            isOn: Binding(
+                                get: { conversation.autoSettle },
+                                set: { model.perform(.thread(threadId: id, action: .autoSettle(enabled: $0))) }
+                            )
+                        )
+                        Button("Rename") { title = conversation.title; renaming = true }
+                    }
+                    if !conversation.agents.rows.isEmpty {
+                        Button("Agents") { showingAgents = true }
+                    }
+                    Divider()
+                    Button("Terminal") { openTools(.terminal, false) }.disabled(!model.snapshot.canOpenTerminal())
+                    Button("Files") { openTools(.files, false) }
+                    Button("Diff") { openTools(.files, true) }
+                    Button("Browser") { openTools(.browser, false) }
+                } label: { Image(systemName: "ellipsis") }
+            }
         }
-        .frame(minHeight: 44)
-        .padding(.horizontal, 8)
+        .sheet(isPresented: $showingAgents) {
+            NavigationStack {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(model.conversation.agents.rows, id: \.id) { agent in
+                            Button {
+                                if let id = agent
+                                    .childThreadId {
+                                    showingAgents = false; model.perform(.openThread(threadId: id))
+                                }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(agent.title).font(T3Theme.font(14, weight: .medium))
+                                    Text(agent.metadata).font(T3Theme.font(12))
+                                        .foregroundStyle(T3Theme.color("textMuted"))
+                                    if !agent.detail
+                                        .isEmpty {
+                                        Text(agent.detail).font(T3Theme.font(13))
+                                            .foregroundStyle(T3Theme.color("textMuted"))
+                                    }
+                                }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 14)
+                            }.buttonStyle(.plain).disabled(agent.childThreadId == nil)
+                            Divider()
+                        }
+                    }.padding(.horizontal, 20)
+                }.navigationTitle("Agents").navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { showingAgents = false } }
+                    }
+            }.presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showingQueue) { QueueSheet(model: model) }
+        .alert("Rename thread", isPresented: $renaming) {
+            TextField("Title", text: $title)
+            Button("Save") {
+                if let id = conversation.threadId {
+                    model.perform(.thread(
+                        threadId: id,
+                        action: .rename(title: title)
+                    ))
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 }
+
+private struct ConversationScroll: Equatable { let height: CGFloat; let nearBottom: Bool }

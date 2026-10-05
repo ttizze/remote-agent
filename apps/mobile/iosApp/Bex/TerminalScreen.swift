@@ -11,13 +11,13 @@ struct TerminalScreen: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            let terminal = model.snapshot.terminalView(handle: handle)
-            if terminal?.loading ?? true {
+            let terminal = model.snapshot.terminal(handle: handle, after: UInt64.max)
+            if terminal.loading {
                 ProgressView().accessibilityIdentifier("terminal.loading")
-            } else if let status = terminal?.status {
+            } else if let status = terminal.status {
                 Text(status).font(.caption).foregroundStyle(.secondary)
             }
-            NativeTerminalView(model: model, handle: handle, cwd: cwd, terminal: terminal)
+            NativeTerminalView(model: model, handle: handle, cwd: cwd).id("\(model.selectedProfileId ?? ""):\(handle)")
         }
     }
 }
@@ -26,7 +26,6 @@ private struct NativeTerminalView: UIViewRepresentable {
     @ObservedObject var model: BexAppViewModel
     let handle: String
     let cwd: String
-    let terminal: AgentCore.TerminalView?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(model: model, handle: handle, cwd: cwd)
@@ -35,7 +34,10 @@ private struct NativeTerminalView: UIViewRepresentable {
     func makeUIView(context: Context) -> SwiftTerm.TerminalView {
         let view = HostTerminalView(frame: .zero)
         view.terminalDelegate = context.coordinator
-        view.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        view.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        view.nativeBackgroundColor = T3Theme.uiColor("terminalBackground")
+        view.nativeForegroundColor = T3Theme.uiColor("terminalForeground")
+        view.caretColor = T3Theme.uiColor("terminalCursor")
         view.accessibilityIdentifier = "terminal.screen"
         return view
     }
@@ -44,15 +46,15 @@ private struct NativeTerminalView: UIViewRepresentable {
         view.terminalDelegate = nil
         coordinator.dismantled = true
         if coordinator.started {
-            coordinator.model.perform(.detachTerminal(DetachTerminal(handle: coordinator.handle)))
+            coordinator.model.perform(.detachTerminal(handle: coordinator.handle))
         }
     }
 
     func updateUIView(_ view: SwiftTerm.TerminalView, context: Context) {
         let coordinator = context.coordinator
-        guard let terminal else { return }
+        let terminal = model.snapshot.terminal(handle: handle, after: coordinator.sequence)
+        coordinator.acceptsInput = terminal.acceptsInput
         view.accessibilityValue = terminal.acceptsInput && !terminal.loading ? "入力可能" : nil
-        let previousSequence = coordinator.sequence
         for chunk in terminal.output where chunk.sequence > coordinator.sequence {
             if let size = chunk.resetSize {
                 coordinator.restoring = true
@@ -62,16 +64,13 @@ private struct NativeTerminalView: UIViewRepresentable {
             coordinator.restoring = false
             coordinator.sequence = chunk.sequence
         }
-        if coordinator.sequence > previousSequence {
-            let sequence = coordinator.sequence
-            Task { @MainActor in model.perform(.acknowledgeTerminal(handle: handle, sequence: sequence)) }
-        }
     }
 
     @MainActor final class Coordinator: NSObject, TerminalViewDelegate {
         let model: BexAppViewModel
         let handle: String
         var sequence: UInt64 = 0
+        var acceptsInput = false
         var restoring = false
         var started = false
         var dismantled = false
@@ -81,8 +80,8 @@ private struct NativeTerminalView: UIViewRepresentable {
         }
 
         func send(source _: SwiftTerm.TerminalView, data: ArraySlice<UInt8>) {
-            guard !dismantled, model.snapshot.terminalView(handle: handle)?.acceptsInput == true else { return }
-            model.perform(.writeTerminal(WriteTerminal(handle: handle, data: Data(data))))
+            guard !dismantled, acceptsInput else { return }
+            model.perform(.writeTerminal(handle: handle, data: Data(data)))
         }
 
         func sizeChanged(source _: SwiftTerm.TerminalView, newCols: Int, newRows: Int) {
@@ -95,9 +94,9 @@ private struct NativeTerminalView: UIViewRepresentable {
                 guard !dismantled else { return }
                 if !started {
                     started = true
-                    model.perform(.startTerminal(StartTerminal(handle: handle, cwd: cwd, size: size)))
-                } else if model.snapshot.terminalView(handle: handle)?.acceptsInput == true {
-                    model.perform(.resizeTerminal(ResizeTerminal(handle: handle, size: size)))
+                    model.perform(.startTerminal(handle: handle, cwd: cwd, cols: size.cols, rows: size.rows))
+                } else if acceptsInput {
+                    model.perform(.resizeTerminal(handle: handle, cols: size.cols, rows: size.rows))
                 }
             }
         }
@@ -116,16 +115,16 @@ private struct NativeTerminalView: UIViewRepresentable {
 
 /// Emulator responses are produced by the Host; SwiftTerm still handles native user input.
 private final class HostTerminalView: SwiftTerm.TerminalView {
-    @TaskLocal private nonisolated static var isPasting = false
-
     override func paste(_ sender: Any?) {
         // SwiftTerm sends paste bytes synchronously through the emulator delegate.
         // Scope forwarding to this call, without enabling replies from its parser thread.
-        Self.$isPasting.withValue(true) { super.paste(sender) }
+        TerminalPaste.$isPasting.withValue(true) { super.paste(sender) }
     }
 
     override nonisolated func send(source: SwiftTerm.Terminal, data: ArraySlice<UInt8>) {
-        guard Self.isPasting else { return }
+        guard TerminalPaste.isPasting else { return }
         super.send(source: source, data: data)
     }
 }
+
+private enum TerminalPaste { @TaskLocal static var isPasting = false }

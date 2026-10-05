@@ -1,14 +1,9 @@
 package dev.remoteagent.mobile
 
 import android.content.Context
-import android.net.Uri
-import android.provider.OpenableColumns
 import android.util.AtomicFile
-import dev.remoteagent.core.Attachment
 import java.io.File
-import java.io.IOException
 import java.util.Base64
-import java.util.UUID
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -33,11 +28,15 @@ internal class AndroidMobileRepository(context: Context) {
     }
 
     fun diagnosticsDirectory(id: String): String =
-        File(
-                directory,
-                "connection-diagnostics/${encodedId(id)}",
-            )
-            .absolutePath
+        File(directory, "connection-diagnostics/${encodedId(id)}").absolutePath
+
+    fun modelPreferences(): ByteArray =
+        preferences.getString("orchestration-model-defaults", null)?.let { Base64.getDecoder().decode(it) }
+            ?: byteArrayOf()
+
+    fun saveModelPreferences(bytes: ByteArray) {
+        preferences.edit().putString("orchestration-model-defaults", Base64.getEncoder().encodeToString(bytes)).apply()
+    }
 
     fun load(id: String): ByteArray {
         val file = snapshotFile(id)
@@ -46,7 +45,7 @@ internal class AndroidMobileRepository(context: Context) {
 
     fun save(id: String, bytes: ByteArray) = snapshotFile(id).writeSynced(bytes)
 
-    private fun snapshotFile(id: String) = AtomicFile(File(directory, "agent-snapshot-${encodedId(id)}.json"))
+    private fun snapshotFile(id: String) = AtomicFile(File(directory, "orchestration-${encodedId(id)}.json"))
 
     private fun encodedId(id: String): String =
         Base64.getUrlEncoder().withoutPadding().encodeToString(id.encodeToByteArray())
@@ -63,27 +62,5 @@ internal fun AtomicFile.writeSynced(bytes: ByteArray) {
         committed = true
     } finally {
         if (!committed) failWrite(output)
-    }
-}
-
-internal fun importAttachment(context: Context, uri: Uri): Attachment {
-    val resolver = context.contentResolver
-    val name =
-        resolver
-            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { if (it.moveToFirst()) it.getString(0) else null }
-            ?.substringAfterLast('/') ?: "attachment"
-    val folder = File(context.cacheDir, UUID.randomUUID().toString())
-    if (!folder.mkdir()) throw IOException("添付用フォルダを作成できません")
-    var imported = false
-    try {
-        val file = File(folder, name)
-        resolver.openInputStream(uri)?.use { input -> file.outputStream().use(input::copyTo) }
-            ?: throw IOException("添付ファイルを開けません")
-        val attachment = Attachment(file.path, name, resolver.getType(uri)?.startsWith("image/") == true)
-        imported = true
-        return attachment
-    } finally {
-        if (!imported) folder.deleteRecursively()
     }
 }

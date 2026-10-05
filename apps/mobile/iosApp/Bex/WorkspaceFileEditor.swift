@@ -18,7 +18,7 @@ struct FileEditorSheet: View {
     }
 
     private var revision: String {
-        snapshot.fileDraft(path: entry.path)?.revision ?? file?.revision ?? ""
+        file?.revision ?? ""
     }
 
     private var savedText: String {
@@ -35,7 +35,11 @@ struct FileEditorSheet: View {
                 if busy {
                     ProgressView().padding()
                 }
-                BufferedTextInput(value: $text) { TextEditor(text: $0) }.font(.body.monospaced())
+                BufferedTextInput(value: $text, edit: { value, acknowledged in
+                    perform(.editFile(path: entry.path, text: value)) { _, result in
+                        acknowledged((try? result.get()) != nil)
+                    }
+                }, content: { TextEditor(text: $0) }).id(entry.path).font(.body.monospaced())
                     .textInputAutocapitalization(.never).disableAutocorrection(true)
                     .accessibilityIdentifier("file.editor")
                     .disabled(revision.isEmpty)
@@ -59,7 +63,7 @@ struct FileEditorSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
                         busy = true; error = nil
-                        perform(.saveFile(SaveFile(path: entry.path))) { _, result in
+                        perform(.saveFile(path: entry.path)) { _, result in
                             busy = false
                             if case let .failure(failure) = result {
                                 error = failure.localizedDescription
@@ -83,15 +87,49 @@ struct FileEditorSheet: View {
 
     private func load(restoreDraft: Bool) {
         busy = true; error = nil
-        perform(.readFile(ReadFile(path: entry.path, discardDraft: !restoreDraft))) { snapshot, result in
+        perform(.readFile(path: entry.path, discardDraft: !restoreDraft)) { _, result in
             busy = false
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
             }
             initialized = true
-            if let file = snapshot.file(), file.path == entry.path,
-               (snapshot.fileDraft(path: entry.path)?.revision ?? file.revision) != file.revision {
-                error = "ホストのファイルが変更されています。下書きは保持しました。再読込すると下書きを破棄します。"
+        }
+    }
+}
+
+/// Keep native editing ahead of Store publication; every edit still dispatches synchronously.
+struct BufferedTextInput<Content: View>: View {
+    @Binding private var value: String
+    @State private var text: String
+    let content: (Binding<String>) -> Content
+    let edit: (String, @escaping (Bool) -> Void) -> Void
+    @State private var edits = DraftRevision()
+
+    init(
+        value: Binding<String>,
+        edit: @escaping (String, @escaping (Bool) -> Void) -> Void,
+        @ViewBuilder content: @escaping (Binding<String>) -> Content
+    ) {
+        _value = value
+        _text = State(initialValue: value.wrappedValue)
+        self.content = content
+        self.edit = edit
+    }
+
+    var body: some View {
+        let input = Binding(get: { text }, set: {
+            guard text != $0 else { return }
+            text = $0
+            let revision = edits.edit($0).revision
+            edit($0) { _ in
+                if edits.acknowledge(revision), text != value {
+                    text = value
+                }
+            }
+        })
+        content(input).onChange(of: value) { _, _ in
+            if edits.pending == nil, text != value {
+                text = value
             }
         }
     }

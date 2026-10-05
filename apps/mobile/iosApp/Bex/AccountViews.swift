@@ -10,7 +10,7 @@ struct AccountUsageView: View {
             if let usage {
                 if let error = usage.error {
                     Label(accountErrorMessage(message: error), systemImage: "exclamationmark.circle")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle(T3Theme.color("warningForeground"))
                 }
                 ForEach(Array(usage.windows.enumerated()), id: \.offset) { _, window in
                     UsageWindowView(window: window)
@@ -27,69 +27,18 @@ struct AccountUsageView: View {
     }
 }
 
-struct WeeklyUsageView: View {
-    let windows: [UsageWindow]
-    var compact = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if windows.isEmpty {
-                Text("残量未取得").font(.caption).foregroundStyle(.secondary)
-            }
-            ForEach(Array(windows.enumerated()), id: \.offset) { _, window in
-                UsageWindowView(window: window, compact: compact)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("週間残量 \(window.remainingPercent)%")
-            }
-        }
-    }
-}
-
-struct ReasoningStrengthIcon: View {
-    let level: UInt32
-    let count: Int
-
-    var body: some View {
-        HStack(alignment: .bottom, spacing: 2) {
-            ForEach(0 ..< count, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(index < Int(level) ? Color.accentColor : Color.secondary.opacity(0.35))
-                    .frame(width: 3, height: 6 + 10 * CGFloat(index + 1) / CGFloat(count))
-            }
-        }
-        .frame(width: 28, height: 22)
-        .accessibilityHidden(true)
-    }
-}
-
 private struct UsageWindowView: View {
     let window: UsageWindow
-    var compact = false
-
     var body: some View {
-        let tint: Color = window.remainingPercent <= 20 ? .orange : compact ? .accentColor : .green
-        if compact {
-            HStack(spacing: 8) {
-                Text("週間残量")
-                ProgressView(value: Double(window.remainingPercent), total: 100)
-                    .tint(tint)
-                Text("\(window.remainingPercent)%").monospacedDigit()
-            }
-            .font(.caption2).foregroundStyle(.secondary)
-        } else {
-            VStack(alignment: .leading, spacing: 5) {
-                HStack {
-                    Text(window.label)
-                    Spacer()
-                    Text("残り \(window.remainingPercent)%").monospacedDigit()
-                }.font(.caption)
-                ProgressView(value: Double(window.remainingPercent), total: 100)
-                    .tint(tint)
-                if let reset = window.resetsAt {
-                    let date = Date(timeIntervalSince1970: Double(reset))
-                    Text("リセット: \(date.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
+        VStack(alignment: .leading, spacing: 5) {
+            HStack { Text(window.label); Spacer(); Text("残り \(window.remainingPercent)%").monospacedDigit() }
+                .font(T3Theme.font(12))
+            ProgressView(value: Double(window.remainingPercent), total: 100)
+                .tint(T3Theme.color(window.remainingPercent <= 20 ? "warningForeground" : "successForeground"))
+            if let reset = window.resetsAt {
+                let date = Date(timeIntervalSince1970: Double(reset))
+                Text("リセット: \(date.formatted(date: .abbreviated, time: .shortened))")
+                    .font(T3Theme.font(11)).foregroundStyle(T3Theme.color("textMuted"))
             }
         }
     }
@@ -120,7 +69,6 @@ struct AccountLoginSection: View {
     let login: AccountLogin
     let providerName: String
     @Binding var loginCode: String
-    let progressMessage: String?
     let loginError: String?
     let submit: () -> Void
     let retry: () -> Void
@@ -151,16 +99,14 @@ struct AccountLoginSection: View {
                     .accessibilityIdentifier("model.login.input")
                 Button("サインインを完了", action: submit)
                     .disabled(loginCode.trimmingCharacters(in: .whitespacesAndNewlines)
-                        .isEmpty || progressMessage != nil)
+                        .isEmpty)
                     .accessibilityIdentifier("model.login.submit")
             } else {
                 ProgressView("ブラウザでの認証を待っています…")
             }
-            if let progressMessage {
-                ProgressView(progressMessage)
-            }
             if let error = loginError {
-                Text(accountErrorMessage(message: error)).font(.caption).foregroundStyle(.red)
+                Text(accountErrorMessage(message: error)).font(.caption)
+                    .foregroundStyle(T3Theme.color("errorForeground"))
                 Button("認証状態を再確認", action: retry)
             }
         }

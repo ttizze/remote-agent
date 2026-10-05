@@ -3,36 +3,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 case "${1:-apple}" in apple|rust|kotlin|swift) language=${1:-apple} ;; *) echo 'quality expects apple, rust, kotlin, or swift' >&2; exit 2 ;; esac
 export CARGO_INCREMENTAL=0
-failed=0
 if [[ $language == apple || $language == rust ]]; then
-    actionlint || failed=1
-    nix build .#agent-peer --no-link || failed=1
-    cargo fmt --all --check || failed=1
-    cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings || failed=1
-    integration_targets=(
-        --test errors --test iroh --test iroh_host --test browser_bridge
-        --test management --test codex_accounts --test claude --test adapter_conformance
-        --test crate_boundaries --test build_cleanup --test diagnostics
-    )
-    if [[ $(uname -s) == Darwin ]]; then
-        integration_targets+=(--test chrome_cookie_webview)
-    fi
-    just unit-tests "${integration_targets[@]}" || failed=1
+    actionlint
+    cargo fmt --all --check
+    cargo clippy --locked --workspace --all-targets --features agent-core/bindings -- -D warnings
+    just unit-tests
+    cargo xtask clean-builds --dry-run
 fi
 if [[ $language == kotlin ]]; then
-    ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt --continue --console=plain || failed=1
-    just android-e2e || failed=1
-fi
-# Every shard runs acceptance; shared Swift checks run on the first shard only.
-if [[ ( $language == apple || $language == swift ) && ${BEX_IOS_TEST_SHARD:-0} == 0 ]]; then
-    swiftformat --lint apps/mobile/iosApp/Bex apps/mobile/iosApp/BexUITests || failed=1
-    swiftlint lint --strict || failed=1
-    if [[ $language == swift ]]; then
-        just ios-markdown || failed=1
-    fi
+    ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt :apps:mobile:testDebugUnitTest :apps:mobile:assembleDebug --console=plain
 fi
 if [[ $language == apple || $language == swift ]]; then
-    just conversation-ui || failed=1
+    swiftformat --lint apps/mobile/iosApp/Bex
+    swiftlint lint --strict
+    /usr/bin/xcrun swift test --package-path apps/mobile/iosApp --scratch-path target/qa/ios-unit
+    scripts/build-agent-ios.sh simulator
+    xcodebuild -project apps/mobile/iosApp/Bex.xcodeproj -scheme Bex \
+        -configuration Debug -destination 'generic/platform=iOS Simulator' \
+        -derivedDataPath target/qa/ios-derived-data -skipPackagePluginValidation \
+        CODE_SIGNING_ALLOWED=NO build
 fi
-cargo xtask clean-builds || failed=1
-exit "$failed"

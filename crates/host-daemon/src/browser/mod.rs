@@ -19,7 +19,6 @@ struct Page {
 struct State {
     chrome: Option<cdp::Chrome>,
     pages: HashMap<String, Page>,
-    aliases: HashMap<String, String>,
 }
 
 pub struct Browser {
@@ -64,12 +63,6 @@ impl Browser {
         mcp::listen(&browser)?;
         Ok(browser)
     }
-    // Codex assigns the thread ID after accepting its MCP configuration.
-    // Bind that startup scope before the first turn can run. Resume uses the ID directly.
-    pub async fn bind_scope(&self, scope: String, thread: String) {
-        self.state.lock().await.aliases.insert(scope, thread);
-    }
-
     pub fn provider_config(&self, thread: &str) -> Result<serde_json::Value, String> {
         Ok(
             serde_json::json!({"command":std::env::current_exe().map_err(|e| e.to_string())?,
@@ -165,14 +158,9 @@ impl Browser {
     ) -> Result<BrowserFrame, String> {
         action.validate()?;
         let mut state = self.state.lock().await;
-        let thread = state
-            .aliases
-            .get(thread)
-            .cloned()
-            .unwrap_or_else(|| thread.to_owned());
-        self.ensure(&mut state, &thread).await?;
-        Self::action(&mut state, &thread, &action).await?;
-        Self::frame(&mut state, &thread).await
+        self.ensure(&mut state, thread).await?;
+        Self::action(&mut state, thread, &action).await?;
+        Self::frame(&mut state, thread).await
     }
 
     async fn action(state: &mut State, thread: &str, action: &BrowserAction) -> Result<(), String> {

@@ -53,8 +53,10 @@ async fn incoming_session_requires_allowlist_and_shutdown_is_distinct() {
             .await
             .unwrap();
         let ticket = host.ticket();
-        let (outgoing, incoming) = tokio::join!(client.connect(&ticket), host.accept());
-        let incoming = incoming.unwrap().unwrap();
+        let (outgoing, incoming) = tokio::join!(client.connect(&ticket), async {
+            host.accept().await.unwrap().establish().await
+        });
+        let incoming = incoming.unwrap();
         assert_eq!(incoming.node_id(), client.node_id());
         assert!(matches!(
             incoming.authorize(&Trust::default()),
@@ -71,8 +73,10 @@ async fn incoming_session_requires_allowlist_and_shutdown_is_distinct() {
             ..Default::default()
         };
         let ticket = host.ticket();
-        let (outgoing, incoming) = tokio::join!(client.connect(&ticket), host.accept());
-        let session = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+        let (outgoing, incoming) = tokio::join!(client.connect(&ticket), async {
+            host.accept().await.unwrap().establish().await
+        });
+        let session = incoming.unwrap().authorize(&trust).unwrap();
         assert_eq!(session.node_id(), client.node_id());
         session.close();
         outgoing.unwrap().close();
@@ -112,8 +116,10 @@ async fn local_client_connects_over_loopback_without_relays() {
             allowed: BTreeSet::from([client.node_id()]),
             ..Default::default()
         };
-        let (outgoing, incoming) = tokio::join!(client.connect(&ticket), host.accept());
-        let incoming = incoming.unwrap().unwrap().authorize(&trust).unwrap();
+        let (outgoing, incoming) = tokio::join!(client.connect(&ticket), async {
+            host.accept().await.unwrap().establish().await
+        });
+        let incoming = incoming.unwrap().authorize(&trust).unwrap();
         let session = outgoing.unwrap();
         let (peer, accepted) = tokio::join!(
             session.open_peer(Duration::from_secs(2), 8),
@@ -169,10 +175,10 @@ async fn incompatible_wire_versions_are_rejected_in_both_directions() {
             current.local_ticket().to_string().parse().unwrap();
         let (outgoing, incoming) = tokio::join!(
             incompatible.connect(ticket.endpoint_addr().clone(), incompatible_alpn),
-            current.accept()
+            async { current.accept().await.unwrap().establish().await }
         );
         assert!(outgoing.is_err());
-        assert!(matches!(incoming, Some(Err(TransportError::Connection(_)))));
+        assert!(matches!(incoming, Err(TransportError::Connection(_))));
 
         incompatible.close().await;
         current.close().await;

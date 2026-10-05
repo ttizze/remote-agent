@@ -1,27 +1,19 @@
 # Client state and device storage
 
-`Snapshot` is the immutable runtime read model. Its JSON inspection API is used
-by diagnostics and fixtures; it is not the device storage contract.
-`agent_core::persistence` owns that contract. Desktop saves `PersistedState`,
-and iOS/Android use the same encoder and decoder through the bindings.
+`Snapshot` is the immutable client read model. `agent_core::persistence` encodes
+device-owned drafts, project/thread selection, model defaults, unsaved file
+edits with original revisions, shelf observations and unconfirmed commands and
+launches. History, projections, approvals and connections are not restored.
 
-The current format stores only the Host storage identity, archived storage
-areas, drafts, attachments, unconfirmed submissions, unsaved file edits with
-revision, navigation and unread marks. It does not store native conversation
-history, lists, models, approvals, connections, operation generations or progress,
-or other Host authority.
-Returning to a different Host storage area preserves its own user data.
+Each paired PC has its own Store and private atomic file. Orchestration-specific
+filenames replace the retired format without migration. Empty bytes initialize
+new state; malformed current-format state fails explicitly.
 
-Encoding takes immutable values. Decoding requires all user-owned fields and
-rejects malformed user data instead of silently creating empty drafts. Unknown
-runtime fields are ignored, including invalid history/cache data: they cannot
-prevent recovery of user work or restore connection authority. Empty bytes mean
-a new installation. There are no old-format decoders or migrations.
+Unconfirmed mutations replay in order with the same command IDs. Host receipts
+deduplicate retries. Late responses cannot overwrite newer drafts/navigation.
+Native buffers use revisions; the owner publishes before completing receipts.
+File saves compare the revision captured when editing began; typing during save
+survives with its base revision updated.
 
-Native clients still own private atomic file writes and lifecycle flushes.
-Store restoration marks unconfirmed sends as delivery-unknown, retains their
-body, attachments, send order and position, and never automatically resends them.
-The Host supplies current delivery evidence when a connection is established.
-
-Tests cover the real storage encoder/decoder, required user fields, scope
-isolation, discarded runtime authority and desktop shutdown persistence.
+Native clients own private writes and lifecycle flushes. QR consent and identity
+keys remain platform-owned. Restored drafts cannot authorize connections.

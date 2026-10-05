@@ -7,22 +7,23 @@ import UIKit
 final class BexAppViewModel: ObservableObject {
     @Published private(set) var snapshot = AgentCore.Snapshot.empty()
     @Published var screen: AppScreen = .profiles
-    @Published var sideChatRequest: SideChatRequest?
-    @Published var composerFocusRequest: UUID?
     @Published var isScanning = false
-    @Published var transferError: String?
-    @Published var transferring = false
     @Published var isConnecting = false
     @Published var pairingError: String?
     @Published private(set) var pairingInvitation: Invitation?
+    @Published var deleteThreadId: String?
     @Published var notice: String?
     @Published var profiles: [HostProfile] = []
     @Published private(set) var selectedProfileId: String?
-    @Published private(set) var conversation: ConversationPresentation?
-    private(set) var list: ThreadList?
-    private(set) var models: [Model] = []
-    private var presentationTask: Task<Void, Never>?
-    private var pendingPresentation: ConversationPresentationInput?
+    @Published var composerText = ""
+    var draftEdits = DraftRevision()
+    private var composerKey = ""
+    @Published private(set) var conversation = AgentCore.Snapshot.empty().conversation()
+    private var presentation: Task<Void, Never>?
+
+    var models: [Model] {
+        snapshot.models()
+    }
 
     private(set) var store: AgentStore?
     private var initialization: Task<Void, Never>?
@@ -79,9 +80,11 @@ final class BexAppViewModel: ObservableObject {
         } catch { notice = error.localizedDescription }
     }
 
-    /// Save and stop the current Host's work; the caller shuts down the returned store.
     private func detachStore() -> AgentStore? {
         persist()
+        draftEdits.reset()
+        presentation?.cancel()
+        presentation = nil
         connection?.cancel()
         observation?.cancel()
         cancelInitialization()
@@ -103,7 +106,6 @@ final class BexAppViewModel: ObservableObject {
 
     private func initialize(_ id: String, previous old: AgentStore?) async {
         let preparationStarted = ProcessInfo.processInfo.systemUptime
-        // Draining the previous Host's transport must not delay opening this Host.
         async let previousClosed: Void? = try? old?.shutdown()
         do {
             let bytes = try await SnapshotFiles.load(id)
@@ -125,7 +127,6 @@ final class BexAppViewModel: ObservableObject {
             )
             initialization = nil
             publish(owner.snapshot())
-            perform(.showThreadList)
             let queued = pending
             pending.removeAll()
             for (intent, complete) in queued {
@@ -136,6 +137,7 @@ final class BexAppViewModel: ObservableObject {
         } catch {
             guard !Task.isCancelled, selectedProfileId == id else { return }
             initialization = nil
+            notice = error.localizedDescription
             let queued = pending
             pending.removeAll()
             for (_, complete) in queued {
@@ -180,8 +182,9 @@ final class BexAppViewModel: ObservableObject {
             connection?.cancel()
             connection = Task { [weak self] in
                 do {
+                    self?.persist()
                     await self?.persistenceWrite?.value
-                    let persisted = try SnapshotFiles.withModelPreferences(Data())
+                    let persisted = try await SnapshotFiles.load(id)
                     let owner = try await AgentStore.connect(connection: Connection(
                         ticket: invitation.endpoint,
                         identity: DeviceIdentity.loadOrGenerate(id),
@@ -193,6 +196,11 @@ final class BexAppViewModel: ObservableObject {
                     observation?.cancel()
                     cancelInitialization()
                     let old = store
+                    presentation?.cancel()
+                    presentation = nil
+                    store = nil
+                    publish(AgentCore.Snapshot.empty())
+                    draftEdits.reset()
                     profiles.removeAll { $0.id == id }
                     profiles.append(HostProfile(id: id, name: invitation.hostName, ticket: invitation.endpoint))
                     try HostProfile.save(profiles)
@@ -204,7 +212,6 @@ final class BexAppViewModel: ObservableObject {
                     pairingInvitation = nil
                     isConnecting = false
                     observe(owner, host: id)
-                    perform(.loadHostName(LoadHostName()))
                     try? await old?.shutdown()
                 } catch {
                     guard !Task.isCancelled else { return }
@@ -233,13 +240,15 @@ final class BexAppViewModel: ObservableObject {
                 do { result = try await .success(receipt.wait()) } catch { result = .failure(error) }
                 guard let self else { return }
                 operations[id] = nil
-                if selectedProfileId == host {
+                if selectedProfileId == host, store === owner {
                     publish(owner.snapshot())
                     if case let .failure(error) = result {
                         notice = snapshot.error() ?? error.localizedDescription
                     }
+                    completion(result)
+                } else {
+                    completion(.failure(CancellationError()))
                 }
-                completion(result)
             }
         } catch { completion(.failure(error)) }
     }
@@ -255,7 +264,7 @@ extension BexAppViewModel {
         notice = nil
         connection = Task { [weak self] in
             let started = ProcessInfo.processInfo.systemUptime
-            recordScene(UIApplication.shared.applicationState == .active ? 1 : 2)
+            self?.recordScene(UIApplication.shared.applicationState == .active ? 1 : 2)
             owner.recordConnectionEvent(phase: .uiConnectStart, value: afterForeground ? 1 : 0)
             do {
                 let identityStarted = ProcessInfo.processInfo.systemUptime
@@ -267,11 +276,10 @@ extension BexAppViewModel {
                 try await owner.resume(connection: Connection(ticket: profile.ticket,
                                                               identity: identity,
                                                               invitation: nil, useRelays: true))
-                guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
+                guard let self, selectedProfileId == profile.id, store === owner, !Task.isCancelled else { return }
                 let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1_000_000
                 owner.recordConnectionEvent(phase: .uiConnectReady, value: UInt64(elapsed))
                 publish(owner.snapshot())
-                perform(.loadHostName(LoadHostName()))
                 notice = snapshot.error()
                 isConnecting = false
             } catch {
@@ -279,7 +287,7 @@ extension BexAppViewModel {
                     phase: Task.isCancelled ? .uiConnectCancelled : .uiConnectFailed,
                     value: UInt64((ProcessInfo.processInfo.systemUptime - started) * 1_000_000)
                 )
-                guard self?.selectedProfileId == profile.id, !Task.isCancelled else { return }
+                guard self?.selectedProfileId == profile.id, self?.store === owner, !Task.isCancelled else { return }
                 self?.isConnecting = false
                 self?.notice = error.localizedDescription
             }
@@ -293,11 +301,10 @@ extension BexAppViewModel {
             while !Task.isCancelled {
                 do {
                     _ = try await owner.nextSnapshot(previous: previous)
-                    guard let self, selectedProfileId == host, !Task.isCancelled else { return }
+                    guard let self, selectedProfileId == host, store === owner, !Task.isCancelled else { return }
                     let latest = owner.snapshot()
                     publish(latest)
                     if previous.connected(), !latest.connected(), !isConnecting {
-                        // Retry a lost connection once, then wait for the next foreground activation.
                         connect()
                     }
                     previous = latest
@@ -307,6 +314,12 @@ extension BexAppViewModel {
     }
 
     private func publish(_ next: AgentCore.Snapshot) {
+        if !next.supersedes(previous: snapshot) {
+            return
+        }
+        if next === snapshot {
+            return
+        }
         if let name = next.hostName(),
            let index = profiles.firstIndex(where: { $0.id == selectedProfileId }),
            profiles[index].name != name {
@@ -316,54 +329,51 @@ extension BexAppViewModel {
         if snapshot.error() != next.error() {
             notice = next.error()
         }
-        let listChanged = !next.listUnchanged(other: snapshot)
-        if listChanged {
-            list = next.threadList()
-            if list != nil {
-                store?.recordConnectionEvent(phase: .listPublished, value: next.connected() ? 1 : 0)
-            }
-        }
-        if !next.modelsUnchanged(other: snapshot) {
-            models = next.models()
-        }
-        let changed = !next.conversationUnchanged(other: snapshot)
-        let source = next.conversationSource()
         snapshot = next
-        if changed {
-            projectConversation(source)
+        let key = next.currentDraftKey()
+        if key != composerKey {
+            draftEdits.reset(); composerKey = key
         }
+        if draftEdits.pending == nil {
+            composerText = next.draft().text
+            draftEdits.base = composerText
+        }
+        schedulePresentation()
         persistence?.cancel()
-        if listChanged {
-            // Completion badges can outlive the process; do not debounce their write.
-            persist()
-        } else {
-            persistence = Task { [weak self] in
-                do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
-                self?.persist()
-            }
+        persistence = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
+            self?.persist()
         }
     }
 
-    private func projectConversation(_ source: AgentCore.Thread?) {
-        if conversation?.id != source?.id() {
-            conversation = nil
-        }
-        pendingPresentation = ConversationPresentationInput(source: source, snapshot: snapshot, host: selectedProfileId)
-        guard presentationTask == nil else { return }
-        presentationTask = Task { [weak self] in
-            while let self, let input = pendingPresentation {
-                pendingPresentation = nil
-                let previous = conversation
-                let rendered = await Task.detached(priority: .userInitiated) {
-                    ConversationPresentation.project(input.source, snapshot: input.snapshot, previous: previous)
-                }.value
-                if selectedProfileId == input.host, snapshot.conversationUnchanged(other: input.snapshot) {
-                    conversation = rendered
+    private func schedulePresentation() {
+        if store == nil {
+            presentation?.cancel()
+            presentation = nil
+            conversation = snapshot.conversation()
+        } else if presentation == nil {
+            let expectedOwner = store
+            let expectedHost = selectedProfileId
+            presentation = Task { [weak self] in
+                guard let self else { return }
+                defer {
+                    if store === expectedOwner, selectedProfileId == expectedHost {
+                        presentation = nil
+                    }
                 }
-                // Coalesce updates off MainActor before publishing parsed, stably sized rows.
-                try? await Task.sleep(nanoseconds: 100_000_000)
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .milliseconds(16)) } catch { return }
+                    let latest = snapshot
+                    let view = await Task.detached(priority: .userInitiated) { latest.conversation() }.value
+                    guard !Task.isCancelled, store === expectedOwner, selectedProfileId == expectedHost else { return }
+                    if snapshot.selectedThreadId() == latest.selectedThreadId() {
+                        conversation = view
+                    }
+                    if snapshot === latest {
+                        return
+                    }
+                }
             }
-            self?.presentationTask = nil
         }
     }
 
@@ -371,7 +381,6 @@ extension BexAppViewModel {
         guard let id = selectedProfileId, let owner = store else { return }
         let current = owner.snapshot()
         let previous = persistenceWrite
-        // Serialize immutable snapshots off MainActor and commit writes in order.
         persistenceWrite = Task { [weak self] in
             await previous?.value
             do {

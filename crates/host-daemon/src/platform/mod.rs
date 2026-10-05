@@ -57,12 +57,17 @@ pub(crate) fn terminal_command() -> &'static [&'static str] {
 
 /// Atomically replace owner-only JSON state and flush its contents before rename.
 pub fn save_private_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    save_private_bytes(path, &serde_json::to_vec(value)?)
+}
+
+pub fn save_private_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
     let parent = path.parent().context("state path has no parent")?;
     create_state_directory(parent)?;
     atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
         .write_with_options(
             |file| {
-                serde_json::to_writer(&mut *file, value)?;
+                file.write_all(bytes)?;
                 file.sync_all()
             },
             private_file_options(),

@@ -1,5 +1,5 @@
 //! Editing provider-owned user defaults, never per-turn overrides.
-use crate::session::ProviderKind;
+use crate::provider::ProviderKind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

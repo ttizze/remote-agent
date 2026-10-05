@@ -1,3 +1,5 @@
+import com.ncorti.ktfmt.gradle.tasks.KtfmtCheckTask
+import com.ncorti.ktfmt.gradle.tasks.KtfmtFormatTask
 import org.gradle.api.tasks.Exec
 
 plugins {
@@ -13,6 +15,22 @@ ktfmt {
     maxWidth.set(120)
 }
 
+// AGP's built-in Kotlin source set is not discovered by ktfmt-gradle.
+val ktfmtFormatNative by
+    tasks.registering(KtfmtFormatTask::class) {
+        source = fileTree("src")
+        include("**/*.kt")
+    }
+val ktfmtCheckNative by
+    tasks.registering(KtfmtCheckTask::class) {
+        source = fileTree("src")
+        include("**/*.kt")
+    }
+
+tasks.named("ktfmtFormat") { dependsOn(ktfmtFormatNative) }
+
+tasks.named("ktfmtCheck") { dependsOn(ktfmtCheckNative) }
+
 detekt {
     toolVersion = "1.23.8"
     buildUponDefaultConfig = true
@@ -26,11 +44,13 @@ val generateAgentBindings by
         workingDir(rootProject.projectDir)
         commandLine("scripts/build-agent-bindings.sh")
         inputs.file(rootProject.file("scripts/build-agent-bindings.sh"))
+        inputs.property("buildRevision", providers.environmentVariable("BEX_BUILD_REVISION").orElse("development"))
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
         inputs.dir(rootProject.file("crates/agent-ffi"))
         inputs.dir(rootProject.file("crates/agent-core"))
         inputs.dir(rootProject.file("crates/agent-protocol"))
         inputs.dir(rootProject.file("crates/agent-transport"))
+        inputs.dir(rootProject.file("crates/orchestration"))
         outputs.dir(rootProject.file("target/agent-bindings"))
     }
 val buildAgentAndroid by
@@ -50,11 +70,13 @@ val buildAgentAndroid by
             "agent-ffi",
             "--release",
         )
+        inputs.property("buildRevision", providers.environmentVariable("BEX_BUILD_REVISION").orElse("development"))
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
         inputs.dir(rootProject.file("crates/agent-ffi"))
         inputs.dir(rootProject.file("crates/agent-core"))
         inputs.dir(rootProject.file("crates/agent-protocol"))
         inputs.dir(rootProject.file("crates/agent-transport"))
+        inputs.dir(rootProject.file("crates/orchestration"))
         outputs.dir(layout.buildDirectory.dir("generated/jniLibs"))
     }
 
@@ -73,30 +95,44 @@ android {
         targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures { compose = true }
-    sourceSets.getByName("androidTest").assets.srcDir(rootProject.file("crates/agent-core/tests/fixtures/markdown"))
+    testOptions {
+        unitTests.all {
+            it.systemProperty("jna.library.path", rootProject.file("target/debug").absolutePath)
+            it.jvmArgs(
+                "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                // UniFFI uses Android SystemCleaner in Robolectric API 35.
+                "--add-exports=java.base/jdk.internal.ref=ALL-UNNAMED",
+                "--add-opens=java.base/java.util=ALL-UNNAMED",
+                "--add-opens=java.base/java.io=ALL-UNNAMED",
+                "--add-opens=java.base/java.net=ALL-UNNAMED",
+                "--add-opens=java.base/java.security=ALL-UNNAMED",
+                "--add-opens=java.base/java.text=ALL-UNNAMED",
+                "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
+                "--add-opens=java.desktop/java.awt.font=ALL-UNNAMED",
+                "--add-opens=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
+            )
+        }
+    }
     sourceSets.getByName("main") {
         kotlin.srcDir(rootProject.file("target/agent-bindings/dev"))
+        res.srcDir("native-res")
         jniLibs.srcDir(layout.buildDirectory.dir("generated/jniLibs").get().asFile)
     }
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
+    // JVM tests require the host JNA dispatcher; the app keeps the Android AAR.
+    testImplementation("net.java.dev.jna:jna:5.19.1")
+    testImplementation("org.robolectric:robolectric:4.17")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     implementation(project(":terminal-native"))
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4:1.11.2")
-    debugImplementation("androidx.compose.ui:ui-test-manifest:1.11.2")
-    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
-    androidTestImplementation("androidx.test:runner:1.7.0")
-    androidTestImplementation("androidx.test.ext:junit:1.3.0")
-    // Compose UI tests pull an older Espresso that calls InputManager.getInstance,
-    // which Android 17 removed; pin the version that supports it.
-    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     implementation("net.java.dev.jna:jna:5.19.1@aar")

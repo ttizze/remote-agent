@@ -17,7 +17,6 @@ process-wrap = { version = "10", features = ["tokio1"] }
 serde.workspace = true
 tokio = { workspace = true, features = ["net"] }
 plist = "1.10"
-roxmltree = "0.21"
 sha2 = "0.10"
 nix = { version = "0.31", features = ["signal", "process", "term", "poll"] }
 

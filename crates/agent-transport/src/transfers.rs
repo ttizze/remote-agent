@@ -34,6 +34,43 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<S>>,
 {
+    upload_with_purpose(peer, open_stream, source, directory, file_name, None).await
+}
+pub async fn upload_attachment<S, F, Fut>(
+    peer: &Client,
+    open_stream: F,
+    source: &Path,
+    name: &str,
+    mime: &str,
+) -> Result<crate::models::UploadedFile, TransferError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+{
+    upload_with_purpose(
+        peer,
+        open_stream,
+        source,
+        Path::new(""),
+        name,
+        Some(mime.to_ascii_lowercase()),
+    )
+    .await
+}
+async fn upload_with_purpose<S, F, Fut>(
+    peer: &Client,
+    open_stream: F,
+    source: &Path,
+    directory: &Path,
+    file_name: &str,
+    attachment_mime_type: Option<String>,
+) -> Result<crate::models::UploadedFile, TransferError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+{
     let mut file = tokio::fs::File::open(source).await?;
     if !file.metadata().await?.is_file() {
         return Err(TransferError::Protocol(
@@ -59,6 +96,7 @@ where
     let grant = peer
         .request::<TransferGrant>(&crate::protocol::Call::Upload(
             agent_protocol::operations::Upload {
+                attachment_mime_type,
                 directory: directory
                     .to_str()
                     .ok_or_else(|| TransferError::Protocol("directory is not UTF-8".into()))?
@@ -142,20 +180,6 @@ where
     Ok(())
 }
 
-pub async fn download_bytes<S, F, Fut>(
-    grant: TransferGrant,
-    open_stream: F,
-) -> Result<Vec<u8>, TransferError>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = std::io::Result<S>>,
-{
-    let mut bytes = Vec::new();
-    receive_download(grant, open_stream().await?, &mut bytes).await?;
-    Ok(bytes)
-}
-
 async fn receive_download<S, W>(
     grant: TransferGrant,
     mut stream: S,
@@ -185,29 +209,4 @@ where
         ));
     }
     Ok(())
-}
-
-pub async fn resolve_item(
-    mut response: agent_protocol::operations::ItemResponse,
-    session: Option<&crate::transport::Session>,
-) -> Result<agent_protocol::operations::ItemResponse, PeerError> {
-    if let Some(grant) = response.transfer.take() {
-        let session = session.ok_or_else(|| {
-            PeerError::InvalidMessage("item transfer requires an iroh session".into())
-        })?;
-        let bytes = crate::transfers::download_bytes(grant, || async {
-            session.open_stream().await.map_err(std::io::Error::other)
-        })
-        .await
-        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-        let item: crate::models::Item = crate::protocol::decode(&bytes)
-            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-        if item.id != response.item.id {
-            return Err(PeerError::InvalidMessage(
-                "transferred item ID does not match".into(),
-            ));
-        }
-        response.item = item;
-    }
-    Ok(response)
 }

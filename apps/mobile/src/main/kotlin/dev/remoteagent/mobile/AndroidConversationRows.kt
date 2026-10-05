@@ -1,14 +1,17 @@
 package dev.remoteagent.mobile
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -16,180 +19,129 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
-import dev.remoteagent.core.AgentException
-import dev.remoteagent.core.Answer
-import dev.remoteagent.core.Choice
-import dev.remoteagent.core.ElicitationAnswer
-import dev.remoteagent.core.ElicitationInput
-import dev.remoteagent.core.Question
-import dev.remoteagent.core.Request
-import dev.remoteagent.core.RequestBody
-import dev.remoteagent.core.buildQuestionAnswer
-import dev.remoteagent.core.requestAnswerFromJson
-import dev.remoteagent.core.requestInputDefault
+import dev.remoteagent.core.Intent
+import dev.remoteagent.core.QuestionAnswer
+import dev.remoteagent.core.TimelineRow
+import dev.remoteagent.core.questionAnswerValues
+import dev.remoteagent.core.questionError
+import dev.remoteagent.core.questionOptionSelected
 
 @Composable
-internal fun RequestCard(request: Request, submit: (Answer, (String?) -> Unit) -> Unit) {
-    var busy by remember(request.id) { mutableStateOf(false) }
-    var error by remember(request.id) { mutableStateOf<String?>(null) }
-    fun respond(answer: Answer) {
-        busy = true
-        submit(answer) {
-            busy = false
-            error = it
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
+internal fun RequestCard(model: AndroidAppModel, row: TimelineRow) {
+    var selected by remember(row.id) { mutableStateOf(emptyMap<String, Set<String>>()) }
+    var custom by remember(row.id) { mutableStateOf(emptyMap<String, String>()) }
+    val answers =
+        row.questions.map { question ->
+            val text = custom[question.id].orEmpty()
+            val values = questionAnswerValues(selected[question.id].orEmpty().sorted(), text, question.multiSelect)
+            QuestionAnswer(question.id, values)
         }
-    }
-    val disabled = busy || !request.canRespond
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(request.title, style = MaterialTheme.typography.labelLarge)
-            Text(request.body)
-            if (request.details.isNotEmpty()) Text(request.details, style = MaterialTheme.typography.bodySmall)
-            when (val body = request.requestBody) {
-                is RequestBody.Approval -> ChoiceButtons(body.choices, false, disabled, ::respond)
-                is RequestBody.Permission -> ChoiceButtons(body.choices, true, disabled, ::respond)
-                is RequestBody.Question -> QuestionAnswers(request.id, body.questions, disabled, ::respond)
-                is RequestBody.Elicitation -> {
-                    ElicitationDescription(body.input, !disabled)
-                    StructuredAnswer(request, disabled, ::respond) { error = it }
-                    Row {
-                        TextButton(
-                            onClick = { respond(Answer.Elicitation(ElicitationAnswer.Decline)) },
-                            enabled = !disabled,
-                        ) {
-                            Text("辞退")
-                        }
-                        TextButton(
-                            onClick = { respond(Answer.Elicitation(ElicitationAnswer.Cancel)) },
-                            enabled = !disabled,
-                        ) {
-                            Text("キャンセル")
-                        }
+    Surface(
+        color = T3.color("mobileGroupedCard"),
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, T3.color("border")),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(row.title, style = MaterialTheme.typography.titleSmall)
+            if (row.text.isNotEmpty())
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(row.text, style = MaterialTheme.typography.bodyMedium)
+                }
+            row.requestId?.let { request ->
+                row.choices.forEach { choice ->
+                    choice.warning?.let {
+                        Text(it, color = T3.color("warningForeground"), style = MaterialTheme.typography.bodySmall)
+                    }
+                    OutlinedButton(
+                        onClick = { model.perform(Intent.RespondApproval(request, choice.decision)) },
+                        enabled = row.actionable,
+                    ) {
+                        Text(choice.label)
                     }
                 }
-                is RequestBody.ToolExecution -> StructuredAnswer(request, disabled, ::respond) { error = it }
-            }
-            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        }
-    }
-}
-
-@Composable
-private fun ElicitationDescription(input: ElicitationInput, enabled: Boolean) {
-    when (input) {
-        is ElicitationInput.Url -> {
-            val context = androidx.compose.ui.platform.LocalContext.current
-            TextButton(
-                onClick = {
-                    context.startActivity(
-                        android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(input.url))
-                    )
-                },
-                enabled = enabled,
-            ) {
-                Text("リンクを開く")
-            }
-        }
-        is ElicitationInput.Form ->
-            input.fields.forEach { field ->
-                Text("${field.title} (${field.name})${if (field.required) " *" else ""}")
-                if (field.description.isNotEmpty()) Text(field.description)
-            }
-    }
-}
-
-@Composable
-private fun ChoiceButtons(choices: List<Choice>, permission: Boolean, disabled: Boolean, respond: (Answer) -> Unit) {
-    choices.forEach { choice ->
-        Button(
-            onClick = { respond(if (permission) Answer.Permission(choice.id) else Answer.Approval(choice.id)) },
-            enabled = !disabled,
-        ) {
-            Text(choice.label)
-        }
-        if (choice.description.isNotEmpty()) Text(choice.description)
-    }
-}
-
-@Composable
-private fun QuestionAnswers(key: String, questions: List<Question>, disabled: Boolean, respond: (Answer) -> Unit) {
-    var answers by remember(key) { mutableStateOf(emptyMap<String, String>()) }
-    var selections by remember(key) { mutableStateOf(emptyMap<String, List<String>>()) }
-    questions.forEach { question ->
-        val id = question.id
-        Text(question.prompt)
-        question.choices.forEach { choice ->
-            val selected = selections[id].orEmpty()
-            TextButton(
-                onClick = {
-                    selections =
-                        selections +
-                            (id to
-                                if (question.multiple) {
-                                    if (choice.id in selected) selected - choice.id else selected + choice.id
-                                } else listOf(choice.id))
-                    answers = answers + (id to "")
-                },
-                enabled = !disabled,
-            ) {
-                Text("${if (choice.id in selected) "✓ " else ""}${choice.label}")
-            }
-            if (choice.description.isNotEmpty()) Text(choice.description)
-        }
-        if (question.allowFreeText)
-            OutlinedTextField(
-                answers[id].orEmpty(),
-                { answers = answers + (id to it) },
-                enabled = !disabled,
-                visualTransformation =
-                    if (question.secret) PasswordVisualTransformation() else VisualTransformation.None,
-            )
-    }
-    Button(
-        onClick = {
-            respond(
-                Answer.Questions(
-                    questions.associate { question ->
-                        question.id to
-                            buildQuestionAnswer(
-                                question.multiple,
-                                answers[question.id].orEmpty(),
-                                selections[question.id].orEmpty(),
+                row.questions.forEach { question ->
+                    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                        Text(question.header, style = MaterialTheme.typography.labelLarge)
+                        Text(question.question, style = MaterialTheme.typography.bodyMedium)
+                        question.options.forEach { option ->
+                            OutlinedButton(
+                                onClick = {
+                                    val old = selected[question.id].orEmpty()
+                                    selected =
+                                        selected +
+                                            (question.id to
+                                                if (question.multiSelect) {
+                                                    if (option.value in old) old - option.value else old + option.value
+                                                } else setOf(option.value))
+                                    if (!question.multiSelect) custom = custom - question.id
+                                },
+                                enabled = row.actionable,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.Top,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Text(
+                                        if (
+                                            questionOptionSelected(
+                                                selected[question.id].orEmpty().toList(),
+                                                custom[question.id].orEmpty(),
+                                                question.multiSelect,
+                                                option.value,
+                                            )
+                                        )
+                                            "●"
+                                        else "○"
+                                    )
+                                    Column {
+                                        Text(option.label, style = MaterialTheme.typography.bodyMedium)
+                                        if (option.description.isNotEmpty())
+                                            Text(
+                                                option.description,
+                                                color = T3.color("textMuted"),
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
+                                    }
+                                }
+                            }
+                        }
+                        if (question.allowCustomAnswer || question.options.isEmpty())
+                            OutlinedTextField(
+                                custom[question.id].orEmpty(),
+                                { custom = custom + (question.id to it) },
+                                Modifier.fillMaxWidth(),
+                                enabled = row.actionable,
+                                placeholder = { Text("Your answer") },
                             )
                     }
-                )
-            )
-        },
-        enabled = !disabled,
-    ) {
-        Text("回答を送信")
-    }
-}
-
-@Composable
-private fun StructuredAnswer(
-    request: Request,
-    disabled: Boolean,
-    respond: (Answer) -> Unit,
-    onError: (String?) -> Unit,
-) {
-    var text by remember(request.id) { mutableStateOf(requestInputDefault(request.requestBody)) }
-    val urlConfirmation = (request.requestBody as? RequestBody.Elicitation)?.input is ElicitationInput.Url
-    if (!urlConfirmation) OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth(), enabled = !disabled)
-    Button(
-        onClick = {
-            try {
-                respond(requestAnswerFromJson(request.requestBody, text))
-            } catch (failure: AgentException) {
-                onError(failure.message)
-            }
-        },
-        enabled = !disabled,
-    ) {
-        Text(if (urlConfirmation) "確認して送信" else "回答を送信")
+                }
+                if (row.responseModeMessage) {
+                    Text(
+                        "Reply in the composer",
+                        color = T3.color("textMuted"),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    TextButton(onClick = { model.perform(Intent.DismissInput(request)) }, enabled = row.actionable) {
+                        Text("Dismiss without answering")
+                    }
+                } else if (row.questions.isNotEmpty()) {
+                    val error = questionError(row.questions, answers)
+                    Button(
+                        onClick = { model.perform(Intent.RespondQuestions(request, answers)) },
+                        enabled = row.actionable && error == null,
+                    ) {
+                        Text("Submit answers")
+                    }
+                    error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = T3.color("textMuted")) }
+                }
+            } ?: Text(row.status, style = MaterialTheme.typography.bodySmall, color = T3.color("textMuted"))
+        }
     }
 }

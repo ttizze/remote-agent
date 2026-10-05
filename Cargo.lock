@@ -134,32 +134,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-cli"
-version = "0.1.0"
-dependencies = [
- "agent-core",
- "agent-protocol",
- "agent-transport",
- "anyhow",
- "clap",
- "serde_json",
- "tempfile",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "agent-core"
 version = "0.1.0"
 dependencies = [
  "agent-protocol",
  "agent-transport",
- "base64 0.23.1",
- "futures-util",
  "insta",
  "markdown",
+ "orchestration",
  "proptest",
- "ring",
  "rstest",
  "scopeguard",
  "serde",
@@ -167,11 +150,21 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "tokio-stream",
  "tokio-util",
  "uniffi",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "agent-domain"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -187,7 +180,7 @@ name = "agent-protocol"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
- "chrono",
+ "orchestration",
  "postcard",
  "proptest",
  "serde",
@@ -195,6 +188,19 @@ dependencies = [
  "thiserror 2.0.20",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "agent-providers"
+version = "0.1.0"
+dependencies = [
+ "agent-domain",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -447,12 +453,6 @@ checksum = "516b6b4f0e40d50dcda9365d53964ec74560ad4284da2e7fc97122cd83174516"
 dependencies = [
  "stable_deref_trait",
 ]
-
-[[package]]
-name = "ascii"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
 
 [[package]]
 name = "ash"
@@ -1045,6 +1045,7 @@ dependencies = [
  "objc2-av-foundation",
  "objc2-foundation 0.3.2",
  "objc2-web-kit",
+ "orchestration",
  "pbkdf2",
  "proptest",
  "qrcode",
@@ -1521,12 +1522,6 @@ dependencies = [
  "wasm-bindgen",
  "windows-link 0.2.1",
 ]
-
-[[package]]
-name = "chunked_transfer"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
 
 [[package]]
 name = "cipher"
@@ -4666,7 +4661,6 @@ dependencies = [
 name = "host-daemon"
 version = "0.1.0"
 dependencies = [
- "agent-core",
  "agent-protocol",
  "agent-transport",
  "alacritty_terminal",
@@ -4683,7 +4677,9 @@ dependencies = [
  "dunce",
  "futures-io",
  "futures-util",
+ "orchestration",
  "proptest",
+ "provider-adapters",
  "reqwest",
  "ring",
  "rustls",
@@ -4696,34 +4692,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "host-fixture"
-version = "0.1.0"
-dependencies = [
- "agent-core",
- "agent-protocol",
- "agent-transport",
- "anyhow",
- "base64 0.23.1",
- "codex-app-server",
- "dunce",
- "host-daemon",
- "indexmap",
- "iroh",
- "iroh-tickets",
- "png 0.18.1",
- "reqwest",
- "rustix 1.1.4",
- "rustls",
- "serde",
- "serde_json",
- "tempfile",
- "tiny_http",
- "tokio",
- "tokio-util",
  "zeroize",
 ]
 
@@ -7461,6 +7429,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "orchestration"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "postcard",
+ "proptest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ordered-float"
 version = "5.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8211,6 +8197,26 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "provider-adapters"
+version = "0.1.0"
+dependencies = [
+ "agent-transport",
+ "base64 0.22.1",
+ "bex-process",
+ "codex-app-server",
+ "orchestration",
+ "proptest",
+ "scopeguard",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -10497,18 +10503,6 @@ dependencies = [
  "arrayref",
  "bytemuck",
  "strict-num",
-]
-
-[[package]]
-name = "tiny_http"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "389915df6413a2e74fb181895f933386023c71110878cd0825588928e64cdc82"
-dependencies = [
- "ascii",
- "chunked_transfer",
- "httpdate",
- "log",
 ]
 
 [[package]]
@@ -13245,7 +13239,6 @@ dependencies = [
  "plist",
  "process-wrap",
  "proptest",
- "roxmltree 0.21.1",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -1,10 +1,6 @@
-//! ABI converters for wire records; the protocol crate has no UniFFI dependency.
-
-use crate::{models::*, session::*};
-use agent_protocol::permissions::*;
-use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
-use serde_json::Value;
-use std::collections::BTreeMap;
+//! ABI converters for retained peripheral wire records.
+use crate::{models::*, provider::ProviderKind};
+use agent_protocol::{browser::*, diagnostics::*, operations::*};
 #[uniffi::remote(Enum)]
 enum WorktreeStatus {
     Unmerged,
@@ -55,13 +51,6 @@ struct ReasoningEffort {
     pub reasoning_effort: String,
 }
 #[uniffi::remote(Record)]
-struct ListQuery {
-    pub project_limit: u32,
-    pub chat_limit: u32,
-    pub project_thread_limits: BTreeMap<String, u32>,
-    pub search_term: String,
-}
-#[uniffi::remote(Record)]
 struct FileList {
     pub path: String,
     pub entries: Vec<FileEntry>,
@@ -99,7 +88,7 @@ struct Worktree {
 }
 #[uniffi::remote(Record)]
 struct WorktreeThread {
-    pub id: SessionRef,
+    pub id: orchestration::ThreadId,
     pub name: String,
     pub active: bool,
 }
@@ -109,13 +98,8 @@ enum ProviderKind {
     Claude,
 }
 #[uniffi::remote(Record)]
-struct SessionRef {
-    pub provider: ProviderKind,
-    pub id: String,
-}
-#[uniffi::remote(Record)]
 struct BrowserRequest {
-    pub thread_id: SessionRef,
+    pub thread_id: orchestration::ThreadId,
     pub tab_id: String,
     pub image_id: String,
     pub action: BrowserAction,
@@ -186,23 +170,6 @@ struct BrowserFrame {
     pub image: Vec<u8>,
     pub image_id: String,
     pub dialog: Option<BrowserDialog>,
-}
-#[uniffi::remote(Enum)]
-enum InvocationKind {
-    Plugin,
-    Skill,
-}
-#[uniffi::remote(Record)]
-struct Invocation {
-    pub provider: ProviderKind,
-    pub kind: InvocationKind,
-    pub name: String,
-    pub path: String,
-}
-#[uniffi::remote(Record)]
-struct ComposerCandidate {
-    pub invocation: Invocation,
-    pub description: String,
 }
 #[uniffi::remote(Enum)]
 enum ConnectionPhase {
@@ -281,7 +248,7 @@ enum ConnectionPhase {
 #[uniffi::remote(Record)]
 struct Account {
     pub id: String,
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
     pub email: Option<String>,
     pub plan_type: Option<String>,
     pub usage: Option<AccountUsage>,
@@ -305,16 +272,6 @@ struct Accounts {
     pub error: Option<String>,
 }
 #[uniffi::remote(Record)]
-struct StartAccountLogin {
-    pub provider: crate::session::ProviderKind,
-}
-#[uniffi::remote(Record)]
-struct SubmitAccountLogin {
-    pub provider: ProviderKind,
-    pub id: String,
-    pub code: String,
-}
-#[uniffi::remote(Record)]
 struct AccountLogin {
     pub provider: ProviderKind,
     pub login_id: String,
@@ -322,271 +279,8 @@ struct AccountLogin {
     pub user_code: String,
     pub verification_url: String,
 }
-#[uniffi::remote(Enum)]
-enum RequestBody {
-    Approval {
-        kind: ApprovalKind,
-        description: String,
-        details: String,
-        choices: Vec<Choice>,
-    },
-    Permission {
-        description: String,
-        details: String,
-        choices: Vec<Choice>,
-    },
-    Question {
-        questions: Vec<Question>,
-    },
-    Elicitation {
-        server: String,
-        message: String,
-        input: ElicitationInput,
-    },
-    ToolExecution {
-        tool: String,
-        namespace: Option<String>,
-        arguments: Value,
-    },
-}
-
-#[uniffi::remote(Enum)]
-enum ApprovalKind {
-    Command,
-    FileChange,
-    Tool,
-}
-
-#[uniffi::remote(Record)]
-struct Choice {
-    pub id: String,
-    pub label: String,
-    pub description: String,
-}
-
-#[uniffi::remote(Record)]
-struct Question {
-    pub id: String,
-    pub header: String,
-    pub prompt: String,
-    pub secret: bool,
-    pub allow_free_text: bool,
-    pub multiple: bool,
-    pub choices: Vec<QuestionChoice>,
-}
-
-#[uniffi::remote(Record)]
-struct QuestionChoice {
-    pub id: String,
-    pub label: String,
-    pub description: String,
-}
-
-#[uniffi::remote(Enum)]
-enum ElicitationInput {
-    Form { fields: Vec<FormField> },
-    Url { url: String },
-}
-
-#[uniffi::remote(Record)]
-struct FormField {
-    pub name: String,
-    pub title: String,
-    pub description: String,
-    pub required: bool,
-    pub input: FormInput,
-}
-
-#[uniffi::remote(Enum)]
-enum FormInput {
-    String {
-        min_length: Option<u64>,
-        max_length: Option<u64>,
-        format: Option<StringFormat>,
-        default: Option<String>,
-    },
-    Number {
-        integer: bool,
-        minimum: Option<f64>,
-        maximum: Option<f64>,
-        default: Option<f64>,
-    },
-    Boolean {
-        default: Option<bool>,
-    },
-    Choice {
-        choices: Vec<FormChoice>,
-        default: Option<String>,
-    },
-    Multiple {
-        choices: Vec<FormChoice>,
-        min_items: Option<u64>,
-        max_items: Option<u64>,
-        default: Vec<String>,
-    },
-}
-
-#[uniffi::remote(Enum)]
-enum StringFormat {
-    Email,
-    Uri,
-    Date,
-    DateTime,
-}
-
-#[uniffi::remote(Record)]
-struct FormChoice {
-    pub value: String,
-    pub title: String,
-}
-
-#[uniffi::remote(Enum)]
-enum Answer {
-    Approval {
-        choice_id: String,
-    },
-    Permission {
-        choice_id: String,
-    },
-    Questions {
-        answers: std::collections::BTreeMap<String, QuestionAnswer>,
-    },
-    Elicitation {
-        action: ElicitationAnswer,
-    },
-    ToolExecution {
-        success: bool,
-        content: Vec<ToolContent>,
-    },
-}
-
-#[uniffi::remote(Enum)]
-enum QuestionAnswer {
-    FreeText { text: String },
-    SingleChoice { choice_id: String },
-    MultipleChoices { choice_ids: Vec<String> },
-}
-
-#[uniffi::remote(Enum)]
-enum ElicitationAnswer {
-    Accept { values: Value },
-    Decline,
-    Cancel,
-}
-
-#[uniffi::remote(Enum)]
-enum ToolContent {
-    Text { text: String },
-    Image { data_url: String },
-}
 #[uniffi::remote(Record)]
 struct TerminalSize {
     pub cols: u16,
     pub rows: u16,
-}
-#[uniffi::remote(Record)]
-struct AddProject {
-    pub cwd: String,
-}
-#[uniffi::remote(Record)]
-struct ListSessions {
-    pub query: crate::models::ListQuery,
-}
-#[uniffi::remote(Record)]
-struct ReadItem {
-    pub thread_id: SessionRef,
-    pub turn_id: agent_protocol::ids::TurnId,
-    pub item_id: agent_protocol::ids::ItemId,
-}
-#[uniffi::remote(Record)]
-struct OpenRequest {
-    pub request_id: agent_protocol::ids::RequestId,
-}
-#[uniffi::remote(Record)]
-struct StartTerminal {
-    pub handle: String,
-    pub cwd: String,
-    pub size: TerminalSize,
-}
-#[uniffi::remote(Record)]
-struct ReviewWorkspace {
-    pub cwd: String,
-}
-#[uniffi::remote(Record)]
-struct RemoveWorktree {
-    pub path: String,
-}
-#[uniffi::remote(Record)]
-struct SelectAccount {
-    pub provider: ProviderKind,
-    pub id: String,
-}
-#[uniffi::remote(Record)]
-struct LogoutAccount {
-    pub provider: ProviderKind,
-    pub id: String,
-}
-#[uniffi::remote(Record)]
-struct CancelAccountLogin {
-    pub provider: ProviderKind,
-    pub id: String,
-}
-#[uniffi::remote(Record)]
-struct LoadVisualization {
-    pub path: String,
-    pub cwd: String,
-}
-#[uniffi::remote(Record)]
-struct ForkSession {
-    pub thread_id: SessionRef,
-    pub last_turn_id: agent_protocol::ids::TurnId,
-}
-#[uniffi::remote(Record)]
-struct CreateSession {
-    pub provider: ProviderKind,
-    pub cwd: Option<String>,
-    pub model: Option<crate::models::ModelRef>,
-}
-#[uniffi::remote(Record)]
-struct Interrupt {
-    pub thread_id: SessionRef,
-    pub turn_id: agent_protocol::ids::TurnId,
-}
-#[uniffi::remote(Record)]
-struct ListFiles {
-    pub path: String,
-}
-#[uniffi::remote(Record)]
-struct ResizeTerminal {
-    pub handle: String,
-    pub size: TerminalSize,
-}
-#[uniffi::remote(Record)]
-struct DetachTerminal {
-    pub handle: String,
-}
-#[uniffi::remote(Record)]
-struct RemoveRemoteHost {
-    pub id: String,
-}
-#[uniffi::remote(Record)]
-struct RevokeDevice {
-    pub id: String,
-}
-
-#[uniffi::remote(Enum)]
-enum PermissionMode {
-    Ask,
-    Auto,
-    FullAccess,
-}
-#[uniffi::remote(Record)]
-struct ReadPermissionSettings {
-    pub provider: ProviderKind,
-}
-#[uniffi::remote(Record)]
-struct UpdatePermissionSettings {
-    pub provider: ProviderKind,
-    pub mode: PermissionMode,
-    pub version: String,
 }

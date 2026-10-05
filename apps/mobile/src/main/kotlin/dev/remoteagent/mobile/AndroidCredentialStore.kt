@@ -88,6 +88,12 @@ internal class AndroidCredentialStore(context: Context, reference: String) {
             input.readBytes().also { require(it.size <= MaximumEncryptedBytes) { "Unreadable device identity" } }
         }
 
+    @Synchronized
+    fun remove() {
+        encryptedFile.delete()
+        KeyStore.getInstance(AndroidKeyStore).apply { load(null) }.deleteEntry(keyStoreAlias)
+    }
+
     private companion object {
         const val HEADER_BYTES = 2
         const val MIN_IV_BYTES = 12

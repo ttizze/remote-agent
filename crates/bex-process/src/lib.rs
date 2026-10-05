@@ -33,8 +33,12 @@ fn supervisor_command() -> io::Result<Command> {
     // Do not kill the supervisor on drop: closing its input lets it terminate
     // and reap the entire provider process group first.
     command.kill_on_drop(false);
+    #[cfg(unix)]
+    command.process_group(0);
     Ok(command)
 }
+/// Separate unsolicited query acknowledgements from user operations and resizes.
+pub const TERMINAL_QUERY_REPLY_ID: u64 = u64::MAX;
 
 /// On Windows the Host owns a Job Object for the supervisor and all PTY
 /// descendants. Unix cleanup is performed by the supervisor on lifetime EOF.

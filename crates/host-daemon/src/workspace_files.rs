@@ -28,10 +28,7 @@ use crate::SessionId;
 const EDIT_LIMIT: u64 = 1024 * 1024;
 pub(crate) const TRANSFER_LIMIT: u64 = 512 * 1024 * 1024;
 const GRANT_LIFETIME: Duration = Duration::from_secs(120);
-
-#[cfg(test)]
-#[path = "workspace_files/item_read_tests.rs"]
-mod item_read_tests;
+mod attachments;
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceFiles {
@@ -39,6 +36,7 @@ pub(crate) struct WorkspaceFiles {
     // Serialize our compare-and-replace writes across all authenticated peers.
     writes: Arc<Mutex<()>>,
     grants: Arc<Mutex<HashMap<[u8; 32], Grant>>>,
+    pending_sweep: Arc<Mutex<Option<Instant>>>,
 }
 
 struct Grant {
@@ -53,6 +51,7 @@ enum GrantFile {
     Upload {
         directory: PathBuf,
         file_name: String,
+        attachment_mime_type: Option<String>,
     },
     Download(File),
 }
@@ -63,7 +62,35 @@ impl WorkspaceFiles {
             upload_directory: upload_directory.into(),
             writes: Default::default(),
             grants: Default::default(),
+            pending_sweep: Default::default(),
         }
+    }
+
+    pub(crate) fn thread_attachment_directory(&self, thread_id: &str) -> PathBuf {
+        self.upload_directory
+            .join("chat")
+            .join(hash(thread_id.as_bytes()))
+    }
+
+    pub(crate) async fn cleanup_thread_attachments(&self, thread_id: &str) -> Result<()> {
+        let files = self.clone();
+        let thread_id = thread_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _lock = files.writes.lock().unwrap_or_else(|e| e.into_inner());
+            let parent = files.upload_directory.join("chat");
+            if parent.try_exists()? && fs::symlink_metadata(&parent)?.file_type().is_symlink() {
+                return Err(anyhow!("attachment storage must not be a symlink"));
+            }
+            let directory = files.thread_attachment_directory(&thread_id);
+            match fs::symlink_metadata(&directory) {
+                Ok(metadata) if metadata.file_type().is_symlink() => fs::remove_file(directory)?,
+                Ok(_) => fs::remove_dir_all(directory)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            Ok(())
+        })
+        .await?
     }
 
     pub(crate) async fn request(&self, session: SessionId, request: Call) -> Result<Body> {
@@ -76,36 +103,6 @@ impl WorkspaceFiles {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, grant| grant.session != session);
-    }
-
-    /// An anonymous transfer file is closed on consumption, expiry or disconnect.
-    /// It is never added to native history or the attachment directory.
-    pub(crate) async fn download_bytes(
-        &self,
-        session: SessionId,
-        bytes: Vec<u8>,
-    ) -> Result<TransferGrant> {
-        let files = self.clone();
-        tokio::task::spawn_blocking(move || {
-            use std::io::{Seek, SeekFrom};
-            if bytes.len() as u64 > TRANSFER_LIMIT {
-                return Err(anyhow!("transfer exceeds 512 MiB"));
-            }
-            let mut file = tempfile::tempfile()?;
-            file.write_all(&bytes)?;
-            file.seek(SeekFrom::Start(0))?;
-            files.grant(Grant {
-                session,
-                expires: Instant::now() + GRANT_LIFETIME,
-                file: GrantFile::Download(file),
-                size: bytes.len() as u64,
-                digest: digest::digest(&SHA256, &bytes)
-                    .as_ref()
-                    .try_into()
-                    .expect("SHA-256 length"),
-            })
-        })
-        .await?
     }
 
     fn dispatch(&self, session: SessionId, request: Call) -> Result<Body> {
@@ -227,12 +224,17 @@ impl WorkspaceFiles {
             Call::Upload(params) => {
                 // New chats have no workspace yet. Keep their attachments in
                 // Host-owned storage; explicit destinations remain absolute.
-                let directory = if params.directory.is_empty() {
+                let directory = if params.attachment_mime_type.is_some() {
+                    self.sweep_pending_attachments()?;
+                    let directory = self.upload_directory.join("pending");
+                    self.prepare_attachment_directory(&directory)?;
+                    directory
+                } else if params.directory.is_empty() {
                     let directory = absolute_path(&self.upload_directory)?;
                     crate::platform::create_state_directory(directory)?;
-                    directory
+                    directory.to_path_buf()
                 } else {
-                    absolute_path(&params.directory)?
+                    absolute_path(&params.directory)?.to_path_buf()
                 };
                 let directory = dunce::canonicalize(directory)?;
                 if !directory.is_dir() {
@@ -248,18 +250,30 @@ impl WorkspaceFiles {
                 {
                     return Err(anyhow!("invalid attachment display name"));
                 }
+                if let Some(mime) = &params.attachment_mime_type {
+                    Self::attachment_metadata(
+                        "pending:validation".into(),
+                        &params.file_name,
+                        mime,
+                        params.size,
+                    )?;
+                }
                 self.grant(Grant {
                     session,
                     expires: Instant::now() + GRANT_LIFETIME,
                     file: GrantFile::Upload {
                         directory,
                         file_name: params.file_name,
+                        attachment_mime_type: params.attachment_mime_type,
                     },
                     size: params.size,
                     digest: params.sha256,
                 })
                 .map(Body::from)
             }
+            Call::AttachmentPath(id) => self
+                .attachment_path(&id)
+                .map(|p| Body::from(p.to_string_lossy().into_owned())),
             Call::Download(params) => {
                 let path = absolute_path(&params.path)?;
                 let mut file = File::open(path)?;
@@ -330,6 +344,7 @@ impl WorkspaceFiles {
                 GrantFile::Upload {
                     directory,
                     file_name,
+                    attachment_mime_type,
                 } => {
                     let output = tempfile::NamedTempFile::new_in(&directory)?;
                     let async_file = output.reopen()?;
@@ -360,11 +375,34 @@ impl WorkspaceFiles {
                         .file_name()
                         .context("temporary upload path missing")?
                         .to_string_lossy();
-                    let path =
-                        directory.join(format!("{}-{}", random.trim_start_matches('.'), file_name));
+                    let token = uuid::Uuid::new_v4().simple().to_string();
+                    let path = if attachment_mime_type.is_some() {
+                        directory.join(&token)
+                    } else {
+                        directory.join(format!("{}-{}", random.trim_start_matches('.'), file_name))
+                    };
                     output.persist_noclobber(&path)?;
+                    let attachment = if let Some(mime) = attachment_mime_type {
+                        match self.save_attachment_upload(
+                            &path,
+                            format!("pending:{token}"),
+                            &file_name,
+                            &mime,
+                            grant.size,
+                            grant.digest,
+                        ) {
+                            Ok(attachment) => Some(attachment),
+                            Err(error) => {
+                                let _ = fs::remove_file(&path);
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let response =
                         agent_protocol::protocol::encode(agent_protocol::models::UploadedFile {
+                            attachment,
                             path: path.to_str().context("upload path is not UTF-8")?.into(),
                             size: grant.size,
                             sha256: grant.digest,
@@ -489,11 +527,7 @@ mod tests {
     fn visualization_archive_survives_file_service_recreation_and_rejects_invalid_sources() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("comparison.html");
-        fs::write(
-            &source,
-            include_str!("../../agent-core/tests/fixtures/visualize/icon-options.html"),
-        )
-        .unwrap();
+        fs::write(&source, include_str!("visualize/icon-options.html")).unwrap();
         let request = || {
             Call::ReadVisualization(agent_protocol::operations::LoadVisualization {
                 path: "comparison.html".into(),
@@ -521,6 +555,39 @@ mod tests {
         fs::remove_file(&source).unwrap();
         fs::create_dir(&source).unwrap();
         assert!(files.dispatch(2, request()).is_err());
+    }
+
+    #[tokio::test]
+    async fn attachment_cleanup_is_idempotent_and_keeps_other_thread_assets() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = WorkspaceFiles::new(directory.path().into());
+        let own = files.thread_attachment_directory("thread/../../outside");
+        let other = files.thread_attachment_directory("other");
+        for path in [&own, &other] {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("image.png"), b"image").unwrap();
+        }
+        files
+            .cleanup_thread_attachments("thread/../../outside")
+            .await
+            .unwrap();
+        files
+            .cleanup_thread_attachments("thread/../../outside")
+            .await
+            .unwrap();
+        assert!(!own.exists());
+        assert!(other.join("image.png").exists());
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            fs::write(outside.path().join("keep"), b"keep").unwrap();
+            std::os::unix::fs::symlink(outside.path(), &own).unwrap();
+            files
+                .cleanup_thread_attachments("thread/../../outside")
+                .await
+                .unwrap();
+            assert!(outside.path().join("keep").exists());
+        }
     }
 
     #[tokio::test]
@@ -602,6 +669,7 @@ mod tests {
                     .dispatch(
                         1,
                         Call::Upload(Upload {
+                            attachment_mime_type: None,
                             directory: directory.path().to_str().unwrap().into(),
                             file_name: "safe.txt".into(),
                             size: 5,
@@ -624,6 +692,7 @@ mod tests {
                     .dispatch(
                         1,
                         Call::Upload(Upload {
+                            attachment_mime_type: None,
                             directory: directory.path().to_str().unwrap().into(),
                             file_name: "../escape".into(),
                             size: 0,
@@ -635,6 +704,7 @@ mod tests {
             for path in ["relative", ".", ".."] {
                 assert!(matches!(
                     files.dispatch(1, Call::Upload(Upload {
+                            attachment_mime_type: None,
                         directory: path.into(),
                         file_name: "safe.txt".into(),
                         size: 0,

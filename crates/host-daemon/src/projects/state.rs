@@ -1,4 +1,4 @@
-use agent_protocol::models::{Project, ProjectMembership};
+use agent_protocol::models::Project;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -9,25 +9,8 @@ pub(crate) struct Snapshot {
     pub(crate) projects: Vec<Project>,
     pub(super) resolved_roots: HashMap<String, PathBuf>,
     pub(super) worktree_roots: HashMap<String, String>,
-    pub(super) chat_directory: Option<PathBuf>,
 }
 impl Snapshot {
-    pub(crate) fn project_membership(&self, cwd: Option<&str>) -> ProjectMembership {
-        let Some(cwd) = cwd else {
-            return ProjectMembership::Unknown {};
-        };
-        if self
-            .chat_directory
-            .as_deref()
-            .is_some_and(|directory| Path::new(cwd) == directory)
-        {
-            ProjectMembership::Unassigned {}
-        } else {
-            self.project_for_workspace(cwd)
-                .map(|id| ProjectMembership::Assigned(id.to_owned()))
-                .unwrap_or(ProjectMembership::Unassigned {})
-        }
-    }
     pub(crate) fn worktree_mapping(&self, workspace: &Path) -> Option<(&str, &str)> {
         self.worktree_roots
             .iter()
@@ -132,33 +115,6 @@ mod tests {
             Some("nested")
         );
     }
-    #[test]
-    fn membership_uses_host_roots_and_keeps_standalone_chats_unassigned() {
-        let mut snapshot = snapshot();
-        snapshot
-            .worktree_roots
-            .insert(fixture_path("/checkout"), fixture_path("/work/a"));
-        snapshot.chat_directory = Some(fixture_path("/work/a/chats").into());
-        for (cwd, expected) in [
-            ("/work/a/src", ProjectMembership::Assigned("a".into())),
-            (
-                "/checkout/packages/app",
-                ProjectMembership::Assigned("nested".into()),
-            ),
-            ("/work/a/chats", ProjectMembership::Unassigned {}),
-            ("/outside", ProjectMembership::Unassigned {}),
-        ] {
-            assert_eq!(
-                snapshot.project_membership(Some(&fixture_path(cwd))),
-                expected
-            );
-        }
-        assert_eq!(
-            snapshot.project_membership(None),
-            ProjectMembership::Unknown {}
-        );
-    }
-
     #[test]
     fn relative_roots_do_not_gain_project_membership() {
         let mut snapshot = snapshot();

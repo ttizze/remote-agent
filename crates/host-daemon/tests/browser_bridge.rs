@@ -44,7 +44,10 @@ async fn stdio_browser_tool_is_typed_and_does_not_expose_generic_execution() {
             )
             .await
             .unwrap();
-        let line = tokio::time::timeout(Duration::from_secs(5), output.read_line())
+        // Loading the Host executable from build storage can exceed five seconds
+        // on macOS before main runs. Keep subsequent IPC deadlines short.
+        let deadline = Duration::from_secs(if id == 1 { 30 } else { 5 });
+        let line = tokio::time::timeout(deadline, output.read_line())
             .await
             .unwrap()
             .unwrap()
@@ -80,7 +83,8 @@ async fn installed_codex_exposes_the_same_browser_as_the_phone() {
     let browser = host_daemon::browser::Browser::start(root.path().join("profile"))
         .await
         .unwrap();
-    let mut mcp = browser.provider_config("startup-scope").unwrap();
+    let session = orchestration::ThreadId::new("browser-test").unwrap();
+    let mut mcp = browser.provider_config(session.as_str()).unwrap();
     mcp["command"] = env!("CARGO_BIN_EXE_host-daemon").into();
     std::fs::create_dir_all(root.path().join("codex")).unwrap();
     let server = codex_app_server::CodexAppServer::spawn(codex_app_server::AppServerConfig {
@@ -102,13 +106,6 @@ async fn installed_codex_exposes_the_same_browser_as_the_phone() {
         .outcome
         .unwrap();
     let thread = started["thread"]["id"].as_str().unwrap();
-    let session = agent_protocol::session::SessionRef {
-        provider: agent_protocol::session::ProviderKind::Codex,
-        id: thread.into(),
-    };
-    browser
-        .bind_scope("startup-scope".into(), session.to_string())
-        .await;
     let mut found = false;
     for _ in 0..20 {
         let status = server
@@ -175,7 +172,7 @@ async fn cancelled_mcp_call_keeps_the_bridge_responsive() {
     let mut output = JsonlReader::new(child.stdout.take().unwrap());
     // Complete MCP initialization before timing bridge cancellation.
     input.write_line(&json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cancel-test","version":"1"}}}).to_string()).await.unwrap();
-    let initialized = tokio::time::timeout(Duration::from_secs(5), output.read_line())
+    let initialized = tokio::time::timeout(Duration::from_secs(30), output.read_line())
         .await
         .unwrap()
         .unwrap()

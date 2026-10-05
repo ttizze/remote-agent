@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,7 +54,7 @@ class MainActivity : ComponentActivity() {
                 val requestQrScan = rememberAndroidQrScanner(this)
                 RemoteAgentApp(activity = this, model = model, requestQrScan = requestQrScan)
             } else {
-                MaterialTheme {
+                T3Theme {
                     Column(Modifier.safeDrawingPadding().padding(24.dp)) {
                         Text("同じネットワークのPCへ接続するには、付近のデバイスへのアクセスを許可してください。")
                         Button(onClick = { requestNetwork.launch(Manifest.permission.ACCESS_LOCAL_NETWORK) }) {

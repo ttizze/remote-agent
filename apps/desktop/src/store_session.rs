@@ -73,7 +73,8 @@ impl StoreSession {
     ) {
         let (send, mut receive) = watch::channel(self.store.snapshot());
         let mut preferences =
-            agent_core::persistence::ModelPreferences::capture(&self.store.snapshot());
+            std::fs::read(path.with_file_name("orchestration-model-preferences.json"))
+                .unwrap_or_default();
         self.persistence = Some(send);
         self.persistence_task = Some(self.runtime.closing.spawn_on(
             async move {
@@ -82,19 +83,20 @@ impl StoreSession {
                     let snapshot = receive.borrow_and_update().clone();
                     let path = path.clone();
                     let next_preferences =
-                        agent_core::persistence::ModelPreferences::capture(&snapshot);
+                        agent_core::persistence::encode_model_preferences(&snapshot)
+                            .unwrap_or_default();
                     let preferences_changed = preferences != next_preferences;
                     let saved_preferences = next_preferences.clone();
                     let result = tokio::task::spawn_blocking(move || {
                         if preferences_changed {
-                            host_daemon::platform::save_private_json(
-                                &path.with_file_name("model-preferences.json"),
+                            host_daemon::platform::save_private_bytes(
+                                &path.with_file_name("orchestration-model-preferences.json"),
                                 &saved_preferences,
                             )?;
                         }
-                        host_daemon::platform::save_private_json(
+                        host_daemon::platform::save_private_bytes(
                             &path,
-                            &agent_core::persistence::PersistedState::capture(&snapshot),
+                            &agent_core::persistence::encode(&snapshot)?,
                         )
                     })
                     .await
@@ -185,18 +187,21 @@ mod tests {
             };
             session.persist(path.clone(), updates, |_| Update::Error);
             store
-                .dispatch(Intent::SelectDefaultEffort {
-                    scope: agent_core::state::ModelDefaultsScope::Environment { id: "vm".into() },
-                    effort: Some("high".into()),
+                .dispatch(Intent::SetRuntimeMode {
+                    mode: "auto".into(),
                 })
                 .await
+                .unwrap()
                 .unwrap();
+            let mut draft = store.snapshot().current_draft();
+            draft.text = "last edit before close".into();
             store
-                .dispatch(Intent::SetDraftText {
-                    thread_id: "draft".into(),
-                    text: "last edit before close".into(),
+                .dispatch(Intent::EditDraft {
+                    text: draft.text,
+                    base_text: None,
                 })
                 .await
+                .unwrap()
                 .unwrap();
             // No UI snapshot/save notification is needed for the final flush.
             drop(session);
@@ -205,18 +210,19 @@ mod tests {
             publish.await.unwrap();
             let restored: Snapshot =
                 agent_core::persistence::decode(&std::fs::read(path).unwrap()).unwrap();
-            assert_eq!(
-                restored.drafts[&agent_core::state::DraftKey::from("draft")].text,
-                "last edit before close"
-            );
-            assert!(store.dispatch(Intent::ShowThreadList).await.is_err());
-            let preferences =
-                std::fs::read(directory.path().join("model-preferences.json")).unwrap();
+            assert_eq!(restored.current_draft().text, "last edit before close");
+            assert!(store.dispatch(Intent::LeaveThread).await.unwrap().is_err());
+            let preferences = std::fs::read(
+                directory
+                    .path()
+                    .join("orchestration-model-preferences.json"),
+            )
+            .unwrap();
             let other = agent_core::persistence::decode(
                 &agent_core::persistence::apply_model_preferences(&[], &preferences).unwrap(),
             )
             .unwrap();
-            assert_eq!(other.scoped_model_defaults, restored.scoped_model_defaults);
+            assert_eq!(other.default_draft, restored.default_draft);
             assert!(other.drafts.is_empty());
         })
         .await
@@ -246,12 +252,15 @@ mod tests {
             session.save(store.snapshot());
             while !matches!(incoming.recv().await.unwrap(), Update::Error) {}
             std::fs::remove_dir(&path).unwrap();
+            let mut draft = store.snapshot().current_draft();
+            draft.text = "recovered".into();
             store
-                .dispatch(Intent::SetDraftText {
-                    thread_id: "draft".into(),
-                    text: "recovered".into(),
+                .dispatch(Intent::EditDraft {
+                    text: draft.text,
+                    base_text: None,
                 })
                 .await
+                .unwrap()
                 .unwrap();
             session.save(store.snapshot());
             drop(session);
@@ -260,10 +269,7 @@ mod tests {
             publish.await.unwrap();
             let restored: Snapshot =
                 agent_core::persistence::decode(&std::fs::read(path).unwrap()).unwrap();
-            assert_eq!(
-                restored.drafts[&agent_core::state::DraftKey::from("draft")].text,
-                "recovered"
-            );
+            assert_eq!(restored.current_draft().text, "recovered");
         })
         .await
         .expect("persistence recovery stalled");
@@ -292,7 +298,7 @@ mod tests {
             .await;
             runtime.closing.close();
             runtime.closing.wait().await;
-            assert!(store.dispatch(Intent::ShowThreadList).await.is_err());
+            assert!(store.dispatch(Intent::LeaveThread).await.unwrap().is_err());
         })
         .await
         .expect("undelivered session remained open");

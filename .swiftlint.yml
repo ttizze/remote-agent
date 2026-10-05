@@ -1,6 +1,5 @@
 included:
   - apps/mobile/iosApp/Bex
-  - apps/mobile/iosApp/BexUITests
 
 strict: true
 check_for_updates: false

@@ -1,21 +1,13 @@
 //! Bex's binary messages. A QUIC stream, rather than a request ID, owns each reply.
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::Value;
 use std::io;
 
-pub mod json_boundary;
 mod requests;
 pub use requests::{Call, contracts};
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Notification {
-    #[serde(rename = "host/session/activity")]
-    Activity {
-        session: crate::session::SessionRef,
-        active: bool,
-        finished: bool,
-    },
     #[serde(rename = "host/terminal/output")]
     Output {
         #[serde(rename = "processHandle")]
@@ -51,8 +43,6 @@ pub enum Notification {
         #[serde(rename = "processHandle")]
         handle: String,
     },
-    #[serde(rename = "host/session/renamed")]
-    SessionRenamed { session: crate::session::SessionRef },
 }
 
 pub fn encode(value: impl Serialize) -> io::Result<Vec<u8>> {
@@ -78,7 +68,6 @@ pub fn response_frame(response: Response) -> io::Result<Vec<u8>> {
             code: "response_too_large".into(),
             message: "RPC response exceeds the transfer limit".into(),
             delivery: crate::error::Delivery::Unknown,
-            execution: None,
         },
     })
 }
@@ -92,15 +81,16 @@ macro_rules! results {
     }
 }
 results! {
+    TurnDiff(crate::orchestration::TurnDiff),
+    Dispatched(crate::orchestration::DispatchReceipt),
+    ShellStream(::orchestration::ShellStreamItem), ThreadStream(::orchestration::ThreadStreamItem),
+    Projection(::orchestration::ThreadProjection), TurnItem(Option<::orchestration::TurnItem>),
+    ThreadHistory(::orchestration::ThreadHistoryPage), Search(Vec<::orchestration::SearchMatch>), Projects(Vec<crate::models::Project>),
     Browser(crate::browser::BrowserFrame),
-    Opened(crate::session::OpenedSession), Item(crate::operations::ItemResponse),
-    History(crate::session::HistoryPage),
-    Thread(crate::models::ThreadResponse), Threads(crate::models::ThreadList),
-    ComposerCatalog(crate::composer::ComposerCatalog),
     PermissionSettings(crate::permissions::PermissionSettings),
     Models(crate::operations::ModelPage), WorktreeSettings(crate::models::WorktreeSettings),
     Worktrees(Vec<crate::models::Worktree>), Review(crate::models::WorkspaceReview),
-    Session(crate::session::SessionRef), Empty(crate::models::Empty),
+    Empty(crate::models::Empty),
     AccountUsage(crate::operations::AccountUsage),
     Accounts(crate::operations::Accounts), Selected(crate::operations::AccountSelection),
     Login(crate::operations::AccountLogin), LoginStatus(crate::operations::AccountLoginStatus),
@@ -108,7 +98,6 @@ results! {
     Transcription(crate::operations::Transcription),
     HostStatus(crate::models::HostStatus), Invitation(crate::models::Invitation),
     Remotes(Vec<crate::models::RemoteHost>), Remote(crate::models::RemoteHost),
-    Submission(crate::operations::SubmissionReceipt),
     Unit(()), Text(String)
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -134,20 +123,9 @@ impl Response {
             code: code.to_string(),
             message: message.to_string(),
             delivery: crate::error::Delivery::Unknown,
-            execution: None,
         }))
     }
 }
-impl<T: Serialize> Response<T> {
-    /// Used only by JSON CLI output and provider fixtures.
-    pub fn into_value(self) -> Value {
-        match self {
-            Self::Success { result } => serde_json::json!({"result":result}),
-            Self::Failure { error } => serde_json::json!({"error":error}),
-        }
-    }
-}
-
 /// Only intrinsically open provider/tool values use JSON; native records do not.
 pub mod json {
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};

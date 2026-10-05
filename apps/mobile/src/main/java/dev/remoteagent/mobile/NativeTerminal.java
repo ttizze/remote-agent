@@ -16,13 +16,16 @@ public final class NativeTerminal implements TerminalSessionClient, TerminalView
     public final TerminalView view;
     public final TerminalSession session;
     private long sequence;
-    public NativeTerminal(Context context, TerminalSession.Transport transport) {
+    public NativeTerminal(Context context, TerminalSession.Transport transport, int background, int foreground, int cursor, int fontSize) {
         view = new TerminalView(context, null);
         view.setTerminalViewClient(this);
-        view.setBackgroundColor(android.graphics.Color.BLACK);
+        view.setBackgroundColor(background);
         view.setId(R.id.native_terminal);
-        view.setTextSize((int) (14 * context.getResources().getDisplayMetrics().scaledDensity));
+        view.setTextSize((int) (fontSize * context.getResources().getDisplayMetrics().scaledDensity));
         session = new TerminalSession(transport, this);
+        session.getEmulator().mColors.mCurrentColors[com.termux.terminal.TextStyle.COLOR_INDEX_BACKGROUND] = background;
+        session.getEmulator().mColors.mCurrentColors[com.termux.terminal.TextStyle.COLOR_INDEX_FOREGROUND] = foreground;
+        session.getEmulator().mColors.mCurrentColors[com.termux.terminal.TextStyle.COLOR_INDEX_CURSOR] = cursor;
         view.attachSession(session);
         view.setFocusableInTouchMode(true);
     }

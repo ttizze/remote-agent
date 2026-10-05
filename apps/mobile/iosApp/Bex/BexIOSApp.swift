@@ -10,7 +10,7 @@ struct BexIOSApp: App {
     var body: some Scene {
         WindowGroup {
             BexSwiftUIRoot(model: model)
-                .onChange(of: scenePhase) { phase in
+                .onChange(of: scenePhase) { _, phase in
                     model.recordScene(phase == .active ? 1 : phase == .inactive ? 2 : 3)
                     switch phase {
                     case .background:

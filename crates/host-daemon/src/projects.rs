@@ -7,7 +7,6 @@ use std::{
 };
 
 pub(crate) mod state;
-pub(crate) mod titles;
 /// The Host owns project registration independently of native provider catalogs.
 #[derive(Debug, Clone)]
 pub struct ProjectStore {
@@ -46,18 +45,21 @@ impl ProjectStore {
         let _registration = self.registration.lock().await;
         let mut projects = self.read_projects().await?;
         let path = root.to_str().context("project path is not UTF-8")?;
-        for registered in projects.iter().flat_map(|project| &project.roots) {
-            if registered.path == path
-                || tokio::fs::canonicalize(&registered.path)
-                    .await
-                    .ok()
-                    .is_some_and(|path| dunce::simplified(&path) == root)
-            {
-                return Ok(path.into());
+        for project in &projects {
+            for registered in &project.roots {
+                if registered.path == path
+                    || tokio::fs::canonicalize(&registered.path)
+                        .await
+                        .ok()
+                        .is_some_and(|path| dunce::simplified(&path) == root)
+                {
+                    return Ok(project.id.clone());
+                }
             }
         }
+        let id = uuid::Uuid::new_v4().to_string();
         projects.push(Project {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: id.clone(),
             name: root
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -77,7 +79,7 @@ impl ProjectStore {
             Ok(())
         })
         .await??;
-        Ok(path.into())
+        Ok(id)
     }
     pub(crate) async fn load(&self) -> anyhow::Result<state::Snapshot> {
         let mut snapshot = state::Snapshot {
@@ -103,11 +105,6 @@ impl ProjectStore {
             }
         }
         snapshot.worktree_roots = crate::worktrees::workspace_roots(&self.path).await?;
-        snapshot.chat_directory = match tokio::fs::canonicalize(self.chat_directory()).await {
-            Ok(path) => Some(dunce::simplified(&path).to_owned()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => return Err(error.into()),
-        };
         Ok(snapshot)
     }
 }
@@ -123,8 +120,8 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         let store = ProjectStore::new(root.join("bex-worktrees.json"));
         assert!(store.load().await.unwrap().projects.is_empty());
-        store.register(&project).await.unwrap();
-        store.register(&project).await.unwrap();
+        let registered_id = store.register(&project).await.unwrap();
+        assert_eq!(store.register(&project).await.unwrap(), registered_id);
         let reopened = ProjectStore::new(store.path());
         let snapshot = reopened.load().await.unwrap();
         assert_eq!(snapshot.projects.len(), 1);
@@ -133,6 +130,8 @@ mod tests {
             Some(snapshot.projects[0].id.as_str())
         );
         let id = snapshot.projects[0].id.clone();
+        assert_eq!(registered_id, id);
+        assert_ne!(id, project.to_str().unwrap());
         let checkout = root.join("checkout");
         std::fs::write(
             store.path(),

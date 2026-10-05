@@ -35,8 +35,6 @@ Android 17では、LAN接続を開く前に付近のデバイスへのアクセ�
 | `crates/host-daemon` | ペアリング、認可、Host RPC、Codex・Claude Codeの実行、ワークツリー、音声入力、ファイル・ターミナル操作 |
 | `crates/codex-app-server` | Codex App Serverとの通信 |
 | `crates/bex-process` | プロバイダーに依存しないプロセス監視とPTYバックエンド |
-| `crates/agent-cli` | スクリプト・結合テスト用のヘッドレスクライアント |
-| `crates/host-fixture` | 決定的に動作するCodex・Claudeの子プロセスと、テスト用の隔離iroh Host |
 | `crates/xtask` | ネイティブ受け入れテスト、ビルド出力の整理、接続診断 |
 | `apps/desktop` | GPUI製のMacアプリ。Alacrittyのネイティブターミナルを搭載 |
 | `apps/mobile` | UniFFI Storeを使うiOS（SwiftUI、`iosApp/`）とAndroid（Compose、`src/`） |
@@ -78,7 +76,7 @@ Codexのイベント処理終了は、プロセスの片付け前に`host.codex.
 固定したLinux環境でHostと監視用実行ファイルをビルドします。
 
 ```sh
-nix develop .#native --command cargo build --locked --release -p host-daemon -p bex-process -p agent-cli
+nix develop .#native --command cargo build --locked --release -p host-daemon -p bex-process
 target/release/host-daemon --name 'Linux development'
 ```
 
@@ -123,9 +121,11 @@ Rustのソースを変更したら、iOS用ライブラリも再ビルドして�
 
 ## 会話の操作
 
-Mac・iPhoneでは、アシスタントの文章を選択して下書きに引用したり、サイドチャットで質問したりできます。iPhoneのサイドチャットを閉じると、元の会話と下書きへ戻ります。Macには右クリックのコピー・Google検索、自分のメッセージのホバーによるコピー・入力欄への戻しもあります。コマンドの実行内容は実行中・再表示後とも最初は折り畳み、明示的に展開した状態は保持します。[会話表示の契約](docs/DESKTOP_CONVERSATION_DISPLAY_CONTRACT.md)を参照してください。
-
-Mac・iPhoneでは、枠のないFast、モデル名、推論強度の操作をマイク・送信の直前に置きます。モデル名を押すと、エージェント・アカウントの行と、検索できるモデル一覧を開きます。アカウント行は報告された週次使用枠を表示し、切り替えや、追加・ログイン・確認付きサインアウトの管理画面へ進めます。設定からも同じ管理画面に入れます。アカウント変更では、対応するモデル設定、本文、添付を保持したまま一覧を更新します。認証とプロバイダーごとのアカウント選択はHostが所有し、接続済みクライアントで共有します。現在はCodex・Claudeに対応し、Pi・第三者の接続アダプターは未対応です。Claudeではログインページを開き、返された認証コードをBexへ貼り付けます。
+会話管理は T3 orchestration-v2 を Rust に移植しています。GPUI・SwiftUI・Compose
+は共通の棚、タイムライン、承認・質問、キュー、モデル・実行モードを表示します。
+通常送信は実行中ならキューへ入り、steer・restart・stop は明示的に選びます。
+要件は [表示契約](docs/DESKTOP_CONVERSATION_DISPLAY_CONTRACT.md)、範囲は
+[移植計画](docs/t3-port/PLAN.md) に記録しています。
 
 ### Claude Code
 
@@ -153,17 +153,6 @@ Macの設定は、Bexが作成したワークツリーと会話を**作成済み
 
 音声入力は、停止時に認識した文章を下書きへ追加し、送信時には下書き・添付とともに送ります。文字が認識されなかった正常終了は静かに終わり、送信を選んでいても下書き・添付を保持します。録音、接続、不正な応答、文字起こしの失敗はエラーを報告しますが、下書きは破棄しません。
 
-## ヘッドレスCLI
-
-```sh
-agent-cli --ticket <endpoint-ticket> --identity-file <32-byte-key> [--invitation <uuid>] list
-agent-cli <connection> send <thread-id> <text> --client-message-id <id> [--model m] [--effort e]
-agent-cli <connection> approve 7 --decision 2               # 数値の要求ID
-agent-cli <connection> approve '"request-id"' --decision 2  # 文字列の要求ID
-```
-
-ローカルのフィクスチャではチケットの代わりに`--stdio <fixture-executable>`を使います。結果はJSONとして標準出力へ、エラーは標準エラーへ出力します。
-
 ## Agent peer CLIとスキル
 
 [`tools/agent-peer`](tools/agent-peer)は、Claude・Codexへの相談CLI、スキル、テスト、単独Nixパッケージの共有ソースです。BEX側の利用箇所とともにここで開発します。このディレクトリだけでもmacOS・Linuxでビルドできます。
@@ -184,42 +173,17 @@ git push git@github.com:ttizze/agent-peer.git "$peer_commit:refs/heads/main"
 
 ## 検証
 
+T3 移植では変更 crate の単体・property test とネイティブのビルドだけを確認します。
+CI 待ち、cargo-mutants、E2E、Simulator UI テストは実行しません。
+旧会話の型・fixture・検証ランナーは削除しました。
+
 ```sh
-scripts/dev-env.sh just unit-tests                  # 全ユニットテスト。Simulator・エミュレーターは起動しない
-scripts/dev-env.sh cargo test --workspace           # 振る舞いコーパスを含むRustテスト
-scripts/dev-env.sh just iroh-e2e                    # 隔離iroh接続で実デーモンを検証
-scripts/dev-env.sh just android-e2e                 # Android 17: 接続許可、Markdown、永続化、Host復帰
-scripts/dev-env.sh just ios-e2e [TestMethod…]        # フィクスチャHostに対するSimulator XCUITest
-scripts/dev-env.sh just conversation-ui            # 選択、サイドチャット、実行表示の回帰確認
-scripts/dev-env.sh just macos-e2e                  # ネイティブBrowserの認証と永続化
-scripts/dev-env.sh just quality [apple|rust|kotlin|swift]  # 既定はMac Host・デスクトップとiPhone
+scripts/dev-env.sh cargo nextest run -p orchestration -p provider-adapters -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p bex-desktop --lib --bins --features agent-core/bindings
+scripts/dev-env.sh scripts/build-agent-ios.sh simulator
+nix develop .#android --command ./gradlew :apps:mobile:assembleDebug
 ```
 
-Claudeの契約テストは`scripts/dev-env.sh cargo test --locked -p host-fixture --test claude`です。先に監視用実行ファイルをビルドしてください。決定的に動作する外部CLI境界と、実際のStore・iroh・Hostルーティング・ネイティブ会話ファイル・隔離Git環境を使います。Claude Code 2.1.266の匿名化した記録でもネイティブ形式との互換性を確認します。任意実行の`live_claude_subscription_completes_and_resumes_through_store_and_host`は実際の認証済みCLIを使います。`BEX_LIVE_CLAUDE_PROGRAM`に絶対パスを設定し、`-- --ignored --exact`を付けて実行すると、サブスクリプションでの推論、Host再起動後の再開、中断、中断後の入力を確認できます。
-
-`scripts/dev-env.sh just unit-tests`で全ローカルユニットテストを実行してから、PR作成やCI完了待ちを必須にせず、mainへ直接統合します。Native clients GitHub Actionsはmainへのpush、任意のPR、手動実行で全検証を行い、CIの失敗はmain上で修正します。force push・main削除は管理者を含め全員に禁止します。検証完了を報告するには、対象コミットのCI成功と、変更のない作業ツリーが必要です。コミットでローカルのバックグラウンド検証は起動しません。ユニットテストと手動の調査コマンドはローカルで使えます。Linux CIはGitHubホストのUbuntu 24.04と`nix develop .#native`を使い、同じ基準でツールチェーンを取得します。Windowsも固定したflakeのRustバージョンを使います。Lintはベースラインなしの既定基準で、ルールの例外にはレビューが必要です。
-
-Android CIは、固定したNix SDKとUbuntu 24.04でKotlinのチェック・ユニットテスト、アプリ・計装テストAPKのビルド、KVMを使ったエミュレーター受け入れテストを行います。Apple CIはXcode 26.6の`macos-26` Apple Siliconランナーで、ローカルと同じ既定の`just quality`を実行します。共通Rust・Swiftチェックの後、Mac Browser E2EとiPhoneの会話テストを並行実行し、iPhoneは2組の隔離Simulator・Hostを使います。CargoとXcodeのderived dataをキャッシュし、失敗時を含めログとXcode結果バンドルを7日間保持します。Linux・Windows・Android・Mac・iPhoneの検証はNative clients CIで実行します。Androidの調査には`just android-e2e`・`just quality kotlin`も使えます。
-
-開発・テストビルドは、全変数のデバッグ情報を含めず、ファイル名・行番号付きバックトレースを保持します。デバッガーで変数が必要なら`CARGO_PROFILE_DEV_DEBUG=full`を指定してください。品質チェックではRustのインクリメンタルコンパイルを無効にし、通常のローカルビルドでは有効にします。
-
-`default`・`native`のNixシェルは、ローカルRustビルドでsccacheを有効にします。ユーザー単位のディスクキャッシュで依存の再コンパイルを再利用し、通常のCargo出力・インクリメンタルビルドも維持します。固定したsccacheでは、`scripts/dev-env.sh`がワークツリーごとに設定する`CARGO_HOME`・`CARGO_TARGET_DIR`により、別ワークツリー間のRustキャッシュを再利用できません。インクリメンタル対象やリンカーを呼ぶクレートはキャッシュを迂回します。`scripts/dev-env.sh sccache --show-stats`で統計を確認し、`SCCACHE_DIR`で保存場所を変えられます。`CI`が設定された環境ではこのラッパーを使わず、既存のCargoキャッシュを使います。
-
-`just unit-tests`は、ネイティブバインディングを有効にしたRustワークスペースのライブラリ・バイナリテスト、単独agent-peerのCargoテスト、macOSのヘッドレスSwift Markdownテストを実行します。RustはNix固定のcargo-nextestでクレートをまたいで並行実行し、Swiftも並行で進めます。両方の結果を待って失敗を集計します。Androidには現在JVMユニットテストがなく、計装テストはCIで実行します。CIも結合・E2E確認の前に同じコマンド・Rust機能構成を使い、Nixのagent-peerパッケージも確認します。監視用実行ファイルはテスト前にビルドします。`agent-ffi/bindgen`はバインディング生成時だけ有効にしてください。ユニットテストはなく、ワークスペーステストに含めると不要な依存構成でネイティブライブラリを置き換えます。整理・接続診断・ネイティブテストはRustの`cargo xtask`で管理します。macOSのプロセス調査はOS付属の`lsof`、LinuxはNix版を使います。Swift Markdownテストは、ソース・バインディング・コンパイラー・SDK・ランナーが一致するときのみビルドを再利用し、毎回現在のRustライブラリへアサーションを実行します。iOS UIテストは初期化済みの空Simulatorを複製して隔離Hostと組み合わせ、`BEX_IOS_TEST_WORKERS=1`–`10`で並行数を指定できます。リポジトリ共通ロックで、ワークツリー・Cargo出力をまたぐiOS確認を直列化します。
-
-`scripts/dev-env.sh`は`flake.nix`・`flake.lock`・プラットフォームが同じなら、ワークツリー間で固定Nix環境を再利用します。キャッシュ利用時はNixを起動せず、共有プロファイルで固定ツールをGCから保護します。Cargoのインデックス・ロック・`target`はワークツリーごとに持ち、同じワークツリーのテスト・開発は同じキャッシュ・出力を使います。固定済みの依存ソースとアーカイブだけを既存キャッシュからコピーし、可能ならAPFSのcopy-on-write・reflinkで容量を共有します。変更済みソースは再コンパイルし、未変更の出力は再利用します。テストは必要なヘルパー・バインディングをビルドし、開発アプリのビルド・インストール・再起動は開発環境へ適用するときに行います。
-
-新規ワークツリーのビルド出力を外付けディスクへ置くには、マウント済みディスクにディレクトリを作り、`git config --local bex.buildRoot /absolute/path/to/builds`を設定します。このローカル設定は全ワークツリーで共有します。`scripts/dev-env.sh`は新しい`target`を外付け上の専用ディレクトリへのシンボリックリンクにし、Cargo・Xcode・生成バインディング・キャッシュの既存パスを維持します。既存`target`は移動しません。移す場合は使用していない間に移動して元の場所をリンクへ置き換えてください。指定ディレクトリは事前に存在する必要があり、ディスク取り外しなどで利用できなければコマンドは失敗します。`git config --local --unset bex.buildRoot`で設定を削除すると、その後の新規ワークツリーはローカル出力へ戻ります。
-
-完了した`just quality`は毎回、登録済みワークツリーの未使用Cargo出力を整理します。3日以上更新のないプロファイルを削除し、残りも未使用出力が合計32 GiB以下になるまで古い順に削除します。`scripts/dev-env.sh just clean-builds --dry-run`でJSONの計画を確認し、`--dry-run`なしで適用できます。通常の`target`と、その直下のCargoキャッシュを調べ、リンク先のキャッシュは追いません。
-
-整理はCargoのビルド・成果物ロックを保持し、ロックのinodeを維持します。稼働中バイナリ、使用中ワークツリー、ロック中ビルドは未使用容量に含めません。検証後の保持方針なので、使用中ビルドは一時的に容量を超えることがあります。削除できるのは認識済みのCargo `debug`・`release`出力のみです。バックアップ・検証記録はその外へ保存してください。アプリバンドル、`target/qa`、要約、ソースは保持し、整理したプロファイルは再ビルドで復元します。
-
-`crates/host-fixture::test_support`は隔離Hostの起動・接続・停止を共有します。`bex-ui-fixture DIRECTORY CODEX PORT_FILE [STREAM_DELAY_MS]`は認証情報をメモリーに保持してHostとループバックのペアリングを動かし、Codexは標準入出力の境界を検証する子プロセスとして残します。`ios-e2e`は終了時にこのプロセスと新しいSimulatorを削除し、Xcodeのderived data・結果を`target/qa`へ残します。失敗・スキップ・テスト欠落はコマンドを失敗させます。`android-e2e`も新規エミュレーターとHostを管理し、許可拒否・再試行・実LAN通信を先に確認してから、出荷するJNIライブラリとフィクスチャHostでMarkdown・Store永続化・モデル復帰を検証します。ログと許可画面の画像を`target/qa`へ残し、欠落・失敗を拒否します。
-
-Simulator・フィクスチャの実行では、実機、本番キーチェーン、カメラ、実際のCodexアカウントは検証できません。
-
-Unixの隔離Hostフィクスチャは、直接の`cargo test`でも、接続開始前にファイル記述子のソフト上限を最低4096へ引き上げます。より高い上限とハード上限は保持し、ハード上限が不足していれば起動を明示的に失敗させます。80クライアントの受け入れテストにも対応します。
+一般のテスト方針は [TEST_MAINTENANCE.md](docs/TEST_MAINTENANCE.md) を参照してください。
 
 ## GitHubの保守
 

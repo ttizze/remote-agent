@@ -1,7 +1,7 @@
 use super::view::section_heading;
 use crate::{Runtime, store_session::StoreSession};
 use agent_core::{
-    state::{Intent, Snapshot, operations as op},
+    state::{Intent, Snapshot},
     store::Outcome,
 };
 use agent_protocol::models::{Invitation, RemoteHost};
@@ -20,11 +20,6 @@ use std::{io::Write, sync::Arc};
 pub(super) enum HostEvent {
     Selected(Option<RemoteHost>),
     Removed(String),
-}
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ConnectionLayout {
-    Onboarding,
-    Settings,
 }
 enum Action {
     None,
@@ -118,10 +113,7 @@ impl Hosts {
             return;
         }
         if self.snapshot.connected {
-            self.dispatch(
-                Intent::LoadHostManagement(op::LoadHostManagement {}),
-                Action::None,
-            );
+            self.dispatch(Intent::LoadHostManagement, Action::None);
         } else {
             self.connect();
         }
@@ -135,7 +127,10 @@ impl Hosts {
         let receipt = store.dispatch(intent);
         let updates = self.updates.clone();
         self.runtime.handle.spawn(async move {
-            let result = receipt.await.map_err(|error| error.to_string());
+            let result = receipt
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|r| r.map_err(|error| error.to_string()));
             let _ = updates.send(Update::Completed(action, result)).await;
         });
     }
@@ -154,10 +149,7 @@ impl Hosts {
                     Ok(store) => {
                         self.snapshot = store.store.snapshot();
                         self.session = Some(store);
-                        self.dispatch(
-                            Intent::LoadHostManagement(op::LoadHostManagement {}),
-                            Action::None,
-                        );
+                        self.dispatch(Intent::LoadHostManagement, Action::None);
                     }
                     Err(error) => self.error = Some(error),
                 }
@@ -176,7 +168,7 @@ impl Hosts {
                     Err(error) => self.error = Some(error),
                     Ok(outcome) => match action {
                         Action::Invite => {
-                            if let Some(invitation) = &self.snapshot.management.invitation {
+                            if let Some(invitation) = &self.snapshot.invitation {
                                 let result = (|| -> Result<_, String> {
                                     let text = serde_json::to_string(invitation)
                                         .map_err(|error| error.to_string())?;
@@ -209,12 +201,8 @@ impl Hosts {
                             self.pairing
                                 .update(cx, |input, cx| input.set_value("", window, cx));
                             if let Outcome::RemoteHostPaired { id } = outcome
-                                && let Some(host) = self
-                                    .snapshot
-                                    .management
-                                    .remotes
-                                    .iter()
-                                    .find(|host| host.id == id)
+                                && let Some(host) =
+                                    self.snapshot.remote_hosts.iter().find(|host| host.id == id)
                             {
                                 cx.emit(HostEvent::Selected(Some(host.clone())));
                             }
@@ -229,34 +217,29 @@ impl Hosts {
     }
     fn pair(&mut self, invitation: Invitation) {
         self.dispatch(
-            Intent::PairRemoteHost(op::PairRemoteHost {
+            Intent::PairRemoteHost {
                 invitation,
                 name: "Bex Desktop".into(),
-            }),
+            },
             Action::Pair,
         );
     }
 
     pub(super) fn connection_choices(
         &self,
-        layout: ConnectionLayout,
         current: Option<&str>,
         connected: bool,
         agent_controls: Div,
         cx: &Context<Self>,
     ) -> Div {
-        let cards = layout == ConnectionLayout::Onboarding;
         let mut agent_controls = Some(agent_controls);
         let mut choices = v_flex()
-            .when(cards, |view| view.gap_3())
-            .when(!cards, |view| {
-                view.rounded(px(10.))
-                    .border_1()
-                    .border_color(rgb(0x2b2f35))
-                    .overflow_hidden()
-            });
+            .rounded(px(10.))
+            .border_1()
+            .border_color(super::color("border"))
+            .overflow_hidden();
         for (index, remote) in std::iter::once(None)
-            .chain(self.snapshot.management.remotes.iter().map(Some))
+            .chain(self.snapshot.remote_hosts.iter().map(Some))
             .enumerate()
         {
             let selected = current == remote.map(|host| host.id.as_str());
@@ -276,17 +259,8 @@ impl Hosts {
             let mut card = v_flex()
                 .gap_3()
                 .p_4()
-                .when(cards, |view| {
-                    view.rounded(px(12.))
-                        .border_1()
-                        .border_color(if selected {
-                            rgb(0x476ce0)
-                        } else {
-                            rgb(0x303030)
-                        })
-                        .bg(rgb(0x151515))
-                })
-                .when(!cards, |view| view.border_b_1().border_color(rgb(0x2b2f35)))
+                .border_b_1()
+                .border_color(super::color("border"))
                 .child(
                     h_flex()
                         .items_center()
@@ -315,13 +289,13 @@ impl Hosts {
                             div()
                                 .text_xs()
                                 .text_color(if selected && connected {
-                                    rgb(0x88c9a0)
+                                    super::color("successForeground")
                                 } else {
-                                    rgb(0x949494)
+                                    super::color("textMuted")
                                 })
                                 .child(label),
                         )
-                        .when_some(remote.filter(|_| !cards), |row, remote| {
+                        .when_some(remote, |row, remote| {
                             let id = remote.id.clone();
                             row.child(
                                 Button::new(format!("remove-{id}"))
@@ -333,9 +307,7 @@ impl Hosts {
                                     .disabled(self.busy || !self.snapshot.connected)
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         view.dispatch(
-                                            Intent::RemoveRemoteHost(op::RemoveRemoteHost {
-                                                id: id.clone(),
-                                            }),
+                                            Intent::RemoveRemoteHost { id: id.clone() },
                                             Action::Remove(id.clone()),
                                         );
                                         cx.notify();
@@ -346,12 +318,10 @@ impl Hosts {
             if selected {
                 let details = v_flex()
                     .gap_2()
-                    .when(cards, |view| {
-                        view.pt_3().border_t_1().border_color(rgb(0x292929))
-                    })
-                    .when(!cards, |view| {
-                        view.ml_8().p_3().rounded(px(6.)).bg(rgb(0x191c20))
-                    })
+                    .ml_8()
+                    .p_3()
+                    .rounded(px(6.))
+                    .bg(super::color("surface"))
                     .children(agent_controls.take());
                 card = card.child(details);
             }
@@ -359,31 +329,19 @@ impl Hosts {
         }
         choices = choices.child(
             Button::new("onboarding-add-remote")
-                .accessibility_label(if cards {
-                    "クラウドVM・別のPCに接続"
-                } else {
-                    "接続先を追加"
-                })
+                .accessibility_label("接続先を追加")
                 .child(
                     h_flex()
-                        .when(!cards, |row| row.w_full())
+                        .w_full()
                         .gap_2()
-                        .child(Icon::new(if cards {
-                            IconName::Network
-                        } else {
-                            IconName::Plus
-                        }))
-                        .child(if cards {
-                            "クラウドVM・別のPCに接続"
-                        } else {
-                            "接続先を追加"
-                        }),
+                        .child(Icon::new(IconName::Plus))
+                        .child("接続先を追加"),
                 )
                 .ghost()
                 .w_full()
-                .when(!cards, |button| {
-                    button.h(px(48.)).px_4().text_color(rgb(0x8bb7f9))
-                })
+                .h(px(48.))
+                .px_4()
+                .text_color(super::color("accent"))
                 .disabled(self.busy)
                 .on_click(cx.listener(|view, _, _, cx| {
                     view.adding_remote = !view.adding_remote;
@@ -417,9 +375,10 @@ impl Hosts {
                 .p_4()
                 .rounded(px(12.))
                 .border_1()
-                .border_color(rgb(0x303030))
-                .bg(rgb(0x151515))
-                .when(!cards, |view| view.mx_4().mb_4())
+                .border_color(super::color("border"))
+                .bg(super::color("surface"))
+                .mx_4()
+                .mb_4()
                 .child(methods);
             if self.use_ssh {
                 form =
@@ -429,7 +388,7 @@ impl Hosts {
                                 .aria_label("SSH接続先")
                                 .disabled(disabled),
                         )
-                        .child(div().text_xs().text_color(rgb(0x949494)).child(
+                        .child(div().text_xs().text_color(super::color("textMuted")).child(
                             "SSHの鍵で接続でき、Bex Hostを起動済みのサーバーにつなぎます。",
                         ));
             } else {
@@ -477,10 +436,9 @@ impl Hosts {
                 .items_center()
                 .gap_3()
                 .p_4()
-                .when(cards, |view| view.rounded(px(12.)).border_1())
-                .when(!cards, |view| view.border_t_1())
-                .border_color(rgb(0x2b2f35))
-                .text_color(rgb(0x737373))
+                .border_t_1()
+                .border_color(super::color("border"))
+                .text_color(super::color("textMuted"))
                 .child(Icon::new(IconName::Network))
                 .child(div().flex_1().child("Bexの実行環境"))
                 .child(div().text_xs().child("今後対応")),
@@ -488,8 +446,8 @@ impl Hosts {
         if let Some(error) = self.error.as_ref().or(self.snapshot.error.as_ref()) {
             choices = choices.child(
                 div()
-                    .when(!cards, |view| view.p_4())
-                    .text_color(rgb(0xff8e86))
+                    .p_4()
+                    .text_color(super::color("errorForeground"))
                     .child(agent_core::presentation::error::error_message(error)),
             );
         }
@@ -504,7 +462,7 @@ impl Hosts {
         cx: &App,
     ) -> impl IntoElement {
         let view = owner.read(cx);
-        let hosts = &view.snapshot.management.remotes;
+        let hosts = &view.snapshot.remote_hosts;
         let name: SharedString = current
             .and_then(|id| hosts.iter().find(|host| host.id == id))
             .map_or_else(
@@ -561,7 +519,7 @@ impl Render for Hosts {
             return body
                 .child(
                     div()
-                        .text_color(rgb(0x949ca8))
+                        .text_color(super::color("textMuted"))
                         .child("このPCの接続情報を読み込めません。"),
                 )
                 .child(
@@ -599,10 +557,7 @@ impl Render for Hosts {
                         .primary()
                         .disabled(disabled)
                         .on_click(cx.listener(|view, _, _, cx| {
-                            view.dispatch(
-                                Intent::CreateInvitation(op::CreateInvitation {}),
-                                Action::Invite,
-                            );
+                            view.dispatch(Intent::CreateInvitation, Action::Invite);
                             cx.notify();
                         })),
                 ),
@@ -610,11 +565,11 @@ impl Render for Hosts {
         if let Some((_, file)) = &self.invitation {
             body = body.child(
                 h_flex().flex_wrap().gap_5().p_4().rounded(px(10.))
-                    .border_1().border_color(rgb(0x2b2f35))
+                    .border_1().border_color(super::color("border"))
                     .child(img(file.path().to_path_buf()).w(px(200.)).h(px(200.)))
                     .child(v_flex().flex_1().min_w(px(200.)).gap_3()
                         .child(div().font_semibold().child("BexアプリでQRを読み取る"))
-                        .child(div().text_sm().text_color(rgb(0x949ca8))
+                        .child(div().text_sm().text_color(super::color("textMuted"))
                             .child("1回限りの招待です。QRを読み取るか、招待をコピーして相手の端末に貼り付けてください。"))
                         .child(Button::new("copy-invite")
                             .label("招待をコピー")
@@ -631,7 +586,7 @@ impl Render for Hosts {
             .gap_3()
             .pt_6()
             .border_t_1()
-            .border_color(rgb(0x2b2f35))
+            .border_color(super::color("border"))
             .child(
                 h_flex()
                     .items_center()
@@ -644,7 +599,7 @@ impl Render for Hosts {
                             .child(
                                 div()
                                     .text_sm()
-                                    .text_color(rgb(0x949ca8))
+                                    .text_color(super::color("textMuted"))
                                     .child("このPCへアクセスできる端末を管理します。"),
                             ),
                     )
@@ -662,18 +617,18 @@ impl Render for Hosts {
                             })),
                     ),
             );
-        if let Some(status) = &self.snapshot.management.status {
+        if let Some(status) = &self.snapshot.host_status {
             let mut list = v_flex()
                 .rounded(px(10.))
                 .border_1()
-                .border_color(rgb(0x2b2f35))
+                .border_color(super::color("border"))
                 .overflow_hidden();
             if status.devices.is_empty() {
                 list = list.child(
                     div()
                         .p_4()
                         .text_sm()
-                        .text_color(rgb(0x949ca8))
+                        .text_color(super::color("textMuted"))
                         .child("接続を許可した端末はありません。"),
                 );
             }
@@ -685,9 +640,9 @@ impl Render for Hosts {
                         .gap_4()
                         .p_4()
                         .when(index > 0, |row| {
-                            row.border_t_1().border_color(rgb(0x2b2f35))
+                            row.border_t_1().border_color(super::color("border"))
                         })
-                        .child(Icon::new(IconName::Network).text_color(rgb(0x949ca8)))
+                        .child(Icon::new(IconName::Network).text_color(super::color("textMuted")))
                         .child(
                             v_flex()
                                 .flex_1()
@@ -697,7 +652,7 @@ impl Render for Hosts {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(0x949ca8))
+                                        .text_color(super::color("textMuted"))
                                         .text_ellipsis()
                                         .child(node.clone()),
                                 ),
@@ -707,11 +662,11 @@ impl Render for Hosts {
                                 .label("接続を解除")
                                 .small()
                                 .ghost()
-                                .text_color(rgb(0x8bb7f9))
+                                .text_color(super::color("accent"))
                                 .disabled(disabled)
                                 .on_click(cx.listener(move |view, _, _, cx| {
                                     view.dispatch(
-                                        Intent::RevokeDevice(op::RevokeDevice { id: node.clone() }),
+                                        Intent::RevokeDevice { id: node.clone() },
                                         Action::None,
                                     );
                                     cx.notify();
@@ -724,7 +679,7 @@ impl Render for Hosts {
             devices = devices.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(0x949ca8))
+                    .text_color(super::color("textMuted"))
                     .child("端末を読み込み中…"),
             );
         }

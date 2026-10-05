@@ -1,298 +1,186 @@
-use agent_core::state::operations as op;
-mod clipboard;
-mod completions;
+//! GPUI rendering of the shared T3 conversation presentation.
+mod attachments;
 mod dictation;
 mod hosts;
-mod selection;
 mod view;
-
 use crate::{Runtime, diff::DiffView, platform, store_session::StoreSession};
 use agent_core::{
-    presentation::conversation::{ActivityExpansion, ConversationRowContent},
-    state::{Attachment, Draft, DraftKey, Intent, ModelDefaultsScope, PendingSubmission, Snapshot},
+    presentation::*,
+    state::{Intent, QuestionAnswer, QueueAction, SendBehavior, Snapshot, ThreadAction},
     store::Outcome,
 };
-use agent_protocol::{
-    ids::{ItemId, RequestId, TurnId},
-    models::{Item, Model, RemoteHost, Thread, Turn, WorktreeSettings},
-    requests::Answer,
-    session::SessionRef,
-};
-use dictation::{Dictation, Phase};
+use agent_protocol::{models::RemoteHost, provider::ProviderKind};
 use gpui_kit::{
     component::{
         button::{Button, ButtonVariants},
         input::{Editor, EditorState, Input, InputEvent, InputState, Textarea, TextareaState},
-        menu::{DropdownMenu, PopupMenuItem},
+        menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
         text::TextView,
         *,
     },
     prelude::FluentBuilder,
     *,
 };
-use hosts::{ConnectionLayout, HostEvent, Hosts};
+use hosts::{HostEvent, Hosts};
 use std::{
-    collections::{HashMap, HashSet},
-    future::Future,
-    path::{Path, PathBuf},
-    rc::Rc,
-    sync::Arc,
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::{Arc, OnceLock},
 };
 
-enum OperationCompletion {
-    Busy,
-    Composer(u64),
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    Diff,
+    Terminal,
+    Files,
+    Browser,
+}
+#[derive(Clone, Copy)]
+enum BufferRevision {
+    Draft(u64),
     Editor(u64),
-    Item { generation: u64, turn_id: TurnId },
-    WorktreeSettings,
-    Request(RequestId),
-    Dictation(uuid::Uuid),
-    RemoveWorktree,
-    Account,
-    Gallery(uuid::Uuid),
 }
 enum Update {
+    AttachmentsPicked(String, Result<Vec<PathBuf>, String>),
+    AttachmentReady(String, Result<PathBuf, String>),
     Connected(Result<(StoreSession, PathBuf), String>),
-    Snapshot,
-    Completed(OperationCompletion, Result<Outcome, String>),
-    Folder(Result<Option<PathBuf>, String>),
-    Image {
-        key: String,
-        result: Result<String, String>,
+    Snapshot(Arc<Snapshot>),
+    Presentation {
+        revision: u64,
+        view: Box<ConversationView>,
     },
-    Recording(uuid::Uuid, platform::RecordingEvent),
+    Completed(Option<BufferRevision>, Result<Outcome, String>),
+    Folder(Option<PathBuf>),
     PersistenceError(String),
-    OnboardingCompleted(Result<(), String>),
+    Recording(uuid::Uuid, platform::RecordingEvent),
+    Transcribed(uuid::Uuid, Result<Outcome, String>),
+    Tick,
 }
-#[derive(Clone, Copy, PartialEq)]
-enum Tab {
-    Chat,
-    Settings,
+struct QuestionInput {
+    selected: BTreeSet<String>,
+    custom: Entity<InputState>,
+    multi: bool,
 }
-#[derive(Clone, Copy, PartialEq)]
-enum SettingsPage {
-    Models,
-    Agents,
-    Connections,
-    Worktrees,
-}
-enum WorktreeToggle {
-    Create(bool),
-    Copy(bool),
-    DeleteMerged(bool),
-}
-#[derive(Clone, Copy, PartialEq)]
-enum ModelPanel {
-    Models,
-    Accounts,
-    Manage,
-}
-#[derive(Clone, Copy, PartialEq)]
-enum Panel {
-    Home,
-    Terminal,
-    SideChat,
-    Browser,
-    Files,
-    Diff,
-}
-pub(crate) enum Mode {
-    Main,
-    SideChat {
-        remote: Option<RemoteHost>,
-        cwd: String,
-    },
-}
-struct Question {
-    definition: agent_protocol::requests::Question,
-    input: Entity<InputState>,
-    selected: HashSet<String>,
-}
-struct RequestInputs {
-    questions: Vec<Question>,
-    response: Entity<TextareaState>,
-    sent: bool,
-}
-struct ImageGallery {
-    zoom: f32,
-    id: uuid::Uuid,
-    entries: Vec<(Arc<String>, bool)>,
-    initial: (Arc<String>, bool),
-    selected: Option<usize>,
-    list: ListState,
-    loading: bool,
-    saving: bool,
-    saved: bool,
-    error: String,
-}
-impl ImageGallery {
-    fn current_image(&self) -> &(Arc<String>, bool) {
-        self.selected
-            .and_then(|index| self.entries.get(index))
-            .unwrap_or(&self.initial)
-    }
-}
-struct ImageState {
-    source: Arc<String>,
-    path: Option<ImageSource>,
-    error: Option<String>,
-}
-struct MarkdownContent {
-    source: SharedString,
-    rendered: SharedString,
-    images: Rc<[String]>,
-}
-#[derive(Clone)]
-enum ConversationRow {
-    Turn(Arc<agent_core::presentation::conversation::RenderedTurn>),
-    Pending(String, Arc<PendingSubmission>),
-    Request(Box<agent_core::presentation::conversation::Request>),
-}
-impl ConversationRow {
-    fn same_identity(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Turn(a), Self::Turn(b)) => a.source.id == b.source.id,
-            (Self::Pending(a, _), Self::Pending(b, _)) => a == b,
-            (Self::Request(a), Self::Request(b)) => a.id == b.id,
-            _ => false,
-        }
-    }
-    fn unchanged(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Turn(a), Self::Turn(b)) => Arc::ptr_eq(a, b),
-            (Self::Pending(a, x), Self::Pending(b, y)) => a == b && Arc::ptr_eq(x, y),
-            (Self::Request(a), Self::Request(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-
-/// Business state is owned by Store. Everything else here is a widget, render
-/// cache, pending UI effect, or immutable snapshot retained for display.
 pub(crate) struct Desktop {
+    attachment_cache: BTreeMap<String, Option<PathBuf>>,
+    attachment_directory: Arc<tempfile::TempDir>,
     session: Option<StoreSession>,
     snapshot: Arc<Snapshot>,
+    conversation: Arc<ConversationView>,
+    presentation_running: bool,
+    presented_revision: u64,
     runtime: Runtime,
     updates: async_channel::Sender<(u64, Update)>,
     epoch: u64,
     connecting: bool,
     remote: Option<RemoteHost>,
-    hosts: Option<Entity<Hosts>>,
-    side_chat_mode: bool,
-    onboarding: bool,
-    initial_cwd: Option<String>,
-    busy: usize,
+    hosts: Entity<Hosts>,
+    settings: bool,
     error: String,
     composer: Entity<TextareaState>,
-    selection: Entity<selection::ConversationSelection>,
-    pending_quote: Option<String>,
-    pending_explanation: Option<String>,
-    composer_value: SharedString,
     composer_revision: u64,
-    completion_index: usize,
-    completion_dismissed: bool,
-    composer_pending: Option<u64>,
-    editor_input: Entity<EditorState>,
-    editor_value: SharedString,
-    editor_path: Option<String>,
-    editor_revision: u64,
-    editor_pending: Option<u64>,
+    pending_draft: Option<u64>,
+    composer_base: String,
+    composer_key: String,
     search: Entity<InputState>,
-    path: Entity<InputState>,
-    model_panel: ModelPanel,
-    model_search: Entity<InputState>,
-    model_provider: Option<agent_protocol::session::ProviderKind>,
-    settings_model_scope: ModelDefaultsScope,
-    account_sign_out: Option<String>,
-    account_login_draft: Option<DraftKey>,
-    worktree_copy_paths: Entity<TextareaState>,
-    worktree_directory: Entity<InputState>,
-    worktree_dirty: bool,
-    worktree_saved: bool,
-    worktree_saving: bool,
-    worktree_save_pending: bool,
-    worktree_removal: Option<String>,
-    worktree_busy: bool,
-    account_code: Entity<InputState>,
-    account_busy: bool,
-    account_polling: bool,
-    expanded_projects: HashSet<String>,
-    expanded_items: HashSet<String>,
-    expanded_work: HashMap<String, ActivityExpansion>,
-    tab: Tab,
-    settings_page: SettingsPage,
-    sidebar: bool,
-    panel_open: bool,
-    panel: Panel,
-    side_chat: Option<Entity<Desktop>>,
+    rename: Entity<InputState>,
+    renaming: bool,
+    collapsed_shelves: BTreeSet<ShelfKind>,
+    settled_limit: usize,
+    show_archive: bool,
+    expanded: BTreeSet<String>,
+    questions: BTreeMap<(String, String), QuestionInput>,
+    timeline: ListState,
+    panel: Option<Panel>,
     terminal: Option<Entity<crate::terminal::Terminal>>,
     browser: Option<Entity<crate::browser::Browser>>,
-    dictation: Option<Dictation>,
-    review_expanded: bool,
-    source_paths: Vec<String>,
-    source_items: Vec<Arc<Item>>,
-    requests: HashMap<RequestId, RequestInputs>,
-    list: ListState,
-    hovered_conversation_marker: Option<usize>,
-    rows: Vec<ConversationRow>,
-    rendered: Option<Arc<agent_core::presentation::conversation::RenderedConversation>>,
-    diffs: HashMap<String, Entity<DiffView>>,
-    images: HashMap<String, ImageState>,
-    image_gallery: Option<ImageGallery>,
-    image_dir: tempfile::TempDir,
-    markdown_cache: HashMap<String, MarkdownContent>,
+    diff: Entity<DiffView>,
+    file_path: Entity<InputState>,
+    editor: Entity<EditorState>,
+    editor_path: Option<String>,
+    editor_value: String,
+    editor_revision: u64,
+    pending_editor: Option<u64>,
+    account_code: Entity<InputState>,
+    dictation: Option<dictation::Dictation>,
+    tick: Option<tokio_util::task::AbortOnDropHandle<()>>,
     _subscriptions: Vec<Subscription>,
 }
-impl Desktop {
-    fn set_error(&mut self, error: String) {
-        tracing::error!(target: "bex", operation = "desktop", message = %error);
-        self.error = error;
+fn palette() -> &'static agent_core::presentation::theme::Theme {
+    static THEME: OnceLock<agent_core::presentation::theme::Theme> = OnceLock::new();
+    THEME.get_or_init(|| agent_core::presentation::theme::theme(true))
+}
+pub(crate) fn color(role: &str) -> Rgba {
+    rgb(u32::from_str_radix(
+        palette()
+            .colors
+            .get(role)
+            .map_or("ffffff", |v| v.trim_start_matches('#')),
+        16,
+    )
+    .unwrap_or(0xffffff))
+}
+pub(crate) fn apply_theme(cx: &mut App) {
+    let theme = gpui_kit::component::Theme::global_mut(cx);
+    theme.font_size = px(palette().prompt_size);
+    theme.mono_font_size = px(palette().code_size);
+    theme.radius = px(palette().radius);
+    for (target, role) in [
+        (&mut theme.colors.background, "canvas"),
+        (&mut theme.colors.foreground, "text"),
+        (&mut theme.colors.border, "border"),
+        (&mut theme.colors.input, "input"),
+        (&mut theme.colors.muted, "muted"),
+        (&mut theme.colors.muted_foreground, "textMuted"),
+        (&mut theme.colors.popover, "surfaceOverlay"),
+        (&mut theme.colors.popover_foreground, "text"),
+        (&mut theme.colors.primary, "accent"),
+        (&mut theme.colors.primary_hover, "messageActionHover"),
+        (&mut theme.colors.primary_foreground, "text"),
+        (&mut theme.colors.ring, "focus"),
+        (&mut theme.colors.accent, "accentSurface"),
+        (&mut theme.colors.accent_foreground, "text"),
+        (&mut theme.colors.sidebar, "sidebar"),
+        (&mut theme.colors.sidebar_foreground, "sidebarForeground"),
+        (&mut theme.colors.sidebar_border, "sidebarBorder"),
+        (&mut theme.colors.link, "accent"),
+        (&mut theme.colors.button, "surface"),
+        (&mut theme.colors.button_foreground, "text"),
+        (&mut theme.colors.button_hover, "toolbarControlHover"),
+        (&mut theme.colors.tab_bar, "toolbar"),
+    ] {
+        *target = color(role).into();
     }
-    pub(crate) fn new(mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> Self {
+}
+fn now() -> orchestration::Timestamp {
+    orchestration::Timestamp::parse(&chrono::Utc::now().to_rfc3339()).expect("UTC timestamp")
+}
+#[derive(Clone)]
+struct PinnedDrag {
+    id: String,
+    title: String,
+}
+impl Render for PinnedDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .p_3()
+            .rounded(px(8.))
+            .bg(color("sidebarRowSelected"))
+            .text_color(color("text"))
+            .child(self.title.clone())
+    }
+}
+impl Desktop {
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let runtime = cx.global::<Runtime>().clone();
+        let (updates, incoming) = async_channel::bounded(16);
         StoreSession::on_app_quit(cx, |view| &mut view.session);
-        let (remote, initial_cwd, side_chat_mode) = match mode {
-            Mode::Main => (None, None, false),
-            Mode::SideChat { remote, cwd } => (remote, Some(cwd), true),
-        };
-        let (updates, incoming) = async_channel::unbounded();
         cx.spawn_in(window, async move |view, cx| {
-            while let Ok(update) = incoming.recv().await {
+            while let Ok((epoch, update)) = incoming.recv().await {
                 if view
-                    .update_in(cx, |view, window, cx| view.receive(update, window, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-        cx.spawn_in(window, async move |view, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(1))
-                    .await;
-                if view
-                    .update(cx, |view, cx| {
-                        if view.account_polling
-                            && !view.account_busy
-                            && view.snapshot.connected
-                            && let Some(login) = &view.snapshot.account.login
-                        {
-                            let id = login.login_id.clone();
-                            let provider = login.provider;
-                            view.account_busy = true;
-                            view.perform(
-                                Intent::ReadAccountLogin(op::ReadAccountLogin {
-                                    provider,
-                                    id,
-                                    thread_id: view.account_login_draft.clone(),
-                                }),
-                                OperationCompletion::Account,
-                            );
-                        }
-                        if let Some(id) = view.thread().and_then(|thread| thread.active_turn_id()) {
-                            view.remeasure_item(&id);
-                            cx.notify();
+                    .update_in(cx, |view, window, cx| {
+                        if view.epoch == epoch {
+                            view.receive(update, window, cx);
                         }
                     })
                     .is_err()
@@ -304,1763 +192,757 @@ impl Desktop {
         .detach();
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("AI に依頼する")
-                .auto_grow(2, 8)
+                .placeholder("Ask anything…")
+                .auto_grow(2, 10)
+                .submit_on_enter(true)
         });
-        let editor_input = cx.new(|cx| EditorState::new(window, cx));
-        let model_search = cx.new(|cx| InputState::new(window, cx).placeholder("モデルを検索"));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search threads…"));
+        let rename = cx.new(|cx| InputState::new(window, cx).placeholder("Thread title"));
+        let file_path = cx.new(|cx| InputState::new(window, cx).placeholder("Path on Host"));
+        let editor = cx.new(|cx| EditorState::new(window, cx));
         let account_code = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("認証コードを貼り付け")
+                .placeholder("Authentication code")
                 .masked(true)
         });
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("会話を検索"));
-        let path = cx.new(|cx| InputState::new(window, cx).placeholder("絶対パス"));
-        let worktree_copy_paths = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .placeholder(".env\n.env.local\nconfig/local")
-                .auto_grow(3, 8)
-        });
-        let worktree_directory = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("接続先 Host 上の絶対パス（空欄で既定）")
-        });
-        let hosts = (!side_chat_mode).then(|| cx.new(|cx| Hosts::new(window, cx)));
-        let selection = cx.new(|_| selection::ConversationSelection::new(!side_chat_mode));
-        let mut subscriptions = vec![
-            cx.subscribe_in(
-                &selection,
-                window,
-                |view, _, action, window, cx| match action {
-                    selection::SelectionAction::AddToChat(text) => {
-                        view.quote_selection(text, window, cx)
-                    }
-                    selection::SelectionAction::AskSideChat(text) => {
-                        view.open_panel(Panel::SideChat, window, cx);
-                        if let Some(chat) = &view.side_chat {
-                            chat.update(cx, |chat, cx| chat.quote_selection(text, window, cx));
-                        }
-                    }
-                    selection::SelectionAction::Explain(text) => {
-                        if view.side_chat_mode {
-                            view.explain_selection(text, cx);
-                        } else {
-                            view.open_panel(Panel::SideChat, window, cx);
-                            if let Some(chat) = &view.side_chat {
-                                chat.update(cx, |chat, cx| chat.explain_selection(text, cx));
-                            }
-                        }
-                    }
-                },
-            ),
+        let hosts = cx.new(|cx| Hosts::new(window, cx));
+        let subscriptions = vec![
+            cx.subscribe(&rename, |view, _, event, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    view.thread_action(ThreadAction::Rename {
+                        title: view.rename.read(cx).value().to_string(),
+                    });
+                    view.renaming = false;
+                    cx.notify();
+                }
+            }),
             cx.subscribe(&composer, |view, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
-                    let value = input.read(cx).value();
-                    if value != view.composer_value {
-                        view.completion_index = 0;
-                        view.completion_dismissed = false;
-                        let cursor = input.read(cx).cursor();
-                        view.composer_value = value.clone();
+                    let text = input.read(cx).value().to_string();
+                    if view.session.is_some() && text != view.composer_base {
                         view.composer_revision += 1;
-                        let revision = view.composer_revision;
-                        view.composer_pending = Some(revision);
+                        view.pending_draft = Some(view.composer_revision);
+                        let base_text =
+                            Some(std::mem::replace(&mut view.composer_base, text.clone()));
                         view.perform(
-                            Intent::EditComposer {
-                                thread_id: view.draft_key().clone(),
-                                text: value.to_string(),
-                                cursor: cursor as u32,
-                            },
-                            OperationCompletion::Composer(revision),
-                        );
-                    }
-                    cx.notify();
-                }
-            }),
-            cx.subscribe(&editor_input, |view, input, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    let value = input.read(cx).value();
-                    if value != view.editor_value
-                        && let Some(path) = view.editor_path.clone()
-                    {
-                        view.editor_value = value.clone();
-                        view.editor_revision += 1;
-                        let revision = view.editor_revision;
-                        view.editor_pending = Some(revision);
-                        view.perform(
-                            Intent::SetFileDraft {
-                                path,
-                                text: value.to_string(),
-                            },
-                            OperationCompletion::Editor(revision),
+                            Intent::EditDraft { text, base_text },
+                            Some(BufferRevision::Draft(view.composer_revision)),
                         );
                     }
                 }
             }),
-            cx.subscribe(&model_search, |_, _, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            }),
-            cx.subscribe(&account_code, |_, _, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
+            cx.subscribe(&composer, |view, _, event, _| {
+                if let InputEvent::PressEnter { shift: false, .. } = event
+                    && (view.conversation.composer.enabled
+                        || view.conversation.composer.plan_follow_up)
+                {
+                    view.perform(
+                        Intent::Send {
+                            behavior: SendBehavior::Default,
+                        },
+                        None,
+                    );
                 }
             }),
             cx.subscribe(&search, |view, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
-                    let value = input.read(cx).value();
-                    if value.as_ref() != view.snapshot.list_query.search_term {
-                        let mut query = (*view.snapshot.list_query).clone();
-                        query.search_term = value.to_string();
-                        view.dispatch(Intent::ListSessions(op::ListSessions::new(query)));
+                    view.perform(
+                        Intent::Search {
+                            query: input.read(cx).value().to_string(),
+                        },
+                        None,
+                    );
+                }
+            }),
+            cx.subscribe(&editor, |view, input, event, cx| {
+                if matches!(event, InputEvent::Change)
+                    && let Some(path) = view.editor_path.clone()
+                {
+                    let text = input.read(cx).value().to_string();
+                    if text != view.editor_value {
+                        view.editor_value = text.clone();
+                        view.editor_revision += 1;
+                        view.pending_editor = Some(view.editor_revision);
+                        view.perform(
+                            Intent::EditFile { path, text },
+                            Some(BufferRevision::Editor(view.editor_revision)),
+                        );
                     }
                 }
             }),
-            cx.subscribe(&worktree_copy_paths, |view, _, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    view.worktree_dirty = !view.settings_match_inputs(cx);
-                    view.worktree_saved = false;
-                    cx.notify();
+            cx.subscribe_in(&hosts, window, |view, _, event, _, cx| {
+                match event {
+                    HostEvent::Selected(remote) => {
+                        view.settings = false;
+                        if view.remote.as_ref().map(|r| (&r.id, &r.ticket))
+                            != remote.as_ref().map(|r| (&r.id, &r.ticket))
+                            || !view.snapshot.connected
+                        {
+                            view.connect(remote.clone());
+                        }
+                        view.sync_browser_visibility(cx);
+                    }
+                    HostEvent::Removed(id) if view.remote.as_ref().is_some_and(|r| &r.id == id) => {
+                        view.connect(None)
+                    }
+                    _ => {}
                 }
-                if matches!(event, InputEvent::Blur) {
-                    view.save_worktree_settings(None, cx);
-                }
-            }),
-            cx.subscribe(&worktree_directory, |view, _, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    view.worktree_dirty = !view.settings_match_inputs(cx);
-                    view.worktree_saved = false;
-                    cx.notify();
-                }
-                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                    view.save_worktree_settings(None, cx);
-                }
+                cx.notify();
             }),
         ];
-        if let Some(hosts) = &hosts {
-            subscriptions.push(cx.observe(hosts, |_, _, cx| cx.notify()));
-            subscriptions.push(
-                cx.subscribe_in(hosts, window, |view, _, event, window, cx| {
-                    match event {
-                        HostEvent::Selected(remote) => view.switch_host(remote.clone(), window, cx),
-                        HostEvent::Removed(id)
-                            if view.remote.as_ref().is_some_and(|remote| &remote.id == id) =>
-                        {
-                            view.switch_host(None, window, cx)
-                        }
-                        _ => {}
-                    }
-                    cx.notify();
-                }),
-            );
-        }
-        let list = ListState::new(0, ListAlignment::Bottom, px(600.));
-        list.set_follow_mode(FollowMode::Tail);
         let mut view = Self {
+            attachment_cache: Default::default(),
+            attachment_directory: Arc::new(
+                tempfile::tempdir().expect("attachment cache directory"),
+            ),
             session: None,
             snapshot: Arc::default(),
-            runtime: cx.global::<Runtime>().clone(),
+            conversation: Arc::new(conversation(&Snapshot::default(), &now())),
+            presentation_running: false,
+            presented_revision: 0,
+            runtime,
             updates,
             epoch: 0,
             connecting: false,
-            remote,
+            remote: None,
             hosts,
-            side_chat_mode,
-            onboarding: !side_chat_mode
-                && !platform::state_dir()
-                    .is_ok_and(|directory| directory.join("onboarding.completed").is_file()),
-            initial_cwd,
-            busy: 0,
+            settings: false,
             error: String::new(),
             composer,
-            selection,
-            pending_quote: None,
-            pending_explanation: None,
-            composer_value: "".into(),
             composer_revision: 0,
-            completion_index: 0,
-            completion_dismissed: false,
-            composer_pending: None,
-            editor_input,
-            editor_value: "".into(),
-            editor_path: None,
-            editor_revision: 0,
-            editor_pending: None,
+            pending_draft: None,
+            composer_base: String::new(),
+            composer_key: String::new(),
             search,
-            path,
-            model_panel: ModelPanel::Models,
-            model_search,
-            model_provider: None,
-            settings_model_scope: ModelDefaultsScope::Global,
-            account_sign_out: None,
-            account_login_draft: None,
-            worktree_copy_paths,
-            worktree_directory,
-            worktree_dirty: false,
-            worktree_saved: false,
-            worktree_saving: false,
-            worktree_save_pending: false,
-            worktree_removal: None,
-            worktree_busy: false,
-            account_code,
-            account_busy: false,
-            account_polling: false,
-            expanded_projects: HashSet::new(),
-            expanded_items: HashSet::new(),
-            expanded_work: HashMap::new(),
-            tab: Tab::Chat,
-            settings_page: SettingsPage::Agents,
-            sidebar: true,
-            panel_open: false,
-            panel: Panel::Home,
-            side_chat: None,
+            rename,
+            renaming: false,
+            collapsed_shelves: BTreeSet::from([ShelfKind::Working, ShelfKind::Snoozed]),
+            settled_limit: 10,
+            show_archive: false,
+            expanded: BTreeSet::new(),
+            questions: BTreeMap::new(),
+            timeline: ListState::new(1, ListAlignment::Bottom, px(600.)),
+            panel: None,
             terminal: None,
             browser: None,
+            diff: cx.new(|_| DiffView::new("".into(), true)),
+            file_path,
+            editor,
+            editor_path: None,
+            editor_value: String::new(),
+            editor_revision: 0,
+            pending_editor: None,
+            account_code,
             dictation: None,
-            review_expanded: false,
-            source_paths: Vec::new(),
-            source_items: Vec::new(),
-            requests: HashMap::new(),
-            list,
-            hovered_conversation_marker: None,
-            rows: Vec::new(),
-            rendered: None,
-            diffs: HashMap::new(),
-            images: HashMap::new(),
-            image_gallery: None,
-            image_dir: tempfile::Builder::new()
-                .prefix("bex-images-")
-                .tempdir()
-                .expect("image temporary directory"),
-            markdown_cache: HashMap::new(),
+            tick: None,
             _subscriptions: subscriptions,
         };
+        if let Some(error) = &view.runtime.logging_error {
+            view.error = error.clone();
+        }
         view.connect(None);
         view
     }
-    fn connect(&mut self, preferences: Option<Vec<u8>>) {
+    fn connect(&mut self, remote: Option<RemoteHost>) {
+        self.attachment_cache.clear();
+        self.cancel_recording();
         self.epoch += 1;
+        self.presentation_running = false;
+        self.presented_revision = 0;
         self.connecting = true;
-        self.busy = 0;
-        self.worktree_removal = None;
-        self.worktree_busy = false;
-        self.account_busy = false;
-        self.account_polling = false;
-        self.model_provider = None;
-        self.account_sign_out = None;
-        self.account_login_draft = None;
-        self.error = self.runtime.logging_error.clone().unwrap_or_default();
-        let epoch = self.epoch;
-        let remote = self.remote.clone();
-        let side = self.side_chat_mode;
-        let initial_cwd = self.initial_cwd.take();
+        self.remote = remote;
+        self.pending_draft = None;
+        self.snapshot = Arc::default();
+        self.conversation = Arc::new(conversation(&self.snapshot, &now()));
+        self.timeline.reset(1);
+        self.editor_path = None;
+        self.editor_value.clear();
+        self.pending_editor = None;
+        self.renaming = false;
+        self.session.take();
+        self.terminal = None;
+        self.browser = None;
+        self.panel = None;
+        self.questions.clear();
         let updates = self.updates.clone();
-        let connections = self.runtime.connections.clone();
+        let epoch = self.epoch;
         let runtime = self.runtime.clone();
+        let connections = runtime.connections.clone();
+        let ticket = self.remote.as_ref().map(|r| r.ticket.clone());
+        let name = self
+            .remote
+            .as_ref()
+            .map(|r| r.id.clone())
+            .unwrap_or_else(|| "local".into());
         self.runtime.handle.spawn(async move {
-            let result = async {
-                let host = if let Some(remote) = &remote {
-                    remote
-                        .ticket
-                        .parse::<agent_transport::transport::Ticket>()
-                        .map_err(|error| error.to_string())?
-                        .node_id()
-                        .to_string()
-                } else {
-                    "local".into()
-                };
-                let path = platform::state_dir()?.join(format!(
-                    "desktop-{}-{host}.json",
-                    if side { "side" } else { "main" }
-                ));
-                let mut snapshot: Snapshot = match tokio::fs::read(&path).await {
-                    Ok(bytes) => agent_core::persistence::decode(&bytes)
-                        .map_err(|error| format!("保存した入力状態を読み込めません: {error}"))?,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        Snapshot::default()
-                    }
-                    Err(error) => return Err(error.to_string()),
-                };
-                let preferences = match preferences {
-                    Some(preferences) => Some(preferences),
-                    None => {
-                        match tokio::fs::read(path.with_file_name("model-preferences.json")).await {
-                            Ok(bytes) => Some(bytes),
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                            Err(error) => return Err(error.to_string()),
+            let state = (|| -> anyhow::Result<(PathBuf, Snapshot)> {
+                let path = platform::state_dir()
+                    .map_err(anyhow::Error::msg)?
+                    .join(format!("orchestration-{name}.json"));
+                let bytes = std::fs::read(&path).unwrap_or_default();
+                let preferences =
+                    std::fs::read(path.with_file_name("orchestration-model-preferences.json"))
+                        .unwrap_or_default();
+                let snapshot = agent_core::persistence::recover(&bytes, &preferences);
+                Ok((path, snapshot))
+            })();
+            match state {
+                Err(error) => {
+                    let _ = updates
+                        .send((epoch, Update::Connected(Err(error.to_string()))))
+                        .await;
+                }
+                Ok((path, snapshot)) => {
+                    let (tx, rx) = async_channel::bounded(8);
+                    let relay = updates.clone();
+                    let forward = tokio::spawn(async move {
+                        while let Ok(event) = rx.recv().await {
+                            if relay.send((epoch, event)).await.is_err() {
+                                break;
+                            }
                         }
-                    }
-                };
-                if let Some(preferences) = preferences {
-                    let saved = agent_core::persistence::encode(&snapshot)
-                        .map_err(|error| error.to_string())?;
-                    snapshot = agent_core::persistence::decode(
-                        &agent_core::persistence::apply_model_preferences(&saved, &preferences)
-                            .map_err(|error| error.to_string())?,
-                    )
-                    .map_err(|error| error.to_string())?;
-                }
-                let initial_cwd = initial_cwd.or_else(|| {
-                    snapshot
-                        .navigation
-                        .thread_id
-                        .is_none()
-                        .then(|| snapshot.navigation.cwd.clone())
-                });
-                let store = connections
-                    .connect(
-                        remote.as_ref().map(|remote| remote.ticket.as_str()),
-                        snapshot,
-                    )
-                    .await
-                    .map_err(|error| format!("{error:#}"))?;
-                if let Some(cwd) = initial_cwd {
-                    drop(store.dispatch(Intent::NewChat { cwd }));
-                }
-                Ok::<_, String>((store, path))
-            }
-            .await;
-            match result {
-                Ok((store, path)) => {
+                    });
                     StoreSession::publish(
-                        Ok(store),
-                        runtime,
-                        updates,
-                        move |session| {
-                            (
-                                epoch,
-                                Update::Connected(session.map(|session| (session, path))),
-                            )
+                        connections.connect(ticket.as_deref(), snapshot).await,
+                        runtime.clone(),
+                        tx,
+                        move |result| {
+                            Update::Connected(result.map(|session| (session, path.clone())))
                         },
-                        move |_| (epoch, Update::Snapshot),
+                        Update::Snapshot,
                     )
                     .await;
-                }
-                Err(error) => {
-                    let _ = updates.send((epoch, Update::Connected(Err(error)))).await;
+                    let _ = forward.await;
                 }
             }
         });
+        let updates = self.updates.clone();
+        self.tick = Some(tokio_util::task::AbortOnDropHandle::new(
+            self.runtime.handle.spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if updates.send((epoch, Update::Tick)).await.is_err() {
+                        break;
+                    }
+                }
+            }),
+        ));
     }
-    fn effect<T: Send + 'static>(
-        &self,
-        future: impl Future<Output = Result<T, String>> + Send + 'static,
-        complete: impl FnOnce(Result<T, String>) -> Update + Send + 'static,
-    ) {
+    fn perform(&self, intent: Intent, revision: Option<BufferRevision>) {
+        if let Some(session) = &self.session {
+            let receipt = session.store.dispatch(intent);
+            let updates = self.updates.clone();
+            let epoch = self.epoch;
+            self.runtime.handle.spawn(async move {
+                let result = receipt
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()));
+                let _ = updates
+                    .send((epoch, Update::Completed(revision, result)))
+                    .await;
+            });
+        }
+    }
+    fn receive(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(update, Update::Tick) {
+            cx.notify();
+            return;
+        }
+        let mut prepared = None;
+        match update {
+            Update::AttachmentsPicked(key, paths) => {
+                let paths = match paths {
+                    Ok(paths) => paths,
+                    Err(error) => {
+                        self.error = error;
+                        return;
+                    }
+                };
+                for path in paths {
+                    if let Some(name) = path.file_name().and_then(|s| s.to_str()).map(str::to_owned)
+                    {
+                        self.perform(
+                            Intent::AttachFile {
+                                path: path.to_string_lossy().into_owned(),
+                                mime_type: agent_core::commands::attachment_mime(&name).into(),
+                                name,
+                                draft_key: key.clone(),
+                            },
+                            None,
+                        );
+                    }
+                }
+            }
+            Update::AttachmentReady(id, result) => {
+                match result {
+                    Ok(path) => {
+                        self.attachment_cache.insert(id, Some(path));
+                    }
+                    Err(error) => self.error = error,
+                };
+            }
+            Update::Connected(Ok((mut session, path))) => {
+                let (tx, rx) = async_channel::bounded(4);
+                let updates = self.updates.clone();
+                let epoch = self.epoch;
+                self.runtime.handle.spawn(async move {
+                    while let Ok(event) = rx.recv().await {
+                        if updates.send((epoch, event)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                session.persist(path, tx, Update::PersistenceError);
+                self.snapshot = session.store.snapshot();
+                self.session = Some(session);
+                self.connecting = false;
+                self.perform(Intent::LoadAccounts, None);
+            }
+            Update::Connected(Err(error)) => {
+                self.connecting = false;
+                self.error = error;
+            }
+            Update::Snapshot(snapshot) => {
+                if !snapshot_is_newer(self.snapshot.revision, snapshot.revision) {
+                    return;
+                }
+                self.snapshot = snapshot;
+                if let Some(session) = &self.session {
+                    session.save(self.snapshot.clone());
+                }
+            }
+            Update::Completed(revision, result) => {
+                if matches!(revision, Some(BufferRevision::Editor(r)) if self.pending_editor == Some(r))
+                {
+                    self.pending_editor = None;
+                }
+                if matches!(revision, Some(BufferRevision::Draft(r)) if self.pending_draft == Some(r))
+                {
+                    self.pending_draft = None;
+                }
+                if let Some(session) = &self.session {
+                    let snapshot = session.store.snapshot();
+                    if snapshot_is_newer(self.snapshot.revision, snapshot.revision) {
+                        self.snapshot = snapshot;
+                    }
+                    session.save(self.snapshot.clone());
+                }
+                if let Err(error) = result {
+                    self.error = error;
+                }
+            }
+            Update::Folder(Some(path)) => self.perform(
+                Intent::RegisterProject {
+                    path: path.to_string_lossy().into(),
+                },
+                None,
+            ),
+            Update::Folder(None) => {}
+            Update::PersistenceError(error) => self.error = error,
+            Update::Recording(id, event) => self.recording_update(id, event),
+            Update::Transcribed(id, result) => {
+                if self.dictation.as_ref().is_some_and(|d| d.id == id) {
+                    self.dictation = None;
+                }
+                if let Some(session) = &self.session {
+                    self.snapshot = session.store.snapshot();
+                }
+                if let Err(error) = result {
+                    self.error = error;
+                }
+            }
+            Update::Presentation { revision, view } => {
+                self.presentation_running = false;
+                if revision >= self.presented_revision
+                    && view.thread_id.as_deref()
+                        == self.snapshot.selected_thread.as_ref().map(|id| id.as_str())
+                {
+                    self.presented_revision = revision;
+                    prepared = Some(*view);
+                }
+            }
+            Update::Tick => {}
+        }
+        let key = self.snapshot.draft_key();
+        if key != self.composer_key {
+            self.pending_draft = None;
+            self.composer_key = key;
+        }
+        if self.pending_draft.is_none() {
+            let text = self.snapshot.current_draft().text;
+            if self.composer.read(cx).value().as_ref() != text {
+                self.composer_base = text.clone();
+                self.composer
+                    .update(cx, |input, cx| input.set_value(text, window, cx));
+            }
+        }
+        if let Some(view) = prepared {
+            self.preload_attachments(&view);
+            self.set_conversation(view, window, cx);
+        } else if self.conversation.thread_id.as_deref()
+            != self.snapshot.selected_thread.as_ref().map(|id| id.as_str())
+            || self.conversation.cwd != self.snapshot.cwd()
+        {
+            self.presented_revision = self.snapshot.revision;
+            self.set_conversation(conversation(&self.snapshot, &now()), window, cx);
+        }
+        self.schedule_presentation();
+        if let Some(file) = &self.snapshot.workspace.file {
+            let text = self
+                .snapshot
+                .workspace
+                .file_drafts
+                .get(&file.path)
+                .map(|draft| &draft.text)
+                .unwrap_or(&file.text);
+            if self.editor_path.as_ref() != Some(&file.path)
+                || (self.pending_editor.is_none() && self.editor_value != *text)
+            {
+                self.editor_path = Some(file.path.clone());
+                self.editor_value = text.clone();
+                self.editor
+                    .update(cx, |input, cx| input.set_value(text.clone(), window, cx));
+            }
+        }
+        self.diff.update(cx, |view, cx| {
+            view.set_source(
+                self.snapshot
+                    .workspace
+                    .review
+                    .as_ref()
+                    .map_or("", |review| &review.diff),
+                cx,
+            )
+        });
+        cx.notify();
+    }
+    fn schedule_presentation(&mut self) {
+        if self.presentation_running || self.presented_revision >= self.snapshot.revision {
+            return;
+        }
+        self.presentation_running = true;
+        let snapshot = self.snapshot.clone();
         let epoch = self.epoch;
         let updates = self.updates.clone();
         self.runtime.handle.spawn(async move {
-            let completion = complete(future.await);
-            let _ = updates.send((epoch, completion)).await;
-        });
-    }
-    fn perform(&self, intent: Intent, completion: OperationCompletion) {
-        let Some(store) = self.session.as_ref().map(|session| &session.store) else {
-            return;
-        };
-        let receipt = store.dispatch(intent);
-        self.effect(
-            async move { receipt.await.map_err(|error| error.to_string()) },
-            move |result| Update::Completed(completion, result),
-        );
-    }
-    fn dispatch(&self, intent: Intent) {
-        if let Some(session) = &self.session {
-            drop(session.store.dispatch(intent));
-        }
-    }
-    fn receive(
-        &mut self,
-        (epoch, update): (u64, Update),
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if epoch != self.epoch {
-            return;
-        }
-        match update {
-            Update::Connected(result) => {
-                self.connecting = false;
-                match result {
-                    Ok((mut session, path)) => {
-                        session.persist(path, self.updates.clone(), move |error| {
-                            (epoch, Update::PersistenceError(error))
-                        });
-                        self.session = Some(session);
-                        self.accept_snapshot(window, cx);
-                        if let Some(text) = self.pending_quote.take() {
-                            self.quote_selection(&text, window, cx);
-                        }
-                        if let Some(text) = self.pending_explanation.take() {
-                            self.explain_selection(&text, cx);
-                        }
-                        self.dispatch(Intent::ReadWorktreeSettings(op::ReadWorktreeSettings {}));
-                        if self.tab == Tab::Settings {
-                            self.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
-                        }
-                    }
-                    Err(error) => self.set_error(error),
-                }
-            }
-            Update::Snapshot => self.accept_snapshot(window, cx),
-            Update::Completed(kind, result) => self.operation_completed(kind, result, window, cx),
-            Update::Recording(id, event) => self.recording_update(id, event),
-            Update::PersistenceError(error) => self.set_error(error),
-            Update::OnboardingCompleted(result) => match result {
-                Ok(()) => self.onboarding = false,
-                Err(error) => self.set_error(error),
-            },
-            Update::Folder(result) => {
-                self.busy = self.busy.saturating_sub(1);
-                match result {
-                    Ok(Some(path)) => {
-                        self.tab = Tab::Chat;
-                        self.cancel_recording();
-                        self.dispatch(Intent::AddProject(op::AddProject {
-                            cwd: path.to_string_lossy().into_owned(),
-                        }));
-                    }
-                    Ok(None) => {}
-                    Err(error) => self.set_error(error),
-                }
-            }
-            Update::Image { key, result } => {
-                if let Some(image) = self.images.get_mut(&key) {
-                    match result {
-                        Ok(path) => {
-                            image.path = Some(if Path::new(&path).is_absolute() {
-                                PathBuf::from(path).into()
-                            } else {
-                                ImageSource::from(path)
-                            })
-                        }
-                        Err(error) => {
-                            tracing::error!(target: "bex", operation = "image.load", message = %error);
-                            image.error = Some(error);
-                        }
-                    }
-                }
-                self.list.remeasure();
-            }
-        }
-        cx.notify();
-    }
-    fn operation_completed(
-        &mut self,
-        kind: OperationCompletion,
-        result: Result<Outcome, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match kind {
-            OperationCompletion::Composer(revision) => {
-                if self.composer_pending == Some(revision) {
-                    self.composer_pending = None;
-                }
-            }
-            OperationCompletion::Editor(revision) => {
-                if self.editor_pending == Some(revision) {
-                    self.editor_pending = None;
-                }
-            }
-            OperationCompletion::Busy => {
-                self.busy = self.busy.saturating_sub(1);
-            }
-            OperationCompletion::Item {
-                generation,
-                turn_id,
-            } => {
-                if self.snapshot.epoch != generation {
-                    return;
-                }
-                self.accept_snapshot(window, cx);
-                self.remeasure_item(&turn_id);
-                return;
-            }
-            OperationCompletion::WorktreeSettings => {
-                self.worktree_saving = false;
-                if let Err(error) = result {
-                    self.set_error(error);
-                }
-                self.accept_snapshot(window, cx);
-                self.worktree_dirty = !self.settings_match_inputs(cx);
-                self.worktree_saved = !self.worktree_dirty;
-                if std::mem::take(&mut self.worktree_save_pending) {
-                    self.save_worktree_settings(None, cx);
-                }
-                return;
-            }
-            OperationCompletion::Request(key) => {
-                if let Err(error) = result {
-                    self.set_error(error);
-                    if let Some(inputs) = self.requests.get_mut(&key) {
-                        inputs.sent = false;
-                    }
-                }
-                self.accept_snapshot(window, cx);
-                self.list.remeasure();
-                return;
-            }
-            OperationCompletion::Account => {
-                self.account_busy = false;
-                if let Err(error) = result {
-                    self.account_polling = false;
-                    self.set_error(error);
-                    self.dispatch(Intent::ListAccounts(op::ListAccounts {}));
-                } else {
-                    self.accept_snapshot(window, cx);
-                    self.account_polling = self.snapshot.account.login.is_some();
-                }
-                if self.snapshot.account.login.is_none() {
-                    self.account_login_draft = None;
-                }
-                return;
-            }
-            OperationCompletion::RemoveWorktree => {
-                self.worktree_busy = false;
-                match result {
-                    Ok(_) => self.worktree_removal = None,
-                    Err(error) => {
-                        self.set_error(error);
-                        self.dispatch(Intent::ListWorktrees(op::ListWorktrees {}));
-                    }
-                }
-                self.accept_snapshot(window, cx);
-                return;
-            }
-            OperationCompletion::Dictation(id) => {
-                if self.dictation.as_ref().is_some_and(|state| state.id == id) {
-                    self.dictation = None;
-                }
-            }
-            OperationCompletion::Gallery(id) => {
-                let Some(gallery) = self
-                    .image_gallery
-                    .as_mut()
-                    .filter(|gallery| gallery.id == id)
-                else {
-                    return;
-                };
-                gallery.loading = false;
-                match result {
-                    Ok(Outcome::SessionImages { images }) => {
-                        let initial = gallery.current_image().clone();
-                        let entries: Vec<_> = images
-                            .into_iter()
-                            .map(|image| (Arc::new(image.source), image.encoded))
-                            .collect();
-                        gallery.selected = entries.iter().position(|entry| entry == &initial);
-                        gallery
-                            .list
-                            .splice(0..gallery.list.item_count(), entries.len());
-                        gallery.entries = entries;
-                        if let Some(index) = gallery.selected {
-                            gallery.list.scroll_to_reveal_item(index);
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(target: "bex", operation = "gallery.load", message = %error);
-                        gallery.error = error;
-                    }
-                    _ => unreachable!("session image outcome"),
-                }
-                return;
-            }
-        }
-        if let Err(error) = result {
-            self.set_error(error);
-        }
-        self.accept_snapshot(window, cx);
-    }
-    fn accept_snapshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(store) = self.session.as_ref().map(|session| &session.store) else {
-            return;
-        };
-        let snapshot = store.snapshot();
-        let changed = !Arc::ptr_eq(&snapshot, &self.snapshot);
-        let previous = std::mem::replace(&mut self.snapshot, snapshot);
-        if previous.account.login.as_ref().map(|login| &login.login_id)
-            != self
-                .snapshot
-                .account
-                .login
-                .as_ref()
-                .map(|login| &login.login_id)
-        {
-            self.account_code
-                .update(cx, |input, cx| input.set_value("", window, cx));
-        }
-        if let Some(request) = self
-            .snapshot
-            .permission_control(self.draft_key())
-            .load_request
-        {
-            self.dispatch(Intent::ReadPermissionSettings(request));
-        }
-        if previous.error != self.snapshot.error
-            && let Some(error) = &self.snapshot.error
-        {
-            tracing::error!(target: "bex", operation = "store", message = %error);
-        }
-        sync_error_banner(
-            &mut self.error,
-            previous.error.as_deref(),
-            self.snapshot.error.as_deref(),
-        );
-        let previous_draft = previous.drafts.get(&previous.navigation.draft_key);
-        let sources_changed = previous_draft.map(|draft| &draft.attachments)
-            != self
-                .snapshot
-                .drafts
-                .get(self.draft_key())
-                .map(|draft| &draft.attachments);
-        let navigated = previous.navigation.draft_key != self.snapshot.navigation.draft_key;
-        let project_for_selected = |snapshot: &Snapshot| {
-            snapshot
-                .threads
-                .as_ref()?
-                .data
-                .iter()
-                .find(|thread| thread.id == snapshot.navigation.thread_id)?
-                .project_id
-                .as_ref()
-                .cloned()
-        };
-        if (navigated || project_for_selected(&previous) != project_for_selected(&self.snapshot))
-            && let Some(project) = project_for_selected(&self.snapshot)
-        {
-            self.expanded_projects.insert(project);
-        }
-        if navigated {
-            self.selection
-                .update(cx, |selection, cx| selection.clear(cx));
-            self.cancel_recording();
-            self.composer_pending = None;
-            self.rendered = None;
-            self.diffs.clear();
-            self.markdown_cache.clear();
-        }
-        if self.composer_pending.is_none() && self.composer_value.as_ref() != self.draft().text {
-            let value: SharedString = self.draft().text.clone().into();
-            self.composer_value = value.clone();
-            self.composer
-                .update(cx, |input, cx| input.set_value(value, window, cx));
-        }
-        let file = self.snapshot.workspace.file.as_ref();
-        let path = file.map(|file| file.path.as_str());
-        let file_changed = self.editor_path.as_deref() != path;
-        let text = file.map_or("", |file| {
-            self.snapshot
-                .file_drafts
-                .get(&file.path)
-                .map_or(file.text.as_str(), |draft| draft.text.as_str())
-        });
-        if file_changed || (self.editor_pending.is_none() && self.editor_value.as_ref() != text) {
-            self.editor_path = path.map(str::to_owned);
-            self.editor_value = text.to_owned().into();
-            self.editor_pending = None;
-            self.editor_input.update(cx, |input, cx| {
-                input.set_value(self.editor_value.clone(), window, cx)
-            });
-        }
-        if !self.worktree_dirty
-            && !self.worktree_saving
-            && previous.workspace.settings != self.snapshot.workspace.settings
-            && let Some(settings) = &self.snapshot.workspace.settings
-        {
-            self.worktree_copy_paths.update(cx, |input, cx| {
-                input.set_value(settings.copy_paths.join("\n"), window, cx)
-            });
-            self.worktree_directory.update(cx, |input, cx| {
-                input.set_value(settings.worktree_directory.clone(), window, cx)
-            });
-        }
-        let conversations_changed =
-            !Arc::ptr_eq(&previous.conversations, &self.snapshot.conversations);
-        if conversations_changed {
-            self.sync_request_inputs(window, cx);
-        }
-        if navigated
-            || conversations_changed
-            || !Arc::ptr_eq(
-                &previous.pending_submissions,
-                &self.snapshot.pending_submissions,
-            )
-        {
-            self.sync_rows(navigated, window, cx);
-        }
-        let user_items_changed = {
-            let mut current = self.user_items();
-            !self.source_items.iter().all(|previous| {
-                current
-                    .next()
-                    .is_some_and(|item| Arc::ptr_eq(previous, item))
-            }) || current.next().is_some()
-        };
-        if sources_changed || user_items_changed || navigated {
-            let mut paths: std::collections::BTreeSet<&str> = self
-                .draft()
-                .attachments
-                .iter()
-                .map(|attachment| attachment.path.as_str())
-                .collect();
-            for item in self.user_items() {
-                if let agent_protocol::items::ItemBody::UserMessage { content, .. } = item.body() {
-                    paths.extend(content.iter().filter_map(|part| match part {
-                        agent_protocol::items::MessagePart::Image { source }
-                            if !source.starts_with("data:") =>
-                        {
-                            Some(source.as_str())
-                        }
-                        agent_protocol::items::MessagePart::Attachment { path, .. }
-                        | agent_protocol::items::MessagePart::Invocation { path, .. } => {
-                            Some(path.as_str())
-                        }
-                        _ => None,
-                    }));
-                }
-            }
-            self.source_paths = paths.into_iter().map(str::to_owned).collect();
-            self.source_items = self.user_items().cloned().collect();
-        }
-        if previous.workspace.directory != self.snapshot.workspace.directory
-            && let Some(directory) = &self.snapshot.workspace.directory
-        {
-            let previous_path = previous
-                .workspace
-                .directory
-                .as_ref()
-                .map_or("", |directory| directory.path.as_str());
-            if self.path.read(cx).value().as_ref() == previous_path {
-                self.path.update(cx, |input, cx| {
-                    input.set_value(directory.path.clone(), window, cx)
-                });
-            }
-        }
-        let cwd_changed = previous.navigation.cwd != self.snapshot.navigation.cwd;
-        if cwd_changed {
-            let cwd = self.snapshot.navigation.cwd.clone();
-            self.path
-                .update(cx, |input, cx| input.set_value(cwd, window, cx));
-        }
-        if changed && let Some(session) = &self.session {
-            session.save(self.snapshot.clone());
-        }
-    }
-    fn draft_key(&self) -> &DraftKey {
-        &self.snapshot.navigation.draft_key
-    }
-    fn selected(&self) -> Option<&SessionRef> {
-        self.snapshot.navigation.thread_id.as_ref()
-    }
-    fn thread(&self) -> Option<&Arc<Thread>> {
-        self.selected()
-            .and_then(|id| self.snapshot.conversations.get(id))
-    }
-    fn draft(&self) -> &Draft {
-        static EMPTY: Draft = Draft {
-            invocations: Vec::new(),
-            text: String::new(),
-            attachments: Vec::new(),
-            model: None,
-            effort: None,
-            service_tier: None,
-        };
-        self.snapshot
-            .drafts
-            .get(self.draft_key())
-            .map_or(&EMPTY, Arc::as_ref)
-    }
-    fn selected_model(&self) -> Option<&Model> {
-        self.snapshot
-            .models
-            .iter()
-            .find(|model| Some(&model.model) == self.draft().model.as_ref())
-    }
-    fn remote_key(&self) -> &str {
-        self.remote.as_ref().map_or("local", |remote| &remote.id)
-    }
-    fn image_key(&self, source: &str, encoded: bool) -> String {
-        format!(
-            "{}:{}:{encoded}:{source}",
-            self.remote_key(),
-            self.snapshot.navigation.cwd
-        )
-    }
-    fn history_key(&self) -> Option<op::OperationKey> {
-        self.selected()
-            .cloned()
-            .map(|session| op::OperationKey::History { session })
-    }
-    fn history_loading(&self) -> bool {
-        self.history_key()
-            .is_some_and(|key| self.snapshot.operation_running(key))
-    }
-    fn history_error(&self) -> Option<String> {
-        self.history_key()
-            .and_then(|key| self.snapshot.operation_error(key))
-    }
-    fn has_older_history(&self) -> bool {
-        self.thread()
-            .is_some_and(|thread| thread.history_has_more == Some(true))
-    }
-    fn user_items(&self) -> impl Iterator<Item = &Arc<Item>> {
-        self.thread()
-            .and_then(|thread| thread.turns.as_deref())
-            .unwrap_or_default()
-            .iter()
-            .flat_map(|turn| turn.items.as_deref().unwrap_or_default())
-            .filter(|item| {
-                matches!(
-                    item.body(),
-                    agent_protocol::items::ItemBody::UserMessage { .. }
-                )
-            })
-    }
-    fn sync_rows(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.rendered = self.snapshot.conversation_thread().map(|thread| {
-            agent_core::presentation::conversation::project_conversation(
-                &self.snapshot,
-                thread,
-                &self.rendered,
-            )
-        });
-        let rows = conversation_rows(&self.rendered);
-        if reset {
-            self.list.reset(rows.len());
-            self.list.scroll_to_end();
-            self.rows = rows;
-            return;
-        }
-        let old = &self.rows;
-        let prefix = old
-            .iter()
-            .zip(&rows)
-            .take_while(|(a, b)| a.same_identity(b))
-            .count();
-        let suffix = old[prefix..]
-            .iter()
-            .rev()
-            .zip(rows[prefix..].iter().rev())
-            .take_while(|(a, b)| a.same_identity(b))
-            .count();
-        let anchor = self.list.logical_scroll_top();
-        let preserve = old
-            .get(anchor.item_ix)
-            .zip(rows.get(anchor.item_ix))
-            .filter(|(a, b)| a.same_identity(b) && !a.unchanged(b))
-            .and_then(|(a, b)| {
-                if let (ConversationRow::Turn(turn), ConversationRow::Turn(next)) = (a, b)
-                    && let Some(first) = turn.source.items.as_ref().and_then(|items| items.first())
-                    && next.source.items.as_ref().is_some_and(|items| {
-                        items
-                            .iter()
-                            .position(|item| item.id == first.id)
-                            .is_some_and(|index| index > 0)
-                    })
-                {
-                    Some((
-                        turn.source.id.clone(),
-                        self.list.bounds_for_item(anchor.item_ix)?.size.height,
-                    ))
-                } else {
-                    None
-                }
-            });
-        if prefix + suffix != old.len() || old.len() != rows.len() {
-            self.list
-                .splice(prefix..old.len() - suffix, rows.len() - prefix - suffix);
-        }
-        for index in 0..prefix {
-            if !old[index].unchanged(&rows[index]) {
-                self.list.remeasure_items(index..index + 1);
-            }
-        }
-        for offset in 0..suffix {
-            let index = rows.len() - suffix + offset;
-            if !old[old.len() - suffix + offset].unchanged(&rows[index]) {
-                self.list.remeasure_items(index..index + 1);
-            }
-        }
-        self.rows = rows;
-        if let Some((id, old_height)) = preserve {
-            let generation = self.snapshot.epoch;
-            let owner = cx.entity().downgrade();
-            window.on_next_frame(move |_, cx| { let _ = owner.update(cx, |view, cx| {
-                if view.snapshot.epoch == generation && !view.list.is_following_tail() && matches!(view.rows.get(anchor.item_ix), Some(ConversationRow::Turn(turn)) if turn.source.id == id)
-                    && let Some(bounds) = view.list.bounds_for_item(anchor.item_ix)
-                {
-                    view.list.scroll_to(ListOffset { item_ix: anchor.item_ix, offset_in_item: anchor.offset_in_item + bounds.size.height - old_height }); cx.notify();
-                }
-            }); });
-        }
-    }
-    fn pause_tail(&self) {
-        if self.list.logical_scroll_top().item_ix == self.list.item_count() {
-            self.list
-                .scroll_by(-self.list.viewport_bounds().size.height);
-        }
-        self.list.pause_following_tail();
-    }
-    fn remeasure_item(&self, id: &str) {
-        for (index, row) in self.rows.iter().enumerate() {
-            if let ConversationRow::Turn(turn) = row
-                && (turn.source.id.as_str() == id
-                    || turn
-                        .source
-                        .items
-                        .as_deref()
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|item| item.id.as_str() == id))
+            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+            let revision = snapshot.revision;
+            if let Ok(view) =
+                tokio::task::spawn_blocking(move || conversation(&snapshot, &now())).await
             {
-                self.list.remeasure_items(index..index + 1);
+                let _ = updates
+                    .send((
+                        epoch,
+                        Update::Presentation {
+                            revision,
+                            view: Box::new(view),
+                        },
+                    ))
+                    .await;
             }
-        }
+        });
     }
-    fn new_chat(&mut self, cwd: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.tab = Tab::Chat;
-        self.cancel_recording();
-        self.dispatch(Intent::NewChat { cwd });
-        self.composer.read(cx).focus_handle(cx).focus(window, cx);
-    }
-    fn open_chat(&mut self, id: SessionRef, window: &mut Window, cx: &mut Context<Self>) {
-        self.tab = Tab::Chat;
-        self.cancel_recording();
-        self.dispatch(Intent::ReadThread(op::ReadThread::open(id)));
-        self.composer.read(cx).focus_handle(cx).focus(window, cx);
-    }
-    fn load_visible_history(&mut self, cx: &mut Context<Self>) {
-        let viewport = self.list.viewport_bounds();
-        let oldest_visible = viewport.size.height > px(0.)
-            && (self.rows.is_empty()
-                || self.list.bounds_for_item(0).is_some_and(|bounds| {
-                    bounds.top() >= viewport.top() - viewport.size.height * 0.6
-                        && bounds.top() <= viewport.bottom()
-                }));
-        if agent_core::presentation::conversation::should_load_history(
-            self.has_older_history(),
-            self.history_loading() || self.history_error().is_some(),
-            oldest_visible,
-            self.list.is_scrolled_to_end() != Some(false),
-            self.list.is_following_tail(),
-        ) {
-            self.dispatch(Intent::ReadOlder {
-                thread_id: self.selected().expect("selected conversation").clone(),
-            });
-            cx.notify();
-        }
-    }
-    fn detail(&mut self, turn_id: TurnId, item_id: ItemId) {
-        let Some(thread_id) = self.selected().cloned() else {
-            return;
-        };
-        let read = op::ReadItem {
-            thread_id,
-            turn_id,
-            item_id,
-        };
-        if self
-            .snapshot
-            .operation_running(op::OperationKey::Item { item: read.clone() })
-        {
-            return;
-        }
-        let needed = self
-            .thread()
-            .and_then(|thread| thread.turns.as_ref())
-            .and_then(|turns| turns.iter().find(|turn| turn.id == read.turn_id))
-            .and_then(|turn| turn.items.as_ref())
-            .and_then(|items| items.iter().find(|item| item.id == read.item_id))
-            .is_some_and(|item| item.is_deferred());
-        if !needed {
-            return;
-        }
-        let generation = self.snapshot.epoch;
-        let turn_id = read.turn_id.clone();
-        self.perform(
-            Intent::ReadItem(read),
-            OperationCompletion::Item {
-                generation,
-                turn_id,
-            },
-        );
-    }
-    fn switch_host(
+    fn set_conversation(
         &mut self,
-        remote: Option<RemoteHost>,
+        conversation: ConversationView,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.remote == remote && self.snapshot.connected {
-            return;
-        }
-        self.cancel_recording();
-        self.dictation = None;
-        let preferences = self
-            .session
-            .as_ref()
-            .map(|session| {
-                agent_core::persistence::encode_model_preferences(&session.store.snapshot())
-            })
-            .transpose();
-        let preferences = match preferences {
-            Ok(preferences) => preferences,
-            Err(error) => {
-                self.error = error.to_string();
-                return;
+        let before = self.conversation.clone();
+        let follow = self.timeline.max_offset_for_scrollbar().y
+            + self.timeline.scroll_px_offset_for_scrollbar().y
+            <= px(80.);
+        let switched = before.thread_id != conversation.thread_id || before.cwd != conversation.cwd;
+        if switched {
+            self.renaming = false;
+            self.pending_editor = None;
+            self.editor_path = None;
+            self.editor_value.clear();
+            self.terminal = None;
+            if !conversation.cwd.is_empty() {
+                match self.panel {
+                    Some(Panel::Diff) => self.perform(
+                        Intent::ReviewWorkspace {
+                            cwd: conversation.cwd.clone(),
+                        },
+                        None,
+                    ),
+                    Some(Panel::Files) => self.perform(
+                        Intent::ListFiles {
+                            path: conversation.cwd.clone(),
+                        },
+                        None,
+                    ),
+                    Some(Panel::Terminal) => {
+                        if let Some(session) = &self.session {
+                            self.terminal = Some(crate::terminal::Terminal::new(
+                                session.store.clone(),
+                                conversation.cwd.clone(),
+                                window,
+                                cx,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
             }
-        };
-        self.session.take();
-        self.remote = remote;
-        self.settings_model_scope = ModelDefaultsScope::Global;
-        self.snapshot = Arc::default();
-        self.composer_pending = None;
-        self.pending_quote = None;
-        self.pending_explanation = None;
-        self.editor_pending = None;
-        self.editor_path = None;
-        self.worktree_dirty = false;
-        self.worktree_saving = false;
-        self.worktree_save_pending = false;
-        self.side_chat = None;
-        self.terminal = None;
-        self.images.clear();
-        self.image_gallery = None;
-        self.rows.clear();
-        self.list.reset(0);
-        self.rendered = None;
-        self.requests.clear();
-        self.diffs.clear();
-        self.markdown_cache.clear();
-        self.composer_value = "".into();
-        self.composer
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        self.connect(preferences);
-    }
-    fn send(&mut self, cx: &Context<Self>) {
-        if !self.snapshot.connected || self.busy > 0 {
-            return;
-        }
-        if let Some(dictation) = &self.dictation {
-            if dictation.phase == Phase::Recording {
-                self.finish_dictation(true);
+            self.timeline.reset(conversation.rows.len() + 1);
+        } else {
+            let (range, count) = timeline_splice(&before.rows, &conversation.rows);
+            self.timeline.splice(range, count);
+            for (index, (old, new)) in before.rows.iter().zip(&conversation.rows).enumerate() {
+                if old != new {
+                    self.timeline.remeasure_items(index + 1..index + 2);
+                }
             }
-            return;
         }
-        if self.composer.read(cx).value().trim().is_empty() && self.draft().attachments.is_empty() {
-            return;
+        if switched || (follow && before.rows.last() != conversation.rows.last()) {
+            self.timeline.scroll_to_end();
         }
-        self.busy += 1;
-        self.perform(
-            Intent::Submit {
-                thread_id: None,
-                client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
-            },
-            OperationCompletion::Busy,
-        );
-    }
-    fn quote_selection(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.session.is_none() {
-            let queued = self.pending_quote.get_or_insert_with(String::new);
-            if !queued.is_empty() {
-                queued.push_str("\n\n");
+        self.conversation = Arc::new(conversation);
+        self.composer.update(cx, |input, cx| {
+            input.set_placeholder(self.conversation.composer.placeholder.clone(), window, cx)
+        });
+        let mut live = BTreeSet::new();
+        for row in &self.conversation.requests {
+            if let Some(request) = &row.request_id {
+                for question in &row.questions {
+                    let key = (request.clone(), question.id.clone());
+                    live.insert(key.clone());
+                    self.questions.entry(key).or_insert_with(|| QuestionInput {
+                        selected: BTreeSet::new(),
+                        multi: question.multi_select,
+                        custom: cx
+                            .new(|cx| InputState::new(window, cx).placeholder("Your answer…")),
+                    });
+                }
             }
-            queued.push_str(text);
-            return;
         }
-        selection::append_to_composer(&self.composer, text, window, cx);
+        self.questions.retain(|key, _| live.contains(key));
     }
-
-    fn explain_selection(&mut self, text: &str, cx: &mut Context<Self>) {
-        let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
-            self.pending_explanation = Some(text.into());
-            return;
-        };
-        let cwd = self.snapshot.selected_directory();
-        let provider = self
-            .snapshot
-            .model_provider_for_draft(self.draft_key().clone());
-        let prompt = format!("次の選択範囲について詳しく説明してください。\n\n{text}");
-        self.busy += 1;
-        self.effect(
-            async move {
-                let Outcome::StartedThread { id } = store
-                    .dispatch(Intent::CreateSession(op::CreateSession {
-                        provider,
-                        cwd: Some(cwd),
-                        model: None,
-                    }))
-                    .await
-                    .map_err(|error| error.to_string())?
-                else {
-                    return Err("新しいサイドチャットを作成できませんでした".into());
-                };
-                // The new thread has its own draft; existing side-chat input stays intact.
-                store
-                    .dispatch(Intent::SetDraftText {
-                        thread_id: id.clone().into(),
-                        text: prompt,
-                    })
-                    .await
-                    .map_err(|error| error.to_string())?;
-                store
-                    .dispatch(Intent::Submit {
-                        thread_id: Some(id),
-                        client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
-                    })
-                    .await
-                    .map_err(|error| error.to_string())
-            },
-            |result| Update::Completed(OperationCompletion::Busy, result),
-        );
-        cx.notify();
+    fn action(
+        &self,
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        intent: Intent,
+        cx: &Context<Self>,
+    ) -> Button {
+        Button::new(id)
+            .label(label)
+            .small()
+            .ghost()
+            .on_click(cx.listener(move |view, _, _, _| view.perform(intent.clone(), None)))
     }
-
-    fn refresh_threads(&self) {
-        self.dispatch(Intent::ListSessions(op::ListSessions::new(
-            (*self.snapshot.list_query).clone(),
-        )));
-    }
-    fn refresh_review(&self) {
-        if !self.snapshot.selected_directory().is_empty() {
-            self.dispatch(Intent::ReviewWorkspace(op::ReviewWorkspace {
-                cwd: self.snapshot.navigation.cwd.clone(),
-            }));
+    fn thread_action(&self, action: ThreadAction) {
+        if let Some(id) = &self.snapshot.selected_thread {
+            self.perform(
+                Intent::Thread {
+                    thread_id: id.to_string(),
+                    action,
+                },
+                None,
+            );
         }
+    }
+    fn pick_folder(&self) {
+        let updates = self.updates.clone();
+        let epoch = self.epoch;
+        self.runtime.handle.spawn(async move {
+            let path = tokio::task::spawn_blocking(platform::choose_folder)
+                .await
+                .ok()
+                .flatten();
+            let _ = updates.send((epoch, Update::Folder(path))).await;
+        });
     }
     fn open_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
-        let result = match panel {
-            Panel::SideChat if self.side_chat.is_none() => {
-                self.side_chat = Some(cx.new(|cx| {
-                    Self::new(
-                        Mode::SideChat {
-                            remote: self.remote.clone(),
-                            cwd: self.snapshot.selected_directory(),
-                        },
+        if self.panel == Some(panel) {
+            self.panel = None;
+        } else {
+            match panel {
+                Panel::Terminal if !self.snapshot.terminal_available() => return,
+                Panel::Terminal if self.terminal.is_none() => {
+                    if let Some(session) = &self.session {
+                        self.terminal = Some(crate::terminal::Terminal::new(
+                            session.store.clone(),
+                            self.snapshot.cwd(),
+                            window,
+                            cx,
+                        ));
+                    }
+                }
+                Panel::Browser if self.browser.is_none() => {
+                    match crate::browser::Browser::new(
+                        wry::WebViewBuilder::new(),
+                        #[cfg(target_os = "macos")]
+                        crate::browser::ChromeProfileSource::default(),
                         window,
                         cx,
-                    )
-                }));
-                Ok(())
+                    ) {
+                        Ok(browser) => self.browser = Some(browser),
+                        Err(error) => self.error = error,
+                    }
+                }
+                Panel::Files => self.perform(
+                    Intent::ListFiles {
+                        path: self.snapshot.cwd(),
+                    },
+                    None,
+                ),
+                Panel::Diff => self.perform(
+                    Intent::ReviewWorkspace {
+                        cwd: self.snapshot.cwd(),
+                    },
+                    None,
+                ),
+                _ => {}
             }
-            Panel::Terminal if self.terminal.is_none() => {
-                self.terminal = Some(crate::terminal::Terminal::new(
-                    self.remote.as_ref().map_or("", |remote| &remote.ticket),
-                    self.snapshot.navigation.cwd.clone(),
-                    window,
-                    cx,
-                ));
-                Ok(())
-            }
-            Panel::Browser if self.browser.is_none() => crate::browser::Browser::new(
-                wry::WebViewBuilder::new(),
-                #[cfg(target_os = "macos")]
-                crate::browser::ChromeProfileSource::default(),
-                window,
-                cx,
-            )
-            .map(|view| self.browser = Some(view)),
-            _ => Ok(()),
-        };
-        if let Err(error) = result {
-            self.set_error(error);
-            return;
+            self.panel = Some(panel);
         }
-        self.panel = panel;
-        self.panel_open = true;
-        self.tab = Tab::Chat;
+        if let Some(browser) = &self.browser {
+            browser.update(cx, |browser, cx| {
+                browser.set_visible(!self.settings && self.panel == Some(Panel::Browser), cx)
+            });
+        }
         cx.notify();
     }
-    fn pick_folder(&mut self) {
-        self.busy += 1;
-        self.effect(
-            async {
-                tokio::task::spawn_blocking(platform::choose_folder)
-                    .await
-                    .map_err(|error| error.to_string())
-            },
-            Update::Folder,
-        );
-    }
-    fn composer_arrow(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.completion_key(key, window, cx) {
-            return;
-        }
-        let moved = self.composer.update(cx, |input, cx| {
-            if input.marked_text_range(window, cx).is_some() || !input.selected_range().is_empty() {
-                return false;
-            }
-            let cursor = input.cursor();
-            let target = if key == "up" { 0 } else { input.text().len() };
-            // Off-screen offsets can be clamped to the first visible row by the input.
-            if input.value()[cursor.min(target)..cursor.max(target)].contains('\n') {
-                return false;
-            }
-            // Compare rendered rows so soft-wrapped text keeps normal vertical movement.
-            let Some(caret) = input.range_to_bounds(&(cursor..cursor)) else {
-                return false;
-            };
-            let Some(edge) = input.range_to_bounds(&(target..target)) else {
-                return false;
-            };
-            if caret.origin.y != edge.origin.y {
-                return false;
-            }
-            input.set_selected_range(target..target, cx);
-            true
-        });
-        if moved {
-            cx.stop_propagation();
+    fn sync_browser_visibility(&mut self, cx: &mut Context<Self>) {
+        if let Some(browser) = &self.browser {
+            browser.update(cx, |browser, cx| {
+                browser.set_visible(!self.settings && self.panel == Some(Panel::Browser), cx)
+            });
         }
     }
-    fn composer_enter(
-        &mut self,
-        action: &gpui_kit::component::input::Enter,
+    fn confirm_thread_action(
+        &self,
+        id: String,
+        action: ThreadAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !action.shift && !action.secondary && self.accept_completion(window, cx) {
-            cx.stop_propagation();
-            return;
-        }
-        let submit = self.composer.update(cx, |input, cx| {
-            composer_should_submit(input, action, window, cx)
-        });
-        if submit && self.snapshot.connected && self.busy == 0 {
-            cx.stop_propagation();
-            self.send(cx);
-        }
-    }
-    fn paste_image(
-        &mut self,
-        _: &gpui_kit::component::input::Paste,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
-        if !item
-            .entries()
-            .iter()
-            .any(|entry| matches!(entry, ClipboardEntry::Image(_)))
-        {
-            return;
-        }
-        cx.stop_propagation();
-        if self.busy > 0 || self.dictation.is_some() {
-            return;
-        }
-        self.attach_sources(move || {
-            let directory = platform::state_dir()?.join("attachments");
-            item.into_entries()
-                .filter_map(|entry| match entry {
-                    ClipboardEntry::Image(image) => {
-                        Some(clipboard::save_image(&directory, image).map(PathBuf::from))
-                    }
-                    _ => None,
-                })
-                .collect()
-        });
-        cx.notify();
-    }
-    fn attach(&mut self) {
-        self.attach_sources(|| Ok(platform::choose_files().unwrap_or_default()));
-    }
-    fn attach_sources(
-        &mut self,
-        sources: impl FnOnce() -> Result<Vec<PathBuf>, String> + Send + 'static,
-    ) {
-        let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
-            return;
-        };
-        let key = self.draft_key().to_owned();
-        let remote = self.remote.is_some();
-        let directory = self.snapshot.navigation.cwd.clone();
-        self.busy += 1;
-        self.effect(
-            async move {
-                let paths = tokio::task::spawn_blocking(sources)
-                    .await
-                    .map_err(|error| error.to_string())??;
-                for path in paths {
-                    let is_image = path
-                        .extension()
-                        .and_then(|extension| extension.to_str())
-                        .and_then(image::ImageFormat::from_extension)
-                        .is_some();
-                    let name = path
-                        .file_name()
-                        .unwrap_or(path.as_os_str())
-                        .to_string_lossy()
-                        .into_owned();
-                    let attachment = Attachment {
-                        path: path.to_string_lossy().into_owned(),
-                        name,
-                        is_image,
-                    };
-                    let intent = if remote {
-                        Intent::UploadAttachment(op::UploadAttachment {
-                            draft_key: key.clone(),
-                            attachment,
-                            directory: directory.clone(),
-                        })
-                    } else {
-                        Intent::AddAttachment {
-                            draft_key: key.clone(),
-                            attachment,
-                        }
-                    };
-                    store
-                        .dispatch(intent)
-                        .await
-                        .map_err(|error| error.to_string())?;
+        if matches!(action, ThreadAction::Delete) {
+            let answer = window.prompt(
+                gpui::PromptLevel::Warning,
+                "Delete this thread?",
+                Some("This permanently deletes the conversation."),
+                &["Cancel", "Delete"],
+                cx,
+            );
+            cx.spawn(async move |view, cx| {
+                if let Ok(1) = answer.await {
+                    let _ = view.update(cx, |view, _| {
+                        view.perform(
+                            Intent::Thread {
+                                thread_id: id,
+                                action: ThreadAction::Delete,
+                            },
+                            None,
+                        )
+                    });
                 }
-                Ok(Outcome::Applied)
-            },
-            |result| Update::Completed(OperationCompletion::Busy, result),
-        );
-    }
-    fn download(&mut self, source: String) {
-        let Some(store) = self.session.as_ref().map(|session| session.store.clone()) else {
-            return;
-        };
-        self.busy += 1;
-        self.effect(
-            async move {
-                let name = Path::new(&source)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                let destination =
-                    tokio::task::spawn_blocking(move || platform::choose_destination(&name))
-                        .await
-                        .map_err(|error| error.to_string())?;
-                if let Some(destination) = destination {
-                    store
-                        .dispatch(Intent::DownloadFile(op::DownloadFile {
-                            source,
-                            destination: destination
-                                .into_os_string()
-                                .into_string()
-                                .map_err(|_| "download destination is not UTF-8")?,
-                        }))
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
-                Ok(Outcome::Applied)
-            },
-            |result| Update::Completed(OperationCompletion::Busy, result),
-        );
-    }
-    fn browse(&mut self, path: String) {
-        self.panel = Panel::Files;
-        self.panel_open = true;
-        self.tab = Tab::Chat;
-        self.dispatch(Intent::ListFiles(op::ListFiles { path }));
-    }
-    fn edit(&mut self, path: String, discard_draft: bool) {
-        self.dispatch(Intent::ReadFile(op::ReadFile {
-            path,
-            discard_draft,
-        }));
-    }
-    fn save_file(&mut self) {
-        let Some(path) = self.editor_path.clone() else {
-            return;
-        };
-        self.busy += 1;
-        self.perform(
-            Intent::SaveFile(op::SaveFile { path }),
-            OperationCompletion::Busy,
-        );
-    }
-    fn settings_match_inputs(&self, cx: &App) -> bool {
-        self.snapshot
-            .workspace
-            .settings
-            .as_ref()
-            .is_some_and(|settings| {
-                self.worktree_directory.read(cx).value().trim() == settings.worktree_directory
-                    && self
-                        .worktree_copy_paths
-                        .read(cx)
-                        .value()
-                        .lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                        .eq(settings.copy_paths.iter().map(String::as_str))
             })
-    }
-    fn save_worktree_settings(&mut self, toggle: Option<WorktreeToggle>, cx: &Context<Self>) {
-        let Some(settings) = &self.snapshot.workspace.settings else {
-            return;
-        };
-        let mut settings: WorktreeSettings = settings.as_ref().clone();
-        if let Some(toggle) = toggle {
-            match toggle {
-                WorktreeToggle::Create(checked) => settings.create_on_new_session = checked,
-                WorktreeToggle::Copy(checked) => settings.copy_on_create = checked,
-                WorktreeToggle::DeleteMerged(checked) => settings.delete_merged = checked,
-            }
-        }
-        settings.worktree_directory = self.worktree_directory.read(cx).value().trim().into();
-        settings.copy_paths = self
-            .worktree_copy_paths
-            .read(cx)
-            .value()
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect();
-        if self.snapshot.workspace.settings.as_deref() == Some(&settings) {
-            return;
-        }
-        if self.worktree_saving {
-            self.worktree_save_pending = true;
-            return;
-        }
-        self.worktree_saving = true;
-        self.worktree_saved = false;
-        self.perform(
-            Intent::UpdateWorktreeSettings(op::UpdateWorktreeSettings { settings }),
-            OperationCompletion::WorktreeSettings,
-        );
-    }
-    fn respond(&mut self, id: RequestId, answer: Answer) {
-        if let Some(inputs) = self.requests.get_mut(&id) {
-            inputs.sent = true;
-        }
-        self.perform(
-            Intent::Respond(op::Respond {
-                request_id: id.clone(),
-                answer,
-            }),
-            OperationCompletion::Request(id),
-        );
-    }
-}
-fn conversation_rows(
-    rendered: &Option<Arc<agent_core::presentation::conversation::RenderedConversation>>,
-) -> Vec<ConversationRow> {
-    let mut rows = Vec::new();
-    if let Some(rendered) = rendered {
-        rows.extend(rendered.turns.iter().cloned().map(ConversationRow::Turn));
-        rows.extend(rendered.queued.iter().filter_map(|item| {
-            if let agent_core::presentation::conversation::ItemSource::Pending(id, pending) =
-                &item.source
-            {
-                Some(ConversationRow::Pending(id.clone(), pending.clone()))
-            } else {
-                None
-            }
-        }));
-    }
-    rows.extend(
-        rendered
-            .iter()
-            .flat_map(|conversation| &conversation.request_rows)
-            .filter_map(|row| {
-                if let ConversationRowContent::PendingRequest { request } = &row.content {
-                    Some(ConversationRow::Request(request.clone()))
-                } else {
-                    None
-                }
-            }),
-    );
-    rows
-}
-
-fn toggle_set(set: &mut HashSet<String>, key: &str) {
-    if !set.remove(key) {
-        set.insert(key.into());
-    }
-}
-fn fenced(text: &str, language: &str) -> String {
-    let longest = text
-        .lines()
-        .map(|line| line.chars().take_while(|c| *c == '`').count())
-        .max()
-        .unwrap_or(0)
-        .max(2)
-        + 1;
-    let fence = "`".repeat(longest);
-    format!("{fence}{language}\n{text}\n{fence}")
-}
-fn literal(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    for c in text.chars() {
-        if "\\`*_{}[]<>()#+-.!|>~".contains(c) {
-            result.push('\\');
-        }
-        if c == '\n' {
-            result.push_str("  ");
-        }
-        result.push(c);
-    }
-    result
-}
-fn sync_error_banner(banner: &mut String, previous: Option<&str>, next: Option<&str>) {
-    if previous != next {
-        if let Some(error) = next {
-            *banner = error.to_owned();
-        } else if previous == Some(banner.as_str()) {
-            banner.clear();
-        }
-    }
-}
-
-fn composer_should_submit(
-    input: &TextareaState,
-    action: &gpui_kit::component::input::Enter,
-    window: &mut Window,
-    cx: &mut Context<TextareaState>,
-) -> bool {
-    !action.shift
-        && !action.secondary
-        && input.selected_range().is_empty()
-        && input.cursor() == input.text().len()
-        && input.marked_text_range(window, cx).is_none()
-}
-
-#[cfg(test)]
-mod composer_tests {
-    use super::{TextareaState, composer_should_submit};
-    use gpui_kit as gpui;
-    use gpui_kit::{EntityInputHandler, TestAppContext};
-    #[gpui::test]
-    fn enter_submits_only_committed_text_at_the_end(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        let input = cx.add_window(TextareaState::new);
-        input
-            .update(cx, |input, window, cx| {
-                let enter = gpui_kit::component::input::Enter {
-                    secondary: false,
-                    shift: false,
-                };
-                input.set_value("日本語🙂", window, cx);
-                let end = input.text().len();
-                input.set_selected_range(end..end, cx);
-                assert!(composer_should_submit(input, &enter, window, cx));
-                input.set_selected_range(3..3, cx);
-                assert!(!composer_should_submit(input, &enter, window, cx));
-                input.set_selected_range(0..end, cx);
-                assert!(!composer_should_submit(input, &enter, window, cx));
-                input.set_selected_range(end..end, cx);
-                assert!(!composer_should_submit(
-                    input,
-                    &gpui_kit::component::input::Enter {
-                        shift: true,
-                        secondary: false
-                    },
-                    window,
-                    cx
-                ));
-                input.replace_and_mark_text_in_range(None, "変換", Some(2..2), window, cx);
-                assert!(!composer_should_submit(input, &enter, window, cx));
-                input.unmark_text(window, cx);
-                assert!(composer_should_submit(input, &enter, window, cx));
-            })
-            .unwrap();
-    }
-}
-
-#[cfg(test)]
-mod error_tests {
-    use super::sync_error_banner;
-
-    #[test]
-    fn recovered_store_error_clears_its_banner() {
-        let mut banner = String::new();
-        sync_error_banner(&mut banner, None, Some("thread read failed"));
-        assert_eq!(banner, "thread read failed");
-        sync_error_banner(&mut banner, Some("thread read failed"), None);
-        assert!(banner.is_empty());
-    }
-
-    #[test]
-    fn recovery_preserves_a_newer_local_error_and_respects_dismissal() {
-        let mut banner = "draft save failed".to_owned();
-        sync_error_banner(&mut banner, Some("thread read failed"), None);
-        assert_eq!(banner, "draft save failed");
-        banner.clear();
-        sync_error_banner(
-            &mut banner,
-            Some("thread read failed"),
-            Some("thread read failed"),
-        );
-        assert!(banner.is_empty());
-        sync_error_banner(
-            &mut banner,
-            Some("thread read failed"),
-            Some("disconnected"),
-        );
-        assert_eq!(banner, "disconnected");
-    }
-}
-
-#[cfg(test)]
-mod completion_tests {
-    use super::{
-        Arc, Context, ConversationRow, Desktop, Mode, OperationCompletion, Outcome, Snapshot,
-        Thread, Update, Window, conversation_rows,
-    };
-    use gpui_kit as gpui;
-    use gpui_kit::TestAppContext;
-
-    #[gpui::test]
-    fn completion_messages_preserve_newer_host_navigation_and_input(cx: &mut TestAppContext) {
-        // Do not drive this runtime: this test exercises UI result delivery, not provisioning.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            cx.set_global(crate::Runtime {
-                handle: runtime.handle().clone(),
-                connections: Arc::new(crate::platform::Connections::default()),
-                closing: tokio_util::task::TaskTracker::new(),
-                logging_error: None,
-            });
-        });
-        let view = cx.add_window(|window, cx| {
-            Desktop::new(
-                Mode::SideChat {
-                    remote: None,
-                    cwd: "/fixture".into(),
+            .detach();
+        } else {
+            self.perform(
+                Intent::Thread {
+                    thread_id: id,
+                    action,
                 },
-                window,
-                cx,
-            )
-        });
-        view.update(cx, |view, window, cx| {
-            view.epoch = 3;
-            Arc::make_mut(&mut view.snapshot).epoch = 5;
-            view.busy = 2;
-            view.composer_pending = Some(9);
-            view.editor_pending = Some(12);
-            let deliver = |view: &mut Desktop,
-                           host,
-                           kind,
-                           result,
-                           window: &mut Window,
-                           cx: &mut Context<Desktop>| {
-                view.receive((host, Update::Completed(kind, result)), window, cx);
-            };
-            deliver(
-                view,
-                2,
-                OperationCompletion::Busy,
-                Err("obsolete host".into()),
-                window,
-                cx,
+                None,
             );
-            assert_eq!(view.busy, 2);
-            assert!(view.error.is_empty());
-            deliver(
-                view,
-                3,
-                OperationCompletion::Composer(8),
-                Ok(Outcome::Applied),
-                window,
-                cx,
-            );
-            deliver(
-                view,
-                3,
-                OperationCompletion::Editor(11),
-                Ok(Outcome::Applied),
-                window,
-                cx,
-            );
-            assert_eq!(view.composer_pending, Some(9));
-            assert_eq!(view.editor_pending, Some(12));
-            deliver(
-                view,
-                3,
-                OperationCompletion::Composer(9),
-                Ok(Outcome::Applied),
-                window,
-                cx,
-            );
-            deliver(
-                view,
-                3,
-                OperationCompletion::Editor(12),
-                Ok(Outcome::Applied),
-                window,
-                cx,
-            );
-            assert_eq!(view.composer_pending, None);
-            assert_eq!(view.editor_pending, None);
-            deliver(
-                view,
-                3,
-                OperationCompletion::Busy,
-                Ok(Outcome::Applied),
-                window,
-                cx,
-            );
-            assert_eq!(view.busy, 1);
-        })
-        .unwrap();
-    }
-
-    #[test]
-    fn row_projection_keeps_repeated_turns_and_scopes_requests_without_changing_input() {
-        let mut source: Arc<Thread> = Arc::new(serde_json::from_value(serde_json::json!({"id":{"provider":"codex","id":"selected"},"turns":[{"id":"repeated","items":[{"id":"first","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"first answer","phase":"unknown"}}}}}],"status":"unknown"},{"id":"repeated","items":[{"id":"second","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"second answer","phase":"unknown"}}}}}],"status":"unknown"}]})).unwrap());
-        let mut snapshot = Snapshot::default();
-        Arc::make_mut(&mut snapshot.navigation).thread_id =
-            Some(agent_protocol::session::SessionRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
-                id: "selected".into(),
-            });
-        let request = Arc::new(agent_protocol::requests::Request {
-            id: "global".into(),
-            target: agent_protocol::requests::RequestTarget::Session,
-            delivery: agent_protocol::session::RequestDelivery::Awaiting,
-            body: agent_protocol::requests::RequestBody::Elicitation {
-                server: "fixture".into(),
-                message: "input".into(),
-                input: agent_protocol::requests::ElicitationInput::Form { fields: vec![] },
-            },
-        });
-        Arc::make_mut(&mut source)
-            .requests
-            .insert(request.id.clone(), request.clone());
-        let mut other = (*source).clone();
-        let request = Arc::make_mut(other.requests.get_mut("global").unwrap());
-        request.id = "other".into();
-        other.id = Some(agent_protocol::session::SessionRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
-            id: "other".into(),
-        });
-        Arc::make_mut(&mut snapshot.conversations)
-            .insert(other.id.clone().unwrap(), Arc::new(other));
-        let before = snapshot.clone();
-        let rendered = Some(
-            agent_core::presentation::conversation::project_conversation(
-                &snapshot,
-                source.clone(),
-                &None,
-            ),
-        );
-        let rows = conversation_rows(&rendered);
-        let repeated = conversation_rows(&rendered);
-        assert_eq!(rows.len(), 3);
-        for (index, turn) in source.turns.as_ref().unwrap().iter().enumerate() {
-            let ConversationRow::Turn(row) = &rows[index] else {
-                panic!("missing turn")
-            };
-            assert!(Arc::ptr_eq(&row.source, turn));
         }
-        assert!(
-            matches!(&rows[2], ConversationRow::Request(request) if request.id.as_str() == "global")
-        );
-        assert!(rows.iter().zip(&repeated).all(|(a, b)| a.unchanged(b)));
-        assert_eq!(snapshot, before);
+    }
+    fn answers(&self, request: &str, cx: &App) -> Vec<QuestionAnswer> {
+        self.questions
+            .iter()
+            .filter(|((id, _), _)| id == request)
+            .map(|((_, id), input)| {
+                let values = question_answer_values(
+                    input.selected.iter().cloned().collect(),
+                    input.custom.read(cx).value().to_string(),
+                    input.multi,
+                );
+                QuestionAnswer {
+                    question_id: id.clone(),
+                    values,
+                }
+            })
+            .collect()
+    }
+}
+impl Render for Desktop {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.view(window, cx)
+    }
+}
+
+fn timeline_splice(old: &[TimelineRow], new: &[TimelineRow]) -> (std::ops::Range<usize>, usize) {
+    let prefix = old
+        .iter()
+        .zip(new)
+        .take_while(|(a, b)| a.id == b.id)
+        .count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a.id == b.id)
+        .count();
+    (
+        prefix + 1..old.len() - suffix + 1,
+        new.len() - prefix - suffix,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ListAlignment, ListOffset, ListState, RowKind, TimelineRow, px, timeline_splice};
+    fn row(id: &str) -> TimelineRow {
+        TimelineRow {
+            attachments: vec![],
+            id: id.into(),
+            kind: RowKind::Assistant,
+            text: id.into(),
+            title: String::new(),
+            status: String::new(),
+            streaming: false,
+            collapsible: false,
+            work: vec![],
+            request_id: None,
+            choices: vec![],
+            questions: vec![],
+            response_mode_message: false,
+            actionable: false,
+            run_id: None,
+            rollback_checkpoint_id: None,
+            fork_source_thread_id: None,
+            duration_ms: None,
+        }
+    }
+    #[test]
+    fn prepending_history_preserves_the_visible_item_anchor() {
+        let old = vec![row("a"), row("b")];
+        let new = vec![row("history"), row("older"), row("a"), row("b")];
+        let list = ListState::new(old.len() + 1, ListAlignment::Bottom, px(600.));
+        list.scroll_to(ListOffset {
+            item_ix: 2,
+            offset_in_item: px(17.),
+        });
+        let (range, count) = timeline_splice(&old, &new);
+        assert_eq!(range, 1..1);
+        assert_eq!(count, 2);
+        list.splice(range, count);
+        assert_eq!(list.logical_scroll_top().item_ix, 4);
+        assert_eq!(list.logical_scroll_top().offset_in_item, px(17.));
+    }
+    #[test]
+    fn replacing_middle_rows_preserves_the_suffix_and_streaming_reuses_identity() {
+        let old = vec![row("a"), row("b"), row("c")];
+        let new = vec![row("a"), row("replacement"), row("extra"), row("c")];
+        assert_eq!(timeline_splice(&old, &new), (2..3, 2));
+        let mut streamed = old.clone();
+        streamed[2].text.push_str(" more output");
+        assert_eq!(timeline_splice(&old, &streamed), (4..4, 0));
     }
 }

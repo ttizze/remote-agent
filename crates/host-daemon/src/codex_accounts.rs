@@ -1,4 +1,4 @@
-use crate::host_rpc::agent::{AccountCommand, AccountReply};
+use crate::host_rpc::identity::{AccountCommand, AccountReply};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use agent_protocol::operations as op;
@@ -233,14 +233,14 @@ impl Accounts {
                 .iter()
                 .map(|account| op::Account {
                     id: account.id.clone(),
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: agent_protocol::provider::ProviderKind::Codex,
                     email: account.email.clone(),
                     plan_type: Some(account.plan_type.clone()),
                     usage: None,
                 })
                 .collect(),
             selected: selected
-                .map(|id| (agent_protocol::session::ProviderKind::Codex, id.to_owned()))
+                .map(|id| (agent_protocol::provider::ProviderKind::Codex, id.to_owned()))
                 .into_iter()
                 .collect(),
             error: self.restoration_error.borrow().clone(),
@@ -256,7 +256,7 @@ impl Accounts {
             AccountCommand::Select { id } => {
                 self.select(primary, &id).await?;
                 Ok(op::AccountSelection {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    provider: agent_protocol::provider::ProviderKind::Codex,
                     selected_id: id,
                     persistence_error: self.save().await.err(),
                 }
@@ -341,7 +341,7 @@ impl Accounts {
                     .to_owned();
                 let mut result = result;
                 result["requiresCodeSubmission"] = false.into();
-                result["provider"] = json!(agent_protocol::session::ProviderKind::Codex);
+                result["provider"] = json!(agent_protocol::provider::ProviderKind::Codex);
                 let response: AccountLogin = serde_json::from_value(result)
                     .map_err(|_| "ログインを開始できませんでした。")?;
                 self.login = Some(Login {

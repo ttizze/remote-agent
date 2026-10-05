@@ -1,58 +1,6 @@
 import AgentCore
 import SwiftUI
 
-struct SettingsSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @ObservedObject var model: BexAppViewModel
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    NavigationLink {
-                        ModelSettingsScreen(model: model, scope: .global, close: { dismiss() })
-                    } label: { Label("モデル", systemImage: "slider.horizontal.3") }
-                        .accessibilityIdentifier("settings.models")
-                    NavigationLink {
-                        AgentSettingsScreen(model: model, close: { dismiss() })
-                    } label: { Label("エージェント", systemImage: "bubble.left.and.bubble.right") }
-                        .accessibilityIdentifier("settings.agents")
-                        .disabled(!model.isConnected)
-                    Button {
-                        dismiss()
-                        model.showProfiles()
-                    } label: {
-                        HStack {
-                            Label("端末と接続", systemImage: "network")
-                            Spacer()
-                            Image(systemName: "chevron.right").font(.caption.weight(.semibold))
-                                .foregroundStyle(.tertiary)
-                        }.foregroundStyle(.primary)
-                    }
-                    .accessibilityIdentifier("settings.connections")
-                    NavigationLink {
-                        WorktreeSettingsScreen(model: model).id(model.selectedProfileId)
-                    } label: { Label("ワークツリー", systemImage: "arrow.triangle.branch") }
-                        .accessibilityIdentifier("settings.worktrees")
-                        .disabled(!model.isConnected)
-                }
-            }
-            .safeAreaInset(edge: .top, spacing: 0) {
-                SettingsScopeBar { Text("すべてのプロジェクト") } environment: {
-                    EnvironmentScopeMenu(model: model)
-                }
-            }
-            .navigationTitle("設定")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完了") { dismiss() }.accessibilityIdentifier("settings.close")
-                }
-            }
-        }
-    }
-}
-
 struct WorktreeSettingsScreen: View {
     @ObservedObject var model: BexAppViewModel
     @Environment(\.dismiss) private var dismiss
@@ -133,7 +81,7 @@ struct WorktreeSettingsScreen: View {
         }
         .interactiveDismissDisabled(busy)
         .onAppear(perform: load)
-        .onChange(of: model.isConnected) { connected in
+        .onChange(of: model.isConnected) { _, connected in
             if connected {
                 load()
             }
@@ -143,7 +91,7 @@ struct WorktreeSettingsScreen: View {
     private func load() {
         guard model.isConnected else { return }
         busy = true; error = nil
-        model.requestSnapshot(.readWorktreeSettings(ReadWorktreeSettings())) { snapshot, result in
+        model.requestSnapshot(.loadWorktreeSettings) { snapshot, result in
             busy = false
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
@@ -162,11 +110,11 @@ struct WorktreeSettingsScreen: View {
         busy = true; error = nil
         let paths = copyPaths.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        model.requestSnapshot(.updateWorktreeSettings(UpdateWorktreeSettings(settings: WorktreeSettings(
+        model.requestSnapshot(.saveWorktreeSettings(settings: WorktreeSettings(
             createOnNewSession: createOnNewSession, copyOnCreate: copyOnCreate,
             copyPaths: paths, worktreeDirectory: directory.trimmingCharacters(in: .whitespacesAndNewlines),
             deleteMerged: deleteMerged
-        )))) { snapshot, result in
+        ))) { snapshot, result in
             busy = false
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
@@ -191,7 +139,7 @@ struct SettingsScopeBar<Projects: View, Environment: View>: View {
         .font(.caption)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 20).padding(.vertical, 12)
-        .background(Color(UIColor.secondarySystemGroupedBackground))
+        .background(T3Theme.color("surface"))
     }
 }
 

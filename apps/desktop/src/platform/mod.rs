@@ -294,12 +294,6 @@ fn start_host(directory: &std::path::Path, isolated: bool) -> anyhow::Result<std
     command.spawn().map_err(Into::into)
 }
 
-pub(crate) fn choose_files() -> Option<Vec<PathBuf>> {
-    rfd::FileDialog::new().pick_files()
-}
 pub(crate) fn choose_folder() -> Option<PathBuf> {
     rfd::FileDialog::new().pick_folder()
-}
-pub(crate) fn choose_destination(name: &str) -> Option<PathBuf> {
-    rfd::FileDialog::new().set_file_name(name).save_file()
 }

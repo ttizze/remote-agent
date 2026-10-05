@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+orchestration = { path = "../orchestration", features = ["runtime"] }
+provider-adapters = { path = "../provider-adapters" }
 async-trait = "0.1.89"
 tracing.workspace = true
 bex-process = { path = "../bex-process" }
@@ -39,8 +41,6 @@ alacritty_terminal = "=0.26.0"
 [dev-dependencies]
 proptest = "1.11"
 tokio = { workspace = true, features = ["test-util"] }
-# Exercise the real client Store and rendering against Host behavior.
-agent-core = { path = "../agent-core" }
 # Match desktop builds even when CI tests only the headless packages. With both
 # backends enabled, cold dictation must select a provider before starting TLS.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }

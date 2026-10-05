@@ -66,6 +66,7 @@ struct WorkspaceScreen: View {
     let root: String
     @Binding var showingDiff: Bool
     let close: () -> Void
+    @State private var diffSelection: TurnDiffOption?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -76,8 +77,22 @@ struct WorkspaceScreen: View {
             .pickerStyle(.segmented).padding(.horizontal).padding(.bottom)
             Divider()
             if showingDiff {
+                HStack {
+                    Menu(diffSelection?.label ?? "Workspace changes") {
+                        Button("Workspace changes") { diffSelection = nil }
+                        ForEach(model.snapshot.turnDiffOptions(), id: \.label) { option in
+                            Button(option.label) { diffSelection = option }
+                        }
+                    }
+                    Spacer()
+                }.padding()
                 WorkspaceDiffScreen { complete in
-                    request(.reviewWorkspace(ReviewWorkspace(cwd: root))) { snapshot, result in
+                    let intent = diffSelection.map { Intent.readTurnDiff(
+                        fromTurnCount: $0.fromTurnCount,
+                        toTurnCount: $0.toTurnCount,
+                        ignoreWhitespace: false
+                    ) } ?? .reviewWorkspace(cwd: root)
+                    request(intent) { snapshot, result in
                         if case let .failure(failure) = result {
                             complete(.failure(failure))
                         } else if let review = snapshot.review() {
@@ -93,6 +108,7 @@ struct WorkspaceScreen: View {
                         }
                     }
                 }
+                .id(diffSelection.map { "\($0.fromTurnCount):\($0.toTurnCount)" } ?? "workspace")
             } else {
                 WorkspaceNavigation(root: root) { directory, openDirectory in
                     WorkspaceDirectoryScreen(snapshot: model.snapshot, directory: directory,
@@ -103,8 +119,7 @@ struct WorkspaceScreen: View {
                 }
             }
         }
-        .background(Color(uiColor: .systemGroupedBackground))
-        .onDisappear { model.perform(.reviewWorkspace(ReviewWorkspace(cwd: root))) }
+        .background(T3Theme.color("canvas"))
     }
 
     private func request(_ intent: Intent, completion: @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) {
@@ -116,9 +131,9 @@ struct WorkspaceScreen: View {
 
     private func fileDraft(_ path: String) -> Binding<String> {
         Binding(get: {
-            model.snapshot.fileDraft(path: path)?.text ??
+            model.snapshot.fileDraft(path: path) ??
                 model.snapshot.file().flatMap { $0.path == path ? $0.text : nil } ?? ""
-        }, set: { model.perform(.setFileDraft(path: path, text: $0)) })
+        }, set: { model.perform(.editFile(path: path, text: $0)) })
     }
 }
 
@@ -204,7 +219,7 @@ private struct WorkspaceDirectoryScreen: View {
     private func load(_ directory: String) {
         path = directory
         busy = true; error = nil
-        perform(.listFiles(ListFiles(path: directory))) { snapshot, result in
+        perform(.listFiles(path: directory)) { snapshot, result in
             busy = false
             if case let .failure(failure) = result {
                 error = failure.localizedDescription; return
@@ -295,16 +310,16 @@ private struct WorkspaceDiffCard: View {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                     Text(file.path).fontWeight(.semibold).frame(maxWidth: .infinity, alignment: .leading)
                     if let additions = file.additions {
-                        Text("+\(additions)").foregroundColor(.green)
+                        Text("+\(additions)").foregroundColor(T3Theme.color("successForeground"))
                     }
                     if let deletions = file.deletions {
-                        Text("−\(deletions)").foregroundColor(.red)
+                        Text("−\(deletions)").foregroundColor(T3Theme.color("errorForeground"))
                     }
                 }.font(.subheadline).padding(12).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("diff.file.\(file.path)")
-            .background(Color(uiColor: .secondarySystemGroupedBackground))
+            .background(T3Theme.color("mobileGroupedCard"))
             if expanded {
                 if file.rows.isEmpty {
                     Text("テキスト差分はありません").font(.caption).foregroundColor(.secondary).padding()
@@ -326,13 +341,13 @@ private struct WorkspaceDiffCard: View {
                     }
                     .font(.system(.footnote, design: .monospaced))
                     .padding(.vertical, 3).padding(.horizontal, 8)
-                    .background(row.kind == "+" ? Color.green.opacity(0.18) :
-                        row.kind == "-" ? Color.red.opacity(0.18) :
+                    .background(row.kind == "+" ? T3Theme.color("successForeground").opacity(0.18) :
+                        row.kind == "-" ? T3Theme.color("errorForeground").opacity(0.18) :
                         row.kind == "@" ? Color.secondary.opacity(0.12) : Color.clear)
                 }
             }
         }
-        .background(Color(uiColor: .systemBackground))
+        .background(T3Theme.color("surface"))
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }

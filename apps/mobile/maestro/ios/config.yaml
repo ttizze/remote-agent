@@ -1,4 +1,0 @@
-# Keep the complete native hierarchy available across keyboard/modal transitions.
-platform:
-  ios:
-    snapshotKeyHonorModalViews: false
