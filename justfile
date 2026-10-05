@@ -75,36 +75,36 @@ android-e2e:
 conversation-ui:
     scripts/ios-e2e.sh \
         testSimulatorModelDefaultsInheritAndPersistAcrossScopes \
-        testSimulatorNativeTerminalRetainsShellAfterReopening \
         testSimulatorModelDefaultsPersistAndApplyOnlyToNewConversations \
-        testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
-        testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
-        testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
-        testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
-        testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
-        testSimulatorUsesNativeHostNavigationAndPairingDismissal \
-        testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
-        testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
-        testSimulatorKeepsLatestVisibleAcrossRepeatedLongHistorySubmissions \
-        testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
-        testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
-        testSimulatorCopiesOnlySelectedMessageText \
-        testSimulatorCanStartAConversationInAProject \
-        testSimulatorReopensCompletedHistoryCollapsed \
-        testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
-        testSimulatorReopensRunningLongHistoryWithoutBlankViewport \
-        testSimulatorOpensSideChatWithoutLosingOriginalDraft \
         testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \
-        testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
-        testSimulatorOpensOnlyTheTappedImageAndSavesIt \
+        testSimulatorNativeTerminalRetainsShellAfterReopening \
+        testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
+        testSimulatorCopiesOnlySelectedMessageText \
+        testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
+        testSimulatorKeepsLatestVisibleAcrossRepeatedLongHistorySubmissions \
+        testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
+        testSimulatorOpensSideChatWithoutLosingOriginalDraft \
+        testSimulatorReopensCompletedHistoryCollapsed \
+        testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
+        testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
+        testSimulatorUsesNativeHostNavigationAndPairingDismissal \
         testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
+        testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
+        testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
         testSimulatorRendersMarkdownTableAndReopensIt \
+        testSimulatorNativeTerminalPastesMultilineText \
+        testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
+        testSimulatorReopensRunningLongHistoryWithoutBlankViewport \
+        testSimulatorOpensOnlyTheTappedImageAndSavesIt \
+        testSimulatorCanStartAConversationInAProject \
+        testSimulatorOpensTasksBeforeHistoryReadFinishes \
+        testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
+        testSimulatorModelPickerUsesAgentRailAndCompactControls \
+        testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
+        testSimulatorNativeTerminalDoesNotDuplicateQueryResponses \
         testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
         testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
-        testSimulatorModelPickerUsesAgentRailAndCompactControls \
-        testSimulatorNativeTerminalPastesMultilineText \
-        testSimulatorOpensTasksBeforeHistoryReadFinishes \
-        testSimulatorNativeTerminalDoesNotDuplicateQueryResponses \
+        testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft \
         testSimulatorFillsInitialHistoryViewportWithoutScrolling
 
 # The Host-owned Chrome runs for this whole worker; keep it off conversation runners.

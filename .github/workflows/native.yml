@@ -252,10 +252,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { suite: conversation, shard: 0, shards: 4, label: 1/4, artifact: 1 }
-          - { suite: conversation, shard: 1, shards: 4, label: 2/4, artifact: 2 }
-          - { suite: conversation, shard: 2, shards: 4, label: 3/4, artifact: 3 }
-          - { suite: conversation, shard: 3, shards: 4, label: 4/4, artifact: 4 }
+          # With Mac, five jobs fit the hosted macOS concurrency limit.
+          - { suite: conversation, shard: 0, shards: 3, label: 1/3, artifact: 1 }
+          - { suite: conversation, shard: 1, shards: 3, label: 2/3, artifact: 2 }
+          - { suite: conversation, shard: 2, shards: 3, label: 3/3, artifact: 3 }
           - { suite: browser, shard: 0, shards: 1, label: browser, artifact: browser }
     runs-on: macos-26
     timeout-minutes: 120

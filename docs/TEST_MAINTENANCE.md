@@ -218,17 +218,18 @@ transfer server just to delete that check would reverse A14.
   to finish before opening its keyboard. Acceptance deadlines stay unchanged.
   Linux, Windows and Android use four
   Cargo build jobs; Apple runners retain two.
-  They partition the same maintained test list with `BEX_IOS_TEST_SHARDS=4`
-  and zero-based `BEX_IOS_TEST_SHARD` values 0 through 3. Each runs one isolated
+  They partition the same maintained test list with `BEX_IOS_TEST_SHARDS=3`
+  and zero-based `BEX_IOS_TEST_SHARD` values 0 through 2. Each runs one isolated
   Simulator/Host pair; an omitted shard setting selects the complete list.
   The maintained list interleaves long and short tests based on CI durations
   so equal test counts do not leave one runner with all the slow cases.
   Swift formatting, linting and headless Markdown checks run on shard zero;
-  all four shards run their selected Simulator acceptance tests.
-  The Host-owned Chrome case (`just browser-ui`) runs on a fifth iPhone runner
+  all three shards run their selected Simulator acceptance tests.
+  The Host-owned Chrome case (`just browser-ui`) runs on a fourth iPhone runner
   with `BEX_IOS_SUITE=browser`, because its Host keeps Chrome running for the
   whole worker; conversation shards select `BEX_IOS_SUITE=conversation`, and
-  local `just quality` runs both. Dispatching Native clients with
+  local `just quality` runs both. With the Mac job, the five Apple jobs fit
+  the hosted macOS concurrency limit, so none waits for another to finish. Dispatching Native clients with
   `ios-test-rounds` above one repeats every iPhone runner's tests on fresh
   Simulator/Host pairs (`BEX_IOS_TEST_ROUNDS`) and prints per-test failure
   counts, to measure flaky cases without retrying them in normal runs.
