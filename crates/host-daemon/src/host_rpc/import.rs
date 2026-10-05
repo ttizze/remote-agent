@@ -673,14 +673,39 @@ pub(super) async fn run(
     roots: Vec<(Driver, PathBuf)>,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
+    let roots = roots
+        .into_iter()
+        .filter(|(driver, _)| !store.import_completed(*driver).unwrap_or(true))
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return;
+    }
+    let providers = roots.iter().map(|(driver, _)| *driver).collect::<Vec<_>>();
     let scan_shutdown = shutdown.clone();
     let Ok(transcripts) = tokio::task::spawn_blocking(move || scan(roots, &scan_shutdown)).await
     else {
         return;
     };
-    for transcript in transcripts {
+    let home = directories::UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+    let state_directory = projects
+        .path()
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut failed = false;
+    for mut transcript in transcripts {
         if *shutdown.borrow() || shutdown.has_changed().is_err() {
             return;
+        }
+        let Ok(cwd) = dunce::canonicalize(&transcript.cwd) else {
+            continue;
+        };
+        transcript.cwd = cwd;
+        if excluded_project(&transcript.cwd, home.as_deref(), state_directory)
+            || store
+                .native_session_registered(transcript.driver, &transcript.native)
+                .unwrap_or(true)
+        {
+            continue;
         }
         let provider = match transcript.driver {
             Driver::Codex => "codex",
@@ -720,10 +745,32 @@ pub(super) async fn run(
             None,
             &transcript.updated_at,
         ) {
+            failed = true;
             tracing::warn!(operation="orchestration.native-import",message=%error);
         }
         tokio::task::yield_now().await;
     }
+    if !failed && !*shutdown.borrow() && !shutdown.has_changed().is_err() {
+        for driver in providers {
+            let _ = store.complete_import(driver);
+        }
+    }
+}
+fn excluded_project(
+    cwd: &std::path::Path,
+    home: Option<&std::path::Path>,
+    state: &std::path::Path,
+) -> bool {
+    let canonical =
+        |path: &std::path::Path| dunce::canonicalize(path).unwrap_or_else(|_| path.into());
+    cwd == canonical(&std::env::temp_dir())
+        || cwd == canonical(std::path::Path::new("/tmp"))
+        || cwd.starts_with(canonical(state))
+        || home.is_some_and(|home| {
+            cwd == canonical(home)
+                || cwd.starts_with(canonical(&home.join("Downloads")))
+                || cwd.starts_with(canonical(&home.join("Documents/Codex")))
+        })
 }
 
 #[cfg(test)]
@@ -739,6 +786,30 @@ mod tests {
             .into_iter()
             .map(|value| serde_json::from_value(value).unwrap())
             .collect()
+    }
+    #[test]
+    fn import_excludes_scratch_and_managed_directories_but_not_user_projects() {
+        let home = std::path::Path::new("/test/home");
+        let state = home.join(".bex");
+        for cwd in [
+            home.to_path_buf(),
+            home.join("Downloads/a"),
+            home.join("Documents/Codex/date/chat"),
+            state.join("bex-chats"),
+            state.join("worktrees/a"),
+            dunce::canonicalize("/tmp").unwrap(),
+        ] {
+            assert!(
+                excluded_project(&cwd, Some(home), &state),
+                "{}",
+                cwd.display()
+            );
+        }
+        assert!(!excluded_project(
+            &home.join("projects/repo"),
+            Some(home),
+            &state
+        ));
     }
     #[test]
     fn codex_import_deduplicates_proven_prompt_copies_and_resumes_native_identity() {

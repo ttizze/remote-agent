@@ -95,6 +95,33 @@ impl Store {
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|_| StoreError::Poisoned)
     }
+    pub fn instance_id(&self) -> Result<String> {
+        Ok(self.lock()?.query_row(
+            "SELECT value FROM orchestration_host_metadata WHERE key='instance'",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+    pub fn import_completed(&self, driver: Driver) -> Result<bool> {
+        Ok(self.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM orchestration_host_metadata WHERE key=?1)",
+            [format!("import:{}", driver.as_str())],
+            |row| row.get(0),
+        )?)
+    }
+    pub fn complete_import(&self, driver: Driver) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT OR IGNORE INTO orchestration_host_metadata(key,value) VALUES(?1,'completed')",
+            [format!("import:{}", driver.as_str())],
+        )?;
+        Ok(())
+    }
+    pub fn native_session_registered(&self, driver: Driver, native: &str) -> Result<bool> {
+        Ok(self.lock()?.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_provider_threads WHERE json_extract(payload_json,'$.driver')=?1 AND json_extract(payload_json,'$.nativeThreadRef.nativeId')=?2)", params![driver.as_str(), native], |row| row.get(0))?)
+    }
+    pub(crate) fn subscribe_commits(&self) -> broadcast::Receiver<StoredEvent> {
+        self.committed.subscribe()
+    }
     pub fn projection(&self, id: &ThreadId) -> Result<ThreadProjection> {
         load_projection(&*self.lock()?, id)?.ok_or(StoreError::ThreadNotFound)
     }
@@ -1263,6 +1290,60 @@ mod tests {
         store
             .dispatch(command, &now(), &turns(), Driver::Codex)
             .unwrap()
+    }
+    #[test]
+    fn native_session_lookup_includes_bex_owned_threads_not_only_import_ids() {
+        let store = setup();
+        dispatch(&store, &send("one", DispatchMode::StartImmediately));
+        let mut provider = store
+            .projection(&create().thread_id)
+            .unwrap()
+            .provider_threads[0]
+            .clone();
+        provider.native_thread_ref = Some(ProviderRef {
+            driver: Driver::Codex,
+            native_id: Some("native-owned-by-bex".into()),
+            strength: Strength::Strong,
+            fingerprint: None,
+            ordinal: None,
+        });
+        store
+            .ingest(
+                crate::events(
+                    &create().thread_id,
+                    "native",
+                    vec![EventPayload::ProviderThreadUpdated(provider)],
+                    &now(),
+                ),
+                None,
+                &now(),
+            )
+            .unwrap();
+        assert!(
+            store
+                .native_session_registered(Driver::Codex, "native-owned-by-bex")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .native_session_registered(Driver::Claude, "native-owned-by-bex")
+                .unwrap()
+        );
+    }
+    #[test]
+    fn import_completion_and_checkpoint_namespace_are_durable_and_store_scoped() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.sqlite");
+        let store = Store::open(&path).unwrap();
+        let instance = store.instance_id().unwrap();
+        assert!(!store.import_completed(Driver::Codex).unwrap());
+        store.complete_import(Driver::Codex).unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(reopened.instance_id().unwrap(), instance);
+        assert!(reopened.import_completed(Driver::Codex).unwrap());
+        assert!(!reopened.import_completed(Driver::Claude).unwrap());
+        assert_ne!(Store::memory().unwrap().instance_id().unwrap(), instance);
     }
     #[test]
     fn queued_message_does_not_hide_later_active_run_output_on_partial_clients() {

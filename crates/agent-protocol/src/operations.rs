@@ -342,3 +342,11 @@ pub struct ReadAccountUsage {
     #[serde(rename = "accountId")]
     pub id: String,
 }
+
+/// Shared terminal identity for a workspace, used by cleanup and every client.
+pub fn terminal_handle(cwd: &str) -> String {
+    format!(
+        "bex-terminal-{}",
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, cwd.as_bytes())
+    )
+}

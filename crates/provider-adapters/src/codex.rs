@@ -470,6 +470,17 @@ impl CodexAdapter {
                 .remove(&native);
             return Ok(());
         }
+        if self
+            .states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&native)
+            .is_some_and(|state| state.interrupted)
+        {
+            self.disconnected(&native, "Interrupted before provider input")
+                .await?;
+            return Ok(());
+        }
         let message_id = message_id.unwrap_or(&run.user_message_id);
         let message = projection
             .messages
@@ -502,6 +513,25 @@ impl CodexAdapter {
             None,
         )
         .await
+    }
+    pub async fn cancel_start(&self, run: &RunId) -> Result<(), AdapterError> {
+        let provider = {
+            let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
+            states
+                .values_mut()
+                .find(|state| state.run.id == *run)
+                .map(|state| {
+                    state.interrupted = true;
+                    (
+                        state.provider_thread.id.clone(),
+                        state.turn.native_turn_ref.is_some(),
+                    )
+                })
+        };
+        if let Some((provider, true)) = provider {
+            self.interrupt(&provider).await?;
+        }
+        Ok(())
     }
     async fn interrupt(&self, provider_thread_id: &ProviderThreadId) -> Result<(), AdapterError> {
         let (native, state) = self.state(provider_thread_id)?;
@@ -566,6 +596,18 @@ impl CodexAdapter {
             self.output.send(batch).await.map_err(error)?;
         }
         self.changed.notify_waiters();
+        if method == "turn/started" {
+            let provider = self
+                .states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(native)
+                .filter(|state| state.interrupted && !state.terminal)
+                .map(|state| state.provider_thread.id.clone());
+            if let Some(provider) = provider {
+                self.interrupt(&provider).await?;
+            }
+        }
         Ok(())
     }
     async fn disconnected(&self, native: &str, message: &str) -> Result<(), AdapterError> {

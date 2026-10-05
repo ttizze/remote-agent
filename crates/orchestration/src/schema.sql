@@ -65,3 +65,6 @@ CREATE TABLE IF NOT EXISTS orchestration_v2_effect_outbox (
     last_error TEXT
 );
 CREATE INDEX IF NOT EXISTS orchestration_v2_effect_lane ON orchestration_v2_effect_outbox(thread_id,status);
+
+CREATE TABLE IF NOT EXISTS orchestration_host_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT OR IGNORE INTO orchestration_host_metadata VALUES('instance', lower(hex(randomblob(16))));

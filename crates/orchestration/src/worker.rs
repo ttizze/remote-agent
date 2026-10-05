@@ -20,6 +20,14 @@ pub struct AdapterError {
 pub trait ProviderAdapter: Send + Sync {
     /// Start effects return once provider ownership is established. Long-lived
     /// notification pumps ingest full records using Store::ingest's run guard.
+    /// Cancel an in-progress Start, including a process still initializing.
+    async fn cancel_start(
+        &self,
+        _run: &RunId,
+        _projection: &ThreadProjection,
+    ) -> std::result::Result<(), AdapterError> {
+        Ok(())
+    }
     async fn execute(
         &self,
         effect: &Effect,
@@ -77,6 +85,7 @@ async fn execute(
     adapter: Arc<dyn ProviderAdapter>,
     claim: ClaimedEffect,
 ) -> std::result::Result<(), StoreError> {
+    let mut commits = store.subscribe_commits();
     let projection = store.projection(&claim.effect.thread_id)?;
     let expected = claim
         .effect
@@ -86,11 +95,67 @@ async fn execute(
         .map(|run| (run.id.clone(), run.active_attempt_id.clone()));
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(10));
     heartbeat.tick().await;
-    let operation = adapter.execute(&claim.effect, projection);
+    let start = match &claim.effect.body {
+        EffectBody::Start { run_id } => Some(run_id.clone()),
+        _ => None,
+    };
+    let stop_requested = start.as_ref().is_some_and(|id| {
+        projection.turn_items.iter().any(|item| {
+            item.run_id.as_ref() == Some(id)
+                && matches!(item.body, TurnItemBody::RunInterruptRequest { .. })
+        })
+    });
+    if stop_requested {
+        let run = start.as_ref().expect("start");
+        adapter
+            .cancel_start(run, &projection)
+            .await
+            .map_err(|error| StoreError::InvalidEvent(error.message))?;
+        let decision = crate::decider::interrupted_start(
+            &projection,
+            run,
+            &claim.effect.id,
+            &Timestamp::from_millis(now_ms()).expect("current time"),
+        );
+        if !decision.events.is_empty() {
+            store.ingest(
+                decision.events,
+                expected
+                    .as_ref()
+                    .map(|(id, attempt)| (id, attempt.as_ref())),
+                &Timestamp::from_millis(now_ms()).expect("current time"),
+            )?;
+        }
+    }
+    let operation = adapter.execute(&claim.effect, projection.clone());
+    let mut cancelled = stop_requested;
     tokio::pin!(operation);
     let result = loop {
         tokio::select! {
             result = &mut operation => break result,
+            event = commits.recv(), if start.is_some() && !cancelled => {
+                let requested = match event {
+                    Ok(event) => event.event.thread_id == claim.effect.thread_id && match &event.event.payload {
+                        EventPayload::TurnItemUpdated(item) => item.run_id.as_ref() == start.as_ref() && matches!(item.body, TurnItemBody::RunInterruptRequest { .. }),
+                        EventPayload::RunUpdated(run) => Some(&run.id) == start.as_ref() && run.status.is_terminal(),
+                        _ => false,
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let current = store.projection(&claim.effect.thread_id)?;
+                        current.turn_items.iter().any(|item| item.run_id.as_ref() == start.as_ref() && matches!(item.body, TurnItemBody::RunInterruptRequest { .. })) || current.runs.iter().any(|run| Some(&run.id) == start.as_ref() && run.status.is_terminal())
+                    },
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+                };
+                if requested {
+                    let run = start.as_ref().expect("start");
+                    adapter.cancel_start(run, &projection).await.map_err(|error| StoreError::InvalidEvent(error.message))?;
+                    let current = store.projection(&claim.effect.thread_id)?;
+                    let timestamp = Timestamp::from_millis(now_ms()).expect("current time");
+                    let events = crate::decider::interrupted_start(&current, run, &claim.effect.id, &timestamp).events;
+                    if !events.is_empty() { store.ingest(events, expected.as_ref().map(|(id, attempt)| (id, attempt.as_ref())), &timestamp)?; }
+                    cancelled = true;
+                }
+            }
             _ = heartbeat.tick() => {match store.renew_effect(&claim, now_ms()) { Ok(()) => {}, Err(StoreError::LeaseLost) => return Ok(()), Err(error) => return Err(error) }}
         }
     };
@@ -129,6 +194,10 @@ async fn execute(
             }
         }
         Err(error) => {
+            if cancelled {
+                let _ = store.finish_effect(&claim, None, now_ms());
+                return Ok(());
+            }
             if error.turn_completed && matches!(claim.effect.body, EffectBody::Steer { .. }) {
                 store.steer_follow_up(&claim.effect, &timestamp)?;
                 store.finish_effect(&claim, None, now_ms())?;
@@ -240,6 +309,87 @@ mod tests {
             )
             .unwrap();
         store
+    }
+    struct Initializing {
+        started: tokio::sync::Notify,
+        cancelled: std::sync::atomic::AtomicBool,
+        changed: tokio::sync::Notify,
+        inputs: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl ProviderAdapter for Initializing {
+        async fn execute(
+            &self,
+            _: &Effect,
+            _: ThreadProjection,
+        ) -> std::result::Result<Vec<DomainEvent>, AdapterError> {
+            self.started.notify_one();
+            self.changed.notified().await;
+            if !self.cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                self.inputs
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(vec![])
+        }
+        async fn cancel_start(
+            &self,
+            _: &RunId,
+            _: &ThreadProjection,
+        ) -> std::result::Result<(), AdapterError> {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.changed.notify_one();
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn stopping_an_in_progress_start_cancels_provider_input_and_holds_the_queue() {
+        let store = setup();
+        store
+            .dispatch(
+                &send("queued", DispatchMode::QueueAfterActive),
+                &now(),
+                &turns(),
+                Driver::Codex,
+            )
+            .unwrap();
+        let adapter = Arc::new(Initializing {
+            started: tokio::sync::Notify::new(),
+            cancelled: std::sync::atomic::AtomicBool::new(false),
+            changed: tokio::sync::Notify::new(),
+            inputs: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let claim = store.claim_effect("test", now_ms()).unwrap().unwrap();
+        let task = tokio::spawn(execute(store.clone(), adapter.clone(), claim));
+        adapter.started.notified().await;
+        let run = store.projection(&create().thread_id).unwrap().runs[0]
+            .id
+            .clone();
+        store
+            .dispatch(
+                &command(
+                    "stop-startup",
+                    CommandBody::RunInterrupt {
+                        run_id: run,
+                        reason: None,
+                        hold_queue: true,
+                    },
+                ),
+                &now(),
+                &turns(),
+                Driver::Codex,
+            )
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(adapter.cancelled.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(adapter.inputs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let projection = store.projection(&create().thread_id).unwrap();
+        assert_eq!(projection.runs[0].status, RunStatus::Interrupted);
+        assert!(projection.runs[1].queue_held);
     }
     struct PanicOnce(std::sync::atomic::AtomicBool);
     #[async_trait::async_trait]

@@ -44,6 +44,7 @@ pub struct ClaudeAdapter {
     config: ClaudeConfig,
     processes: tokio::sync::Mutex<BTreeMap<ProviderThreadId, Arc<ProcessHandle>>>,
     capacity: Arc<Semaphore>,
+    cancelled_starts: Mutex<std::collections::BTreeSet<RunId>>,
     output: mpsc::Sender<ProviderBatch>,
 }
 impl ClaudeAdapter {
@@ -85,8 +86,40 @@ impl ClaudeAdapter {
             config,
             processes: tokio::sync::Mutex::new(BTreeMap::new()),
             capacity: Arc::new(Semaphore::new(8)),
+            cancelled_starts: Mutex::new(Default::default()),
             output,
         }
+    }
+    pub async fn cancel_start(&self, run: &RunId) -> Result<(), AdapterError> {
+        self.cancelled_starts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(run.clone());
+        let handle = self
+            .processes
+            .lock()
+            .await
+            .values()
+            .find(|handle| {
+                handle
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .run
+                    .id
+                    == *run
+            })
+            .cloned();
+        if let Some(handle) = handle {
+            handle
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .interrupted = true;
+            let _ = handle.stop.send(true);
+            wait_done(&handle).await?;
+        }
+        Ok(())
     }
     pub async fn execute(
         &self,
@@ -242,6 +275,20 @@ impl ClaudeAdapter {
         browser: Option<Value>,
         credentials_home: &Path,
     ) -> Result<(), AdapterError> {
+        let _cancel = scopeguard::guard(run_id.clone(), |run| {
+            self.cancelled_starts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&run);
+        });
+        if self
+            .cancelled_starts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(run_id)
+        {
+            return Ok(());
+        }
         let run = projection
             .runs
             .iter()
@@ -466,6 +513,17 @@ impl ClaudeAdapter {
                 return Box::pin(self.start(&fresh, run_id, cwd, browser, credentials_home)).await;
             }
             return Err(initial);
+        }
+        if self
+            .cancelled_starts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(run_id)
+            || *handle.done.borrow()
+        {
+            let _ = handle.stop.send(true);
+            wait_done(&handle).await?;
+            return Ok(());
         }
         let message = projection
             .messages

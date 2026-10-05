@@ -218,18 +218,25 @@ impl Checkpoints {
                 "Cannot rebuild a checkpoint index for non-cone sparse checkout."
             ));
         }
-        if text(cwd, &["rev-parse", "--verify", "HEAD"], None)
-            .await
-            .is_ok()
-        {
-            let args: &[&str] = if sparse {
-                &["-c", "index.sparse=true", "read-tree", "--reset", "HEAD"]
-            } else {
-                &["read-tree", "HEAD"]
-            };
-            git(cwd, args, Some(&index)).await?;
-        } else {
-            git(cwd, &["read-tree", "--empty"], Some(&index)).await?;
+        let source_index = text(
+            cwd,
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            None,
+        )
+        .await?;
+        match tokio::fs::copy(source_index.trim(), &index).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if text(cwd, &["rev-parse", "--verify", "HEAD"], None)
+                    .await
+                    .is_ok()
+                {
+                    git(cwd, &["read-tree", "HEAD"], Some(&index)).await?;
+                } else {
+                    git(cwd, &["read-tree", "--empty"], Some(&index)).await?;
+                }
+            }
+            Err(error) => return Err(error.into()),
         }
         let args: &[&str] = if sparse {
             &["add", "--all", "--sparse", "--", "."]

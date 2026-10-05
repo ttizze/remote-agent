@@ -1732,6 +1732,56 @@ fn respond(
     Ok(())
 }
 
+/// A stopped startup must not leave provider I/O detached from run ownership.
+pub fn interrupted_start(
+    projection: &ThreadProjection,
+    run_id: &RunId,
+    key: &str,
+    now: &Timestamp,
+) -> Decision {
+    let Some(run) = projection
+        .runs
+        .iter()
+        .find(|run| run.id == *run_id && run.status.is_blocking())
+    else {
+        return Decision::default();
+    };
+    let command = Command {
+        command_id: CommandId::new(format!("command:cancel-start:{key}")).expect("derived id"),
+        thread_id: projection.thread.id.clone(),
+        body: CommandBody::RunInterrupt {
+            run_id: run_id.clone(),
+            reason: None,
+            hold_queue: true,
+        },
+    };
+    let mut decision = Decision::default();
+    terminalize(
+        &mut decision,
+        &command,
+        run,
+        &projection.attempts,
+        &projection.nodes,
+        now,
+        RunStatus::Interrupted,
+    );
+    for turn in projection.provider_turns.iter().filter(|turn| {
+        turn.run_attempt_id == run.active_attempt_id
+            && matches!(turn.status, TurnStatus::Pending | TurnStatus::Running)
+    }) {
+        for payload in finish_provider_turn(
+            turn,
+            &projection.runtime_requests,
+            &projection.turn_items,
+            now,
+            TurnStatus::Interrupted,
+        ) {
+            emit(&mut decision, &command, now, payload);
+        }
+    }
+    decision
+}
+
 /// Startup recovery never silently runs a held queue or replays process-bound I/O.
 pub fn recover(
     projection: &ThreadProjection,

@@ -8183,6 +8183,7 @@ dependencies = [
  "codex-app-server",
  "orchestration",
  "proptest",
+ "scopeguard",
  "serde",
  "serde_json",
  "tokio",

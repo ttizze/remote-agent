@@ -90,6 +90,7 @@ struct ServiceInner {
     connections: Connections,
     provider_receiver: Mutex<Option<tokio::sync::mpsc::Receiver<provider_adapters::ProviderBatch>>>,
     started: AtomicBool,
+    launches: tokio::sync::Mutex<()>,
     stop: tokio::sync::watch::Sender<bool>,
 }
 struct HostResources {
@@ -162,6 +163,7 @@ impl HostRpcService {
                 connections: Connections::new(),
                 provider_receiver: Mutex::new(Some(receiver)),
                 started: AtomicBool::new(false),
+                launches: tokio::sync::Mutex::new(()),
                 stop: tokio::sync::watch::channel(false).0,
             }),
         })
@@ -419,9 +421,7 @@ impl HostRpcService {
     async fn request(&self, session: SessionId, request: &Call) -> Result<Body, Failure> {
         let _workspace = if matches!(
             request,
-            Call::DispatchCommand(_)
-                | Call::LaunchThread(_)
-                | Call::StartTerminal(_)
+            Call::StartTerminal(_)
                 | Call::WriteFile(_)
                 | Call::Upload(_)
                 | Call::ReviewWorkspace(_)
@@ -453,50 +453,27 @@ impl HostRpcService {
                         .ensure_restore_isolated(&projection.thread, &scope.cwd)
                         .await?;
                 }
+                if let CommandBody::ThreadCreate { project_id, .. } = &command.body {
+                    if !self
+                        .projects()
+                        .await?
+                        .iter()
+                        .any(|project| project.id == project_id.as_str())
+                    {
+                        return Err(Failure::new(
+                            "project_unavailable",
+                            "project is not registered",
+                        ));
+                    }
+                }
                 self.dispatch_command(command)?.into()
             }
             Call::LaunchThread(params) => {
-                let mut create = params.create.clone();
-                if self.inner.store.projection(&create.thread_id).is_err()
-                    && let CommandBody::ThreadCreate {
-                        project_id,
-                        worktree_path,
-                        ..
-                    } = &mut create.body
-                    && worktree_path.is_none()
-                    && project_id.as_str() != "bex:chats"
-                {
-                    let projects = self.projects().await?;
-                    let root = projects
-                        .iter()
-                        .find(|project| project.id == project_id.as_str())
-                        .and_then(|project| project.roots.first())
-                        .ok_or_else(|| {
-                            Failure::new("project_unavailable", "project root missing")
-                        })?;
-                    *worktree_path = self
-                        .inner
-                        .resources
-                        .worktrees
-                        .prepare(Some(&root.path))
-                        .await
-                        .map_err(|error| Failure::new("workspace_preparation_failed", error))?
-                        .map(|path| path.to_string_lossy().into_owned());
-                }
-                if !matches!(params.create.body, CommandBody::ThreadCreate { .. }) {
-                    return Err(Failure::new(
-                        "invalid_launch",
-                        "launch requires thread.create",
-                    ));
-                }
-                self.dispatch_command(&create)?;
-                self.dispatch_command(&Command {
-                    command_id: CommandId::new(format!("{}:input", params.create.command_id))
-                        .expect("derived id"),
-                    thread_id: params.create.thread_id.clone(),
-                    body: CommandBody::MessageDispatch(params.input.clone()),
-                })?
-                .into()
+                let service = self.clone();
+                let params = params.clone();
+                tokio::spawn(async move { service.launch_thread(&params).await })
+                    .await
+                    .map_err(|e| Failure::new("launch_failed", e))??
             }
             Call::GetThreadProjection(params) => self
                 .inner
@@ -847,6 +824,90 @@ impl HostRpcService {
         Ok(())
     }
 
+    async fn launch_thread(
+        &self,
+        params: &agent_protocol::orchestration::LaunchThread,
+    ) -> Result<Body, Failure> {
+        let _launch = self.inner.launches.lock().await;
+        let _workspace = self.inner.resources.worktree_access.read().await;
+        if !matches!(params.create.body, CommandBody::ThreadCreate { .. }) {
+            return Err(Failure::new(
+                "invalid_launch",
+                "launch requires thread.create",
+            ));
+        }
+        let mut create = params.create.clone();
+        let selection_driver = if let CommandBody::ThreadCreate {
+            model_selection, ..
+        } = &create.body
+        {
+            driver(&model_selection.instance_id)?
+        } else {
+            unreachable!()
+        };
+        let capabilities = provider_adapters::capabilities::capabilities(selection_driver).turns;
+        let preview =
+            orchestration::decider::decide(&create, None, &now(), &capabilities, selection_driver)
+                .map_err(|e| Failure::new("invalid_launch", e))?;
+        let projection = preview.events.iter().fold(None, |p, e| {
+            orchestration::projector::apply(p.as_ref(), e, Default::default())
+        });
+        let input_command = Command {
+            command_id: CommandId::new(format!("{}:input", create.command_id)).expect("derived id"),
+            thread_id: create.thread_id.clone(),
+            body: CommandBody::MessageDispatch(params.input.clone()),
+        };
+        orchestration::decider::decide(
+            &input_command,
+            projection.as_ref(),
+            &now(),
+            &capabilities,
+            selection_driver,
+        )
+        .map_err(|e| Failure::new("invalid_launch", e))?;
+        if self.inner.store.projection(&create.thread_id).is_err()
+            && let CommandBody::ThreadCreate {
+                project_id,
+                worktree_path,
+                ..
+            } = &mut create.body
+            && worktree_path.is_none()
+            && project_id.as_str() != "bex:chats"
+        {
+            let projects = self.projects().await?;
+            let root = projects
+                .iter()
+                .find(|project| project.id == project_id.as_str())
+                .and_then(|project| project.roots.first())
+                .ok_or_else(|| Failure::new("project_unavailable", "project root missing"))?;
+            *worktree_path = self
+                .inner
+                .resources
+                .worktrees
+                .prepare(Some(&root.path))
+                .await
+                .map_err(|error| Failure::new("workspace_preparation_failed", error))?
+                .map(|path| path.to_string_lossy().into_owned());
+        }
+        if !matches!(params.create.body, CommandBody::ThreadCreate { .. }) {
+            return Err(Failure::new(
+                "invalid_launch",
+                "launch requires thread.create",
+            ));
+        }
+        self.dispatch_command(&create)?;
+        self.dispatch_command(&Command {
+            command_id: CommandId::new(format!("{}:input", params.create.command_id))
+                .expect("derived id"),
+            thread_id: params.create.thread_id.clone(),
+            body: CommandBody::MessageDispatch(params.input.clone()),
+        })
+        .map_err(|mut failure| {
+            failure.delivery = agent_protocol::error::Delivery::Unknown;
+            failure
+        })
+        .map(Into::into)
+    }
     async fn projects(&self) -> Result<Vec<agent_protocol::models::Project>, Failure> {
         let mut projects = self
             .inner
@@ -908,7 +969,9 @@ impl HostRpcService {
         let snapshot = self.inner.store.shell_snapshot().map_err(store_failure)?;
         let projects = self.projects().await?;
         for shell in snapshot.threads.iter().chain(&snapshot.archived_threads) {
-            let cwd = thread_cwd(&shell.thread, &projects)?;
+            let Ok(cwd) = thread_cwd(&shell.thread, &projects) else {
+                continue;
+            };
             let active =
                 shell.active_run_id.is_some() || !shell.pending_background_tasks.is_empty();
             for entry in entries
@@ -994,8 +1057,15 @@ impl HostRpcService {
     ) -> Result<HostReply, String> {
         let cancellation = self.inner.connections.cancellation(session)?;
         let (mut frames, mut receiver, mut cursor) =
-            subscription_frames(&self.inner.store, &target, after, true)
-                .map_err(|error| error.to_string())?;
+            match subscription_frames(&self.inner.store, &target, after, true) {
+                Ok(frames) => frames,
+                Err(error) => {
+                    return Ok(Response::<Body>::Failure {
+                        error: error.into(),
+                    }
+                    .into());
+                }
+            };
         let initial = frames.remove(0);
         let (sender, receiver_frames) = tokio::sync::mpsc::channel(2);
         let store = self.inner.store.clone();
@@ -1363,6 +1433,30 @@ impl HostResources {
 }
 #[async_trait::async_trait]
 impl ProviderAdapter for HostResources {
+    async fn cancel_start(
+        &self,
+        run_id: &RunId,
+        projection: &ThreadProjection,
+    ) -> Result<(), AdapterError> {
+        let run = projection
+            .runs
+            .iter()
+            .find(|run| run.id == *run_id)
+            .ok_or_else(|| adapter_error("run missing"))?;
+        match driver(&run.provider_instance_id).map_err(adapter_error)? {
+            Driver::Codex => {
+                if let Some(adapter) = &self.codex_adapter {
+                    adapter.cancel_start(run_id).await?;
+                }
+            }
+            Driver::Claude => {
+                if let Some(claude) = self.claude.get() {
+                    claude.adapter.cancel_start(run_id).await?;
+                }
+            }
+        }
+        Ok(())
+    }
     async fn execute(
         &self,
         effect: &Effect,
@@ -1566,9 +1660,33 @@ impl ProviderAdapter for HostResources {
             ));
         }
         if matches!(effect.body, EffectBody::TerminalCleanup) {
-            self.terminals
-                .cleanup_handle(&format!("terminal:{}", effect.thread_id))
-                .await;
+            let projects = self.projects.load().await.map_err(adapter_error)?.projects;
+            let cwd = if projection.thread.project_id.as_str() == "bex:chats" {
+                self.projects.chat_directory()
+            } else {
+                thread_cwd(&projection.thread, &projects).map_err(adapter_error)?
+            };
+            let shell = self.orchestration.shell_snapshot().map_err(adapter_error)?;
+            let shared = shell
+                .threads
+                .iter()
+                .chain(&shell.archived_threads)
+                .filter(|s| s.thread.id != effect.thread_id)
+                .any(|s| {
+                    let other = if s.thread.project_id.as_str() == "bex:chats" {
+                        Some(self.projects.chat_directory())
+                    } else {
+                        thread_cwd(&s.thread, &projects).ok()
+                    };
+                    other.is_some_and(|other| other == cwd)
+                });
+            if !shared {
+                self.terminals
+                    .cleanup_handle(&agent_protocol::operations::terminal_handle(
+                        &cwd.to_string_lossy(),
+                    ))
+                    .await;
+            }
             return Ok(vec![]);
         }
         if matches!(effect.body, EffectBody::AttachmentCleanup) {
@@ -1655,6 +1773,35 @@ impl ProviderAdapter for HostResources {
             }
             _ => {}
         }
+        if matches!(
+            effect.body,
+            EffectBody::Interrupt { .. } | EffectBody::Steer { .. }
+        ) {
+            match driver {
+                Driver::Codex => {
+                    self.codex_adapter
+                        .as_ref()
+                        .ok_or_else(|| adapter_error("Codex unavailable"))?
+                        .execute(&effect.body, &projection, Path::new(""), None)
+                        .await?
+                }
+                Driver::Claude => {
+                    self.claude
+                        .get()
+                        .ok_or_else(|| adapter_error("Claude unavailable"))?
+                        .adapter
+                        .execute(
+                            &effect.body,
+                            &projection,
+                            Path::new(""),
+                            None,
+                            Path::new(""),
+                        )
+                        .await?
+                }
+            }
+            return Ok(vec![]);
+        }
         let cwd = if projection.thread.project_id.as_str() == "bex:chats" {
             self.projects.chat_directory()
         } else {
@@ -1693,8 +1840,19 @@ impl ProviderAdapter for HostResources {
                     .as_ref()
                     .ok_or_else(|| adapter_error("checkpoint root missing"))?;
                 let scope = CheckpointScope {
-                    id: CheckpointScopeId::new(format!("scope:{}:root", effect.thread_id))
-                        .expect("derived id"),
+                    id: projection
+                        .checkpoint_scopes
+                        .iter()
+                        .find(|scope| scope.kind == ScopeKind::RootRun)
+                        .map(|scope| scope.id.clone())
+                        .unwrap_or(
+                            CheckpointScopeId::new(format!(
+                                "scope:{}:{}:root",
+                                self.orchestration.instance_id().map_err(adapter_error)?,
+                                effect.thread_id
+                            ))
+                            .expect("derived id"),
+                        ),
                     thread_id: effect.thread_id.clone(),
                     run_id: Some(run_id.clone()),
                     node_id: root.clone(),
@@ -1809,6 +1967,20 @@ mod tests {
         .unwrap();
         // Own just delivery in this unit test; no live provider or native-home scanner is started.
         let session = service.inner.connections.open_session();
+        let missing = service
+            .dispatch(
+                session.id(),
+                &Call::SubscribeThread(agent_protocol::orchestration::SubscribeThread {
+                    thread_id: ThreadId::new("missing").unwrap(),
+                    after_sequence: None,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            protocol::decode::<Response<ThreadStreamItem>>(&missing.initial).unwrap(),
+            Response::Failure { .. }
+        ));
         let mut shell = service
             .dispatch(
                 session.id(),
