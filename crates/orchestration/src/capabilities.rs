@@ -1,5 +1,5 @@
 //! Capability records from the pinned T3 adapters.
-use orchestration::*;
+use crate::contracts::*;
 
 pub fn capabilities(driver: Driver) -> ProviderCapabilities {
     let mut value = ProviderCapabilities {
@@ -115,4 +115,13 @@ pub fn capabilities(driver: Driver) -> ProviderCapabilities {
         value.identity.native_turn_ids = Strength::Weak;
     }
     value
+}
+
+/// The supported provider instance identifiers are shared by admission and UI.
+pub fn driver(instance: &ProviderInstanceId) -> Option<Driver> {
+    match instance.as_str() {
+        "codex" => Some(Driver::Codex),
+        "claude" => Some(Driver::Claude),
+        _ => None,
+    }
 }

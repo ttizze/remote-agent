@@ -12,11 +12,7 @@ use agent_protocol::{
 };
 use agent_transport::peer::RpcMessageError;
 use codex_app_server::CodexAppServer;
-use orchestration::{
-    store::Store,
-    worker::{AdapterError, EffectWorker, ProviderAdapter},
-    *,
-};
+use orchestration::{AdapterError, ProviderAdapter, store::Store, worker::EffectWorker, *};
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -391,7 +387,7 @@ impl HostRpcService {
             .dispatch(
                 command,
                 &now(),
-                &provider_adapters::capabilities::capabilities(driver).turns,
+                &orchestration::capabilities::capabilities(driver).turns,
                 driver,
             )
             .map_err(store_failure)?;
@@ -845,7 +841,7 @@ impl HostRpcService {
         } else {
             unreachable!()
         };
-        let capabilities = provider_adapters::capabilities::capabilities(selection_driver).turns;
+        let capabilities = orchestration::capabilities::capabilities(selection_driver).turns;
         let preview =
             orchestration::decider::decide(&create, None, &now(), &capabilities, selection_driver)
                 .map_err(|e| Failure::new("invalid_launch", e))?;
@@ -1187,14 +1183,8 @@ fn provider_key(provider: ProviderKind) -> String {
     .into()
 }
 fn driver(instance: &ProviderInstanceId) -> Result<Driver, Failure> {
-    match instance.as_str() {
-        "codex" => Ok(Driver::Codex),
-        "claude" => Ok(Driver::Claude),
-        _ => Err(Failure::new(
-            "provider_unavailable",
-            "unknown provider instance",
-        )),
-    }
+    orchestration::capabilities::driver(instance)
+        .ok_or_else(|| Failure::new("provider_unavailable", "unknown provider instance"))
 }
 fn thread_cwd(
     thread: &AppThread,

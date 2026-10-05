@@ -26,7 +26,7 @@
 | H3 | 照合・対応中 | 未完了 |
 | H4 | 照合・対応中 | 未完了 |
 | H5 | private index は実 index のコピーで stat cache を保持する。index のない初回だけ HEAD/empty から作る。 | 既存 checkpoint の tracked/untracked、通常 index 保持、sparse、rollback テスト。 |
-| H6 | 照合・対応中 | 未完了 |
+| H6 | orchestration の既定 feature は contracts/純粋な判断のみ。SQLite/Tokio worker は Host の runtime feature、adapter 境界は別 feature にした。 | feature を追跡する境界テスト2件で、core/FFI に rusqlite が入らず Host には入ることを検証。 |
 | H7 | Interrupt/Steer は provider の既存 process owner へ直接渡し、workspace 準備と browser 設定を通さない。 | Host 単体テスト、最終全 unit-tests。 |
 | H8 | provider ごとの初回取り込み完了を durable metadata に保存し、完了後は scan 自体を呼ばない。中断・保存失敗時は再実行する。 | import_completion_and_checkpoint_namespace 回帰テスト。 |
 | H9 | transcript.cwd を canonicalize してから除外・登録・検索・保存に同じ値を使う。 | project symlink/idempotency と import のテスト。 |

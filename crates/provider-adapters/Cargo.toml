@@ -7,7 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 scopeguard = "1.2"
-orchestration = { path = "../orchestration" }
+orchestration = { path = "../orchestration", features = ["adapter"] }
 codex-app-server = { path = "../codex-app-server" }
 bex-process = { path = "../bex-process" }
 agent-transport = { path = "../agent-transport" }

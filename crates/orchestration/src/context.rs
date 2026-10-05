@@ -425,7 +425,7 @@ pub fn consumed(
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime"))]
 mod tests {
     use super::*;
     use crate::{store::Store, test_support::*};

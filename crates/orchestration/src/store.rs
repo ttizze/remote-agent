@@ -150,17 +150,9 @@ impl Store {
             .iter()
             .find(|m| m.id == *message_id)
             .ok_or(StoreError::InvalidEvent("steer message missing".into()))?;
-        let driver = projection
-            .provider_threads
-            .iter()
-            .find(|p| p.provider_instance_id == projection.thread.provider_instance_id)
-            .map_or(Driver::Codex, |p| p.driver);
-        let capabilities = projection
-            .provider_sessions
-            .iter()
-            .find(|s| s.driver == driver)
-            .map(|s| &s.capabilities.turns)
-            .ok_or_else(|| StoreError::InvalidEvent("steer provider session missing".into()))?;
+        let driver = crate::capabilities::driver(&projection.thread.provider_instance_id)
+            .ok_or_else(|| StoreError::InvalidEvent("unknown steer provider".into()))?;
+        let capabilities = crate::capabilities::capabilities(driver).turns;
         let command = Command {
             command_id: CommandId::new(format!("command:steer-follow-up:{}", effect.id))
                 .expect("derived id"),
@@ -178,7 +170,7 @@ impl Store {
                 dispatch_mode: DispatchMode::QueueAfterActive,
             }),
         };
-        self.dispatch_inner(&command, now, capabilities, driver, Some(message_id))
+        self.dispatch_inner(&command, now, &capabilities, driver, Some(message_id))
     }
     fn dispatch_inner(
         &self,

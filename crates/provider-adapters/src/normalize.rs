@@ -1440,7 +1440,7 @@ pub fn disconnected(state: &TurnState, message: &str, now: &Timestamp) -> Transl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capabilities::capabilities;
+    use orchestration::capabilities::capabilities;
     fn timestamp() -> Timestamp {
         Timestamp::parse("2026-10-05T00:00:00Z").unwrap()
     }

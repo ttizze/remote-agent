@@ -1,5 +1,4 @@
 //! Codex app-server and Claude stream-json adapters for orchestration-v2.
-pub mod capabilities;
 pub mod claude;
 pub mod codex;
 pub mod normalize;
@@ -25,16 +24,16 @@ pub(crate) fn now() -> Timestamp {
         .min(i64::MAX as u128) as i64;
     Timestamp::from_millis(millis).expect("system time in RFC 3339 range")
 }
-pub(crate) fn error(message: impl std::fmt::Display) -> orchestration::worker::AdapterError {
-    orchestration::worker::AdapterError {
+pub(crate) fn error(message: impl std::fmt::Display) -> orchestration::AdapterError {
+    orchestration::AdapterError {
         message: message.to_string(),
         retryable: false,
         turn_completed: false,
     }
 }
 
-pub(crate) fn turn_completed() -> orchestration::worker::AdapterError {
-    orchestration::worker::AdapterError {
+pub(crate) fn turn_completed() -> orchestration::AdapterError {
+    orchestration::AdapterError {
         message: "turn completed".into(),
         retryable: false,
         turn_completed: true,
@@ -46,7 +45,7 @@ async fn portable_fallback(
     output: &tokio::sync::mpsc::Sender<ProviderBatch>,
     projection: &ThreadProjection,
     run: &Run,
-) -> Result<ThreadProjection, orchestration::worker::AdapterError> {
+) -> Result<ThreadProjection, orchestration::AdapterError> {
     let timestamp = now();
     let mut provider = projection
         .provider_threads

@@ -867,7 +867,7 @@ mod tests {
             .dispatch(
                 &input,
                 &at(),
-                &provider_adapters::capabilities::capabilities(Driver::Codex).turns,
+                &orchestration::capabilities::capabilities(Driver::Codex).turns,
                 Driver::Codex,
             )
             .unwrap();

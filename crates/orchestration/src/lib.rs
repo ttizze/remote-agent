@@ -1,11 +1,18 @@
 //! T3 orchestration-v2: shared contracts and pure decisions/projections, with
 //! transactional persistence and an independently owned provider effect worker.
+#[cfg(feature = "adapter")]
+pub mod adapter;
 pub mod checkpoint;
 pub mod contracts;
 pub mod decider;
 pub mod projector;
+#[cfg(feature = "runtime")]
 pub mod store;
+#[cfg(feature = "runtime")]
 pub mod worker;
+#[cfg(feature = "adapter")]
+pub use adapter::{AdapterError, ProviderAdapter};
+pub mod capabilities;
 pub use contracts::*;
 #[cfg(test)]
 mod test_support;
