@@ -209,6 +209,7 @@ name = "agent-runtime"
 version = "0.1.0"
 dependencies = [
  "agent-domain",
+ "agent-providers",
  "base64 0.23.1",
  "futures-util",
  "proptest",
@@ -221,6 +222,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
