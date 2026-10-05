@@ -5,10 +5,12 @@ pub mod adapter;
 pub mod attachments;
 pub mod checkpoint;
 pub mod checkpoint_scope;
+pub mod command_policy;
 pub mod contracts;
 pub mod decider;
 pub mod delegation;
 pub mod projector;
+pub mod queued_run_order;
 #[cfg(feature = "runtime")]
 pub mod store;
 #[cfg(feature = "runtime")]

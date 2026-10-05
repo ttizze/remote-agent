@@ -60,59 +60,6 @@ pub fn interruptible_run<'a>(runs: &'a [Run], tasks: &[Subagent]) -> Option<&'a 
 pub fn editable_message(native_continuation: bool, delegated_completion: bool) -> bool {
     !native_continuation && !delegated_completion
 }
-pub fn queued_runs<'a>(runs: &'a [Run], messages: &[ConversationMessage]) -> Vec<&'a Run> {
-    let mut queue: Vec<_> = runs
-        .iter()
-        .filter(|run| run.status == RunStatus::Queued)
-        .collect();
-    queue.sort_by_key(|run| {
-        (
-            !messages
-                .iter()
-                .any(|m| m.id == run.user_message_id && m.delegated_completion.is_some()),
-            run.queue_position.unwrap_or(run.ordinal),
-            run.ordinal,
-        )
-    });
-    queue
-}
-
-pub fn resolve_dispatch_mode(
-    requested: &DispatchMode,
-    intent: Option<DeliveryIntent>,
-    active_run: Option<&Run>,
-    turns: &TurnCapabilities,
-) -> DispatchMode {
-    let Some(intent) = intent else {
-        return requested.clone();
-    };
-    let Some(run) = active_run else {
-        return DispatchMode::StartImmediately;
-    };
-    match intent {
-        DeliveryIntent::Steer => DispatchMode::SteerActive {
-            target_run_id: run.id.clone(),
-        },
-        DeliveryIntent::Restart => DispatchMode::RestartActive {
-            target_run_id: run.id.clone(),
-        },
-        DeliveryIntent::Auto
-            if matches!(run.status, RunStatus::Preparing | RunStatus::Starting) =>
-        {
-            DispatchMode::QueueAfterActive
-        }
-        DeliveryIntent::Auto if turns.supports_active_steering => DispatchMode::SteerActive {
-            target_run_id: run.id.clone(),
-        },
-        DeliveryIntent::Auto if turns.supports_queued_messages => DispatchMode::QueueAfterActive,
-        DeliveryIntent::Auto if turns.supports_steering_by_interrupt_restart => {
-            DispatchMode::RestartActive {
-                target_run_id: run.id.clone(),
-            }
-        }
-        DeliveryIntent::Auto => DispatchMode::QueueAfterActive,
-    }
-}
 
 pub fn decide(
     command: &Command,
@@ -293,7 +240,10 @@ pub fn decide(
                 )),
             );
             if *hold_queue {
-                for queued in queued_runs(&projection.runs, &projection.messages) {
+                for queued in crate::queued_run_order::queued_runs_in_delivery_order(
+                    &projection.runs,
+                    &projection.messages,
+                ) {
                     let mut queued = queued.clone();
                     queued.queue_held = true;
                     emit(
@@ -456,7 +406,10 @@ pub fn decide(
                     "cannot reorder before a delegated completion",
                 )?;
             }
-            let mut queue = queued_runs(&projection.runs, &projection.messages);
+            let mut queue = crate::queued_run_order::queued_runs_in_delivery_order(
+                &projection.runs,
+                &projection.messages,
+            );
             queue.retain(|candidate| candidate.id != *run_id);
             let position = match before_run_id {
                 Some(id) => queue
@@ -866,7 +819,11 @@ pub fn decide(
                             .runtime_requests
                             .iter()
                             .any(|request| request.status == RequestStatus::Pending)
-                            && queued_runs(&projection.runs, &projection.messages).is_empty(),
+                            && crate::queued_run_order::queued_runs_in_delivery_order(
+                                &projection.runs,
+                                &projection.messages,
+                            )
+                            .is_empty(),
                         "pending or queued work cannot be snoozed",
                     )?;
                     thread.snoozed_until = Some(snoozed_until.clone());
@@ -1273,7 +1230,7 @@ fn promote_next(
     if native_busy || active(runs).is_some_and(|run| Some(&run.id) != excluding) {
         return;
     }
-    if let Some(next) = queued_runs(runs, messages)
+    if let Some(next) = crate::queued_run_order::queued_runs_in_delivery_order(runs, messages)
         .first()
         .filter(|run| !run.queue_held)
     {
@@ -1438,11 +1395,10 @@ fn dispatch(
                 .any(|t| t.kind == TransferKind::MergeBack && t.status == TransferStatus::Pending),
         "wait for the active run before consuming merge back",
     )?;
-    let mode = resolve_dispatch_mode(
+    let mode = crate::command_policy::resolve_message_dispatch_intent(
+        projection,
         &message.dispatch_mode,
         message.delivery_intent,
-        active,
-        capabilities,
     );
     if matches!(
         mode,
@@ -2726,7 +2682,7 @@ mod tests {
             for i in 0..count { projection = apply(&projection, &send(&format!("send-{i}"), DispatchMode::StartImmediately)).0; }
             for (i, cancelled) in cancel.iter().enumerate().take(count).skip(1) { if *cancelled { projection = apply(&projection, &command(&format!("cancel-{i}"), CommandBody::QueuedRunCancel { run_id: projection.runs[i].id.clone() })).0; } }
             prop_assert_eq!(projection.runs.iter().filter(|run| run.status.is_blocking()).count(), 1);
-            let positions: Vec<_> = queued_runs(&projection.runs, &projection.messages).iter().map(|run| run.queue_position.unwrap()).collect();
+            let positions: Vec<_> = crate::queued_run_order::queued_runs_in_delivery_order(&projection.runs, &projection.messages).iter().map(|run| run.queue_position.unwrap()).collect();
             prop_assert!(positions.windows(2).all(|positions| positions[0] < positions[1]));
         }
         #[test]

@@ -1150,7 +1150,7 @@ mod tests {
                 .len(),
             2
         );
-        let queue = decider::queued_runs(&p.runs, &p.messages);
+        let queue = queued_run_order::queued_runs_in_delivery_order(&p.runs, &p.messages);
         assert_eq!(queue[0].user_message_id, messages[0].id);
         dispatch(
             &store,
