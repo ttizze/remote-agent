@@ -610,7 +610,9 @@ mod tests {
             )
             .await;
             let (recorded, receiver) = tokio::sync::oneshot::channel();
-            let waiting = wait_for_recording(client, receiver, Duration::from_millis(20));
+            // Only the expiry case may reach the deadline; a loaded runner must not expire the others.
+            let expiry = Duration::from_millis(if end == "expire" { 20 } else { 60_000 });
+            let waiting = wait_for_recording(client, receiver, expiry);
             let provider = async {
                 server.send(Message::Ping(vec![1].into())).await.unwrap();
                 assert_eq!(
