@@ -907,6 +907,10 @@ impl Owner {
                 self.state.editing_run = None;
                 self.state.workspace.review = None;
                 self.state.workspace.diff_request = None;
+                self.state.workspace.directory = None;
+                self.state.workspace.file = None;
+                self.state.workspace.requested_directory = None;
+                self.state.workspace.requested_file = None;
                 self.subscribe_thread();
                 None
             }
@@ -1013,6 +1017,10 @@ impl Owner {
                 self.state.editing_run = None;
                 self.state.workspace.review = None;
                 self.state.workspace.diff_request = None;
+                self.state.workspace.directory = None;
+                self.state.workspace.file = None;
+                self.state.workspace.requested_directory = None;
+                self.state.workspace.requested_file = None;
                 self.subscribe_thread();
                 self.visited.remove(&id);
                 target = Some(id);
@@ -1025,6 +1033,10 @@ impl Owner {
                 self.state.editing_run = None;
                 self.state.workspace.review = None;
                 self.state.workspace.diff_request = None;
+                self.state.workspace.directory = None;
+                self.state.workspace.file = None;
+                self.state.workspace.requested_directory = None;
+                self.state.workspace.requested_file = None;
                 self.subscribe_thread();
                 None
             }
@@ -1553,11 +1565,15 @@ impl Owner {
                 self.subscribe_thread();
                 None
             }
-            Intent::ListFiles { path } => Some(Call::ListFiles(op::ListFiles { path })),
+            Intent::ListFiles { path } => {
+                self.state.workspace.requested_directory = Some(path.clone());
+                Some(Call::ListFiles(op::ListFiles { path }))
+            }
             Intent::ReadFile {
                 path,
                 discard_draft,
             } => {
+                self.state.workspace.requested_file = Some(path.clone());
                 if discard_draft {
                     self.state.workspace.file_drafts.remove(&path);
                 }
@@ -1759,12 +1775,12 @@ impl Owner {
                         _ => {}
                     }
                 }
-                if let Call::StartTerminal(params) = &call {
-                    if let Some(terminal) = self.state.terminals.get_mut(&params.handle) {
-                        terminal.phase = TerminalPhase::Failed(
-                            crate::presentation::error::error_message(&error.to_string()),
-                        );
-                    }
+                if let Call::StartTerminal(params) = &call
+                    && let Some(terminal) = self.state.terminals.get_mut(&params.handle)
+                {
+                    terminal.phase = TerminalPhase::Failed(
+                        crate::presentation::error::error_message(&error.to_string()),
+                    );
                 }
                 Err(error)
             }
@@ -1908,7 +1924,12 @@ impl Owner {
                         self.refresh();
                     }
                     Reply::Projects(projects) => self.state.projects = projects,
-                    Reply::Files(files) => self.state.workspace.directory = Some(files),
+                    Reply::Files(files) => {
+                        if matches!(&call, Call::ListFiles(request) if self.state.workspace.requested_directory.as_ref() == Some(&request.path))
+                        {
+                            self.state.workspace.directory = Some(files);
+                        }
+                    }
                     Reply::File(file) => {
                         if let Call::WriteFile(written) = &call
                             && let Some(draft) =
@@ -1921,14 +1942,38 @@ impl Owner {
                                 Arc::make_mut(draft).revision = file.revision.clone();
                             }
                         }
-                        self.state.workspace.file = Some(Arc::new(file));
+                        let requested = match &call {
+                            Call::ReadFile(request) => {
+                                self.state.workspace.requested_file.as_ref().map_or_else(
+                                    || {
+                                        self.state
+                                            .workspace
+                                            .file
+                                            .as_ref()
+                                            .is_some_and(|current| current.path == file.path)
+                                    },
+                                    |path| path == &request.path,
+                                )
+                            }
+                            Call::WriteFile(_) => self
+                                .state
+                                .workspace
+                                .file
+                                .as_ref()
+                                .is_some_and(|current| current.path == file.path),
+                            _ => false,
+                        };
+                        if requested {
+                            self.state.workspace.requested_file = Some(file.path.clone());
+                            self.state.workspace.file = Some(Arc::new(file));
+                        }
                     }
                     Reply::Review(review) => {
-                        self.state.workspace.review_generation += 1;
                         if let Call::ReviewWorkspace(request) = &call
                             && request.cwd == self.state.cwd()
                             && self.state.workspace.diff_request.is_none()
                         {
+                            self.state.workspace.review_generation += 1;
                             self.state.workspace.review = Some(Arc::new(review));
                         }
                     }
@@ -1940,6 +1985,7 @@ impl Owner {
                             && request.from_turn_count == diff.from_turn_count
                             && request.to_turn_count == diff.to_turn_count
                         {
+                            self.state.workspace.review_generation += 1;
                             self.state.workspace.review =
                                 Some(Arc::new(crate::presentation::diff::turn_review(diff)));
                         }
@@ -2237,6 +2283,62 @@ async fn thread_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn healthy_resume_reuses_connection_and_timed_out_mutations_keep_id_and_order() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            use transport::{Endpoint, Identity, IncomingRequest, Relays, Trust};
+            let host = Endpoint::bind(Identity::generate(), Relays::Loopback).await.unwrap();
+            let endpoint = Endpoint::bind(Identity::generate(), Relays::Loopback).await.unwrap();
+            let ticket = host.local_ticket();
+            let (outgoing, incoming) = tokio::join!(endpoint.connect(&ticket), host.accept());
+            let session = outgoing.unwrap();
+            let incoming = incoming.unwrap().unwrap().authorize(&Trust { allowed: BTreeSet::from([endpoint.node_id()]), ..Default::default() }).unwrap();
+            let (client, _events) = session.open_peer(Duration::from_millis(150), 8).await.unwrap();
+            let _host_events = incoming.accept_peer().await.unwrap();
+            let client = Arc::new(client);
+            let mut owner = owner(Snapshot { connected: true, ..Default::default() });
+            owner.network = Some(Network { peer: client.clone(), session: session.clone(), ticket: ticket.clone(), epoch: 0, tasks: vec![], thread: None, mutations: BTreeMap::new(), running_mutations: BTreeSet::new() });
+            let (sender, mut receiver) = mpsc::channel(8);
+            owner.sender = sender;
+            let (complete, answer) = oneshot::channel();
+            owner.handle(OwnerEvent::Resume { endpoint: endpoint.clone(), ticket, complete }).await;
+            let reused = answer.await.unwrap().unwrap();
+            assert!(reused.reused);
+            assert_eq!(reused.connection_id, client.diagnostic_id);
+            let thread = ThreadId::new("thread").unwrap();
+            let first = command(thread.clone(), CommandBody::ThreadPin { order_key: None });
+            let second = command(thread.clone(), CommandBody::ThreadUnpin);
+            let expected = vec![first.clone(), first.clone(), second.clone()];
+            let server = tokio::spawn(async move {
+                let mut held = vec![];
+                for (index, expected) in expected.into_iter().enumerate() {
+                    let IncomingRequest::Call(mut request) = incoming.accept_request().await.unwrap() else { panic!("mutation request"); };
+                    assert!(matches!(&request.call, Call::DispatchCommand(actual) if actual == &expected));
+                    if index == 0 {
+                        // Keep the response stream open until the client times out.
+                        held.push(request.send);
+                    } else {
+                        agent_transport::framing::write(&mut request.send, protocol::Response::Success { result: rpc::DispatchReceipt { thread_id: expected.thread_id, sequence: index as u64, replayed: index == 1 } }).await.unwrap();
+                        request.send.finish().unwrap();
+                    }
+                }
+            });
+            owner.job(Call::DispatchCommand(first), None, None, None).unwrap();
+            owner.job(Call::DispatchCommand(second), None, None, None).unwrap();
+            for _ in 0..2 {
+                let event = receiver.recv().await.unwrap();
+                assert!(matches!(&event, OwnerEvent::Finished(_, result) if result.result.is_ok()));
+                owner.handle(event).await;
+            }
+            server.await.unwrap();
+            assert!(owner.state.pending_commands.is_empty());
+            assert!(owner.network.as_ref().unwrap().running_mutations.is_empty());
+            drop(owner);
+            session.close();
+            endpoint.close().await;
+            host.close().await;
+        }).await.unwrap();
+    }
     fn owner(state: Snapshot) -> Owner {
         let (sender, _) = mpsc::channel(64);
         let (snapshots, _) = watch::channel(Arc::new(state.clone()));
@@ -2647,6 +2749,83 @@ mod tests {
         let draft = &owner.state.workspace.file_drafts[&file.path];
         assert_eq!(draft.text, "typed during save");
         assert_eq!(draft.revision, "v2");
+    }
+    #[test]
+    fn late_file_reads_do_not_switch_the_editor_and_canonical_paths_are_accepted() {
+        let mut owner = owner(queued_state());
+        let read = |path: &str| Intent::ReadFile {
+            path: path.into(),
+            discard_draft: false,
+        };
+        let first = owner.prepare(read("/old")).unwrap().0.unwrap();
+        let second = owner.prepare(read("/symlink/new")).unwrap().0.unwrap();
+        let finish = |call, path: &str| JobResult {
+            call,
+            result: Ok(Reply::File(m::FileContent {
+                path: path.into(),
+                revision: "v1".into(),
+                text: "file".into(),
+                size: 4,
+            })),
+            complete: None,
+            sent: None,
+            launched: None,
+        };
+        owner.finished(finish(first, "/old"));
+        assert!(owner.state.workspace.file.is_none());
+        owner.finished(finish(second, "/canonical/new"));
+        assert_eq!(
+            owner.state.workspace.file.as_ref().unwrap().path,
+            "/canonical/new"
+        );
+        let pending = owner.prepare(read("/canonical/new")).unwrap().0.unwrap();
+        owner
+            .prepare(Intent::NewThread { project_id: None })
+            .unwrap();
+        owner.finished(finish(pending, "/canonical/new"));
+        assert!(owner.state.workspace.file.is_none());
+    }
+    #[test]
+    fn a_queued_edit_ends_when_its_run_starts_and_restores_the_main_draft() {
+        let mut owner = owner(queued_state());
+        let draft = Draft {
+            text: "keep my draft".into(),
+            ..owner.state.current_draft()
+        };
+        owner
+            .state
+            .drafts
+            .insert(owner.state.draft_key(), draft.clone());
+        let run = owner
+            .state
+            .projection()
+            .unwrap()
+            .runs
+            .iter()
+            .find(|r| r.status == RunStatus::Queued)
+            .unwrap()
+            .clone();
+        owner
+            .prepare(Intent::Queue {
+                action: QueueAction::Edit {
+                    run_id: run.id.to_string(),
+                },
+            })
+            .unwrap();
+        let mut started = run;
+        started.status = RunStatus::Starting;
+        let id = owner.state.selected_thread.clone().unwrap();
+        crate::sync::thread(
+            &mut owner.state,
+            &id,
+            ThreadStreamItem::Event(Box::new(StoredEvent {
+                sequence: 2,
+                command_id: None,
+                event: crate::test_support::event("started", EventPayload::RunUpdated(started)),
+            })),
+        );
+        assert!(owner.state.editing_run.is_none());
+        assert_eq!(owner.state.current_draft(), draft);
     }
     #[test]
     fn delayed_submission_receipt_preserves_new_text_and_model_changes() {

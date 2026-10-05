@@ -202,6 +202,8 @@ impl Snapshot {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Workspace {
+    pub requested_directory: Option<String>,
+    pub requested_file: Option<String>,
     pub directory: Option<crate::models::FileList>,
     pub file: Option<Arc<crate::models::FileContent>>,
     pub file_drafts: BTreeMap<String, Arc<FileDraft>>,

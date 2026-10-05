@@ -589,6 +589,26 @@ fn detail(item: &TurnItem) -> (String, String) {
         TurnItemBody::Notification {
             summary, detail, ..
         } => (summary.clone(), detail.clone().unwrap_or_default()),
+        TurnItemBody::ApprovalRequest { prompt, .. } => {
+            ("Approval".into(), prompt.clone().unwrap_or_default())
+        }
+        TurnItemBody::UserInputRequest {
+            questions,
+            question_answer,
+            ..
+        } => (
+            "Questions".into(),
+            questions
+                .iter()
+                .map(|q| q.question.clone())
+                .chain(
+                    question_answer
+                        .iter()
+                        .map(|answer| serde_json::to_string(answer).unwrap_or_default()),
+                )
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
         _ => (
             item.title.clone().unwrap_or_else(|| "Work".into()),
             String::new(),
@@ -619,7 +639,9 @@ pub fn timeline(projection: &ThreadProjection) -> Vec<TimelineRow> {
             kind: RowKind::Work,
             text: String::new(),
             title: String::new(),
-            status: item.status.as_str().into(),
+            status: request
+                .map_or(item.status.as_str(), |request| request.status.as_str())
+                .into(),
             streaming: false,
             collapsible: false,
             work: vec![],
@@ -701,7 +723,7 @@ pub fn timeline(projection: &ThreadProjection) -> Vec<TimelineRow> {
             }
             TurnItemBody::ApprovalRequest {
                 prompt, options, ..
-            } => {
+            } if request.is_some_and(|request| request.status == RequestStatus::Pending) => {
                 row.kind = RowKind::Approval;
                 row.title = "Approval required".into();
                 row.text = prompt.clone().unwrap_or_default();
@@ -719,7 +741,7 @@ pub fn timeline(projection: &ThreadProjection) -> Vec<TimelineRow> {
                 question_answer,
                 response_mode_message,
                 ..
-            } => {
+            } if request.is_some_and(|request| request.status == RequestStatus::Pending) => {
                 row.kind = RowKind::Question;
                 row.title = "Questions".into();
                 row.response_mode_message = *response_mode_message;
@@ -780,7 +802,7 @@ pub fn timeline(projection: &ThreadProjection) -> Vec<TimelineRow> {
                     id: item.id.to_string(),
                     title,
                     detail: text,
-                    status: item.status.as_str().into(),
+                    status: row.status.clone(),
                     kind: match &item.body {
                         TurnItemBody::Reasoning { .. } => "reasoning",
                         TurnItemBody::CommandExecution { .. } => "command",
@@ -1026,6 +1048,73 @@ impl Snapshot {
 mod tests {
     use super::*;
     use crate::test_support::*;
+    #[test]
+    fn only_pending_requests_use_the_composer_drawer_and_resolved_requests_join_work_log() {
+        let mut p = projection();
+        let request = RuntimeRequest {
+            id: RuntimeRequestId::new("approval").unwrap(),
+            node_id: NodeId::new("approval-node").unwrap(),
+            provider_turn_id: None,
+            native_request_ref: None,
+            kind: RequestKind::Command,
+            status: RequestStatus::Pending,
+            response_capability: ResponseCapability::Message,
+            created_at: now(),
+            resolved_at: None,
+            decision: None,
+            answers: None,
+        };
+        let approval = item(
+            "approval-item",
+            1,
+            TurnItemBody::ApprovalRequest {
+                request_id: request.id.clone(),
+                request_kind: RequestKind::Command,
+                prompt: Some("Run tests?".into()),
+                app_name: None,
+                options: vec![],
+            },
+        );
+        p.runtime_requests.push(request);
+        p.turn_items.push(approval);
+        p.visible_turn_items = projector::visible_items(&p);
+        let id = p.thread.id.clone();
+        let mut state = Snapshot {
+            selected_thread: Some(id.clone()),
+            ..Default::default()
+        };
+        crate::sync::thread(
+            &mut state,
+            &id,
+            ThreadStreamItem::Snapshot {
+                snapshot_sequence: 1,
+                projection: Box::new(p.clone()),
+                history_cursor: None,
+                has_more_history: false,
+                latest_local_turn_ordinal: None,
+            },
+        );
+        let view = conversation(&state);
+        assert_eq!(view.requests.len(), 1);
+        assert!(view.rows.is_empty());
+        p.runtime_requests[0].status = RequestStatus::Resolved;
+        crate::sync::thread(
+            &mut state,
+            &id,
+            ThreadStreamItem::Snapshot {
+                snapshot_sequence: 2,
+                projection: Box::new(p),
+                history_cursor: None,
+                has_more_history: false,
+                latest_local_turn_ordinal: None,
+            },
+        );
+        let view = conversation(&state);
+        assert!(view.requests.is_empty());
+        assert_eq!(view.rows[0].kind, RowKind::Work);
+        assert_eq!(view.rows[0].work[0].detail, "Run tests?");
+        assert_eq!(view.rows[0].work[0].status, "resolved");
+    }
     #[test]
     fn unread_is_a_completion_watermark_and_never_visited_is_not_unread() {
         let mut shell = projector::shell(&projection());
