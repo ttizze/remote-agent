@@ -32,7 +32,8 @@ explicitly instead of creating a Codex conversation or dropping the draft.
 Claude's `result` ends one response, while `session_state_changed: idle` marks
 the end of its run, including background work and the resulting follow-up.
 The Host requests these state events and keeps the turn running until both the
-result and idle have arrived, in either order, and queued input has been consumed.
+result and idle have arrived, in either order. The Host then starts the next
+unheld queued input as a separate turn.
 Intermediate text such as “あとで報告します” therefore retains the loading
 indicator; a promise in the text alone does not imply active work. Reconnection
 and history refresh retain the running turn and actionable requests.
@@ -69,16 +70,32 @@ hydration must not change this default.
 - Load the latest bounded page first; request older pages using the server's
   opaque cursor. A refresh must not fetch the entire conversation.
 - Display cached conversation content immediately. Codex initially reads the latest
-  five turns through `thread/turns/list` with `itemsView: summary`, in parallel
-  with metadata. Each summary contains its opening user message and final answer.
-  Continue older turn pages from the native opaque cursor without rereading the
+  five turns from the Host's persisted history, with an indexed summary view.
+  Each summary contains its opening user message and final answer.
+  Continue older turn pages from the Host's opaque cursor without rereading the
   latest page or creating empty turn placeholders.
 - Keep saved activity collapsed. Expanding a summary requests that turn's full
-  items through bounded `thread/items/list` pages. Apply the result on the same
+  items from the Host's DB. Apply the result on the same
   ordered stream as live changes, preserving current status and newer output.
   Cache hydrated activity and retain it on an unchanged summary refresh; changed
   or running turns remain eligible for a detail refresh. Gallery reads request
   full activity explicitly so images inside activity remain available.
+- Codex and Claude histories are imported automatically on first startup. Native
+  pagination and hydration belong to the importer; conversation refresh and
+  detail reads use the Host's DB after import. Import work must not block the
+  title list. Preserve an unfinished import's continuation across restart and
+  expose import failures as incomplete history with a visible reason, rather
+  than presenting the missing history as confirmed empty. Reopening continues
+  an import that is still progressing; explicit import retries failed histories.
+  Keep provider source data. These ownership changes follow
+  the October 5, 2026 native rewrite requirement in `T3_NATIVE_REWRITE_PLAN.md`.
+- Return stored titles immediately while the initial catalog is being scanned.
+  Publish each committed page and expose import progress independently of list
+  pagination. A blocked source must not block another provider's discovery.
+  Hide confirmed-empty labels during the scan. Read unfinished body imports in
+  bounded DB pages rather than collecting the entire source catalog in memory.
+  The Host owns persisted titles and filtering even when a provider is unavailable;
+  clients must not append cached rows outside the returned search or page limits.
 - Do not show history-loading buttons or placeholder conversation rows. Load
   the next bounded page automatically while the oldest loaded boundary is in
   the viewport, including on initial display when the page does not fill the
@@ -635,3 +652,13 @@ Acceptance: core `composer::tests`,
 `invocation_completion_preserves_suffix_and_does_not_accept_ime`,
 `completion_candidates_keep_names_and_descriptions_on_one_line`, and iOS
 `testSimulatorSelectsPluginAndSkillFromComposer`.
+
+Live provider events may publish a deferred body before the full tool output is available. Reading that body imports it once into the Host database, after native IO completes outside the event pump. The import compares the stored item with the requested version; a newer streamed item cannot be replaced by an older full body. Reading or hydrating details does not change conversation activity time.
+
+Queued input belongs to the Host, remains separate from executed turns, and is durable before its receipt is returned. Pause/resume, edit, reorder and removal operate on that queue. Restart preserves order and edits and holds undelivered input. A claimed write becomes Unknown after a restart; removing its visible queue row does not change that outcome or make resending the same input safe.
+
+A successful stop holds waiting inputs before another queue entry can be claimed.
+Stopping an empty queue allows the next new input without a separate resume action.
+A rejected stop for an old turn leaves the queue unchanged. The Host owns an
+interrupt and its resulting queue update after dispatch begins, including when
+the requesting client disconnects.

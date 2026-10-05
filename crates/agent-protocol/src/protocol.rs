@@ -53,6 +53,10 @@ pub enum Notification {
     },
     #[serde(rename = "host/session/renamed")]
     SessionRenamed { session: crate::session::SessionRef },
+    #[serde(rename = "host/session/catalog/changed")]
+    CatalogChanged {},
+    #[serde(rename = "host/session/history/changed")]
+    HistoryChanged { session: crate::session::SessionRef },
 }
 
 pub fn encode(value: impl Serialize) -> io::Result<Vec<u8>> {

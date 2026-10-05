@@ -1,8 +1,5 @@
 package dev.remoteagent.mobile
 
-import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -16,12 +13,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -43,6 +39,7 @@ import dev.remoteagent.core.ActivityExpansion
 import dev.remoteagent.core.ActivityPresentation
 import dev.remoteagent.core.ConversationRow
 import dev.remoteagent.core.ConversationRowContent
+import dev.remoteagent.core.ImportHistory
 import dev.remoteagent.core.Intent
 import dev.remoteagent.core.Interrupt
 import dev.remoteagent.core.Outcome
@@ -50,9 +47,7 @@ import dev.remoteagent.core.ReadItem
 import dev.remoteagent.core.Respond
 import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.activityIsExpanded
-import dev.remoteagent.core.insertInvocation
 import dev.remoteagent.core.shouldLoadHistory
-import java.util.UUID
 import kotlinx.coroutines.launch
 
 @Composable
@@ -85,7 +80,15 @@ internal fun ThreadDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 threadId?.let(snapshot::conversation)?.historyNotice()?.let { notice ->
-                    item(key = "history:read-state") { Text(notice) }
+                    item(key = "history:read-state") {
+                        HistoryNotice(
+                            notice,
+                            threadId?.let(snapshot::conversation)?.canRetryHistory() == true,
+                            snapshot.connected(),
+                        ) {
+                            perform(Intent.ImportHistory(ImportHistory())) {}
+                        }
+                    }
                 }
                 val renderRow: @Composable (ConversationRowContent) -> Unit = { content ->
                     ConversationContent(
@@ -110,6 +113,16 @@ internal fun ThreadDetailScreen(
             LatestMessageButton(listState) { following = true }
         }
         composer { following = true }
+    }
+}
+
+@Composable
+private fun HistoryNotice(text: String, canRetry: Boolean, enabled: Boolean, retry: () -> Unit) {
+    Column {
+        Text(text)
+        if (canRetry) {
+            TextButton(onClick = retry, enabled = enabled) { Text("履歴の取り込みを再試行") }
+        }
     }
 }
 
@@ -203,75 +216,6 @@ private fun ActivityHeader(
 }
 
 @Composable
-internal fun ThreadComposer(
-    snapshot: Snapshot,
-    perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
-    onSend: () -> Unit,
-    attach: @Composable () -> Unit,
-) {
-    val navigation = snapshot.navigation()
-    val draft = snapshot.draft(navigation.draftKey)
-    var sending by remember { mutableStateOf(false) }
-    val inputUnavailable = navigation.threadId?.let(snapshot::conversation)?.inputUnavailableReason()
-    Column(Modifier.padding(12.dp)) {
-        inputUnavailable?.let { Text(it) }
-        DraftAttachments(draft.attachments, navigation.draftKey, perform)
-        val cursor = draft.text.toByteArray(Charsets.UTF_8).size.toUInt()
-        ComposerInvocationPicker(snapshot.composerSuggestions(draft.text, cursor)) { invocation ->
-            insertInvocation(draft.text, cursor, invocation.kind, invocation.name)?.let {
-                perform(Intent.InsertInvocation(navigation.draftKey, it.text, invocation)) {}
-            }
-        }
-        OutlinedTextField(
-            draft.text,
-            { perform(Intent.EditComposer(navigation.draftKey, it, it.toByteArray(Charsets.UTF_8).size.toUInt())) {} },
-            Modifier.fillMaxWidth(),
-            label = { Text("メッセージ") },
-            minLines = 2,
-        )
-        Row {
-            attach()
-            Button(
-                onClick = {
-                    sending = true
-                    onSend()
-                    perform(Intent.Submit(navigation.threadId, UUID.randomUUID().toString())) { sending = false }
-                },
-                enabled =
-                    inputUnavailable == null && !sending && (draft.text.isNotBlank() || draft.attachments.isNotEmpty()),
-            ) {
-                Text("送信")
-            }
-        }
-    }
-}
-
-@Composable
-internal fun AttachmentButton(
-    selectionKey: Pair<String?, dev.remoteagent.core.DraftKey>,
-    attach: (Pair<String?, dev.remoteagent.core.DraftKey>, Uri, () -> Unit) -> Unit,
-) {
-    var transferring by remember { mutableStateOf(false) }
-    var selection by remember { mutableStateOf(selectionKey) }
-    val picker =
-        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-            if (uri != null) {
-                transferring = true
-                attach(selection, uri) { transferring = false }
-            }
-        }
-    Button(
-        onClick = {
-            selection = selectionKey
-            picker.launch(arrayOf("*/*"))
-        },
-        enabled = !transferring,
-    ) {
-        Text(if (transferring) "添付中…" else "添付")
-    }
-}
-
-@Composable
 internal fun ConversationHeader(title: String?, showThreads: () -> Unit, scrollToTop: () -> Unit) {
     Row {
         Button(onClick = showThreads) { Text("タスク一覧") }
@@ -302,18 +246,18 @@ private fun ObserveFollowing(
     LaunchedEffect(snapshot, following, older) {
         val hasMore = snapshot.navigation().threadId?.let(snapshot::conversation)?.hasMoreHistory() == true
         snapshotFlow {
-            val viewportHeight = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
-            shouldLoadHistory(
-                hasMore,
-                older == null || snapshot.error() != null,
-                viewportHeight > 0 &&
-                    listState.firstVisibleItemIndex == 0 &&
-                    listState.firstVisibleItemScrollOffset <
-                        viewportHeight * HISTORY_PREFETCH_FRACTION,
-                !listState.canScrollForward,
-                following,
-            )
-        }.collect { needed -> if (needed) older?.invoke() }
+                val viewportHeight = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
+                shouldLoadHistory(
+                    hasMore,
+                    older == null || snapshot.error() != null,
+                    viewportHeight > 0 &&
+                        listState.firstVisibleItemIndex == 0 &&
+                        listState.firstVisibleItemScrollOffset < viewportHeight * HISTORY_PREFETCH_FRACTION,
+                    !listState.canScrollForward,
+                    following,
+                )
+            }
+            .collect { needed -> if (needed) older?.invoke() }
     }
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress to !listState.canScrollForward }

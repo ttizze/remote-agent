@@ -102,7 +102,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         std::fs::write(home.join("account-fixture.json"), r#"{"type":"chatgpt","email":"desktop@example.invalid","planType":"plus","accountId":"desktop"}"#).unwrap();
         let config = AppServerConfig { codex_home: Some(home.clone()), ..codex_fixture::config(&home) };
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json"))).unwrap();
         let accounts_dir = directory.path().join("accounts");
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
         let mut session = service.open_session();
@@ -181,7 +181,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         drop(session); drop(service);
         server.shutdown().await.unwrap();
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json"))).unwrap();
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
         let mut session = service.open_session();
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
@@ -197,16 +197,17 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         server.shutdown().await.unwrap();
         std::fs::remove_file(home.join("account-fixture.json")).unwrap();
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json"))).unwrap();
         service.enable_accounts(accounts_dir, config).await.unwrap();
         let mut session = service.open_session();
         let accounts = call(&service, &mut session, "host/account/list", json!({})).await;
         assert!(accounts["result"]["selected"]["codex"].is_null());
         assert!(accounts["result"]["error"].is_string());
         assert!(call(&service, &mut session, "host/session/list", json!({})).await.get("error").is_none());
-        assert_eq!(call(&service, &mut session, "host/session/submit", json!({"threadId":{"provider":"codex","id":"any"},"clientUserMessageId":"unavailable-account","input":[{"text":{"text":"must not use a different account"}}]})).await["error"]["code"], "account_unavailable");
+        assert_eq!(call(&service, &mut session, "host/session/submit", json!({"threadId":{"provider":"codex","id":thread},"clientUserMessageId":"unavailable-account","input":[{"text":{"text":"must not use a different account"}}]})).await["error"]["code"], "account_unavailable");
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
         let started = call(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":home})).await;
+        assert!(started.get("error").is_none(), "{started}");
         completed_turn(&service, &mut session, started["result"]["thread"]["id"]["id"].as_str().unwrap(), "recovered account").await;
         let logged_out = call(&service, &mut session, "host/account/logout", json!({"accountId":second})).await;
         assert!(logged_out.get("error").is_none(), "{logged_out}");
@@ -231,7 +232,8 @@ async fn helper_initialization_does_not_block_completed_turns() {
         let service = HostRpcService::new(
             Ok(server.clone()),
             ProjectStore::new(home.join("bex-worktrees.json")),
-        );
+        )
+        .unwrap();
         service
             .enable_accounts(home.join("accounts"), config)
             .await
@@ -313,7 +315,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         let config = AppServerConfig { codex_home: Some(home.clone()), ..codex_fixture::config(&home) };
         let accounts_dir = directory.path().join("accounts");
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json"))).unwrap();
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
         let mut session = service.open_session();
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
@@ -331,7 +333,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         drop(session); drop(service);
         server.shutdown().await.unwrap();
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json"))).unwrap();
         service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
         let mut session = service.open_session();
         assert_eq!(call(&service, &mut session, "host/account/list", json!({})).await["result"]["selected"]["codex"], "desktop");
@@ -358,7 +360,7 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         drop(session); drop(service);
         server.shutdown().await.unwrap();
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")));
+        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json"))).unwrap();
         service.enable_accounts(accounts_dir.clone(), config).await.unwrap();
         let mut session = service.open_session();
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;

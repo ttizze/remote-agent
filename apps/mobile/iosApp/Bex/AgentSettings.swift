@@ -9,6 +9,7 @@ struct AgentSettingsScreen: View {
     let close: () -> Void
     @State private var changingAccount = false
     @State private var loadingAccounts = false
+    @State private var importingHistory = false
     @State private var loginCode = ""
     @State private var loginError: String?
     @State private var loginRequestInFlight = false
@@ -70,6 +71,17 @@ struct AgentSettingsScreen: View {
                     }
                 }
                 accountSection
+                Section("会話履歴") {
+                    Button("既存の会話を取り込み・再試行") {
+                        importingHistory = true
+                        model.perform(.importHistory(ImportHistory())) { _ in importingHistory = false }
+                    }
+                    .disabled(busy || importingHistory)
+                    .accessibilityIdentifier("history.import")
+                    if importingHistory {
+                        ProgressView("会話を検索中…")
+                    }
+                }
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {

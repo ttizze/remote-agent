@@ -32,7 +32,7 @@ struct ConversationMarkdown: View {
                 Text(linkError).font(.caption).foregroundColor(.red)
             }
         }
-        .font(.system(size: 18))
+        .font(.custom("DMSans-Regular", size: 16, relativeTo: .body))
         .tint(.accentColor)
         .environment(\.openURL, OpenURLAction { url in
             if url.scheme == "https" || url.scheme == "http" {

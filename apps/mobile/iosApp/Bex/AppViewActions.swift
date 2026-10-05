@@ -148,6 +148,18 @@ extension BexAppViewModel {
         }
     }
 
+    func enqueueDraft() {
+        guard let threadId = selectedThreadId else { return }
+        perform(.queue(threadId: threadId, clientUserMessageId: UUID().uuidString)) { [weak self] _ in
+            self?.persist()
+        }
+    }
+
+    func controlQueue(_ action: QueueAction) {
+        guard let threadId = selectedThreadId else { return }
+        perform(.queueControl(QueueControl(session: threadId, action: action)))
+    }
+
     func restoreUnknownSubmission(_ id: String) {
         perform(.restoreUnknownSubmission(clientUserMessageId: id)) { [weak self] _ in self?.persist() }
     }

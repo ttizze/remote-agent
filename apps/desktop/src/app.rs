@@ -41,6 +41,7 @@ use std::{
 
 enum OperationCompletion {
     Busy,
+    QueueEdit(SessionRef, agent_protocol::ids::ClientInputId),
     Composer(u64),
     Editor(u64),
     Item { generation: u64, turn_id: TurnId },
@@ -107,6 +108,11 @@ struct Question {
     definition: agent_protocol::requests::Question,
     input: Entity<InputState>,
     selected: HashSet<String>,
+}
+struct QueueEditor {
+    session: SessionRef,
+    id: agent_protocol::ids::ClientInputId,
+    input: Entity<TextareaState>,
 }
 struct RequestInputs {
     questions: Vec<Question>,
@@ -184,6 +190,7 @@ pub(crate) struct Desktop {
     busy: usize,
     error: String,
     composer: Entity<TextareaState>,
+    queue_editor: Option<QueueEditor>,
     selection: Entity<selection::ConversationSelection>,
     pending_quote: Option<String>,
     pending_explanation: Option<String>,
@@ -472,6 +479,7 @@ impl Desktop {
             busy: 0,
             error: String::new(),
             composer,
+            queue_editor: None,
             selection,
             pending_quote: None,
             pending_explanation: None,
@@ -764,6 +772,17 @@ impl Desktop {
             }
             OperationCompletion::Busy => {
                 self.busy = self.busy.saturating_sub(1);
+            }
+            OperationCompletion::QueueEdit(session, id) => {
+                self.busy = self.busy.saturating_sub(1);
+                if result.is_ok()
+                    && self
+                        .queue_editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.session == session && editor.id == id)
+                {
+                    self.queue_editor = None;
+                }
             }
             OperationCompletion::Item {
                 generation,

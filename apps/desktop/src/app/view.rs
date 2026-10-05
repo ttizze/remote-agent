@@ -4,6 +4,7 @@ mod media;
 mod model_settings;
 mod onboarding;
 mod permissions;
+mod queue;
 mod settings;
 mod sidebar;
 mod workbench;
@@ -25,7 +26,7 @@ fn file_name(path: &str) -> String {
         .to_owned()
 }
 
-const CHAT_WIDTH: f32 = 780.;
+const CHAT_WIDTH: f32 = 736.;
 
 fn new_chat_icon() -> Icon {
     Icon::default().path("bex/square-pen.svg")
@@ -91,7 +92,7 @@ fn image_skeleton(height: f32, background: Hsla) -> Div {
         )
 }
 
-fn user_message_bubble() -> Div {
+fn user_message_bubble(background: Hsla) -> Div {
     v_flex()
         .debug_selector(|| "user-message-bubble".into())
         .gap_3()
@@ -99,7 +100,7 @@ fn user_message_bubble() -> Div {
         .max_w(px(560.))
         .p_4()
         .rounded(px(18.))
-        .bg(rgb(0x303030))
+        .bg(background)
 }
 
 fn review_counts(additions: Option<u64>, deletions: Option<u64>) -> AnyElement {
@@ -156,8 +157,8 @@ impl Render for Desktop {
             let gallery = self.image_gallery_view(window, cx);
             return h_flex()
                 .size_full()
-                .bg(rgb(0x181818))
-                .text_color(rgb(0xececec))
+                .bg(cx.theme().background)
+                .text_color(cx.theme().foreground)
                 .text_size(px(14.))
                 .child(gallery);
         }
@@ -181,8 +182,8 @@ impl Render for Desktop {
         h_flex()
             .size_full()
             .items_stretch()
-            .bg(rgb(0x181818))
-            .text_color(rgb(0xececec))
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
             .text_size(px(14.))
             .font_weight(FontWeight::NORMAL)
             .when(self.sidebar && !self.side_chat_mode, |body| {

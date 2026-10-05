@@ -1,4 +1,4 @@
-//! Build once and own each isolated Simulator/Host pair through cleanup.
+//! Build once; each worker owns a Simulator and each case owns fresh Host/app data.
 use crate::Result;
 use plist::Value as Plist;
 use serde_json::Value;
@@ -362,26 +362,21 @@ async fn template(
     result
 }
 
-async fn worker(
+async fn run_case(
     tests: Vec<String>,
     target: PathBuf,
     source: PathBuf,
-    simulator_source: SimulatorSource,
+    simulator: &str,
     prefix: PathBuf,
     without_codex: bool,
     cancel: watch::Receiver<bool>,
 ) -> Result<WorkerResult> {
     let started = Instant::now();
-    let records = prefix.parent().ok_or("missing worker records")?;
     let label = prefix
         .file_name()
         .ok_or("missing worker label")?
         .to_string_lossy();
     let bundle = prefix.with_extension("xcresult");
-    let name = format!(
-        "Bex isolated E2E {}-{label}",
-        records.file_name().unwrap().to_string_lossy()
-    );
     let products = source.parent().ok_or("missing test products")?;
     let run = products.join(label.as_ref()).with_extension("xctestrun");
     let log = File::create(prefix.with_extension("log"))?;
@@ -415,20 +410,7 @@ async fn worker(
                 if Instant::now() >= deadline { return Err(format!("{label}: UI fixture timed out").into()); }
                 tokio::select! { _ = tokio::time::sleep(Duration::from_millis(100)) => {}, _ = supervision::cancelled(cancel.clone()) => return Err(supervision::interrupted()) }
             }
-            let create = match simulator_source {
-                SimulatorSource::Template(template) => args![vec; "xcrun", "simctl", "clone", template, &name],
-                SimulatorSource::Runtime(runtime) => args![vec; "xcrun", "simctl", "create", &name, SIMULATOR_DEVICE_TYPE, runtime],
-            };
-            let simulator = supervision::run(&create, &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
-            let simulator = std::str::from_utf8(&simulator.stdout)?.trim();
-            let mut preparation = vec![
-                ("boot", args![vec; "xcrun", "simctl", "boot", simulator]),
-                ("bootstatus", args![vec; "xcrun", "simctl", "bootstatus", simulator, "-b"]),
-            ];
-            if needs_media_fixtures(&tests) {
-                preparation.push(("addmedia", args![vec; "xcrun", "simctl", "addmedia", simulator, "apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png", records.join("attachment-video.mov")]));
-            }
-            preparation.push(("install", args![vec; "xcrun", "simctl", "install", simulator, products.join("Debug-iphonesimulator/Bex.app")]));
+            let mut preparation = vec![("install", args![vec; "xcrun", "simctl", "install", simulator, products.join("Debug-iphonesimulator/Bex.app")])];
             if tests.iter().any(|test| test == "testSimulatorOpensOnlyTheTappedImageAndSavesIt") {
                 preparation.push(("photos-add permission", args![vec; "xcrun", "simctl", "privacy", simulator, "grant", "photos-add", "com.ttizze.b-codex"]));
             }
@@ -475,20 +457,25 @@ async fn worker(
             println!("{label}: {} passed; records: {}", tests.len(), bundle.display());
             Ok(WorkerResult { tests, seconds: started.elapsed().as_secs_f64(), setup_seconds, bundle })
         }.await;
-    // Stop the Host before potentially slow Simulator cleanup.
+    // Every case stops its Host before the worker resets the app.
     let shutdown = host.stop(true, Duration::from_secs(10)).await;
-    // Cleanup ignores cancellation, and recovers devices by this run's
-    // unique name even if simctl create/clone was cancelled before returning an ID.
+    // Preserve redacted diagnostics before the isolated source/database directory is removed.
     let cleanup: Result<()> = async {
         match fs::remove_file(&run) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        delete_devices(&name, &cwd, &log).await?;
-        let diagnostics = root.join("host/logs/host.jsonl");
-        if diagnostics.is_file() {
-            fs::copy(diagnostics, prefix.with_extension("host-diagnostics.jsonl"))?;
+        let diagnostics = root.join("host/logs");
+        if diagnostics.is_dir() {
+            let destination = prefix.with_extension("diagnostics");
+            fs::create_dir_all(&destination)?;
+            for file in fs::read_dir(diagnostics)? {
+                let file = file?;
+                if file.file_type()?.is_file() {
+                    fs::copy(file.path(), destination.join(file.file_name()))?;
+                }
+            }
         }
         Ok(())
     }
@@ -496,6 +483,63 @@ async fn worker(
     let result = result?;
     cleanup?;
     shutdown?;
+    Ok(result)
+}
+
+async fn worker(
+    tests: Vec<String>,
+    target: PathBuf,
+    source: PathBuf,
+    simulator_source: SimulatorSource,
+    prefix: PathBuf,
+    without_codex: bool,
+    cancel: watch::Receiver<bool>,
+) -> Result<Vec<WorkerResult>> {
+    let cwd = std::env::current_dir()?;
+    let records = prefix.parent().ok_or("missing worker records")?;
+    let label = prefix
+        .file_name()
+        .ok_or("missing worker label")?
+        .to_string_lossy();
+    let name = format!(
+        "Bex isolated E2E {}-{label}",
+        records.file_name().unwrap().to_string_lossy()
+    );
+    let log = File::create(prefix.with_extension("setup.log"))?;
+    let result = async {
+        let create = match simulator_source {
+            SimulatorSource::Template(template) => args![vec; "xcrun", "simctl", "clone", template, &name],
+            SimulatorSource::Runtime(runtime) => args![vec; "xcrun", "simctl", "create", &name, SIMULATOR_DEVICE_TYPE, runtime],
+        };
+        let simulator = supervision::run(&create, &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
+        let simulator = std::str::from_utf8(&simulator.stdout)?.trim();
+        let mut preparation = vec![
+            ("boot", args![vec; "xcrun", "simctl", "boot", simulator]),
+            ("bootstatus", args![vec; "xcrun", "simctl", "bootstatus", simulator, "-b"]),
+        ];
+        if needs_media_fixtures(&tests) {
+            preparation.push(("addmedia", args![vec; "xcrun", "simctl", "addmedia", simulator, "apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png", records.join("attachment-video.mov")]));
+        }
+        for (phase, arguments) in preparation {
+            println!("{label}: {phase}");
+            supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT).await
+                .map_err(|error| format!("{label}: {phase} failed: {error}"))?;
+        }
+        let mut results = Vec::new();
+        for (case, test) in tests.into_iter().enumerate() {
+            if case > 0 {
+                supervision::run(&args!["xcrun", "simctl", "uninstall", simulator, "com.ttizze.b-codex"], &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT).await?;
+            }
+            results.push(run_case(vec![test], target.clone(), source.clone(), simulator,
+                records.join(format!("{label}-case-{}", case + 1)), without_codex, cancel.clone()).await?);
+        }
+        Result::<Vec<WorkerResult>>::Ok(results)
+    }.await;
+    // Cleanup ignores cancellation and recovers the uniquely named Simulator,
+    // including a create/clone cancelled before it returned its ID.
+    let cleanup = delete_devices(&name, &cwd, &log).await;
+    let result = result?;
+    cleanup?;
     Ok(result)
 }
 
@@ -696,20 +740,25 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
         return Err("Expected exactly one xctestrun file".into());
     }
     println!(
-        "Build: {build_seconds:.2}s; running {} tests on {workers} isolated pairs; records: {}",
+        "Build: {build_seconds:.2}s; running {} tests with at most {workers} isolated pairs; records: {}",
         tests.len(),
         records.display()
     );
     let mut pending = JoinSet::new();
     for (index, tests) in groups.into_iter().enumerate() {
+        let target = target.clone();
+        let run = runs[0].clone();
+        let simulator_source = simulator_source.clone();
+        let records = records.clone();
+        let cancel = cancel.clone();
         pending.spawn(worker(
             tests,
-            target.clone(),
-            runs[0].clone(),
-            simulator_source.clone(),
+            target,
+            run,
+            simulator_source,
             records.join(format!("worker-{}", index + 1)),
             without_codex,
-            cancel.clone(),
+            cancel,
         ));
     }
     // Await every owner so that an error never drops a live Host's cleanup.
@@ -717,7 +766,7 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
     let mut failure = None;
     while let Some(result) = pending.join_next().await {
         match result {
-            Ok(Ok(result)) => results.push(result),
+            Ok(Ok(result)) => results.extend(result),
             Ok(Err(error)) if failure.is_none() => failure = Some(error),
             Err(error) if failure.is_none() => failure = Some(error.into()),
             _ => {}

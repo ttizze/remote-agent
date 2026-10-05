@@ -20,9 +20,11 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
 tokio-util.workspace = true
 zeroize.workspace = true
+uuid = { version = "1", features = ["v4"] }
 png = "0.18.1"
 tiny_http = "0.12.0"
 indexmap = "2"
+rusqlite = { version = "=0.37.0", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
@@ -33,3 +35,6 @@ iroh = { version = "=1.1.0", default-features = false, features = ["tls-ring", "
 iroh-tickets = "=1.0.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring"] }
+async-tungstenite = { version = "=0.35.0", default-features = false, features = ["tokio-runtime", "handshake", "futures-03-sink"] }
+futures-util.workspace = true

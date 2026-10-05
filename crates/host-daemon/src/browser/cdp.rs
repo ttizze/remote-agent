@@ -106,7 +106,9 @@ impl Chrome {
                 tracing::warn!(target: "bex", operation = "browser.launch",
                     message = %format_args!("Chrome launch failed after {} ms: {error}", started.elapsed().as_millis()));
                 child.stdin.take();
-                let _ = child.wait().await;
+                // EOF asks the companion supervisor to reap the whole browser
+                // process group. Cleanup must not keep an RPC pending forever.
+                let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
                 Err(error)
             }
         }

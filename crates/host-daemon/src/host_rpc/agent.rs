@@ -137,7 +137,7 @@ pub(crate) trait Agent: Identity {
     async fn submit(
         &self,
         input: &op::Submission,
-        route: super::submission::SubmissionTarget<'_>,
+        route: super::submission::SubmissionTarget,
         reload: bool,
         browser: Option<Value>,
     ) -> Result<op::SubmissionReceipt, Failure>;
@@ -158,7 +158,6 @@ pub(crate) trait Agent: Identity {
         turn: &str,
         browser: Option<Value>,
     ) -> Result<ThreadResponse, Failure>;
-    async fn rename(&self, id: &str, name: &str) -> Result<Empty, Failure>;
     fn event_stream(&self) -> Option<tokio::sync::mpsc::Receiver<AgentEvent>>;
     async fn shutdown(&self);
 }
@@ -178,7 +177,10 @@ pub(crate) enum AgentChange {
         native_id: Value,
     },
     SourceClosed(uuid::Uuid),
-    Renamed(SessionRef),
+    Renamed {
+        session: SessionRef,
+        name: String,
+    },
     Stopped {
         provider: agent_protocol::session::ProviderKind,
         reason: String,
@@ -191,7 +193,7 @@ pub(crate) struct AgentEvent {
 impl AgentChange {
     pub fn apply(self, router: &SessionRouter) -> Result<(), String> {
         match self {
-            Self::Session { session, change } => router.session_change(&session, change),
+            Self::Session { session, change } => return router.session_change(&session, change),
             Self::Request {
                 session,
                 origin,
@@ -200,12 +202,12 @@ impl AgentChange {
             Self::Resolved {
                 instance,
                 native_id,
-            } => router.resolve_native_request(instance, &native_id),
-            Self::SourceClosed(instance) => router.close_request_source(instance),
-            Self::Renamed(session) => {
+            } => return router.resolve_native_request(instance, &native_id),
+            Self::SourceClosed(instance) => return router.close_request_source(instance),
+            Self::Renamed { session, .. } => {
                 router.broadcast(agent_protocol::protocol::Notification::SessionRenamed { session })
             }
-            Self::Stopped { provider, reason } => router.fail_provider(provider, &reason),
+            Self::Stopped { provider, reason } => return router.fail_provider(provider, &reason),
         }
         Ok(())
     }

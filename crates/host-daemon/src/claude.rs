@@ -8,7 +8,7 @@ mod process;
 
 use anyhow::Context;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -127,7 +127,6 @@ struct Running {
 
 pub(crate) struct Command {
     pub(crate) value: Value,
-    pub(crate) user: Option<Item>,
     pub(crate) delivered: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
 }
 
@@ -599,7 +598,7 @@ impl Claude {
             (running.input.clone(), running.interrupt.clone())
         };
         if interrupt.borrow().is_none() {
-            input.send(Command { value: json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}), user: None, delivered: None }).await.map_err(|_| "Claude Code input is closed")?;
+            input.send(Command { value: json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}), delivered: None }).await.map_err(|_| "Claude Code input is closed")?;
         }
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
@@ -615,50 +614,6 @@ impl Claude {
         .await
         .map_err(|_| "Claude Codeの停止要求がタイムアウトしました。")??;
         Ok(())
-    }
-
-    async fn additional_input(
-        &self,
-        id: &str,
-        input: &[op::Input],
-        client_id: &str,
-    ) -> Result<agent_protocol::ids::TurnId, OperationError> {
-        if self.stop.is_cancelled() {
-            return Err("Host is shutting down".into());
-        }
-        let record = self.record(id).await?;
-        let content = input_content(input).await?;
-        let state = record.lock().await;
-        let running = state
-            .running
-            .as_ref()
-            .ok_or("Claudeは実行中ではありません。")?;
-        let sender = running.input.clone();
-        let turn_id = running.turn_id.clone();
-        let session = state.session_id;
-        drop(state);
-        let id = client_id.to_owned();
-        let (delivered, receipt) = tokio::sync::oneshot::channel();
-        sender.send(Command {
-            value: json!({"type":"user","uuid":id,"session_id":session,"message":{"role":"user","content":content},"parent_tool_use_id":null}),
-            user: Some(Item { id: id.clone().into(), status: ItemStatus::Unknown, client_input_id: Some(client_id.into()), body: ItemContent::Inline { body: Box::new(ItemBody::UserMessage { text: None, content: op::Input::message_parts(input) }) } }),
-            delivered: Some(delivered),
-        }).await.map_err(|_| "Claude Code input is closed")?;
-        tokio::time::timeout(std::time::Duration::from_secs(15), receipt)
-            .await
-            .map_err(|_| OperationError {
-                message: "Claude input delivery is unknown".into(),
-                delivery: agent_transport::peer::Delivery::Unknown,
-            })?
-            .map_err(|_| OperationError {
-                message: "Claude exited before confirming additional input".into(),
-                delivery: agent_transport::peer::Delivery::Unknown,
-            })?
-            .map_err(|message| OperationError {
-                message,
-                delivery: agent_transport::peer::Delivery::Unknown,
-            })?;
-        Ok(turn_id)
     }
 
     async fn start_turn(
@@ -857,7 +812,6 @@ impl Worker {
             });
         });
         let mut interrupted = false;
-        let mut pending_inputs = HashSet::new();
         let mut result_received = false;
         let mut idle = false;
         let outcome = async {
@@ -873,14 +827,6 @@ impl Worker {
                     command = input.recv() => {
                         let command = command.ok_or("Claude input queue is closed")?;
                         let result = process.write(&command.value).await;
-                        if result.is_ok() && let Some(user) = command.user {
-                            result_received = false;
-                            idle = false;
-                            pending_inputs.insert(user.id.clone());
-                            self.change(SessionChange::Item {
-                                turn_id: self.turn_id.clone(), item: Arc::new(user),
-                            }).await?;
-                        }
                         if let Some(delivered) = command.delivered { let _ = delivered.send(result.clone()); }
                         result?;
                         continue;
@@ -929,12 +875,10 @@ impl Worker {
                         self.interrupt.send_replace(Some(result));
                     }
                     _ => {
-                        let input_consumed = kind == "user"
-                            && message["uuid"].as_str().is_some_and(|id| pending_inputs.remove(id));
                         let response_started = message["parent_tool_use_id"].is_null()
                             && (kind == "assistant"
                                 || (kind == "stream_event" && message["event"]["type"] == "message_start"));
-                        if input_consumed || response_started {
+                        if response_started {
                             result_received = false;
                             idle = false;
                         }
@@ -943,8 +887,8 @@ impl Worker {
                 }
                 // A result ends one response, not necessarily the background
                 // work and its follow-up. Idle is Claude's run-end signal.
-                // It can precede the result; queued input must still be consumed.
-                if result_received && idle && pending_inputs.is_empty() {
+                // It can precede the result; both signals are required.
+                if result_received && idle {
                     return Ok(());
                 }
             }
@@ -1620,7 +1564,7 @@ impl crate::host_rpc::requests::AnswerSource for RequestSource {
             .map_err(|_| Failure::new("answer_not_sent", "agent input is closed"))?;
         Ok(async move {
             let (delivered, receipt) = tokio::sync::oneshot::channel();
-            permit.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}), user: None, delivered: Some(delivered) });
+            permit.send(Command { value: json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":result}}), delivered: Some(delivered) });
             tokio::time::timeout(std::time::Duration::from_secs(15), receipt).await.map_err(|_| Failure::unknown("answer_delivery_unknown", "answer delivery timed out"))?
                 .map_err(|_| Failure::unknown("answer_delivery_unknown", "agent exited before confirming the answer write"))?
                 .map_err(|e| Failure::unknown("answer_delivery_unknown", e))
@@ -1757,7 +1701,7 @@ impl Agent for Claude {
     async fn submit(
         &self,
         input: &op::Submission,
-        route: crate::host_rpc::submission::SubmissionTarget<'_>,
+        route: crate::host_rpc::submission::SubmissionTarget,
         _reload: bool,
         browser: Option<Value>,
     ) -> Result<op::SubmissionReceipt, Failure> {
@@ -1769,14 +1713,12 @@ impl Agent for Claude {
                     "this provider accepts queued input",
                 ));
             }
-            SubmissionTarget::Queue => Some(
-                self.additional_input(
-                    &input.thread_id.id,
-                    &input.input,
-                    &input.client_user_message_id,
-                )
-                .await?,
-            ),
+            SubmissionTarget::Queue => {
+                return Err(Failure::new(
+                    "invalid_execution_route",
+                    "the Host owns queued input",
+                ));
+            }
             SubmissionTarget::Start { .. } => Some(self.start_turn(input, browser).await?),
         };
         Ok(op::SubmissionReceipt { turn_id })
@@ -1934,16 +1876,6 @@ impl Agent for Claude {
             "fork is unsupported by this provider",
         ))
     }
-    async fn rename(
-        &self,
-        _id: &str,
-        _name: &str,
-    ) -> Result<agent_protocol::models::Empty, Failure> {
-        Err(Failure::new(
-            "unsupported_operation",
-            "rename is unsupported by this provider",
-        ))
-    }
     fn event_stream(&self) -> Option<mpsc::Receiver<AgentEvent>> {
         self.event_receiver
             .lock()
@@ -1965,59 +1897,6 @@ impl Agent for Claude {
 #[cfg(test)]
 mod execution_tests {
     use super::*;
-
-    #[tokio::test]
-    async fn queued_input_requires_write_confirmation_to_prove_delivery() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = dunce::canonicalize(directory.path()).unwrap();
-        let claude = Claude::load(
-            root.join("unused"),
-            root.join("adapter"),
-            Some(root.join("native")),
-        )
-        .await
-        .unwrap();
-        let session = Claude::create(&claude, root.to_str().unwrap(), "default")
-            .await
-            .unwrap()
-            .thread
-            .id
-            .unwrap();
-        let record = claude.record(&session.id).await.unwrap();
-        for enqueued in [false, true] {
-            let (input, mut receiver) = mpsc::channel(1);
-            let (_interrupt, interrupt) = watch::channel(None);
-            record.lock().await.running = Some(Running {
-                turn_id: "turn".into(),
-                input,
-                interrupt,
-            });
-            if !enqueued {
-                receiver.close();
-            }
-            let parts = [op::Input::Text {
-                text: "additional input".into(),
-            }];
-            let (result, ()) = tokio::join!(
-                claude.additional_input(&session.id, &parts, "input"),
-                async move {
-                    if enqueued {
-                        // Once accepted by the worker queue, closing the receipt
-                        // does not establish whether the native write happened.
-                        drop(receiver.recv().await.unwrap());
-                    }
-                },
-            );
-            assert_eq!(
-                result.unwrap_err().delivery,
-                if enqueued {
-                    agent_transport::peer::Delivery::Unknown
-                } else {
-                    agent_transport::peer::Delivery::NotSent
-                }
-            );
-        }
-    }
 
     #[test]
     fn final_blocks_match_content_kind_and_native_message_before_falling_back() {
@@ -2113,16 +1992,18 @@ mod execution_tests {
         });
         let uuid = Uuid::new_v4();
         let session = SessionRef::new(ProviderKind::Claude, uuid.to_string()).unwrap();
-        router.session_change(
-            &session,
-            SessionChange::Turn {
-                turn: agent_protocol::models::Turn {
-                    id: "turn".into(),
-                    ..Default::default()
+        router
+            .session_change(
+                &session,
+                SessionChange::Turn {
+                    turn: agent_protocol::models::Turn {
+                        id: "turn".into(),
+                        ..Default::default()
+                    },
+                    completed: false,
                 },
-                completed: false,
-            },
-        );
+            )
+            .unwrap();
         let (input, _receiver) = mpsc::channel(1);
         let (interrupt, _) = watch::channel(None);
         let mut worker = Worker {

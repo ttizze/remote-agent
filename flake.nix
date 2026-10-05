@@ -68,12 +68,12 @@
           };
           native = pkgs.mkShell {
             RUST_TOOLCHAIN_VERSION = rustToolchain.version;
-            packages = with pkgs; [ rustToolchain sccache cargo-mutants cargo-nextest just jq git pkg-config cmake clang actionlint nodejs ]
+            packages = with pkgs; [ rustToolchain sccache cargo-mutants cargo-nextest just jq git gh openssl pkg-config cmake clang actionlint nodejs ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 lsof
                 alsa-lib fontconfig freetype libxkbcommon wayland libGL vulkan-loader
                 libxcb libX11 libXcursor libXi libXrandr
-                openssl gtk3 webkitgtk_4_1 procps
+                gtk3 webkitgtk_4_1 procps
               ];
             LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux
               (pkgs.lib.makeLibraryPath [ pkgs.vulkan-loader pkgs.libGL pkgs.libxkbcommon pkgs.wayland ]);
@@ -94,6 +94,8 @@
               shellcheck
               actionlint
               nodejs
+              gh
+              openssl
               rustToolchain
               sccache
               cargo-mutants

@@ -186,7 +186,9 @@ transfer server just to delete that check would reverse A14.
   `nix develop . --command just quality swift` for Swift checks and acceptance.
   They partition the same maintained test list with `BEX_IOS_TEST_SHARDS=4`
   and zero-based `BEX_IOS_TEST_SHARD` values 0 through 3. Each runs one isolated
-  Simulator/Host pair; an omitted shard setting selects the complete list.
+  Simulator at a time, with a fresh Host database and app container for every test case; an omitted
+  shard setting selects the complete list. Reopening the app within one case
+  retains that case's Host database and client storage.
   The maintained list interleaves long and short tests based on CI durations
   so equal test counts do not leave one runner with all the slow cases.
   Swift formatting, linting and headless Markdown checks run on shard zero;
@@ -256,12 +258,12 @@ transfer server just to delete that check would reverse A14.
   -p host-daemon -p host-fixture` covers the integration tests omitted by the
   selected quality targets.
 - `scripts/dev-env.sh just conversation-ui` runs the maintained native
-  conversation contracts on one fresh isolated Simulator/Host pair.
-  Each pair owns its history, failure controls and app storage.
+  conversation contracts with a fresh isolated Host and app container per case.
+  Each worker owns a disposable Simulator; each case owns its history, failure controls and client storage.
   Set `BEX_IOS_TEST_WORKERS=1` for a serial audit, or 2–10 for parallel runs.
   On persistent development machines, an initialized, app-free Simulator template
   is kept shut down for this repository and runtime. Each worker clones it into
-  its own disposable device, then installs the current app and fixtures.
+  its own disposable device. Between cases the runner uninstalls and reinstalls the app and starts fresh fixtures.
   Initial OS migration runs only when
   preparing the template; test devices and Hosts are still removed after each run.
   The runner retains Xcode derived data under the Cargo target's
@@ -270,7 +272,7 @@ transfer server just to delete that check would reverse A14.
   different worktrees or Cargo targets cannot overlap iOS acceptance batches.
   Unchanged bindings preserve their timestamps; the compiled Swift bindings
   are reused only with matching sources, SDK, compiler and Rust runner.
-  Per-worker logs, result bundles and a timing summary remain under `qa/Bex-*`.
+  Per-case logs, redacted Host diagnostics, result bundles and a timing summary remain under `qa/Bex-*`.
   `just ios-e2e`
   also covers pagination, foreground refresh, files, dictation, and images.
   Missing or skipped requested tests fail the runner.

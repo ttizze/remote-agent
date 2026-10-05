@@ -212,6 +212,7 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
                     },
                     client_user_message_id: "client".into(),
                     draft: Arc::default(),
+                    force_queue: false,
                 }
                 .apply(
                     &mut finished,
@@ -259,6 +260,7 @@ fn submission_acknowledgement_moves_to_the_returned_turn() {
         Some("answer")
     );
     op::SendSubmission {
+        force_queue: false,
         thread_id: SessionRef {
             provider: ProviderKind::Codex,
             id: "thread".into(),

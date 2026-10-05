@@ -134,6 +134,12 @@ impl Snapshot {
 }
 #[uniffi::export]
 impl Thread {
+    pub fn queue_messages(&self) -> Vec<crate::presentation::conversation::QueueMessage> {
+        crate::presentation::conversation::queue_messages(&self.0.queued_inputs)
+    }
+    pub fn queue_held(&self) -> bool {
+        self.0.queue_held
+    }
     pub fn active_turn_id(&self) -> Option<agent_protocol::ids::TurnId> {
         self.0.active_turn_id()
     }
@@ -148,6 +154,9 @@ impl Thread {
     }
     pub fn history_notice(&self) -> Option<String> {
         crate::presentation::conversation::history_notice(&self.0)
+    }
+    pub fn can_retry_history(&self) -> bool {
+        crate::presentation::conversation::can_retry_history(&self.0)
     }
     pub fn has_more_history(&self) -> bool {
         self.0.history_has_more == Some(true)

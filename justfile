@@ -96,6 +96,7 @@ conversation-ui:
         testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
         testSimulatorRendersMarkdownTableAndReopensIt \
         testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
+        testSimulatorEditsHeldQueueAndPreservesDraftAcrossRelaunch \
         testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
         testSimulatorModelPickerUsesAgentRailAndCompactControls \
         testSimulatorNativeTerminalPastesMultilineText \

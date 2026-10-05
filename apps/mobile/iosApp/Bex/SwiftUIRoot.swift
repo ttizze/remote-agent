@@ -4,9 +4,14 @@ import UIKit
 
 struct BexSwiftUIRoot: View {
     @ObservedObject var model: BexAppViewModel
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         BexScreen(model: model)
+            .font(.custom("DMSans-Regular", size: 16, relativeTo: .body))
+            .tint(Color(paletteRGB: colorScheme.nativePalette.primary))
+            .foregroundStyle(Color(paletteRGB: colorScheme.nativePalette.foreground))
+            .background(Color(paletteRGB: colorScheme.nativePalette.background))
             .onChange(of: model.screen) { screen in
                 if screen != .thread {
                     model.sideChatRequest = nil
@@ -65,7 +70,6 @@ private struct BexScreen: View {
             }
             .navigationBarTitleDisplayMode(.inline)
         }
-        .preferredColorScheme(.dark)
     }
 
     private var pairingScreen: some View {

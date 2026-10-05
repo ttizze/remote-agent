@@ -39,6 +39,87 @@ pub struct RenderedConversation {
     pub request_rows: Vec<ConversationRow>,
 }
 
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct QueueMessage {
+    pub id: agent_protocol::ids::ClientInputId,
+    pub text: String,
+    pub images: Vec<String>,
+    pub delivery: agent_protocol::session::SubmissionDelivery,
+    pub editable: bool,
+    pub removable: bool,
+    pub status: String,
+    pub move_up: Option<agent_protocol::queue::QueueAction>,
+    pub move_down: Option<agent_protocol::queue::QueueAction>,
+}
+
+pub fn queue_messages(entries: &[agent_protocol::queue::QueueEntry]) -> Vec<QueueMessage> {
+    use agent_protocol::operations::Input;
+    use agent_protocol::{queue::QueueAction, session::SubmissionDelivery};
+    let waiting: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.delivery == SubmissionDelivery::Queued)
+        .map(|entry| &entry.submission.client_user_message_id)
+        .collect();
+    entries
+        .iter()
+        .map(|entry| {
+            let id = &entry.submission.client_user_message_id;
+            let position = waiting.iter().position(|value| *value == id);
+            QueueMessage {
+                id: id.clone(),
+                text: entry
+                    .submission
+                    .input
+                    .iter()
+                    .filter_map(|part| match part {
+                        Input::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                images: entry
+                    .submission
+                    .input
+                    .iter()
+                    .filter_map(|part| match part {
+                        Input::LocalImage { path } => Some(path.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                delivery: entry.delivery.clone(),
+                editable: entry.delivery == SubmissionDelivery::Queued,
+                removable: !matches!(
+                    entry.delivery,
+                    SubmissionDelivery::Sending | SubmissionDelivery::Accepted { .. }
+                ),
+                status: match entry.delivery {
+                    SubmissionDelivery::Queued => "待機中",
+                    SubmissionDelivery::Sending => "送信中",
+                    SubmissionDelivery::Accepted { .. } => "送信済み",
+                    SubmissionDelivery::Unknown => {
+                        "送信結果を確認できません。自動では再送しません。"
+                    }
+                    SubmissionDelivery::Rejected => "送信失敗",
+                }
+                .into(),
+                move_up: position.filter(|position| *position > 0).map(|position| {
+                    QueueAction::Move {
+                        id: id.clone(),
+                        before: Some(waiting[position - 1].clone()),
+                    }
+                }),
+                move_down: position
+                    .filter(|position| position + 1 < waiting.len())
+                    .map(|position| QueueAction::Move {
+                        id: id.clone(),
+                        before: waiting.get(position + 2).map(|id| (*id).clone()),
+                    }),
+            }
+        })
+        .collect()
+}
+
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct RenderedTurn {
     pub source: Arc<models::Turn>,
@@ -404,7 +485,6 @@ fn render_turn(
             let id = retained[index - native.len()].0.as_str();
             ItemMetadata {
                 id,
-                client_id: Some(id),
                 kind: super::GroupKind::User,
                 ..Default::default()
             }
@@ -748,6 +828,81 @@ pub struct Request {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn queue_controls_move_only_waiting_inputs_and_preserve_uncertain_text() {
+        use agent_protocol::{
+            operations::Submission,
+            queue::{QueueAction, QueueEntry},
+            session::{ProviderKind, SessionRef, SubmissionDelivery},
+        };
+        let entries: Vec<_> = [
+            SubmissionDelivery::Queued,
+            SubmissionDelivery::Unknown,
+            SubmissionDelivery::Sending,
+            SubmissionDelivery::Queued,
+            SubmissionDelivery::Queued,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, delivery)| QueueEntry {
+            submission: Submission {
+                thread_id: SessionRef {
+                    provider: ProviderKind::Codex,
+                    id: "conversation".into(),
+                },
+                client_user_message_id: index.to_string().into(),
+                input: vec![
+                    agent_protocol::operations::Input::Text {
+                        text: format!("message {index}"),
+                    },
+                    agent_protocol::operations::Input::LocalImage {
+                        path: format!("/isolated/image-{index}.png"),
+                    },
+                ],
+                model: None,
+                effort: None,
+                service_tier: None,
+            },
+            delivery,
+        })
+        .collect();
+        let messages = super::queue_messages(&entries);
+        assert_eq!(
+            messages[0].move_down,
+            Some(QueueAction::Move {
+                id: "0".into(),
+                before: Some("4".into())
+            })
+        );
+        assert_eq!(
+            messages[3].move_down,
+            Some(QueueAction::Move {
+                id: "3".into(),
+                before: None
+            })
+        );
+        assert_eq!(
+            messages[4].move_up,
+            Some(QueueAction::Move {
+                id: "4".into(),
+                before: Some("3".into())
+            })
+        );
+        assert!(messages[0].move_up.is_none());
+        assert!(messages[4].move_down.is_none());
+        assert_eq!(
+            messages[3].move_up,
+            Some(QueueAction::Move {
+                id: "3".into(),
+                before: Some("0".into())
+            })
+        );
+        assert_eq!(messages[3].images, ["/isolated/image-3.png"]);
+        assert!(!messages[1].editable && messages[1].removable);
+        assert!(!messages[2].editable && !messages[2].removable);
+        assert_eq!(messages[1].text, "message 1");
+        assert!(messages[1].move_up.is_none() && messages[1].move_down.is_none());
+    }
     use super::*;
     use crate::state::{Draft, Snapshot};
     use serde_json::json;
@@ -1266,6 +1421,18 @@ mod tests {
             ["native b", "pending a 2", "pending c 3"]
         );
         assert!(matches!(&items[0].source, ItemSource::Native(_)));
+        let activity_ids = rendered
+            .turns
+            .last()
+            .unwrap()
+            .rows
+            .iter()
+            .filter_map(|row| match &row.content {
+                ConversationRowContent::ActivityHeader { activity } => Some(activity.id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(activity_ids, ["echo-turn:c"]);
         assert!(rendered.queued.is_empty());
         assert_eq!(snapshot.pending_submissions.len(), 3);
         assert!(Arc::ptr_eq(
@@ -1540,10 +1707,21 @@ mod progress_tests {
 }
 
 /// Shared read-state wording; native views only render this projection.
+pub fn can_retry_history(thread: &models::Thread) -> bool {
+    thread.history_read_state.as_ref().is_some_and(|state| {
+        matches!(
+            state.kind,
+            crate::session::HistoryReadKind::Incomplete
+                | crate::session::HistoryReadKind::Unavailable
+        )
+    })
+}
+
 pub fn history_notice(thread: &models::Thread) -> Option<String> {
     use crate::session::HistoryReadKind;
     let state = thread.history_read_state.as_ref()?;
     let heading = match state.kind {
+        HistoryReadKind::Importing => "既存の履歴を取り込んでいます。",
         HistoryReadKind::Partial => "履歴の一部を表示しています。",
         HistoryReadKind::Incomplete => "履歴の一部を読み取れませんでした。",
         HistoryReadKind::Unavailable => {

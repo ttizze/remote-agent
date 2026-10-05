@@ -72,17 +72,22 @@ internal fun ThreadMessageCard(
             }
         }
         if (!isUser) {
-            content.imageSources.forEach { source ->
-                AttachmentThumbnail(source, "生成画像", perform, imageFrame)
-            }
+            content.imageSources.forEach { source -> AttachmentThumbnail(source, "生成画像", perform, imageFrame) }
         }
-        content.body?.takeIf { it.isNotEmpty() }?.let { body ->
-            Card {
-                Column(Modifier.padding(12.dp)) {
-                    if (isUser) Text(body) else ConversationBody(body, cwd, perform)
-                }
+        content.body
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { body ->
+                if (isUser) {
+                    Card(
+                        colors =
+                            androidx.compose.material3.CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+                    ) {
+                        Text(body, Modifier.padding(14.dp), color = MaterialTheme.colorScheme.onSurface)
+                    }
+                } else ConversationBody(body, cwd, perform)
             }
-        }
         if (isUser && content.nativeId == null) {
             content.title?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         }
@@ -138,7 +143,7 @@ internal fun ConversationBody(
                                 null -> MaterialTheme.typography.bodyLarge
                                 else -> MaterialTheme.typography.titleLarge
                             },
-                        fontFamily = if (block.style.code) FontFamily.Monospace else FontFamily.Default,
+                        fontFamily = if (block.style.code) FontFamily.Monospace else null,
                         modifier = Modifier.padding(start = if (block.style.quoted) 12.dp else 0.dp),
                     )
                 is MarkdownBlock.Visualization -> ConversationVisualization(block.path, cwd, perform)

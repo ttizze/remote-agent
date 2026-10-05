@@ -234,7 +234,7 @@ impl Desktop {
                 .into_any_element()
             }
             agent_protocol::items::ItemBody::UserMessage { text, content } => {
-                let mut body = user_message_bubble();
+                let mut body = user_message_bubble(cx.theme().accent);
                 let mut has_body = false;
                 if !content.is_empty() {
                     for (i, part) in content.iter().enumerate() {
@@ -607,7 +607,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let draft = &pending.draft;
-        let mut body = user_message_bubble();
+        let mut body = user_message_bubble(cx.theme().accent);
         if !draft.text.is_empty() {
             body = body.child(
                 TextView::markdown(
@@ -1023,6 +1023,7 @@ fn user_message_row(
 mod tests {
     use super::{user_message_bubble, user_message_row};
     use gpui_kit as gpui;
+    use gpui_kit::component::ActiveTheme;
     use gpui_kit::{
         ClipboardItem, Context, IntoElement, Modifiers, ParentElement, Render, TestAppContext,
         Window,
@@ -1030,11 +1031,11 @@ mod tests {
 
     struct Message;
     impl Render for Message {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             user_message_row(
                 "test",
                 "一行目\nsecond line",
-                user_message_bubble().child("一行目\nsecond line"),
+                user_message_bubble(cx.theme().accent).child("一行目\nsecond line"),
                 Some(1),
                 gpui::component::button::Button::new("edit"),
             )

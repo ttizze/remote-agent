@@ -12,6 +12,7 @@ pub struct ThreadSummary {
 }
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ThreadList {
+    pub importing: bool,
     pub notice: Option<String>,
     pub threads: Vec<ThreadSummary>,
     pub projects: Vec<Project>,
@@ -49,13 +50,20 @@ impl Snapshot {
             .map(|project| project.id.as_str())
             .collect();
         let mut notices = Vec::new();
+        if list.importing {
+            notices.push("既存の会話を探しています。見つかった会話から表示します。".into());
+        }
         if let Some(errors) = list.provider_errors.as_ref() {
-            notices.push(format!("会話一覧は部分結果です（{}）。取得できない提供元の保存済み表示は最新とは限りません。", errors.keys().cloned().collect::<Vec<_>>().join("、")));
+            notices.push(format!(
+                "利用できない提供元があります（{}）。保存済みの会話は引き続き表示できます。",
+                errors.keys().cloned().collect::<Vec<_>>().join("、")
+            ));
         }
         if !self.archived_scopes.is_empty() {
             notices.push("保存領域が変更されています。以前の下書き・未保存編集は保持しています。Hostの保存先設定を元に戻すと再び表示できます。".into());
         }
         Some(ThreadList {
+            importing: list.importing,
             notice: (!notices.is_empty()).then(|| notices.join("\n")),
             threads: list
                 .data
@@ -80,12 +88,7 @@ impl Snapshot {
                                     .filter(|preview| !preview.is_empty())
                             })
                             .unwrap_or("無題のタスク")
-                            .to_owned()
-                            + if thread.list_stale == Some(true) {
-                                "（保存済み・未確認）"
-                            } else {
-                                ""
-                            },
+                            .to_owned(),
                         project_id: thread
                             .project_id
                             .as_ref()
@@ -112,6 +115,55 @@ mod tests {
     use crate::state::operations::Operation;
     use agent_protocol::models;
     use serde_json::json;
+
+    #[test]
+    fn titles_use_a_nonempty_name_then_preview_then_the_untitled_label() {
+        let mut snapshot = Snapshot::default();
+        ListSessions::new(Default::default()).apply(
+            &mut snapshot,
+            serde_json::from_value(json!({
+                "data": [
+                    {"id":{"provider":"codex","id":"named"},"name":"Name","preview":"Preview"},
+                    {"id":{"provider":"codex","id":"preview"},"name":"","preview":"First prompt"},
+                    {"id":{"provider":"claude","id":"empty"},"name":"","preview":""},
+                    {"id":{"provider":"claude","id":"missing"}}
+                ],
+                "projects":[], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false
+            }))
+            .unwrap(),
+        );
+        let list = snapshot.thread_list().unwrap();
+        assert_eq!(
+            list.threads
+                .iter()
+                .map(|thread| thread.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Name", "First prompt", "無題のタスク", "無題のタスク"]
+        );
+    }
+
+    #[test]
+    fn importing_lists_keep_progress_separate_from_pagination_and_provider_errors() {
+        let mut snapshot = Snapshot::default();
+        let mut page: models::ThreadList = serde_json::from_value(json!({
+            "data":[], "projects":[], "moreProjectIds":[],
+            "hasMoreChats":false, "hasMoreProjects":false, "importing":true,
+            "providerErrors":{"codex":{"message":"unavailable"}}
+        }))
+        .unwrap();
+        ListSessions::new(Default::default()).apply(&mut snapshot, page.clone());
+        let list = snapshot.thread_list().unwrap();
+        assert!(list.importing);
+        assert!(!list.has_more_chats && !list.has_more_projects);
+        let notice = list.notice.unwrap();
+        assert!(notice.contains("探しています") && notice.contains("利用できない提供元"));
+        page.importing = false;
+        page.provider_errors = None;
+        ListSessions::new(Default::default()).apply(&mut snapshot, page);
+        let list = snapshot.thread_list().unwrap();
+        assert!(!list.importing);
+        assert!(list.notice.is_none());
+    }
 
     #[test]
     fn list_preserves_order_and_only_exposes_known_project_membership() {
@@ -151,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_provider_keeps_explicitly_stale_cached_summaries() {
+    fn host_results_replace_cached_lists_even_when_a_provider_is_unavailable() {
         let mut snapshot = Snapshot::default();
         let page = |data, errors| {
             serde_json::from_value(serde_json::json!({"data":data,"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false,"providerErrors":errors})).unwrap()
@@ -171,20 +223,10 @@ mod tests {
             ),
         );
         let list = snapshot.thread_list().unwrap();
-        assert_eq!(list.threads.len(), 2);
-        assert!(list.notice.unwrap().contains("部分結果"));
-        assert!(
-            list.threads
-                .iter()
-                .find(|thread| thread.id
-                    == agent_protocol::session::SessionRef {
-                        provider: agent_protocol::session::ProviderKind::Codex,
-                        id: "native".into()
-                    })
-                .unwrap()
-                .title
-                .contains("未確認")
-        );
+        assert_eq!(list.threads.len(), 1);
+        assert_eq!(list.threads[0].title, "Available");
+        assert_eq!(list.threads[0].id.id, "uuid");
+        assert!(list.notice.unwrap().contains("利用できない提供元"));
         assert!(snapshot.error.is_none());
     }
     #[rstest::rstest]

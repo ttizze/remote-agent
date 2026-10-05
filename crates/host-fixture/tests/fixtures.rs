@@ -121,7 +121,7 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
                 .await
                 .unwrap()
                 .status(),
-            204
+            503
         );
         let threads: Vec<Value> =
             serde_json::from_slice(&fs::read(root.join("list-fixture.json")).unwrap()).unwrap();
@@ -138,7 +138,7 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
                 .await
                 .unwrap()
                 .status(),
-            204
+            503
         );
         assert_eq!(fs::read(root.join("bex-projects.json")).unwrap(), original);
         assert!(!root.join("list-fixture.json").exists());
@@ -150,7 +150,7 @@ async fn pairing_controls_restore_the_original_project_store_and_survive_rejecte
                 .await
                 .unwrap()
                 .status(),
-            204
+            503
         );
         assert_eq!(
             client

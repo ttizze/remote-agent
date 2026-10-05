@@ -38,7 +38,17 @@ pub(super) fn notification(
         | Notification::Exited { .. }
         | Notification::TerminalRestored { .. }
         | Notification::TerminalDetached { .. }) => process(previous, event),
-        Notification::SessionRenamed { .. } => (previous.clone(), refresh_list(previous)),
+        Notification::SessionRenamed { .. } | Notification::CatalogChanged {} => {
+            (previous.clone(), refresh_list(previous))
+        }
+        Notification::HistoryChanged { session } => (
+            previous.clone(),
+            if previous.connected && previous.navigation.thread_id.as_ref() == Some(&session) {
+                vec![Effect::execute(op::ReadThread::new(session))]
+            } else {
+                Vec::new()
+            },
+        ),
         _ => (previous.clone(), Vec::new()),
     }
 }

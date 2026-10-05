@@ -420,8 +420,8 @@ pub(super) fn event_change(
             change,
         }
     } else if message.method() == Some("thread/name/updated") {
-        AgentChange::Renamed(
-            SessionRef::new(
+        AgentChange::Renamed {
+            session: SessionRef::new(
                 ProviderKind::Codex,
                 params["threadId"]
                     .as_str()
@@ -429,7 +429,11 @@ pub(super) fn event_change(
                     .into(),
             )
             .map_err(str::to_owned)?,
-        )
+            name: params["threadName"]
+                .as_str()
+                .ok_or("renamed session title is missing")?
+                .into(),
+        }
     } else {
         return Ok(None);
     };
@@ -748,7 +752,7 @@ impl Agent for Codex {
     async fn submit(
         &self,
         input: &op::Submission,
-        route: super::submission::SubmissionTarget<'_>,
+        route: super::submission::SubmissionTarget,
         reload: bool,
         browser: Option<Value>,
     ) -> Result<op::SubmissionReceipt, Failure> {
@@ -760,15 +764,16 @@ impl Agent for Codex {
         });
         let turn_id = match route {
             SubmissionTarget::Steer(turn) => {
-                params["expectedTurnId"] = turn.into();
+                params["expectedTurnId"] = turn.clone().into();
                 self.request::<_, agent_protocol::models::Empty>("turn/steer", &params)
                     .await?;
                 Some(turn.into())
             }
             SubmissionTarget::Queue => {
-                let reply: Value = self.request("thread/queue/add", &params).await?;
-                native_turn_id(reply["queuedSubmission"]["id"].as_str())?;
-                None
+                return Err(Failure::new(
+                    "invalid_execution_route",
+                    "the Host owns queued input",
+                ));
             }
             SubmissionTarget::Start { cwd } => {
                 if reload {
@@ -869,13 +874,6 @@ impl Agent for Codex {
         )
         .await
     }
-    async fn rename(&self, id: &str, name: &str) -> Result<agent_protocol::models::Empty, Failure> {
-        self.request(
-            "thread/name/set",
-            &serde_json::json!({"threadId":id,"name":name}),
-        )
-        .await
-    }
     fn event_stream(&self) -> Option<tokio::sync::mpsc::Receiver<AgentEvent>> {
         // Subscribe before spawning the pump. Otherwise Codex can emit a
         // server request in the scheduling gap and it would be lost before
@@ -895,11 +893,9 @@ impl Agent for Codex {
                 match events.recv().await {
                     Ok(PeerEvent::Message(message)) => {
                         let sequence = message.sequence;
-                        let _processed = scopeguard::guard(sequence, |sequence| {
-                            processed.send_replace(sequence);
-                        });
                         let line = message.value;
                         let Ok(request) = RpcMessage::parse(&line) else {
+                            processed.send_replace(sequence);
                             continue;
                         };
                         if request.kind() == RpcMessageKind::Request
@@ -977,6 +973,10 @@ impl Agent for Codex {
                                 );
                             }
                         }
+                        // An event is processed only after the Host has committed
+                        // it. A failed commit closes this stream before advancing
+                        // the barrier awaited by native command responses.
+                        processed.send_replace(sequence);
                     }
                     Ok(PeerEvent::Response { sequence, .. }) => {
                         processed.send_replace(sequence);

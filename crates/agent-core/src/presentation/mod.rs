@@ -7,6 +7,7 @@ pub mod diff;
 pub mod error;
 pub mod model_settings;
 pub mod permissions;
+pub mod theme;
 
 use crate::models::{
     ApprovalReviewStatus, AssistantPhase, AttachmentKind, Item, ItemBody, ToolKind, Turn,

@@ -135,6 +135,10 @@ fn route(
     if method != &Method::Post {
         return Ok((404, Vec::new()));
     }
+    // This control translates one exact fixture source; production never exposes native IDs.
+    if let Some(native) = path.strip_prefix("/conversation/") {
+        return Ok((200, serde_json::to_vec(&conversation(root, native)?)?));
+    }
     match path {
         "/auth-token/unavailable" => fs::write(root.join("auth-token-unavailable"), [])?,
         "/auth-token/reset" => {
@@ -143,10 +147,11 @@ fn route(
             }
         }
         "/worktree-conversation" => worktree_conversation(root)?,
-        "/merge-worktree/fresh" | "/merge-worktree/merged" | "/merge-worktree/new-work"
-        | "/merge-worktree/dirty" | "/merge-worktree/clean" => {
-            merge_worktree(root, path)?
-        }
+        "/merge-worktree/fresh"
+        | "/merge-worktree/merged"
+        | "/merge-worktree/new-work"
+        | "/merge-worktree/dirty"
+        | "/merge-worktree/clean" => merge_worktree(root, path)?,
         "/worktree/unavailable" => fs::rename(
             root.join("review-worktree"),
             root.join("review-worktree-unavailable"),
@@ -165,6 +170,14 @@ fn route(
                  "status":"completed","aggregatedOutput":crate::fixture::history::detail_output(),"exitCode":0},
                 {"id":"fixture-final-persisted","type":"agentMessage","phase":"final_answer","text":"Persisted history complete."}
             ]}]}]),
+        )?,
+        "/repeated-history" => write_json(
+            root.join("list-fixture.json"),
+            &json!([
+                {"id":"fixture-repeated-history","name":"Repeated history","cwd":root.join("project"), "historyMode":"paginated",
+                 "turns":[{"id":"repeated","status":"completed","items":[{"id":"duplicate-history-old","type":"agentMessage","phase":"final_answer","text":"Older AI response must remain visible."}]},
+                          {"id":"repeated","status":"completed","items":[{"id":"duplicate-history-new","type":"agentMessage","phase":"final_answer","text":"Newer AI response must remain visible."}]}]}
+            ]),
         )?,
         "/long-conversation" | "/viewport-conversation" => write_json(
             root.join("list-fixture.json"),
@@ -195,7 +208,11 @@ fn route(
                 runtime,
                 ticket,
                 identity,
-                &agent_core::state::operations::CreateSession {provider: agent_protocol::session::ProviderKind::Codex, cwd: Some(root.join("project").to_string_lossy().into_owned()), model: None},
+                &agent_core::state::operations::CreateSession {
+                    provider: agent_protocol::session::ProviderKind::Codex,
+                    cwd: Some(root.join("project").to_string_lossy().into_owned()),
+                    model: None,
+                },
             )?;
             return Ok((
                 200,
@@ -203,35 +220,95 @@ fn route(
             ));
         }
         "/background-reply" => {
-            fs::write(
-                root.join("background-reply"),
-                "Latest reply from another client",
+            let db = rusqlite::Connection::open_with_flags(
+                root.join("bex-conversations.sqlite"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )?;
-            let rollout = root.join("external-rollout.jsonl");
-            if rollout.exists() {
-                OpenOptions::new()
-                    .append(true)
-                    .open(rollout)?
-                    .write_all(b"external reply persisted\n")?;
-            }
+            db.busy_timeout(Duration::from_secs(5))?;
+            let id: String = db.query_row("SELECT id FROM conversations WHERE provider=?1 ORDER BY json_extract(metadata, '$.updatedAt') DESC, rowid DESC LIMIT 1", ["\"codex\""], |row| row.get(0))?;
+            rpc(
+                runtime,
+                ticket,
+                identity,
+                &agent_protocol::operations::Submission {
+                    thread_id: agent_protocol::session::SessionRef {
+                        provider: agent_protocol::session::ProviderKind::Codex,
+                        id,
+                    },
+                    client_user_message_id: format!("other-client-{}", uuid::Uuid::new_v4()).into(),
+                    input: vec![agent_protocol::operations::Input::Text {
+                        text: "[external-reply] Latest reply from another client".into(),
+                    }],
+                    model: None,
+                    effort: None,
+                    service_tier: None,
+                },
+            )?;
         }
         "/client-reply" => runtime.block_on(async {
             let connection =
                 Connection::open(ticket, Identity::from_bytes(identity.to_bytes())).await?;
+            let target = conversation(root, "fixture-external-thread")?;
             let result: Result<()> = async {
-                connection.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::OpenSession(serde_json::from_value::<agent_protocol::session::OpenSession>(json!({"session":{"provider":"codex","id":"fixture-external-thread"},"limit":5})).unwrap())).await.map(|output| serde_json::to_value(output).unwrap())?;
-                connection.peer.call(&serde_json::from_value::<agent_protocol::operations::Submission>(json!({"threadId":{"provider":"codex","id":"fixture-external-thread"},"clientUserMessageId":"fixture-other-client",
-                        "input":[{"text":{"text":"[success] Reply from another Bex client"}}]})).unwrap()).await.map(|output| serde_json::to_value(output).unwrap())?;
+                connection
+                    .peer
+                    .request::<agent_protocol::session::OpenedSession>(
+                        &agent_protocol::protocol::Call::OpenSession(
+                            serde_json::from_value::<agent_protocol::session::OpenSession>(
+                                json!({"session":target,"limit":5}),
+                            )
+                            .unwrap(),
+                        ),
+                    )
+                    .await
+                    .map(|output| serde_json::to_value(output).unwrap())?;
+                connection
+                    .peer
+                    .call(
+                        &serde_json::from_value::<agent_protocol::operations::Submission>(
+                            json!({"threadId":target,"clientUserMessageId":"fixture-other-client",
+                        "input":[{"text":{"text":"[success] Reply from another Bex client"}}]}),
+                        )
+                        .unwrap(),
+                    )
+                    .await
+                    .map(|output| serde_json::to_value(output).unwrap())?;
                 Ok(())
-            }.await;
+            }
+            .await;
             connection.close().await;
             result
         })?,
         "/fail-next-thread-start" => {
             fs::write(root.join("fail-next-thread-start"), "")?;
         }
-        "/fail-next-history-read" => {
-            fs::write(root.join("fail-next-history-read"), "")?;
+        "/fail-history-read" => {
+            let db = rusqlite::Connection::open(root.join("bex-conversations.sqlite"))?;
+            db.busy_timeout(Duration::from_secs(5))?;
+            let saved: (String, String) = db.query_row("SELECT id, metadata FROM conversations ORDER BY json_extract(metadata, '$.updatedAt') DESC, rowid DESC LIMIT 1", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            write_json(
+                root.join("failed-history.json"),
+                &serde_json::to_value(&saved)?,
+            )?;
+            // A valid JSON projection with a damaged identity fails only the
+            // detail read, while title/catalog requests remain available.
+            db.execute(
+                "UPDATE conversations SET metadata=json_set(metadata, '$.id', NULL) WHERE id=?1",
+                [&saved.0],
+            )?;
+        }
+        "/restore-history-read" => {
+            let saved = root.join("failed-history.json");
+            if saved.exists() {
+                let (id, metadata): (String, String) = serde_json::from_slice(&fs::read(&saved)?)?;
+                let db = rusqlite::Connection::open(root.join("bex-conversations.sqlite"))?;
+                db.busy_timeout(Duration::from_secs(5))?;
+                db.execute(
+                    "UPDATE conversations SET metadata=?2 WHERE id=?1",
+                    rusqlite::params![id, metadata],
+                )?;
+                fs::remove_file(saved)?;
+            }
         }
         "/hold-history-reads" => {
             fs::write(root.join("hold-history-reads"), [])?;
@@ -247,7 +324,48 @@ fn route(
         }
         _ => return Ok((404, Vec::new())),
     }
+    if matches!(
+        path,
+        "/completed-history"
+            | "/repeated-history"
+            | "/long-conversation"
+            | "/viewport-conversation"
+            | "/external-conversation"
+            | "/list-fixture"
+            | "/title-fixture"
+            | "/list-fixture/reset"
+            | "/merge-worktree/fresh"
+            | "/merge-worktree/merged"
+            | "/merge-worktree/new-work"
+            | "/merge-worktree/dirty"
+            | "/merge-worktree/clean"
+            | "/worktree-conversation"
+    ) {
+        rpc(
+            runtime,
+            ticket,
+            identity,
+            &agent_core::state::operations::ImportHistory {},
+        )?;
+    }
     Ok((204, Vec::new()))
+}
+
+fn conversation(root: &Path, native: &str) -> Result<agent_protocol::session::SessionRef> {
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("bex-conversations.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    db.busy_timeout(Duration::from_secs(5))?;
+    let id = db.query_row(
+        "SELECT id FROM conversations WHERE provider=?1 AND native_id=?2",
+        rusqlite::params!["\"codex\"", native],
+        |row| row.get(0),
+    )?;
+    Ok(agent_protocol::session::SessionRef {
+        provider: agent_protocol::session::ProviderKind::Codex,
+        id,
+    })
 }
 
 fn merge_worktree(root: &Path, path: &str) -> Result<()> {

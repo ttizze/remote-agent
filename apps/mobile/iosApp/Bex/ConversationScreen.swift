@@ -4,6 +4,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ThreadScreen: View {
+    @Environment(\.colorScheme) var colorScheme
     @ObservedObject var model: BexAppViewModel
     let conversation: ConversationPresentation?
     var isSideChat = false
@@ -207,7 +208,7 @@ struct ThreadScreen: View {
                         .accessibilityIdentifier("task.loading")
                 }
             }
-            .background(Color(UIColor.systemBackground))
+            .background(Color(paletteRGB: colorScheme.nativePalette.background))
             .safeAreaInset(edge: .bottom, spacing: 0) { composer }
             .toolbar {
                 ToolbarItem(placement: .principal) {

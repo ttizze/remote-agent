@@ -89,6 +89,10 @@ pub struct Thread {
     pub requests: BTreeMap<crate::ids::RequestId, Arc<crate::requests::Request>>,
     #[serde(default)]
     pub submissions: BTreeMap<crate::ids::ClientInputId, crate::session::SubmissionDelivery>,
+    #[serde(default)]
+    pub queued_inputs: Vec<crate::queue::QueueEntry>,
+    #[serde(default)]
+    pub queue_held: bool,
     pub id: Option<crate::session::SessionRef>,
     pub name: Option<String>,
     pub cwd: Option<String>,
@@ -103,7 +107,6 @@ pub struct Thread {
     pub history_has_more: Option<bool>,
     pub history_cursor: Option<String>,
     pub history_limit: Option<u64>,
-    pub list_stale: Option<bool>,
     pub agent_id: Option<String>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -191,6 +194,8 @@ pub struct ThreadList {
     pub more_project_ids: Vec<String>,
     pub has_more_chats: bool,
     pub has_more_projects: bool,
+    #[serde(default)]
+    pub importing: bool,
     #[serde(default)]
     #[serde(with = "crate::protocol::json")]
     pub provider_errors: Option<Map<String, Value>>,

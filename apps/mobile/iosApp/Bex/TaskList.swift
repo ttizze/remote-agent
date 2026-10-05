@@ -2,6 +2,7 @@ import AgentCore
 import SwiftUI
 
 struct ThreadsScreen: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ObservedObject var model: BexAppViewModel
     @State private var search = ""
     @State private var expandedProjectIds = Set<String>()
@@ -103,7 +104,7 @@ struct ThreadsScreen: View {
                 .listSectionSeparator(.hidden)
             }
 
-            if model.threadLoadState == .ready, (model.list?.projects ?? []).isEmpty {
+            if model.threadLoadState == .ready, model.list?.importing != true, (model.list?.projects ?? []).isEmpty {
                 Section {
                     Text("Codexに登録されたプロジェクトはありません")
                         .font(.subheadline)
@@ -114,7 +115,7 @@ struct ThreadsScreen: View {
             }
 
             Section {
-                if model.threadLoadState == .ready, chats.isEmpty {
+                if model.threadLoadState == .ready, model.list?.importing != true, chats.isEmpty {
                     Text("プロジェクトに属さないチャットはありません")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
@@ -150,8 +151,9 @@ struct ThreadsScreen: View {
             }
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
         .environment(\.defaultMinListRowHeight, 52)
-        .background(Color(UIColor.systemBackground))
+        .background(Color(paletteRGB: colorScheme.nativePalette.sidebar))
         .accessibilityIdentifier("tasks.list")
         .searchable(text: $search, placement: .toolbar, prompt: "チャットを検索")
         .refreshable { model.refreshTaskList() }

@@ -164,7 +164,6 @@ while read -r line; do :; done
             assert!(message.contains("instance="), "{message}");
             let expected_sequence = match scenario {
                 "lag" => 0,
-                "event" => 2,
                 _ => 1,
             };
             assert!(message.contains(&format!("last_processed_sequence={expected_sequence} ")), "{message}");

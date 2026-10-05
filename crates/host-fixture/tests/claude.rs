@@ -260,7 +260,7 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
                 .await
                 .unwrap();
             completed(&store, &id, 1, "completed").await;
-            let session = &id.id;
+            let session = host_fixture::test_support::native_id(root.path(), &id);
             let inputs: Value = serde_json::from_slice(
                 &std::fs::read(root.path().join(format!("claude-session-{session}.json"))).unwrap(),
             )
@@ -339,7 +339,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                         let user = items.iter().find(|item| matches!(item.body(), agent_protocol::items::ItemBody::UserMessage { .. })).unwrap();
                         assert_eq!(user.client_input_id.as_deref(), Some(format!("client-{number}").as_str()));
                         assert!(matches!(user.body(), agent_protocol::items::ItemBody::UserMessage { content, .. } if content.first() == Some(&agent_protocol::items::MessagePart::Text { text: format!("message {number}") })));
-                        let session = &id.id;
+                        let session = host_fixture::test_support::native_id(&root, &id);
                         let inputs: Value = serde_json::from_slice(&std::fs::read(Path::new(&cwd).join(format!("claude-session-{session}.json"))).unwrap()).unwrap();
                         assert_eq!(inputs.as_array().unwrap().len(), number + 1);
                         assert_eq!(inputs[number]["effort"], "low");
@@ -583,6 +583,10 @@ async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_inter
                 .label(),
             "running"
         );
+        assert!(
+            !store.snapshot().conversations[&id].queue_held,
+            "a rejected stale stop must not hold waiting inputs"
+        );
         store
             .dispatch(Intent::Interrupt(op::Interrupt {
                 thread_id: id.clone(),
@@ -591,6 +595,20 @@ async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_inter
             .await
             .unwrap();
         completed(&store, &id, 4, "interrupted").await;
+        let snapshot = until(&store, |snapshot| snapshot.conversations[&id].queue_held).await;
+        assert_eq!(snapshot.conversations[&id].queued_inputs.len(), 1);
+        for action in [
+            agent_protocol::queue::QueueAction::Cancel { id: "busy".into() },
+            agent_protocol::queue::QueueAction::Resume,
+        ] {
+            store
+                .dispatch(Intent::QueueControl(agent_protocol::queue::QueueControl {
+                    session: id.clone(),
+                    action,
+                }))
+                .await
+                .unwrap();
+        }
         send(&store, "after interruption", "recovered").await;
         let snapshot = completed(&store, &id, 5, "completed").await;
         assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
@@ -932,11 +950,21 @@ async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
         );
         let local = fixture.local().await.unwrap();
         std::fs::write(root.path().join("exit-on-list"), "").unwrap();
-        // BEX may return partial Claude results when Codex exits during listing.
-        if let Ok(list) = local
+        assert!(
+            local
+                .peer
+                .request::<models::Empty>(&agent_protocol::protocol::Call::ImportHistory(
+                    models::Empty {}
+                ))
+                .await
+                .is_err()
+        );
+        // An unavailable provider does not hide committed Host conversations.
+        let list = local
             .peer
             .call(&rpc::ListSessions::new(Default::default()))
             .await
+            .unwrap();
         {
             assert!(list.provider_errors.unwrap().contains_key("codex"));
             assert!(
@@ -1213,7 +1241,7 @@ async fn consecutive_claude_inputs_reuse_one_native_process() {
     completed(&store, &id, 1, "completed").await;
     send(&store, "second", "reuse-2").await;
     let snapshot = completed(&store, &id, 2, "completed").await;
-    let native = &id.id;
+    let native = host_fixture::test_support::native_id(root.path(), &id);
     let inputs: Value = serde_json::from_slice(
         &std::fs::read(
             Path::new(&snapshot.navigation.cwd).join(format!("claude-session-{native}.json")),
@@ -1283,7 +1311,8 @@ async fn deleted_claude_worktree_restarts_the_retained_process_and_continues_the
         let id = send(&store, "first", "before-removal").await;
         let snapshot = completed(&store, &id, 1, "completed").await;
         let cwd = snapshot.navigation.cwd.clone();
-        let inputs_path = Path::new(&cwd).join(format!("claude-session-{}.json", id.id));
+        let native = host_fixture::test_support::native_id(&root, &id);
+        let inputs_path = Path::new(&cwd).join(format!("claude-session-{native}.json"));
         let before: Value = serde_json::from_slice(&std::fs::read(&inputs_path).unwrap()).unwrap();
         std::fs::remove_dir_all(&cwd).unwrap();
         assert_eq!(send(&store, "second", "after-removal").await, id);
@@ -1707,6 +1736,10 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
             .unwrap();
         let snapshot = completed(&store, &id, 3, "interrupted").await;
         assert!(snapshot.requests().next().is_none());
+        assert!(
+            !snapshot.conversations[&id].queue_held,
+            "stopping an empty queue must allow the next input"
+        );
         // A settings change replaces the retained CLI. The same native
         // conversation must resume after its background work was stopped.
         store
@@ -1727,7 +1760,11 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
                 .any(|item| item_text(item) == Some("reply 4: after stop"))
         );
         let inputs: Value = serde_json::from_slice(
-            &std::fs::read(root.path().join(format!("claude-session-{}.json", id.id))).unwrap(),
+            &std::fs::read(root.path().join(format!(
+                "claude-session-{}.json",
+                host_fixture::test_support::native_id(root.path(), &id)
+            )))
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(inputs[3]["effort"], "high");
@@ -1739,20 +1776,24 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
+async fn claude_host_queue_preserves_edits_order_and_hold_across_restart() {
+    use agent_protocol::{
+        queue::{QueueAction, QueueControl},
+        session::SubmissionDelivery,
+    };
     let root = tempfile::tempdir().unwrap();
-    let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
+    let memory = Arc::new(Memory::default());
+    let fixture = host(root.path(), memory.clone(), fixture_program()).await;
     let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
     store
         .dispatch(Intent::NewChat { cwd: String::new() })
         .await
         .unwrap();
-    let key = store.snapshot().navigation.draft_key.clone();
     store
         .dispatch(Intent::SelectModel {
-            thread_id: key,
-            model: agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Claude,
+            thread_id: store.snapshot().navigation.draft_key.clone(),
+            model: models::ModelRef {
+                provider: ProviderKind::Claude,
                 id: "default".into(),
             },
         })
@@ -1760,25 +1801,17 @@ async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
         .unwrap();
     let id = send(&store, "wait", "initial").await;
     until(&store, |snapshot| {
-        snapshot
-            .conversations
-            .get(&id)
-            .and_then(|thread| thread.turns.as_ref())
-            .and_then(|turns| turns.first())
-            .and_then(|turn| turn.items.as_ref())
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| item_text(item) == Some("Waiting for interruption"))
-            })
+        snapshot.conversations[&id]
+            .turns
+            .iter()
+            .flatten()
+            .flat_map(|turn| turn.items.iter().flatten())
+            .any(|item| item_text(item) == Some("Waiting for interruption"))
     })
     .await;
-    assert!(
-        store.snapshot().conversations[&id]
-            .capabilities
-            .unwrap()
-            .additional_input
-    );
+    let initial_turn = store.snapshot().conversations[&id]
+        .active_turn_id()
+        .unwrap();
     assert!(
         agent_protocol::session::input_unavailable_reason(&store.snapshot().conversations[&id])
             .is_none()
@@ -1789,127 +1822,148 @@ async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
             .peer
             .call(&rpc::Interrupt {
                 thread_id: id.clone(),
-                turn_id: "stale".into(),
+                turn_id: "stale".into()
             })
             .await
             .is_err()
     );
-    send(&store, "follow-up", "steered").await;
-    let snapshot = completed(&store, &id, 1, "completed").await;
-    let items = snapshot.conversations[&id].turns.as_ref().unwrap()[0]
-        .items
-        .as_ref()
-        .unwrap();
+    for (text, nonce) in [
+        ("follow-up", "queued-a"),
+        ("remove this", "queued-b"),
+        ("next", "queued-c"),
+    ] {
+        send(&store, text, nonce).await;
+    }
+    let queued = until(&store, |snapshot| {
+        snapshot.conversations[&id].queued_inputs.len() == 3
+    })
+    .await;
+    let original = queued.conversations[&id].queued_inputs[0]
+        .submission
+        .clone();
+    for action in [
+        QueueAction::Pause,
+        QueueAction::Edit {
+            id: "queued-a".into(),
+            text: "edited follow-up".into(),
+        },
+        QueueAction::Move {
+            id: "queued-c".into(),
+            before: Some("queued-a".into()),
+        },
+        QueueAction::Cancel {
+            id: "queued-b".into(),
+        },
+    ] {
+        store
+            .dispatch(Intent::QueueControl(QueueControl {
+                session: id.clone(),
+                action,
+            }))
+            .await
+            .unwrap();
+    }
+    let queued = store.snapshot();
     assert_eq!(
-        items
+        queued.conversations[&id]
+            .queued_inputs
             .iter()
-            .filter(|item| item.client_input_id.as_deref() == Some("steered"))
-            .count(),
-        1
+            .map(|entry| entry.submission.client_user_message_id.as_str())
+            .collect::<Vec<_>>(),
+        ["queued-c", "queued-a"]
     );
     assert!(
-        items
+        queued.conversations[&id]
+            .queued_inputs
             .iter()
-            .any(|item| item_text(item) == Some("reply 2: follow-up"))
+            .all(|entry| entry.delivery == SubmissionDelivery::Queued)
     );
-    assert!(snapshot.pending_submissions.is_empty());
+    let native_id = host_fixture::test_support::native_id(root.path(), &id);
+    let native_inputs = root
+        .path()
+        .join("claude-native/projects/fixture-native-project")
+        .join(format!("{native_id}.inputs.json"));
+    let inputs: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(&native_inputs).unwrap()).unwrap();
+    assert_eq!(
+        inputs.len(),
+        1,
+        "waiting input is not written to the running provider"
+    );
+    store
+        .dispatch(Intent::Interrupt(op::Interrupt {
+            thread_id: id.clone(),
+            turn_id: initial_turn,
+        }))
+        .await
+        .unwrap();
+    completed(&store, &id, 1, "interrupted").await;
+    assert!(store.snapshot().conversations[&id].queue_held);
+    local.close().await;
+    store.close().await.unwrap();
+    endpoint.close().await;
+    fixture.close().await.unwrap();
+
+    let fixture = host(root.path(), memory, fixture_program()).await;
+    let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
     store
         .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
         .await
         .unwrap();
-    let refreshed = store.snapshot();
-    let turns = refreshed.conversations[&id].turns.as_ref().unwrap();
-    assert_eq!(
-        turns.len(),
-        1,
-        "queued input must retain its live turn in history"
-    );
-    assert_eq!(
-        turns[0]
-            .items
-            .as_ref()
-            .unwrap()
-            .iter()
-            .filter(|item| { item_text(item) == Some("reply 2: follow-up") })
-            .count(),
-        1
-    );
-    send(&store, "wait", "wait-again").await;
-    until(&store, |snapshot| {
-        snapshot
-            .conversations
-            .get(&id)
-            .and_then(|thread| thread.turns.as_ref())
-            .and_then(|turns| turns.get(1))
-            .and_then(|turn| turn.items.as_ref())
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| item_text(item) == Some("Waiting for interruption"))
+    let restored = store.snapshot();
+    assert!(restored.conversations[&id].queue_held);
+    assert_eq!(restored.conversations[&id].queued_inputs.len(), 2);
+    assert!(
+        restored.conversations[&id].queued_inputs[1]
+            .submission
+            .input
+            .contains(&rpc::Input::Text {
+                text: "edited follow-up".into()
             })
-    })
-    .await;
-    let queued = local
-        .peer
-        .call(&rpc::Submission {
-            thread_id: id.clone(),
-            client_user_message_id: "queued".into(),
-            model: None,
-            effort: None,
-            service_tier: None,
-            input: vec![rpc::Input::Text {
-                text: "queued follow-up".into(),
-            }],
-        })
+    );
+    store
+        .dispatch(Intent::QueueControl(QueueControl {
+            session: id.clone(),
+            action: QueueAction::Resume,
+        }))
         .await
         .unwrap();
-    let snapshot = completed(&store, &id, 2, "completed").await;
-    let items = snapshot.conversations[&id].turns.as_ref().unwrap()[1]
-        .items
-        .as_ref()
-        .unwrap();
+    let finished = completed(&store, &id, 3, "completed").await;
+    let turns = finished.conversations[&id].turns.as_ref().unwrap();
+    for (turn, nonce) in turns[1..].iter().zip(["queued-c", "queued-a"]) {
+        assert_eq!(turn.status.label(), "completed");
+        assert_eq!(
+            turn.items
+                .iter()
+                .flatten()
+                .filter(|item| item.client_input_id.as_deref() == Some(nonce))
+                .count(),
+            1
+        );
+    }
+    assert!(
+        turns[2]
+            .items
+            .iter()
+            .flatten()
+            .any(|item| item_text(item) == Some("reply 2: edited follow-up"))
+    );
+    assert!(finished.conversations[&id].queued_inputs.is_empty());
+    assert!(finished.pending_submissions.is_empty());
+    let local = fixture.local().await.unwrap();
     assert_eq!(
-        queued.turn_id.as_ref(),
-        Some(&snapshot.conversations[&id].turns.as_ref().unwrap()[1].id)
+        local.peer.call(&original).await.unwrap().turn_id.as_ref(),
+        Some(&turns[2].id),
+        "replay uses the immutable admission even after editing"
     );
-    assert!(
-        items
-            .iter()
-            .any(|item| item.client_input_id.as_deref() == Some("queued"))
+    let inputs: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(&native_inputs).unwrap()).unwrap();
+    assert_eq!(inputs.len(), 3);
+    assert_eq!(
+        inputs[1]["pid"], inputs[2]["pid"],
+        "consecutive queued turns reuse the provider process"
     );
-    assert!(
-        items
-            .iter()
-            .any(|item| item_text(item) == Some("reply 4: queued follow-up"))
-    );
-    send(&store, "after completion", "last").await;
-    completed(&store, &id, 3, "completed").await;
-    let native_id = &id.id;
-    let inputs: Vec<Value> = serde_json::from_slice(
-        &std::fs::read(
-            Path::new(&snapshot.navigation.cwd).join(format!("claude-session-{native_id}.json")),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(inputs.len(), 5);
-    assert!(inputs.iter().all(|input| input["pid"] == inputs[0]["pid"]));
-    send(&store, "wait", "before-live-refresh").await;
-    until(&store, |snapshot| {
-        snapshot.conversations[&id]
-            .turns
-            .as_ref()
-            .unwrap()
-            .get(3)
-            .and_then(|turn| turn.items.as_ref())
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| item_text(item) == Some("Waiting for interruption"))
-            })
-    })
-    .await;
-    send(&store, "permission", "queued-before-refresh").await;
+    send(&store, "permission", "live-refresh").await;
     until(&store, |snapshot| snapshot.requests().next().is_some()).await;
     store
         .dispatch(Intent::ReadThread(op::ReadThread::open(id.clone())))
@@ -1920,26 +1974,26 @@ async fn claude_accepts_running_input_and_reads_past_the_previous_result() {
     assert_eq!(
         turns.len(),
         4,
-        "live overlay must not append a duplicate queued turn"
+        "refresh cannot append another occurrence of the live turn"
     );
-    let turn = turns.last().unwrap();
-    assert_eq!(turn.status, agent_protocol::execution::TurnStatus::Running);
     assert_eq!(
-        turn.items
-            .as_ref()
+        turns
+            .last()
             .unwrap()
+            .items
             .iter()
+            .flatten()
             .filter(|item| matches!(
                 item.body(),
                 agent_protocol::items::ItemBody::UserMessage { .. }
             ))
             .count(),
-        2
+        1
     );
     store
         .dispatch(Intent::Interrupt(op::Interrupt {
             thread_id: id.clone(),
-            turn_id: turn.id.clone(),
+            turn_id: turns.last().unwrap().id.clone(),
         }))
         .await
         .unwrap();

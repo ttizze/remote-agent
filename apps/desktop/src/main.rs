@@ -4,12 +4,10 @@ mod diff;
 mod platform;
 mod store_session;
 mod terminal;
+mod theme;
 use futures_util::FutureExt;
-use gpui_kit::{
-    component::{Root, Theme, ThemeMode},
-    *,
-};
-const WINDOW_HEADER_HEIGHT: f32 = 44.;
+use gpui_kit::{component::Root, *};
+const WINDOW_HEADER_HEIGHT: f32 = 52.;
 #[derive(Clone)]
 pub(crate) struct Runtime {
     pub(crate) handle: tokio::runtime::Handle,
@@ -134,7 +132,7 @@ fn main() {
                 gpui_kit::component::input::Paste,
                 Some("ChatComposer > Input"),
             )]);
-            Theme::change(ThemeMode::Dark, None, cx);
+            theme::install(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
