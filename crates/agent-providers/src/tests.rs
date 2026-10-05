@@ -53,12 +53,51 @@ async fn json_lines_continue_after_invalid_frames_and_preserve_large_unicode_out
         .unwrap();
     let bytes = [b"\nnot json\n".as_slice(), input.as_slice()].concat();
     let mut reader = tokio::io::BufReader::new(bytes.as_slice());
-    assert!(read_frame(&mut reader).await.is_err());
+    let mut line = Vec::new();
+    assert!(read_frame(&mut reader, &mut line).await.is_err());
     assert_eq!(
-        read_frame(&mut reader).await.unwrap().unwrap()["text"],
+        read_frame(&mut reader, &mut line).await.unwrap().unwrap()["text"],
         text
     );
-    assert!(read_frame(&mut reader).await.unwrap().is_none());
+    assert!(read_frame(&mut reader, &mut line).await.unwrap().is_none());
+}
+#[tokio::test]
+async fn a_cancelled_read_keeps_the_partial_frame_for_the_next_read() {
+    use tokio::io::AsyncWriteExt;
+    let (mut writer, reader) = tokio::io::duplex(64);
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut line = Vec::new();
+    writer.write_all(br#"{"text":"split "#).await.unwrap();
+    let cancelled = tokio::time::timeout(
+        std::time::Duration::from_millis(20),
+        read_frame(&mut reader, &mut line),
+    )
+    .await;
+    assert!(cancelled.is_err());
+    writer.write_all(b"frame\"}\n").await.unwrap();
+    assert_eq!(
+        read_frame(&mut reader, &mut line).await.unwrap().unwrap(),
+        serde_json::json!({"text":"split frame"})
+    );
+    drop(writer);
+    assert!(read_frame(&mut reader, &mut line).await.unwrap().is_none());
+}
+#[tokio::test]
+async fn an_adopted_child_speaks_json_lines() {
+    let child = tokio::process::Command::new("cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut process = StdioProcess::from_child(child).unwrap();
+    process.send(&serde_json::json!({"id":1})).await.unwrap();
+    assert_eq!(
+        process.next_frame().await.unwrap().unwrap(),
+        serde_json::json!({"id":1})
+    );
+    assert!(process.close().await.unwrap().success());
 }
 
 fn codex_start() -> ProviderCommand {
