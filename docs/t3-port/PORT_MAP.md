@@ -1060,3 +1060,17 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | reducer の JavaScript object identity assertions | 同じ項目 ID、内容、表示順序を fold で検証 | 内部の参照同一性は対象外：Rust の projection と facts に再構成 |
 | SQLite の control-read 回数、Effect service の mock 呼出し構造 | domain の入力→事実→projection、Host の境界テストへ分離 | T3 の内部 service 配線は対象外：actor が唯一の書込 owner |
 | V1 import / migration と他 provider 専用テスト | 対象外 | 現行形式だけ、provider は Codex と Claude の指定 |
+
+Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機械・fold・子 actor への command に流す。固定版の 71 NDJSON は改変せず保存し、manifest の SHA-256 と全 native frame の decoding を検証する。これは全 projection の移植完了を意味しない。下表は projection の期待値まで移植した範囲であり、残りの fixture の移植も段階 1・2 の作業として継続する。
+
+| T3 fixture / adapter test | projection・制御の検証 |
+|---|---|
+| `simple`, `multi_turn`（両 driver） | run 数・status・ordinal・role・応答文・native thread の共有 |
+| `queued_turn`, `message_steering`（両 driver） | queued の受付→昇格、timeline の順序、1 run / 1 attempt の steer、元の input intent |
+| `proposed_plan`, `todo_list`（Codex） | proposal の active 状態、replay / fixture を含む内容、todo の completed ×3 |
+| `tool_call_read_only_on_request`, `tool_call_restricted_granular`（両 driver）, `tool_call_denied_write`（Claude） | 1 件の承認の解決、decline の保持、元の応答文 |
+| `claude_compact_after_peer_turn`, `_no_echo` | 元の 3 run / 2 run の分岐、PEER_ACK の帰属、27445→1192 の compaction |
+| `claude_background_task_wake`, `claude_background_monitor_wake` | 元の run 数・応答・通知・roster 種別・continuation detail |
+| `claude_result_is_error` | 認証の文言、api_error_401 / provider_error、assistant の二重表示なし、次の run の成功 |
+| `subagent`（両 driver）, `subagent_v2`, `subagent_v2_nested`（Codex） | 子の run を増やさず、1 / 2 / 3 段の子スレッド、元の結果・prompt・title・親への tool 漏れなし |
+| `ClaudeAdapterV2.test.ts` の resume dialog | 元の 1h 30m / 120,000 tokens の質問、選択肢、compact の control response |

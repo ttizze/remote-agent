@@ -539,6 +539,18 @@ fn fork_history_and_provider_context_are_fixed_at_creation() {
             title: None,
         },
     );
+    assert!(matches!(
+        fork.effects[0].body,
+        EffectBody::ForkNative { .. }
+    ));
+    let fork = result(
+        &mut s,
+        "fork-result",
+        EffectResult::NativeForked {
+            command: CommandId::new("fork").unwrap(),
+            native_thread: "fork-native".into(),
+        },
+    );
     let EffectBody::SendToThread {
         command: accept, ..
     } = &fork.effects[0].body
@@ -561,11 +573,22 @@ fn fork_history_and_provider_context_are_fixed_at_creation() {
         send_message("child-send", DispatchMode::StartImmediately),
     );
     assert_eq!(child.inherited_items, history);
-    let EffectBody::Provider(ProviderCommand::Start { context, .. }) = &start.effects[0].body
+    let EffectBody::Provider(ProviderCommand::Start {
+        context,
+        native_thread,
+        ..
+    }) = &start.effects[0].body
     else {
         panic!()
     };
-    assert!(context.contains("fork marker"));
+    assert!(context.is_empty());
+    assert_eq!(native_thread.as_deref(), Some("fork-native"));
+    assert!(
+        child
+            .inherited_items
+            .iter()
+            .any(|i| i.text == "fork marker")
+    );
     assert_eq!(child.thread.unwrap().title, "Thread fork");
 }
 #[test]
@@ -580,6 +603,18 @@ fn merge_back_supersedes_pending_delta_and_excludes_inherited_history() {
             target: ThreadId::new("child").unwrap(),
             through_run: run,
             title: None,
+        },
+    );
+    assert!(matches!(
+        fork.effects[0].body,
+        EffectBody::ForkNative { .. }
+    ));
+    let fork = result(
+        &mut parent,
+        "fork-result",
+        EffectResult::NativeForked {
+            command: CommandId::new("fork").unwrap(),
+            native_thread: "fork-native".into(),
         },
     );
     let EffectBody::SendToThread {
@@ -888,6 +923,32 @@ fn unread_uses_latest_completion_even_with_newer_queued_run() {
 }
 use proptest::prelude::*;
 proptest! {
+    #[test]
+    fn mixed_provider_commands_requests_and_restarts_preserve_attempt_ownership(ops in prop::collection::vec(0u8..12,0..100)) {
+        let mut s = state(); let mut all_attempts = vec![];
+        for (index,op) in ops.into_iter().enumerate() {
+            let key = format!("mixed-{index}");
+            let attempt = s.active_run().and_then(|r|r.attempt.clone());
+            match (op,attempt) {
+                (0|1,_) => { command(&mut s,&key,send_message(&key,DispatchMode::QueueAfterActive)); }
+                (2,Some(a)) => { provider(&mut s,&key,&a,ProviderEvent::TurnStarted { native_turn:Some(key.clone()) }); }
+                (3,Some(a)) => { provider(&mut s,&key,&a,ProviderEvent::TextDelta { key:"text".into(),kind:ProviderItem::Text,text:"日本語🙂".into() }); }
+                (4,Some(a)) => { provider(&mut s,&key,&a,ProviderEvent::RequestOpened { key:key.clone(),body:RequestBody::Questions { questions:vec![] },capability:ResponseCapability::Live }); }
+                (5,_) => { if let Some(request) = s.requests.iter().find(|r|r.status == RequestStatus::Pending).cloned() { command(&mut s,&key,Command::Respond { request:request.id,answers:Some(BTreeMap::new()),decision:None,attachments:BTreeMap::new() }); } }
+                (6,Some(a)) => { provider(&mut s,&key,&a,ProviderEvent::TurnFinished { status:RunStatus::Completed,native_head:Some(key.clone()) }); }
+                (7,_) => { command(&mut s,&key,Command::Stop); }
+                (8,_) => recover(&mut s),
+                (9,_) => { command(&mut s,&key,Command::ResumeQueue); }
+                (10,_) => { if let Some(run) = s.active_run().filter(|r|r.status == RunStatus::Running).map(|r|r.id.clone()) { command(&mut s,&key,send_message(&key,DispatchMode::RestartActive { run })); } }
+                _ => { if let Some(a) = all_attempts.first().cloned() { let before=s.clone(); let stale=provider(&mut s,&key,&a,ProviderEvent::TextDelta { key:"late".into(),kind:ProviderItem::Text,text:"stale".into() }); if !before.runs.iter().any(|r|r.attempt.as_ref()==Some(&a) && matches!(r.status,RunStatus::Starting|RunStatus::Running)) { prop_assert!(stale.facts.is_empty()); prop_assert_eq!(&before,&s); } } }
+            }
+            all_attempts = s.attempts.iter().map(|a|a.id.clone()).collect();
+            prop_assert!(s.runs.iter().filter(|r|r.status.blocking()).count() <= 1);
+            prop_assert!(s.items.windows(2).all(|pair|pair[0].ordinal < pair[1].ordinal));
+            prop_assert!(s.requests.iter().filter(|r|r.status != RequestStatus::Pending).all(|r|r.resolved_at.is_some()));
+            prop_assert!(s.items.iter().filter(|i|i.status.terminal()).all(|i|i.completed_at.is_some()));
+        }
+    }
     #[test]
     fn arbitrary_command_sequences_preserve_single_writer_invariants(ops in prop::collection::vec(0u8..8,0..120)) {
         let mut s=state();

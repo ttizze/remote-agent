@@ -1,4 +1,3 @@
-use crate::ProtocolError;
 use serde_json::Value;
 use std::{io, path::Path};
 use tokio::{
@@ -74,12 +73,16 @@ impl StdioProcess {
         read_frame(&mut self.output).await
     }
     pub async fn close(mut self) -> io::Result<std::process::ExitStatus> {
-        self.input.shutdown().await?;
-        self.child.wait().await
-    }
-}
-impl From<ProtocolError> for io::Error {
-    fn from(error: ProtocolError) -> Self {
-        io::Error::new(io::ErrorKind::InvalidData, error)
+        drop(self.input);
+        let mut stdout_sink = tokio::io::sink();
+        let mut stderr_sink = tokio::io::sink();
+        let (status, stdout, stderr) = tokio::join!(
+            self.child.wait(),
+            tokio::io::copy(&mut self.output, &mut stdout_sink),
+            tokio::io::copy(&mut self.stderr, &mut stderr_sink)
+        );
+        stdout?;
+        stderr?;
+        status
     }
 }

@@ -103,3 +103,6 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-05: provider 層は app の ID や entity を生成しない。native key の対応だけを扱い、子スレッドへの書き込みは親の状態機械から saga effect で行う。独自の provider capacity、wake buffer の件数・byte 上限、steer UUID gate は設けない。
 - 2026-10-05: Claude の prompt echo の早期／result-only／未対応の判定と、先行した provider ターンの run への帰属は状態機械に置く。翻訳層はフレームの UUID・origin・turn 数だけを正規化する。steer は `PromptOffered` を発行せず、進行中 prompt の所有者を変えない。provider continuation は既に流れてきた出力を受け取り、CLI へ新しい prompt を送らない。
 - 2026-10-05: 発言の作成者と作成元は明示的な入力にする。自動発言の重複した boolean は持たず、agent 作成の発言でキュー優先順位を決める。CLI の background roster と通知は domain の事実として記録する。
+- 2026-10-05: native fork は親に固定した子作成 command を記録してから provider effect を実行し、成功結果を受けて子へ送る。native セッションがない場合は portable context を使う。成功結果の再送は子作成を繰り返さない。
+- 2026-10-05: rollback の絶対 head は checkpoint に固定する。Claude の assistant UUID は翻訳層の累積 cursor から terminal result に付けず、所有者が決まった frame の事実として attempt に記録する。先行した peer ターンや子の cursor が、別の run の rollback 境界にならないため。
+- 2026-10-05: provider は native の親子関係だけを保持し、深い子の通知を `Child` の経路として正規化する。各 actor は直下の子だけへ effect を送る。session 共有のルーティング用 app entity を adapter に作らない。

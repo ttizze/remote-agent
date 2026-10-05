@@ -21,7 +21,10 @@ impl ClaudeControl {
         json!({"type":"control_request","request_id":id,"request":request})
     }
     pub fn initialize(&mut self) -> Value {
-        self.request("initialize", json!({"hooks":{},"sdkMcpServers":[]}))
+        self.request(
+            "initialize",
+            json!({"hooks":{},"sdkMcpServers":[],"supportedDialogKinds":["resume_return"]}),
+        )
     }
     pub fn receive(&mut self, frame: &Value) -> Result<Option<Translation>, ProtocolError> {
         match string(frame, "type").as_str() {
@@ -45,6 +48,7 @@ impl ClaudeControl {
                 Ok(Some(Translation {
                     events: vec![ProviderEvent::RequestClosed { key }],
                     outbound: vec![],
+                    ..Translation::default()
                 }))
             }
             "control_request" => {
@@ -61,7 +65,7 @@ impl ClaudeControl {
                                 events.push(ProviderEvent::Plan {
                                     key: optional(request, "tool_use_id")
                                         .unwrap_or_else(|| key.clone()),
-                                    markdown,
+                                    markdown: markdown.trim().into(),
                                     steps: vec![],
                                 });
                             }
@@ -69,8 +73,9 @@ impl ClaudeControl {
                                 events,
                                 outbound: vec![control_success(
                                     &key,
-                                    json!({"behavior":"deny","message":"Plan received. Wait for the user's next instruction.","toolUseID":request["tool_use_id"]}),
+                                    json!({"behavior":"deny","message":"The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.","toolUseID":request["tool_use_id"]}),
                                 )],
+                                ..Translation::default()
                             }));
                         }
                         self.permissions.insert(key.clone(), request.clone());
@@ -103,27 +108,63 @@ impl ClaudeControl {
                                 capability: ResponseCapability::Live,
                             }],
                             outbound: vec![],
+                            ..Translation::default()
                         }))
                     }
                     // SDK user dialogs are structured questions, rather than tool approvals.
-                    "user_dialog" => {
+                    "request_user_dialog" if request["dialog_kind"] == "resume_return" => {
                         self.permissions.insert(key.clone(), request.clone());
+                        let age = request["payload"]["sessionAgeMinutes"]
+                            .as_f64()
+                            .filter(|n| n.is_finite())
+                            .unwrap_or(0.)
+                            .max(0.)
+                            .floor() as u64;
+                        let tokens = request["payload"]["estimatedTokens"]
+                            .as_f64()
+                            .filter(|n| n.is_finite())
+                            .unwrap_or(0.)
+                            .max(0.)
+                            .floor() as u64;
+                        let age = if age >= 60 {
+                            format!("{}h {}m", age / 60, age % 60)
+                        } else {
+                            format!("{age}m")
+                        };
+                        let digits = tokens.to_string();
+                        let tokens = digits
+                            .chars()
+                            .enumerate()
+                            .flat_map(|(i, c)| {
+                                if i > 0 && (digits.len() - i).is_multiple_of(3) {
+                                    vec![',', c]
+                                } else {
+                                    vec![c]
+                                }
+                            })
+                            .collect::<String>();
+                        let question = format!(
+                            "This session is {age} old and uses {tokens} tokens. Compact it before continuing?"
+                        );
                         Ok(Some(Translation {
                             events: vec![ProviderEvent::RequestOpened {
                                 key,
                                 body: RequestBody::Questions {
-                                    questions: questions(&request["questions"]),
+                                    questions: vec![Question { id:question.clone(),header:"Resume session".into(),question,multiple:false,options:vec![QuestionOption { label:"Compact and continue".into(),description:Some("Resume with a summary and use fewer tokens.".into()) },QuestionOption { label:"Keep full history".into(),description:Some("Resume without changing the conversation.".into()) },QuestionOption { label:"Don't ask again".into(),description:Some("Keep full history and skip future resume prompts.".into()) }] },],
                                 },
                                 capability: ResponseCapability::Live,
                             }],
                             outbound: vec![],
+                            ..Translation::default()
                         }))
                     }
+                    "request_user_dialog" => Ok(Some(Translation::default())),
                     _ => Ok(Some(Translation {
                         events: vec![],
                         outbound: vec![
                             json!({"type":"control_response","response":{"subtype":"error","request_id":key,"error":"Unsupported control request"}}),
                         ],
+                        ..Translation::default()
                     })),
                 }
             }
@@ -142,6 +183,15 @@ impl ClaudeControl {
             .remove(key)
             .ok_or_else(|| ProtocolError::Invalid("native request is no longer pending".into()))?;
         let tool = string(&request, "tool_name");
+        if request["subtype"] == "request_user_dialog" {
+            let response = if let Some(answers) = answers {
+                let answer = answers.values().flatten().next().map(String::as_str);
+                json!({"behavior":"completed","result":match answer {Some("Compact and continue")=>"compact",Some("Don't ask again")=>"never",_=>"continue"}})
+            } else {
+                json!({"behavior":"cancelled"})
+            };
+            return Ok(control_success(key, response));
+        }
         let response = if let Some(answers) = answers {
             let mut input = request["input"].clone();
             // SDK AskUserQuestion expects each selected set joined into one string.

@@ -17,6 +17,54 @@ fn transcript(scenario: &str, driver: Driver) -> Vec<Value> {
     .map(|line| serde_json::from_str(line).unwrap())
     .collect()
 }
+#[test]
+fn every_reference_transcript_is_unchanged_and_all_native_frames_decode() {
+    use sha2::{Digest, Sha256};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fixtures");
+    let manifest: Vec<Value> =
+        serde_json::from_str(include_str!("fixtures/manifest.json")).unwrap();
+    assert_eq!(manifest.len(), 71);
+    for entry in manifest {
+        let bytes = std::fs::read(root.join(entry["file"].as_str().unwrap())).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            string(&entry, "sha256")
+        );
+        let rows: Vec<Value> = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let mut codex = CodexProtocol::default();
+        let mut claude = ClaudeProtocol::default();
+        for (index, row) in rows.iter().enumerate() {
+            if row["type"] == "expect_outbound" && entry["driver"] == "codex" {
+                codex.replay_outbound(&row["frame"]);
+            }
+            if row["type"] != "emit_inbound" {
+                continue;
+            }
+            let frame = &row["frame"];
+            let frame = if frame["type"] == "permission.request" {
+                json!({"type":"control_request","request_id":frame["options"]["toolUseID"],"request":{"subtype":"can_use_tool","tool_name":frame["toolName"],"input":frame["input"],"tool_use_id":frame["options"]["toolUseID"]}})
+            } else {
+                frame.clone()
+            };
+            let result = if entry["driver"] == "codex" {
+                codex.receive(&frame)
+            } else {
+                claude.receive(&frame)
+            };
+            assert!(
+                result.is_ok()
+                    || matches!(result, Err(ProtocolError::Remote { .. }))
+                        && frame.get("error").is_some(),
+                "{} frame {index}: {result:?}",
+                entry["file"]
+            );
+        }
+    }
+}
 
 struct Replay {
     driver: Driver,
@@ -208,6 +256,28 @@ impl Replay {
     }
     fn run(scenario: &str, driver: Driver) -> Self {
         let rows = transcript(scenario, driver);
+        let offered: Vec<String> = rows
+            .iter()
+            .filter(|row| row["type"] == "expect_outbound")
+            .filter_map(|row| {
+                let f = &row["frame"];
+                if f["type"] == "prompt.offer" {
+                    Some(string(&f["message"]["message"], "content"))
+                } else if f["method"] == "turn/start" {
+                    Some(
+                        f["params"]["input"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|b| b["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect();
         let mut replay = Self::new(driver, &rows);
         for row in &rows {
             let frame = &row["frame"];
@@ -234,10 +304,17 @@ impl Replay {
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-                replay.send(
-                    text,
-                    method == "turn/steer" || frame["message"]["priority"] == "now",
-                );
+                if !(scenario == "queued_turn" && replay.state().runs.len() == 2) {
+                    replay.send(
+                        text,
+                        method == "turn/steer" || frame["message"]["priority"] == "now",
+                    );
+                } else if driver == Driver::Codex {
+                    replay.owner = replay.state().active_run().and_then(|r| r.attempt.clone());
+                }
+                if scenario == "queued_turn" && replay.state().runs.len() == 1 {
+                    replay.send(offered[1].clone(), false);
+                }
                 if driver == Driver::Codex
                     && let Some(native_thread) = optional(&frame["params"], "threadId")
                 {
@@ -333,6 +410,72 @@ impl Replay {
                 }
             }
         }
+    }
+}
+#[test]
+fn queued_turn_replays_preserve_queued_acceptance_and_promotion_order() {
+    for driver in [Driver::Codex, Driver::Claude] {
+        let replay = Replay::run("queued_turn", driver);
+        replay.integrity();
+        assert_eq!(replay.statuses(), vec![RunStatus::Completed; 2]);
+        assert_eq!(
+            replay
+                .state()
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::User)
+                .map(|m| m.intent)
+                .collect::<Vec<_>>(),
+            vec![InputIntent::TurnStart, InputIntent::QueuedTurn]
+        );
+        assert_eq!(
+            replay.replies(&replay.state().runs[0].id),
+            vec!["first fixture turn complete"]
+        );
+        assert_eq!(
+            replay.replies(&replay.state().runs[1].id),
+            vec!["second fixture turn complete"]
+        );
+        assert!(replay.facts.iter().any(|f|matches!(&f.body,FactBody::RunRequested { id,status:RunStatus::Queued,.. } if *id == replay.state().runs[1].id)));
+        assert_eq!(
+            replay
+                .state()
+                .items
+                .iter()
+                .map(|i| i.run.clone().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                replay.state().runs[0].id.clone(),
+                replay.state().runs[0].id.clone(),
+                replay.state().runs[1].id.clone(),
+                replay.state().runs[1].id.clone()
+            ]
+        );
+    }
+}
+#[test]
+fn steering_replays_keep_one_run_and_one_attempt() {
+    for driver in [Driver::Codex, Driver::Claude] {
+        let replay = Replay::run("message_steering", driver);
+        replay.integrity();
+        assert_eq!(replay.statuses(), vec![RunStatus::Completed]);
+        assert_eq!(replay.state().attempts.len(), 1);
+        assert_eq!(
+            replay
+                .state()
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::User)
+                .map(|m| m.intent)
+                .collect::<Vec<_>>(),
+            vec![InputIntent::TurnStart, InputIntent::Steer]
+        );
+        assert!(
+            replay
+                .replies(&replay.state().runs[0].id)
+                .iter()
+                .any(|text| text.contains("steering fixture observed"))
+        );
     }
 }
 
@@ -586,4 +729,104 @@ fn tool_approval_replays_resolve_the_original_request_once() {
             .replies(&replay.state().runs[0].id)
             .contains(&"write permission denied".into())
     );
+}
+#[test]
+fn authentication_failure_replay_preserves_failure_details_and_allows_the_followup() {
+    let replay = Replay::run("claude_result_is_error", Driver::Claude);
+    replay.integrity();
+    assert_eq!(
+        replay.statuses(),
+        vec![RunStatus::Failed, RunStatus::Completed]
+    );
+    assert_eq!(
+        replay.replies(&replay.state().runs[0].id),
+        vec!["Failed to authenticate. API Error: 401 Invalid authentication credentials"]
+    );
+    assert_eq!(
+        replay.replies(&replay.state().runs[1].id),
+        vec!["claude result is_error fixture recovered"]
+    );
+    let error = replay
+        .state()
+        .items
+        .iter()
+        .find(|i| matches!(i.kind, ItemKind::Error { .. }))
+        .unwrap();
+    let ItemKind::Error {
+        message,
+        code,
+        class,
+        ..
+    } = &error.kind
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        message,
+        "Claude could not authenticate. For subscription login, run `claude auth login` on this environment's machine, then start a new thread. For API-key authentication, check this instance's configured credentials."
+    );
+    assert_eq!(code.as_deref(), Some("api_error_401"));
+    assert_eq!(class.as_deref(), Some("provider_error"));
+}
+#[test]
+fn native_subagent_replays_keep_children_runless_and_output_out_of_the_parent() {
+    for (scenario, driver, children) in [
+        ("subagent", Driver::Claude, 2),
+        ("subagent", Driver::Codex, 2),
+        ("subagent_v2", Driver::Codex, 1),
+        ("subagent_v2_nested", Driver::Codex, 3),
+    ] {
+        let replay = Replay::run(scenario, driver);
+        replay.integrity();
+        assert_eq!(
+            replay.statuses(),
+            vec![RunStatus::Completed],
+            "{scenario} {driver:?}"
+        );
+        assert_eq!(replay.states.len(), children + 1, "{scenario} {driver:?}");
+        for (id, child) in &replay.states {
+            if id != &replay.root {
+                assert!(child.runs.is_empty());
+                assert!(child.thread.as_ref().unwrap().parent.is_some());
+            }
+        }
+        assert!(
+            !replay
+                .state()
+                .items
+                .iter()
+                .any(|i| matches!(i.kind, ItemKind::DynamicTool { .. }))
+        );
+        for state in replay.states.values() {
+            for task in &state.tasks {
+                assert_eq!(
+                    task.status,
+                    ItemStatus::Completed,
+                    "{scenario} {driver:?}: {task:?}"
+                );
+                assert!(task.completed_at.is_some());
+                if scenario.starts_with("subagent_v2") {
+                    assert_eq!(task.prompt, "");
+                    assert_eq!(task.result.as_deref(), Some("Hello."));
+                    assert!(task.title.as_ref().unwrap().starts_with("/root/"));
+                }
+                let child = &replay.states[&task.child_thread];
+                assert!(
+                    child
+                        .items
+                        .iter()
+                        .any(|i| matches!(i.kind, ItemKind::AssistantMessage { .. })),
+                    "{scenario} {driver:?}: child has no assistant response"
+                );
+                if driver == Driver::Claude {
+                    assert!(
+                        child
+                            .messages
+                            .iter()
+                            .any(|m| m.role == Role::User && m.text == task.prompt)
+                    );
+                }
+            }
+        }
+    }
 }

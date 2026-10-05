@@ -183,6 +183,9 @@ pub enum ItemKind {
     Error {
         message: String,
         retrying: bool,
+        code: Option<String>,
+        class: Option<String>,
+        retryable: Option<bool>,
     },
     SystemNotice {
         message: String,
@@ -303,6 +306,9 @@ pub struct Task {
     pub parent_task: Option<NodeId>,
     pub app_owned: bool,
     pub prompt: String,
+    pub title: Option<String>,
+    pub started_at: Timestamp,
+    pub completed_at: Option<Timestamp>,
     pub model: Option<String>,
     pub status: ItemStatus,
     pub result: Option<String>,
@@ -326,6 +332,19 @@ pub struct PendingRollback {
     pub command: CommandId,
     pub checkpoint: CheckpointId,
     pub restore_files: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingFork {
+    pub target: ThreadId,
+    pub child_command: Box<Command>,
+    pub instance: String,
+    pub head: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NativeBinding {
+    pub instance: String,
+    pub thread: String,
+    pub head: Option<String>,
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PromptEchoMode {
@@ -385,6 +404,8 @@ pub struct State {
     pub native_continuations: BTreeMap<RunId, Vec<ProviderEvent>>,
     pub background_work: BTreeMap<String, BackgroundWork>,
     pub wake_reports: BTreeMap<String, String>,
+    pub pending_forks: BTreeMap<CommandId, PendingFork>,
+    pub native_sessions: BTreeMap<String, String>,
 }
 impl State {
     pub fn active_run(&self) -> Option<&Run> {
@@ -563,6 +584,7 @@ pub enum Command {
         boundary: u64,
         history: Vec<Item>,
         context: String,
+        native: Option<NativeBinding>,
     },
     MergeBack {
         target: ThreadId,
@@ -642,10 +664,25 @@ pub enum ProviderItem {
     Error {
         message: String,
         retrying: bool,
+        code: Option<String>,
+        class: Option<String>,
+        retryable: Option<bool>,
     },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderEvent {
+    AssistantCursor {
+        key: String,
+    },
+    ResultText {
+        key: String,
+        text: String,
+        status: ItemStatus,
+    },
+    SubagentNamed {
+        key: String,
+        title: String,
+    },
     PromptOffered {
         key: String,
     },
@@ -793,6 +830,10 @@ pub struct Effect {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectBody {
+    ForkNative {
+        command: CommandId,
+        provider: ProviderCommand,
+    },
     Provider(ProviderCommand),
     CaptureCheckpoint {
         run: RunId,
@@ -817,6 +858,14 @@ pub enum EffectBody {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EffectResult {
+    NativeForked {
+        command: CommandId,
+        native_thread: String,
+    },
+    ForkFailed {
+        command: CommandId,
+        message: String,
+    },
     ProviderFailed {
         attempt: RunAttemptId,
         operation: ProviderOperation,

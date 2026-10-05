@@ -222,6 +222,12 @@ impl Decision {
                     .iter()
                     .find(|r| r.id == a.run && r.selection.instance == run.selection.instance)
                     .and(a.native_thread.clone())
+            })
+            .or_else(|| {
+                self.state
+                    .native_sessions
+                    .get(&run.selection.instance)
+                    .cloned()
             });
         let context = self
             .state
@@ -1291,26 +1297,57 @@ impl Decision {
                     .cloned()
                     .collect::<Vec<_>>();
                 let context = context_text(history.iter());
-                self.effect(
-                    None,
-                    EffectBody::SendToThread {
-                        thread: target.clone(),
-                        command: Box::new(AcceptFork {
+                let child_command = Box::new(AcceptFork {
+                    thread: target.clone(),
+                    parent: thread.id,
+                    project: thread.project,
+                    title: title
+                        .clone()
+                        .unwrap_or_else(|| format!("{} fork", thread.title)),
+                    selection: thread.selection,
+                    runtime_mode: thread.runtime_mode,
+                    interaction_mode: thread.interaction_mode,
+                    boundary: run.ordinal,
+                    history,
+                    context,
+                    native: None,
+                });
+                let native = run
+                    .attempt
+                    .as_ref()
+                    .and_then(|id| self.state.attempts.iter().find(|a| &a.id == id))
+                    .and_then(|a| {
+                        a.native_thread
+                            .clone()
+                            .map(|thread| (thread, a.native_head.clone()))
+                    });
+                if let Some((native_thread, head)) = native {
+                    self.fact(FactBody::ForkPrepared {
+                        command: id.clone(),
+                        target: target.clone(),
+                        child_command,
+                        instance: run.selection.instance,
+                        head: head.clone(),
+                    });
+                    self.effect(
+                        run.attempt,
+                        EffectBody::ForkNative {
+                            command: id.clone(),
+                            provider: ProviderCommand::Fork {
+                                native_thread,
+                                through_turn: head,
+                            },
+                        },
+                    );
+                } else {
+                    self.effect(
+                        None,
+                        EffectBody::SendToThread {
                             thread: target.clone(),
-                            parent: thread.id,
-                            project: thread.project,
-                            title: title
-                                .clone()
-                                .unwrap_or_else(|| format!("{} fork", thread.title)),
-                            selection: thread.selection,
-                            runtime_mode: thread.runtime_mode,
-                            interaction_mode: thread.interaction_mode,
-                            boundary: run.ordinal,
-                            history,
-                            context,
-                        }),
-                    },
-                );
+                            command: child_command,
+                        },
+                    );
+                }
                 Reply::Thread(target.clone())
             }
             AcceptFork {
@@ -1324,6 +1361,7 @@ impl Decision {
                 boundary,
                 history,
                 context,
+                native,
             } => {
                 if self.state.thread.is_some() {
                     return reject("thread-already-exists");
@@ -1341,14 +1379,22 @@ impl Decision {
                     boundary: *boundary,
                     history: history.clone(),
                 });
-                self.fact(FactBody::TransferOpened {
-                    id: ContextTransferId::new(self.key("transfer", id.as_str())).unwrap(),
-                    kind: TransferKind::Fork,
-                    source: parent.clone(),
-                    target: thread.clone(),
-                    boundary: *boundary,
-                    text: context.clone(),
-                });
+                if let Some(native) = native {
+                    self.fact(FactBody::NativeSessionInherited {
+                        instance: native.instance.clone(),
+                        native_thread: native.thread.clone(),
+                        head: native.head.clone(),
+                    });
+                } else {
+                    self.fact(FactBody::TransferOpened {
+                        id: ContextTransferId::new(self.key("transfer", id.as_str())).unwrap(),
+                        kind: TransferKind::Fork,
+                        source: parent.clone(),
+                        target: thread.clone(),
+                        boundary: *boundary,
+                        text: context.clone(),
+                    });
+                }
                 Reply::Thread(thread.clone())
             }
             MergeBack { target } => {
@@ -1604,6 +1650,9 @@ impl Decision {
             ItemKind::Error {
                 message: message.into(),
                 retrying: false,
+                code: None,
+                class: None,
+                retryable: None,
             },
         );
         self.fact(FactBody::ItemCompleted {
@@ -1676,9 +1725,18 @@ impl Decision {
             ProviderItem::Notice { message } => ItemKind::SystemNotice {
                 message: message.clone(),
             },
-            ProviderItem::Error { message, retrying } => ItemKind::Error {
+            ProviderItem::Error {
+                message,
+                retrying,
+                code,
+                class,
+                retryable,
+            } => ItemKind::Error {
                 message: message.clone(),
                 retrying: *retrying,
+                code: code.clone(),
+                class: class.clone(),
+                retryable: *retryable,
             },
         };
         if let Some(item) = self.state.items.iter().find(|i| i.id == id) {
@@ -1730,6 +1788,7 @@ impl Decision {
         let background = matches!(
             event,
             ProviderEvent::SubagentStarted { .. }
+                | ProviderEvent::SubagentNamed { .. }
                 | ProviderEvent::SubagentProgress { .. }
                 | ProviderEvent::SubagentFinished { .. }
                 | ProviderEvent::Child { .. }
@@ -1750,6 +1809,63 @@ impl Decision {
         let run_id = run.as_ref().map(|r| &r.id);
         use ProviderEvent::*;
         match event {
+            AssistantCursor { key } => {
+                if run.is_some() {
+                    self.fact(FactBody::AttemptHeadRecorded {
+                        attempt: attempt.clone(),
+                        head: Some(key.clone()),
+                    });
+                }
+            }
+            ResultText { key, text, status } => {
+                let previous = self
+                    .state
+                    .items
+                    .iter()
+                    .rev()
+                    .find(|i| matches!(i.kind, ItemKind::AssistantMessage { .. }))
+                    .map(|i| i.text.as_str())
+                    .unwrap_or("");
+                if text.trim().is_empty()
+                    || *status == ItemStatus::Completed
+                        && previous.split_whitespace().eq(text.split_whitespace())
+                {
+                    return Reply::Ignored;
+                }
+                return self.provider(
+                    attempt,
+                    &ProviderEvent::ItemFinished {
+                        key: key.clone(),
+                        kind: ProviderItem::Text,
+                        text: Some(text.clone()),
+                        status: *status,
+                    },
+                );
+            }
+            SubagentNamed { key, title } => {
+                if let Some(task) = self
+                    .state
+                    .tasks
+                    .iter()
+                    .find(|t| &t.native_key == key)
+                    .cloned()
+                    && task.title.as_ref() != Some(title)
+                {
+                    self.fact(FactBody::TaskNamed {
+                        id: task.id,
+                        title: title.clone(),
+                    });
+                    self.effect(
+                        None,
+                        EffectBody::SendToThread {
+                            thread: task.child_thread,
+                            command: Box::new(Command::Rename {
+                                title: title.clone(),
+                            }),
+                        },
+                    );
+                }
+            }
             PromptOffered { key } => self.fact(FactBody::PromptOffered {
                 attempt: attempt.clone(),
                 key: key.clone(),
@@ -1768,7 +1884,7 @@ impl Decision {
                     }) {
                         return Reply::Ignored;
                     }
-                    self.finish(&run.id, RunStatus::Completed, true);
+                    self.finish(&run.id, RunStatus::Interrupted, true);
                 }
             }
             SessionReady { native_thread } => {
@@ -1795,6 +1911,12 @@ impl Decision {
                     return reject("invalid-terminal-status");
                 }
                 if let Some(run) = run {
+                    if native_head.is_some() {
+                        self.fact(FactBody::AttemptHeadRecorded {
+                            attempt: attempt.clone(),
+                            head: native_head.clone(),
+                        });
+                    }
                     let status = if self.state.stopping.contains(attempt) {
                         RunStatus::Interrupted
                     } else {
@@ -2060,8 +2182,21 @@ impl Decision {
                     .cloned()
                 {
                     if task.status.terminal() {
-                        self.fact(FactBody::TaskReopened { id: task.id });
+                        self.fact(FactBody::TaskReopened {
+                            id: task.id.clone(),
+                        });
                     }
+                    self.effect(
+                        Some(attempt.clone()),
+                        EffectBody::SendToThread {
+                            thread: task.child_thread,
+                            command: Box::new(Command::BindNativeChild {
+                                owner: attempt.clone(),
+                                parent: self.state.thread.as_ref().unwrap().id.clone(),
+                                task: task.id,
+                            }),
+                        },
+                    );
                 } else {
                     let id = NodeId::new(self.native_key("task", attempt, key)).unwrap();
                     let child_thread =
@@ -2115,6 +2250,21 @@ impl Decision {
                             }),
                         },
                     );
+                    if !prompt.is_empty() {
+                        self.effect(
+                            Some(attempt.clone()),
+                            EffectBody::SendToThread {
+                                thread: child_thread.clone(),
+                                command: Box::new(Command::NativeInput {
+                                    attempt: attempt.clone(),
+                                    event: Box::new(ProviderEvent::UserMessage {
+                                        key: "spawn-prompt".into(),
+                                        text: prompt.clone(),
+                                    }),
+                                }),
+                            },
+                        );
+                    }
                     if let Some(events) = self
                         .state
                         .pending_children
@@ -2163,17 +2313,38 @@ impl Decision {
                 status,
                 result,
             } => {
-                if let Some(id) = self
+                if let Some(task) = self
                     .state
                     .tasks
                     .iter()
                     .find(|t| &t.native_key == key)
-                    .map(|t| t.id.clone())
+                    .cloned()
                 {
+                    if !result.is_empty() {
+                        self.effect(
+                            Some(attempt.clone()),
+                            EffectBody::SendToThread {
+                                thread: task.child_thread.clone(),
+                                command: Box::new(Command::NativeInput {
+                                    attempt: attempt.clone(),
+                                    event: Box::new(ProviderEvent::ResultText {
+                                        key: format!("{key}:result"),
+                                        text: result.clone(),
+                                        status: *status,
+                                    }),
+                                }),
+                            },
+                        );
+                    }
+                    let id = task.id;
                     self.fact(FactBody::TaskFinished {
                         id: id.clone(),
                         status: *status,
-                        result: result.clone(),
+                        result: if result.is_empty() {
+                            task.result.unwrap_or_default()
+                        } else {
+                            result.clone()
+                        },
                     });
                     if let Some(item) = self
                         .state
@@ -2447,6 +2618,42 @@ impl Decision {
     }
     fn effect_result(&mut self, result: &EffectResult) -> Reply {
         match result {
+            EffectResult::NativeForked {
+                command,
+                native_thread,
+            } => {
+                let Some(pending) = self.state.pending_forks.get(command).cloned() else {
+                    return Reply::Ignored;
+                };
+                let mut child_command = pending.child_command;
+                if let Command::AcceptFork { native, .. } = child_command.as_mut() {
+                    *native = Some(NativeBinding {
+                        instance: pending.instance,
+                        thread: native_thread.clone(),
+                        head: pending.head,
+                    });
+                }
+                self.fact(FactBody::ForkResolved {
+                    command: command.clone(),
+                });
+                self.effect(
+                    None,
+                    EffectBody::SendToThread {
+                        thread: pending.target,
+                        command: child_command,
+                    },
+                );
+                return Reply::Accepted;
+            }
+            EffectResult::ForkFailed { command, message } => {
+                if !self.state.pending_forks.contains_key(command) {
+                    return Reply::Ignored;
+                }
+                self.fact(FactBody::ForkResolved {
+                    command: command.clone(),
+                });
+                return reject(message);
+            }
             EffectResult::ProviderFailed {
                 attempt,
                 operation,
@@ -2536,7 +2743,26 @@ impl Decision {
                     id: checkpoint.clone(),
                     run: Some(run.clone()),
                     run_ordinal: r.ordinal,
-                    native_heads: self.state.native_heads.clone(),
+                    native_heads: self
+                        .state
+                        .runs
+                        .iter()
+                        .filter(|candidate| candidate.ordinal <= r.ordinal)
+                        .filter_map(|candidate| {
+                            candidate
+                                .attempt
+                                .as_ref()
+                                .and_then(|id| {
+                                    self.state.attempts.iter().find(|attempt| &attempt.id == id)
+                                })
+                                .map(|attempt| {
+                                    (
+                                        candidate.selection.instance.clone(),
+                                        attempt.native_head.clone(),
+                                    )
+                                })
+                        })
+                        .collect(),
                     file_ref: file_ref.clone(),
                 });
                 if let Some(status) = self.state.captures.get(run).copied() {

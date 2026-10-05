@@ -14,3 +14,4 @@ tokio.workspace = true
 
 [dev-dependencies]
 proptest = "1.11"
+sha2 = "0.10"

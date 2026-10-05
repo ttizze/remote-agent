@@ -27,7 +27,7 @@ pub struct CodexProtocol {
     pending: BTreeMap<u64, Pending>,
     thread: Option<String>,
     turn: Option<String>,
-    /// Native child thread -> native task, used solely to route notifications.
+    /// Native child thread -> native parent, used solely to route notifications.
     children: BTreeMap<String, String>,
 }
 impl CodexProtocol {
@@ -204,6 +204,16 @@ impl CodexProtocol {
                 });
             }
             let result = &frame["result"];
+            output.replies.push(NativeReply {
+                request: id.to_string(),
+                operation: match &pending {
+                    Pending::Initialize => "initialize".into(),
+                    Pending::Thread { .. } => "thread/start".into(),
+                    Pending::RevertRead { .. } => "thread/read".into(),
+                    Pending::Operation(operation) => operation.clone(),
+                },
+                result: Json(result.clone()),
+            });
             match pending {
                 Pending::Initialize => output.outbound.push(json!({"method":"initialized"})),
                 Pending::Thread { mut start } => {
@@ -333,17 +343,36 @@ impl CodexProtocol {
                 let key = required(item, "id")?;
                 let completed = method == "item/completed";
                 match string(item, "type").as_str() {
-                    "userMessage" => {}
+                    "userMessage" => {
+                        if completed {
+                            events.push(ProviderEvent::UserMessage {
+                                key,
+                                text: item["content"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|b| b["text"].as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            });
+                        }
+                    }
                     "subAgentActivity" => {
                         let child = required(item, "agentThreadId")?;
-                        self.children.insert(child.clone(), child.clone());
+                        self.children.insert(
+                            child.clone(),
+                            native_thread
+                                .clone()
+                                .filter(|p| self.thread.as_ref() != Some(p))
+                                .unwrap_or_default(),
+                        );
                         match string(item, "kind").as_str() {
                             "started" => events.push(ProviderEvent::SubagentStarted {
                                 key: child,
                                 parent: native_thread
                                     .clone()
                                     .filter(|id| self.children.contains_key(id)),
-                                prompt: string(item, "agentPath"),
+                                prompt: String::new(),
                                 model: optional(item, "model"),
                             }),
                             "completed" | "closed" => {
@@ -355,6 +384,10 @@ impl CodexProtocol {
                             }
                             _ => {}
                         }
+                        events.push(ProviderEvent::SubagentNamed {
+                            key: required(item, "agentThreadId")?,
+                            title: string(item, "agentPath"),
+                        });
                     }
                     "collabAgentToolCall" => {
                         let tool = string(item, "tool");
@@ -366,7 +399,13 @@ impl CodexProtocol {
                             .map(str::to_owned)
                             .collect::<Vec<_>>();
                         for child in receivers {
-                            self.children.insert(child.clone(), child.clone());
+                            self.children.insert(
+                                child.clone(),
+                                native_thread
+                                    .clone()
+                                    .filter(|p| self.thread.as_ref() != Some(p))
+                                    .unwrap_or_default(),
+                            );
                             if matches!(tool.as_str(), "spawnAgent" | "sendInput" | "resumeAgent") {
                                 events.push(ProviderEvent::SubagentStarted {
                                     key: child.clone(),
@@ -486,7 +525,13 @@ impl CodexProtocol {
                 let message = string(&p["error"], "message");
                 events.push(ProviderEvent::ItemFinished {
                     key: format!("error:{}", self.next_id),
-                    kind: ProviderItem::Error { message, retrying },
+                    kind: ProviderItem::Error {
+                        message,
+                        retrying,
+                        code: optional(&p["error"], "codexErrorInfo"),
+                        class: Some("provider_error".into()),
+                        retryable: retrying.then_some(true),
+                    },
                     text: None,
                     status: ItemStatus::Failed,
                 });
@@ -495,17 +540,7 @@ impl CodexProtocol {
             _ => {}
         }
         if let Some(thread) = native_thread.filter(|t| self.thread.as_ref() != Some(t)) {
-            output.events = events
-                .into_iter()
-                .map(|event| ProviderEvent::Child {
-                    key: self
-                        .children
-                        .get(&thread)
-                        .cloned()
-                        .unwrap_or(thread.clone()),
-                    event: Box::new(event),
-                })
-                .collect();
+            output.events = child_events(events, &thread, &self.children)?;
         } else {
             output.events = events;
         }

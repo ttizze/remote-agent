@@ -9,6 +9,29 @@ pub struct Fact {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FactBody {
+    TaskNamed {
+        id: NodeId,
+        title: String,
+    },
+    ForkPrepared {
+        command: CommandId,
+        target: ThreadId,
+        child_command: Box<Command>,
+        instance: String,
+        head: Option<String>,
+    },
+    ForkResolved {
+        command: CommandId,
+    },
+    NativeSessionInherited {
+        instance: String,
+        native_thread: String,
+        head: Option<String>,
+    },
+    AttemptHeadRecorded {
+        attempt: RunAttemptId,
+        head: Option<String>,
+    },
     BackgroundTaskStarted {
         key: String,
         tool: String,
@@ -336,6 +359,43 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
     let at = &fact.at;
     use FactBody::*;
     match &fact.body {
+        TaskNamed { id, title } => {
+            find_mut(&mut state.tasks, "task", |t| &t.id == id)?.title = Some(title.clone())
+        }
+        ForkPrepared {
+            command,
+            target,
+            child_command,
+            instance,
+            head,
+        } => {
+            state.pending_forks.insert(
+                command.clone(),
+                PendingFork {
+                    target: target.clone(),
+                    child_command: child_command.clone(),
+                    instance: instance.clone(),
+                    head: head.clone(),
+                },
+            );
+        }
+        ForkResolved { command } => {
+            state.pending_forks.remove(command);
+        }
+        NativeSessionInherited {
+            instance,
+            native_thread,
+            head,
+        } => {
+            state
+                .native_sessions
+                .insert(instance.clone(), native_thread.clone());
+            state.native_heads.insert(instance.clone(), head.clone());
+        }
+        AttemptHeadRecorded { attempt, head } => {
+            find_mut(&mut state.attempts, "attempt", |a| &a.id == attempt)?.native_head =
+                head.clone();
+        }
         BackgroundTaskStarted {
             key,
             tool,
@@ -454,6 +514,11 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
         } => {
             state.native_owner = Some(owner.clone());
             state.native_parent = Some((parent.clone(), task.clone()));
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .parent = Some(parent.clone());
         }
         ThreadRenamed { title } => {
             state
@@ -972,6 +1037,9 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 parent_task: parent.clone(),
                 app_owned: *app_owned,
                 prompt: prompt.clone(),
+                title: None,
+                started_at: at.clone(),
+                completed_at: None,
                 model: model.clone(),
                 wake: *wake,
                 status: ItemStatus::Running,
@@ -995,12 +1063,14 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             let task = find_mut(&mut state.tasks, "task", |t| &t.id == id)?;
             task.status = *status;
             task.result = Some(result.clone());
+            task.completed_at = Some(at.clone());
         }
         TaskReopened { id } => {
             let t = find_mut(&mut state.tasks, "task", |t| &t.id == id)?;
             t.status = ItemStatus::Running;
             t.result = None;
             t.delivery = DeliveryState::Pending;
+            t.completed_at = None;
         }
         TaskWakeChanged { id, wake } => {
             find_mut(&mut state.tasks, "task", |t| &t.id == id)?.wake = *wake

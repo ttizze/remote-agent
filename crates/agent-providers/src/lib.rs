@@ -14,6 +14,28 @@ pub use stdio::*;
 pub struct Translation {
     pub events: Vec<ProviderEvent>,
     pub outbound: Vec<Value>,
+    pub process: Option<ProcessDirective>,
+    pub replies: Vec<NativeReply>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcessDirective {
+    Reset {
+        native_thread: String,
+    },
+    Resume {
+        native_thread: String,
+        absolute_head: Option<String>,
+    },
+    Fork {
+        native_thread: String,
+        through_head: Option<String>,
+    },
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeReply {
+    pub request: String,
+    pub operation: String,
+    pub result: Json,
 }
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ProtocolError {
@@ -45,6 +67,33 @@ fn required(value: &Value, key: &str) -> Result<String, ProtocolError> {
 }
 fn optional(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+fn child_events(
+    events: Vec<ProviderEvent>,
+    route: &str,
+    parents: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<ProviderEvent>, ProtocolError> {
+    let mut path = vec![];
+    let mut key = route;
+    while !key.is_empty() {
+        if path.contains(&key) {
+            return Err(ProtocolError::Invalid("cyclic native child routing".into()));
+        }
+        path.push(key);
+        key = parents.get(key).map(String::as_str).unwrap_or("");
+    }
+    Ok(events
+        .into_iter()
+        .map(|mut event| {
+            for key in &path {
+                event = ProviderEvent::Child {
+                    key: (*key).into(),
+                    event: Box::new(event),
+                };
+            }
+            event
+        })
+        .collect())
 }
 fn terminal(value: &str) -> RunStatus {
     match value {
