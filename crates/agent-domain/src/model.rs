@@ -180,6 +180,8 @@ pub struct Attempt {
     pub native_thread: Option<String>,
     pub native_turn: Option<String>,
     pub native_head: Option<String>,
+    /// The provider accepted the turn, so its input reached native history.
+    pub accepted: bool,
     pub usage: Option<TokenUsage>,
     pub context_usage: Option<ContextUsage>,
     pub turn_usage: Option<TurnTokenUsage>,
@@ -1008,13 +1010,16 @@ pub enum ProviderCommand {
         selection: ModelSelection,
         runtime_mode: RuntimeMode,
         interaction_mode: InteractionMode,
+        /// The user's text; compose the native prompt with `provider_prompt`.
         text: String,
+        note: Option<String>,
         attachments: Vec<Attachment>,
         native_thread: Option<String>,
         resume_at: Option<String>,
         context: Option<HistoricalContext>,
     },
     Steer {
+        message: MessageId,
         text: String,
         attachments: Vec<Attachment>,
     },
@@ -1115,6 +1120,8 @@ pub enum EffectResult {
         message: String,
         message_id: Option<MessageId>,
         turn_completed: bool,
+        /// A start could not resume its native session; start a fresh one.
+        session_lost: bool,
     },
     /// A capture that could not read the workspace reports `Missing` or
     /// `Error`; the run still finishes.

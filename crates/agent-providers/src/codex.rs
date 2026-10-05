@@ -31,11 +31,11 @@ enum Pending {
     Initialize,
     Thread {
         start: Value,
-        history: Option<HistoricalContext>,
+        history: Option<InlineHistory>,
     },
     Inject {
         start: Value,
-        history: HistoricalContext,
+        history: InlineHistory,
     },
     RevertRead {
         thread: String,
@@ -53,6 +53,13 @@ enum Pending {
         visited: BTreeSet<Option<String>>,
     },
     Operation(String),
+}
+/// Historical context for injection, and the complete prompt text used when
+/// the native thread cannot inject it.
+#[derive(Debug, Clone)]
+struct InlineHistory {
+    history: HistoricalContext,
+    inline_text: String,
 }
 /// One native app-server session's RPC correlation, with no application entities.
 #[derive(Debug, Default)]
@@ -77,10 +84,12 @@ impl CodexProtocol {
     pub fn initialize(&mut self, context: &WireContext) -> Value {
         self.request("initialize",json!({"capabilities":{"experimentalApi":true,"optOutNotificationMethods":["turn/diff/updated"]},"clientInfo":{"name":context.client_name,"title":context.client_name,"version":context.client_version}}),Pending::Initialize)
     }
+    /// Image bytes are prepared by the resource owner; paths are never sent.
     pub fn command(
         &mut self,
         command: &ProviderCommand,
         context: &WireContext,
+        images: &[PreparedImage],
     ) -> Result<Vec<Value>, ProtocolError> {
         let frame = match command {
             ProviderCommand::Start {
@@ -89,21 +98,32 @@ impl CodexProtocol {
                 runtime_mode,
                 interaction_mode,
                 text,
+                note,
                 attachments,
                 native_thread,
                 context: handoff,
                 ..
             } => {
-                let mut input = vec![];
-                if !resume_interrupted_turn {
-                    for file in attachments {
-                        if native_image(file) {
-                            input.push(json!({"type":"localImage","path":file.path}));
-                        }
-                    }
-                    let text = attachment_text(text, attachments);
-                    input.push(json!({"type":"text","text":text}));
-                }
+                let input = if *resume_interrupted_turn {
+                    vec![]
+                } else {
+                    codex_input(
+                        &provider_prompt(text, note.as_deref(), None),
+                        attachments,
+                        images,
+                    )?
+                };
+                let handoff = handoff.as_ref().map(|history| InlineHistory {
+                    history: history.clone(),
+                    inline_text: attachment_text(
+                        &codex_skill_mention_text(&provider_prompt(
+                            text,
+                            note.as_deref(),
+                            Some(history),
+                        )),
+                        attachments,
+                    ),
+                });
                 let (approval, reviewer, sandbox) = codex_runtime(*runtime_mode);
                 let mut start = json!({"input":input,"cwd":context.cwd,"model":selection.model,"summary":"detailed","approvalPolicy":approval,"approvalsReviewer":reviewer,"sandboxPolicy":{"type":sandbox}});
                 if let Some(policy) = &context.approval_policy {
@@ -138,7 +158,7 @@ impl CodexProtocol {
                     .filter(|id| native_thread.as_ref() == Some(id))
                 {
                     start["threadId"] = json!(thread);
-                    self.start_or_inject(start, handoff.clone())
+                    self.start_or_inject(start, handoff)
                 } else if let Some(thread) = native_thread {
                     let mut params = context.thread_params(Some(&selection.model));
                     params["threadId"] = json!(thread);
@@ -148,7 +168,7 @@ impl CodexProtocol {
                         params,
                         Pending::Thread {
                             start,
-                            history: handoff.clone(),
+                            history: handoff,
                         },
                     )
                 } else {
@@ -157,12 +177,14 @@ impl CodexProtocol {
                         context.thread_params(Some(&selection.model)),
                         Pending::Thread {
                             start,
-                            history: handoff.clone(),
+                            history: handoff,
                         },
                     )
                 }
             }
-            ProviderCommand::Steer { text, attachments } => {
+            ProviderCommand::Steer {
+                text, attachments, ..
+            } => {
                 let thread = self
                     .thread
                     .as_ref()
@@ -175,7 +197,7 @@ impl CodexProtocol {
                         message: "No active turn".into(),
                         turn_completed: true,
                     })?;
-                let input = json!([{"type":"text","text":attachment_text(text,attachments)}]);
+                let input = codex_input(text, attachments, images)?;
                 self.request(
                     "turn/steer",
                     json!({"threadId":thread,"expectedTurnId":turn,"input":input}),
@@ -310,9 +332,9 @@ impl CodexProtocol {
         }
         Ok(self.request("thread/turns/list",json!({"threadId":thread,"cursor":cursor,"limit":100,"sortDirection":"desc","itemsView":"summary"}),Pending::RevertPage {thread,head,before,visited}))
     }
-    fn start_or_inject(&mut self, start: Value, history: Option<HistoricalContext>) -> Value {
+    fn start_or_inject(&mut self, start: Value, history: Option<InlineHistory>) -> Value {
         if let Some(history) = history {
-            self.request("thread/inject_items",json!({"threadId":start["threadId"],"items":history_response_items(&history.messages,&history.context)}),Pending::Inject {start,history})
+            self.request("thread/inject_items",json!({"threadId":start["threadId"],"items":history_response_items(&history.history.messages,&history.history.context)}),Pending::Inject {start,history})
         } else {
             self.request("turn/start", start, Pending::Operation("turn/start".into()))
         }
@@ -352,7 +374,7 @@ impl CodexProtocol {
                     if std::mem::take(&mut self.stop_before_thread) {
                         return Ok(output);
                     }
-                    prepend_inline_history(&mut start, &history);
+                    replace_input_text(&mut start, history.inline_text);
                     output.outbound.push(self.request(
                         "turn/start",
                         start,
@@ -921,19 +943,37 @@ impl CodexProtocol {
         Ok(output)
     }
 }
-fn prepend_inline_history(start: &mut Value, history: &HistoricalContext) {
-    if let Some(inputs) = start["input"].as_array_mut() {
-        for input in inputs {
-            if input["type"] == "text" {
-                input["text"] = json!(format!(
-                    "{}\n\n{}",
-                    render_history(history),
-                    string(input, "text")
-                ));
-                break;
-            }
-        }
+fn replace_input_text(start: &mut Value, text: String) {
+    let inputs = start["input"]
+        .as_array_mut()
+        .expect("turn input is an array");
+    inputs.retain(|input| input["type"] != "text");
+    inputs.insert(0, json!({"type":"text","text":text}));
+}
+/// Text first, then native images as data URLs, as the reference adapter sends them.
+fn codex_input(
+    text: &str,
+    attachments: &[Attachment],
+    images: &[PreparedImage],
+) -> Result<Vec<Value>, ProtocolError> {
+    let mut input = vec![];
+    let text = attachment_text(&codex_skill_mention_text(text), attachments);
+    if !text.is_empty() {
+        input.push(json!({"type":"text","text":text}));
     }
+    for file in attachments.iter().filter(|file| native_image(file)) {
+        let image = images
+            .iter()
+            .find(|image| image.attachment_id == file.id)
+            .ok_or_else(|| ProtocolError::Invalid(format!("missing prepared image {}", file.id)))?;
+        input.push(json!({"type":"image","url":format!("data:{};base64,{}", image.mime_type, image.base64)}));
+    }
+    if input.is_empty() {
+        return Err(ProtocolError::Invalid(
+            "Turn requires non-empty text or attachments.".into(),
+        ));
+    }
+    Ok(input)
 }
 fn codex_runtime(mode: RuntimeMode) -> (&'static str, &'static str, &'static str) {
     match mode {

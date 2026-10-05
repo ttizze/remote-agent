@@ -177,6 +177,9 @@ impl Decision {
                     })
             });
         if latest.selection.instance == target_run.selection.instance && !needs_backfill {
+            if let Some(native) = native_thread {
+                self.prepare_missed_inputs(target_run, native);
+            }
             return;
         }
         let boundary = latest.ordinal;
@@ -204,9 +207,7 @@ impl Decision {
                                 self.state.attempts.iter().find(|attempt| &attempt.id == id)
                             })
                             .is_some_and(|attempt| {
-                                attempt.native_thread.as_deref() == Some(native)
-                                    && (run.status == RunStatus::Completed
-                                        || attempt.native_turn.is_some())
+                                attempt.native_thread.as_deref() == Some(native) && attempt.accepted
                             })
                 })
             })
@@ -244,6 +245,78 @@ impl Decision {
             target: thread,
             boundary,
             instance: target_run.selection.instance.clone(),
+            history: prepare_history(&self.state, &items, boundary),
+        });
+    }
+    /// Failed or interrupted inputs that the provider never accepted are
+    /// missing from the native history of a session that is otherwise current.
+    fn prepare_missed_inputs(&mut self, target_run: &Run, native: &str) {
+        let instance = &target_run.selection.instance;
+        let missed = self
+            .state
+            .runs
+            .iter()
+            .filter(|run| {
+                run.ordinal < target_run.ordinal
+                    && &run.selection.instance == instance
+                    && matches!(run.status, RunStatus::Failed | RunStatus::Interrupted)
+                    && run.attempt.as_ref().is_some_and(|id| {
+                        self.state
+                            .attempts
+                            .iter()
+                            .any(|attempt| &attempt.id == id && !attempt.accepted)
+                    })
+            })
+            .map(|run| (run.id.clone(), run.ordinal))
+            .collect::<BTreeMap<_, _>>();
+        let Some(boundary) = missed.values().copied().max() else {
+            return;
+        };
+        let covered = self
+            .state
+            .transfers
+            .iter()
+            .filter(|transfer| &transfer.instance == instance)
+            .filter_map(|transfer| transfer.delivery.as_ref())
+            .filter(|delivery| {
+                delivery.native_thread.as_deref() == Some(native)
+                    && delivery.status != ContextDeliveryStatus::Pending
+            })
+            .flat_map(|delivery| delivery.item_ids.iter().chain(&delivery.omitted_item_ids))
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let items = self
+            .state
+            .visible_items()
+            .into_iter()
+            .filter(|item| {
+                item.run
+                    .as_ref()
+                    .is_some_and(|run| missed.contains_key(run))
+                    && !covered.contains(item.id.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if items.is_empty()
+            || self.state.transfers.iter().any(|transfer| {
+                !transfer.superseded
+                    && &transfer.instance == instance
+                    && transfer.kind == TransferKind::ProviderHandoffDelta
+                    && transfer.boundary == boundary
+                    && transfer.delivery.is_none()
+            })
+        {
+            return;
+        }
+        let thread = self.state.thread.as_ref().unwrap().id.clone();
+        self.fact(FactBody::TransferOpened {
+            native_fork: None,
+            id: ContextTransferId::new(self.key("missed-inputs", target_run.id.as_str())).unwrap(),
+            kind: TransferKind::ProviderHandoffDelta,
+            source: thread.clone(),
+            target: thread,
+            boundary,
+            instance: instance.clone(),
             history: prepare_history(&self.state, &items, boundary),
         });
     }
@@ -313,11 +386,28 @@ impl Decision {
             .find(|m| m.id == run.message)
             .unwrap()
             .clone();
-        let native_thread = self
+        let mut native_thread = self
             .state
             .native_sessions
             .get(&run.selection.instance)
             .cloned();
+        if native_thread.is_some()
+            && self.state.transfers.iter().any(|transfer| {
+                !transfer.superseded
+                    && transfer.target == thread.id
+                    && transfer.instance == run.selection.instance
+                    && transfer.delivery.as_ref().is_some_and(|delivery| {
+                        delivery.native_thread == native_thread
+                            && delivery.status == ContextDeliveryStatus::Pending
+                    })
+            })
+        {
+            // History may already be in that native thread; continue in a fresh one.
+            self.fact(FactBody::NativeSessionCleared {
+                instance: run.selection.instance.clone(),
+            });
+            native_thread = None;
+        }
         self.prepare_provider_handoff(&run, native_thread.as_deref());
         let restart_work = pending_restart_work(
             &run,
@@ -325,15 +415,7 @@ impl Decision {
             &self.state.attempts,
             &self.state.messages,
         );
-        let text = if restart_work.is_empty() {
-            message.text.clone()
-        } else {
-            format!(
-                "{}\n\nUser message:\n{}",
-                restart_background_note(&restart_work),
-                message.text
-            )
-        };
+        let note = (!restart_work.is_empty()).then(|| restart_background_note(&restart_work));
         let native_forks = self
             .state
             .transfers
@@ -386,15 +468,6 @@ impl Decision {
                     })
             })
             .collect::<Vec<_>>();
-        if transfers.iter().any(|transfer| {
-            transfer.delivery.as_ref().is_some_and(|delivery| {
-                delivery.native_thread == native_thread
-                    && delivery.status == ContextDeliveryStatus::Pending
-            })
-        }) {
-            self.fail_start(id, &attempt, HANDOFF_UNCERTAIN_ERROR);
-            return;
-        }
         let context = if transfers.is_empty() {
             None
         } else {
@@ -429,32 +502,6 @@ impl Decision {
                 previous.map(|(usage, _)| usage),
                 model_window,
             );
-            let estimate = if native_thread.is_some() {
-                self.state
-                    .visible_items()
-                    .into_iter()
-                    .filter(|item| {
-                        item.run.as_ref().is_some_and(|id| {
-                            self.state.runs.iter().any(|r| {
-                                &r.id == id && r.selection.instance == run.selection.instance
-                            })
-                        })
-                    })
-                    .map(|item| item.text.len() as u64)
-                    .sum()
-            } else {
-                0
-            };
-            let budget = handoff_budget(
-                self.state
-                    .handoff_token_cap
-                    .unwrap_or(DEFAULT_HANDOFF_TOKEN_CAP),
-                &text,
-                &message.attachments,
-                usage.as_ref(),
-                estimate,
-                model_window,
-            );
             let delivered = self
                 .state
                 .transfers
@@ -467,6 +514,22 @@ impl Decision {
                 })
                 .flat_map(|delivery| delivery.item_ids.clone())
                 .collect();
+            let estimate = native_thread.as_deref().map_or(0, |native| {
+                self.native_history_estimate(&run, native, &delivered)
+            });
+            let budget = handoff_budget(
+                self.state
+                    .handoff_token_cap
+                    .unwrap_or(DEFAULT_HANDOFF_TOKEN_CAP),
+                &note.as_ref().map_or_else(
+                    || message.text.clone(),
+                    |note| format!("{note}\n\n{}", message.text),
+                ),
+                &message.attachments,
+                usage.as_ref(),
+                estimate,
+                model_window,
+            );
             match combine_handoffs(&transfers, &thread.id, &delivered, budget) {
                 Ok(context) => Some(context),
                 Err(message) => {
@@ -545,7 +608,8 @@ impl Decision {
                 selection: run.selection.clone(),
                 runtime_mode: thread.runtime_mode,
                 interaction_mode: thread.interaction_mode,
-                text,
+                text: message.text,
+                note,
                 attachments: message.attachments,
                 native_thread,
                 resume_at: self
@@ -557,6 +621,55 @@ impl Decision {
                 context,
             }),
         );
+    }
+    /// Occupancy of a native session without telemetry: its own accepted
+    /// history and the foreign history already delivered to it, plus the
+    /// attachment allowance of inputs that reached it.
+    fn native_history_estimate(
+        &self,
+        target: &Run,
+        native: &str,
+        delivered: &std::collections::BTreeSet<String>,
+    ) -> u64 {
+        let thread = &self.state.thread.as_ref().unwrap().id;
+        let attempt_of = |run: &Run| {
+            run.attempt
+                .as_ref()
+                .and_then(|id| self.state.attempts.iter().find(|attempt| &attempt.id == id))
+        };
+        let own = |id: &RunId| {
+            self.state.runs.iter().find(|run| {
+                &run.id == id
+                    && run.selection.instance == target.selection.instance
+                    && !(matches!(run.status, RunStatus::Failed | RunStatus::Interrupted)
+                        && attempt_of(run).is_none_or(|attempt| !attempt.accepted))
+            })
+        };
+        self.state
+            .visible_items()
+            .into_iter()
+            .filter(|item| item.run.as_ref() != Some(&target.id))
+            .filter_map(|item| {
+                let run = item.run.as_ref().and_then(own);
+                if run.is_none() && !delivered.contains(item.id.as_str()) {
+                    return None;
+                }
+                let text = historical_message(item, thread, None, None)?.text.len() as u64;
+                let reached = run.and_then(attempt_of).is_some_and(|attempt| {
+                    attempt.accepted && attempt.native_thread.as_deref() == Some(native)
+                });
+                let allowance = match &item.kind {
+                    ItemKind::UserMessage { message } if reached => self
+                        .state
+                        .messages
+                        .iter()
+                        .find(|candidate| &candidate.id == message)
+                        .map_or(0, |message| attachment_allowance(&message.attachments)),
+                    _ => 0,
+                };
+                Some(text + allowance)
+            })
+            .sum()
     }
     fn fail_start(&mut self, run: &RunId, attempt: &RunAttemptId, message: &str) {
         let key = self.key("handoff-failure", attempt.as_str());
@@ -1034,6 +1147,7 @@ impl Decision {
                     runtime_mode: t.runtime_mode,
                     interaction_mode: t.interaction_mode,
                     text: message.text.clone(),
+                    note: None,
                     attachments: message.attachments.clone(),
                     native_thread: self
                         .state
@@ -1048,6 +1162,7 @@ impl Decision {
                 self.effect(
                     Some(attempt),
                     EffectBody::Provider(ProviderCommand::Steer {
+                        message: message.id.clone(),
                         text: message.text.clone(),
                         attachments: message.attachments.clone(),
                     }),
@@ -1709,6 +1824,7 @@ impl Decision {
                 self.effect(
                     target.attempt,
                     EffectBody::Provider(ProviderCommand::Steer {
+                        message: m.id.clone(),
                         text: m.text,
                         attachments: m.attachments,
                     }),
@@ -3797,6 +3913,7 @@ impl Decision {
                 message,
                 message_id,
                 turn_completed,
+                session_lost,
             } => {
                 let Some(run) = self
                     .state
@@ -3841,6 +3958,24 @@ impl Decision {
                 }
                 if !run.status.blocking() {
                     return Reply::Ignored;
+                }
+                if *operation == ProviderOperation::Start
+                    && *session_lost
+                    && !self.state.stopping.contains(attempt)
+                    && self
+                        .state
+                        .native_sessions
+                        .contains_key(&run.selection.instance)
+                {
+                    self.fact(FactBody::AttemptFinished {
+                        id: attempt.clone(),
+                        status: AttemptStatus::Failed,
+                    });
+                    self.fact(FactBody::NativeSessionCleared {
+                        instance: run.selection.instance.clone(),
+                    });
+                    self.start_run(&run.id);
+                    return Reply::Accepted;
                 }
                 match operation {
                     ProviderOperation::Start | ProviderOperation::Compact => {

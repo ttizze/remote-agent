@@ -112,6 +112,7 @@ fn codex_start() -> ProviderCommand {
         runtime_mode: RuntimeMode::Auto,
         interaction_mode: InteractionMode::Default,
         text: "hello".into(),
+        note: None,
         attachments: vec![],
         native_thread: None,
         resume_at: None,
@@ -128,7 +129,7 @@ fn wire_context() -> WireContext {
 }
 fn codex_turn_params(command: &ProviderCommand, context: &WireContext) -> Value {
     let mut protocol = CodexProtocol::default();
-    let start = protocol.command(command, context).unwrap();
+    let start = protocol.command(command, context, &[]).unwrap();
     protocol
         .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
         .unwrap()
@@ -288,13 +289,13 @@ fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume
     let mut protocol = CodexProtocol::default();
     let expected = json!({"tools.update_plan.enabled":true,"mcp_servers":{"runtime":{"url":"http://127.0.0.1:43123/mcp"}}});
     assert_eq!(
-        protocol.command(&start, &context).unwrap()[0]["params"]["config"],
+        protocol.command(&start, &context, &[]).unwrap()[0]["params"]["config"],
         expected
     );
     if let ProviderCommand::Start { native_thread, .. } = &mut start {
         *native_thread = Some("resumed".into());
     }
-    let resume = protocol.command(&start, &context).unwrap();
+    let resume = protocol.command(&start, &context, &[]).unwrap();
     assert_eq!(resume[0]["method"], "thread/resume");
     assert_eq!(resume[0]["params"]["config"], expected);
     let fork = protocol
@@ -304,6 +305,7 @@ fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume
                 through_turn: Some("head".into()),
             },
             &context,
+            &[],
         )
         .unwrap();
     assert_eq!(fork[0]["params"]["config"], expected);
@@ -315,6 +317,7 @@ fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume
                 absolute_head: Some("head".into()),
             },
             &context,
+            &[],
         )
         .unwrap();
     let resume = protocol.receive(&json!({"id":revert[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"notLoaded"}}}})).unwrap();
@@ -326,7 +329,9 @@ fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume
 fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start() {
     use serde_json::json;
     let mut protocol = CodexProtocol::default();
-    let start = protocol.command(&codex_start(), &wire_context()).unwrap();
+    let start = protocol
+        .command(&codex_start(), &wire_context(), &[])
+        .unwrap();
     assert_eq!(start[0]["method"], "thread/start");
     assert!(
         protocol
@@ -335,7 +340,8 @@ fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start()
                     native_thread: None,
                     native_turn: None
                 },
-                &wire_context()
+                &wire_context(),
+                &[]
             )
             .unwrap()
             .is_empty()
@@ -348,7 +354,9 @@ fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start()
     if let ProviderCommand::Start { native_thread, .. } = &mut next_command {
         *native_thread = Some("root".into());
     }
-    let next = protocol.command(&next_command, &wire_context()).unwrap();
+    let next = protocol
+        .command(&next_command, &wire_context(), &[])
+        .unwrap();
     assert_eq!(next[0]["method"], "turn/start");
     assert_eq!(next[0]["params"]["approvalsReviewer"], "auto_review");
     assert_eq!(next[0]["params"]["approvalPolicy"], "on-request");
@@ -361,7 +369,9 @@ fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start()
 fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes() {
     use serde_json::json;
     let mut protocol = CodexProtocol::default();
-    let start = protocol.command(&codex_start(), &wire_context()).unwrap();
+    let start = protocol
+        .command(&codex_start(), &wire_context(), &[])
+        .unwrap();
     let ready = protocol
         .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"root"}}}))
         .unwrap();
@@ -372,7 +382,8 @@ fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes(
                     native_thread: Some("root".into()),
                     native_turn: None
                 },
-                &wire_context()
+                &wire_context(),
+                &[]
             )
             .unwrap()
             .is_empty()
@@ -391,6 +402,7 @@ fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes(
                 native_turn: Some("turn-root".into()),
             },
             &wire_context(),
+            &[],
         )
         .unwrap();
     assert_eq!(
@@ -410,6 +422,7 @@ fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes(
                 native_turn: Some("turn-child".into()),
             },
             &wire_context(),
+            &[],
         )
         .unwrap();
     assert_eq!(child.len(), 1);
@@ -471,7 +484,7 @@ fn native_history_injection_preserves_roles_and_only_explicit_unsupported_uses_i
         if let ProviderCommand::Start { context, .. } = &mut command {
             *context = Some(history.clone());
         }
-        let start = protocol.command(&command, &wire_context()).unwrap();
+        let start = protocol.command(&command, &wire_context(), &[]).unwrap();
         let ready = protocol
             .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
             .unwrap();
@@ -503,7 +516,14 @@ fn native_history_injection_preserves_roles_and_only_explicit_unsupported_uses_i
         let text = result.outbound[0]["params"]["input"][0]["text"]
             .as_str()
             .unwrap();
-        assert_eq!(text.contains("Keep indentation."), error.is_some());
+        assert_eq!(
+            text,
+            if error.is_some() {
+                format!("{}\n\nUser message:\nhello", render_history(&history))
+            } else {
+                "hello".into()
+            }
+        );
         assert_eq!(
             result.events.contains(&ProviderEvent::ContextInjected),
             error.is_none()
@@ -511,6 +531,127 @@ fn native_history_injection_preserves_roles_and_only_explicit_unsupported_uses_i
     }
 }
 
+// T3 ProviderTurnStartService.ts: context, then the restart note, then "User message:".
+#[test]
+fn inline_history_and_restart_notes_precede_the_labelled_user_message() {
+    let history = select_history(&[], "Recover source history", 0, 16_000);
+    let mut command = codex_start();
+    if let ProviderCommand::Start { context, note, .. } = &mut command {
+        *context = Some(history.clone());
+        *note = Some("Note: work was cancelled".into());
+    }
+    let mut claude = ClaudeProtocol::default();
+    let sent = claude.command(&command, "prompt", &[]).unwrap().outbound[0].clone();
+    assert_eq!(
+        sent["message"]["content"],
+        format!(
+            "{}\n\nNote: work was cancelled\n\nUser message:\nhello",
+            render_history(&history)
+        )
+    );
+    let mut codex = CodexProtocol::default();
+    let start = codex.command(&command, &wire_context(), &[]).unwrap();
+    let ready = codex
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
+        .unwrap();
+    let injected = codex
+        .receive(&json!({"id":ready.outbound[0]["id"],"result":{}}))
+        .unwrap();
+    assert_eq!(
+        injected.outbound[0]["params"]["input"][0]["text"],
+        "Note: work was cancelled\n\nUser message:\nhello"
+    );
+}
+// T3 CodexAdapterV2.ts toCodexInput: start and steer send text, then image data URLs.
+#[test]
+fn codex_start_and_steer_send_prepared_images_after_the_text() {
+    let image = Attachment {
+        kind: AttachmentKind::Image,
+        source: None,
+        id: "shot".into(),
+        name: "shot.png".into(),
+        mime_type: "image/png".into(),
+        path: "/attachments/shot.png".into(),
+        size: 3,
+    };
+    let prepared = [PreparedImage {
+        attachment_id: "shot".into(),
+        mime_type: "image/png".into(),
+        base64: "AAEC".into(),
+    }];
+    let mut command = codex_start();
+    if let ProviderCommand::Start {
+        attachments, text, ..
+    } = &mut command
+    {
+        attachments.push(image.clone());
+        *text = "€review this".into();
+    }
+    let mut codex = CodexProtocol::default();
+    let start = codex.command(&command, &wire_context(), &prepared).unwrap();
+    let ready = codex
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
+        .unwrap();
+    let input = &ready.outbound[0]["params"]["input"];
+    assert_eq!(
+        input[1],
+        json!({"type":"image","url":"data:image/png;base64,AAEC"})
+    );
+    assert!(
+        input[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("$review this\n\n")
+    );
+    codex
+        .receive(
+            &json!({"method":"turn/started","params":{"threadId":"native","turn":{"id":"turn"}}}),
+        )
+        .unwrap();
+    let steer = codex
+        .command(
+            &ProviderCommand::Steer {
+                message: MessageId::new("steer").unwrap(),
+                text: "and this".into(),
+                attachments: vec![image],
+            },
+            &wire_context(),
+            &prepared,
+        )
+        .unwrap();
+    assert_eq!(steer[0]["method"], "turn/steer");
+    assert_eq!(
+        steer[0]["params"]["input"][1],
+        json!({"type":"image","url":"data:image/png;base64,AAEC"})
+    );
+    assert!(
+        codex
+            .command(
+                &ProviderCommand::Steer {
+                    message: MessageId::new("missing").unwrap(),
+                    text: "x".into(),
+                    attachments: vec![Attachment {
+                        id: "other".into(),
+                        ..prepared_attachment()
+                    }],
+                },
+                &wire_context(),
+                &prepared,
+            )
+            .is_err()
+    );
+}
+fn prepared_attachment() -> Attachment {
+    Attachment {
+        kind: AttachmentKind::Image,
+        source: None,
+        id: "shot".into(),
+        name: "shot.png".into(),
+        mime_type: "image/png".into(),
+        path: "/attachments/shot.png".into(),
+        size: 3,
+    }
+}
 #[test]
 fn assistant_context_usage_includes_cache_reads_and_creation_in_the_reference_window() {
     let mut protocol = ClaudeProtocol::default();
@@ -620,7 +761,7 @@ fn rollback_resolves_an_absolute_boundary_across_pages_and_is_safe_to_repeat() {
         absolute_head: Some("kept".into()),
     };
     let read = protocol
-        .command(&command, &wire_context())
+        .command(&command, &wire_context(), &[])
         .unwrap()
         .remove(0);
     assert_eq!(
@@ -653,7 +794,7 @@ fn rollback_resolves_an_absolute_boundary_across_pages_and_is_safe_to_repeat() {
         .receive(&json!({"id":revert["id"],"result":{"thread":{"id":"thread"}}}))
         .unwrap();
     let read = protocol
-        .command(&command, &wire_context())
+        .command(&command, &wire_context(), &[])
         .unwrap()
         .remove(0);
     let page = protocol.receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}})).unwrap().outbound.remove(0);
@@ -677,6 +818,7 @@ fn rollback_rejects_repeated_cursors_and_missing_heads_without_reverting_partial
                     absolute_head: Some("kept".into()),
                 },
                 &wire_context(),
+                &[],
             )
             .unwrap()
             .remove(0);
@@ -771,7 +913,10 @@ fn stop_during_history_injection_suppresses_both_acceptance_and_unsupported_fall
                 omitted_item_ids: vec![],
             });
         }
-        let create = protocol.command(&start, &wire_context()).unwrap().remove(0);
+        let create = protocol
+            .command(&start, &wire_context(), &[])
+            .unwrap()
+            .remove(0);
         let inject = protocol
             .receive(&json!({"id":create["id"],"result":{"thread":{"id":"native"}}}))
             .unwrap()
@@ -784,6 +929,7 @@ fn stop_during_history_injection_suppresses_both_acceptance_and_unsupported_fall
                     native_turn: None,
                 },
                 &wire_context(),
+                &[],
             )
             .unwrap();
         let reply = if let Some(code) = code {

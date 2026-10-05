@@ -961,6 +961,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 native_thread: None,
                 native_turn: None,
                 native_head: None,
+                accepted: false,
                 usage: None,
                 context_usage: None,
                 turn_usage: None,
@@ -1005,6 +1006,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             let a = find_mut(&mut state.attempts, "attempt", |a| &a.id == attempt)?;
             a.native_turn = native_turn.clone();
             a.status = AttemptStatus::Running;
+            a.accepted = true;
             let run = a.run.clone();
             find_mut(&mut state.runs, "run", |r| r.id == run)?.status = RunStatus::Running;
         }

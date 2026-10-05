@@ -63,6 +63,7 @@ impl ClaudeProtocol {
             ProviderCommand::Start {
                 selection,
                 text,
+                note,
                 attachments,
                 context,
                 ..
@@ -78,20 +79,26 @@ impl ClaudeProtocol {
                     .events
                     .push(ProviderEvent::TurnStarted { native_turn: None });
                 result.outbound.push(claude_user_message(
-                    &if context.is_none() || text.trim() == "/compact" {
-                        text.clone()
-                    } else {
-                        format!("{}\n\n{text}", render_history(context.as_ref().unwrap()))
-                    },
+                    &provider_prompt(
+                        text,
+                        note.as_deref(),
+                        context.as_ref().filter(|_| text.trim() != "/compact"),
+                    ),
                     attachments,
                     user_uuid,
                     false,
                     images,
                 )?);
             }
-            ProviderCommand::Steer { text, attachments } => result.outbound.push(
-                claude_user_message(text, attachments, user_uuid, true, images)?,
-            ),
+            ProviderCommand::Steer {
+                text, attachments, ..
+            } => result.outbound.push(claude_user_message(
+                text,
+                attachments,
+                user_uuid,
+                true,
+                images,
+            )?),
             ProviderCommand::Interrupt { .. } => result
                 .outbound
                 .push(self.control.request("interrupt", json!({}))),

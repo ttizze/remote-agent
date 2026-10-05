@@ -283,6 +283,7 @@ fn completed_steer_becomes_one_followup_on_the_original_selection() {
         message: "completed".into(),
         message_id: Some(MessageId::new("steer").unwrap()),
         turn_completed: true,
+        session_lost: false,
     };
     result(&mut s, "fallback", failure.clone());
     result(&mut s, "fallback-retry", failure);
@@ -304,6 +305,7 @@ fn failed_control_operation_keeps_live_native_work_authoritative() {
             message: "transport error".into(),
             message_id: None,
             turn_completed: false,
+            session_lost: false,
         },
     );
     assert_eq!(s.runs[0].status, RunStatus::Running);
@@ -628,7 +630,7 @@ fn recovery_keeps_lost_work_for_its_provider_until_a_completed_non_compact_turn(
         "after-compact",
         send_message("continue", DispatchMode::StartImmediately),
     );
-    assert!(start.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start { text, .. }) if text == "Note: the T3 server restarted, and this background work was cancelled before it finished. It will not report back:\n- subagent: Background subagent test\n\nUser message:\ncontinue")));
+    assert!(start.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start { text, note, .. }) if provider_prompt(text, note.as_deref(), None) == "Note: the T3 server restarted, and this background work was cancelled before it finished. It will not report back:\n- subagent: Background subagent test\n\nUser message:\ncontinue")));
     let delivered = s.active_run().unwrap().attempt.clone().unwrap();
     provider(
         &mut s,
@@ -2271,6 +2273,7 @@ fn async_question_answer_steers_the_current_turn_and_rejects_blank_answers_atomi
 }
 
 #[test]
+// T3 ProviderTurnStartService.ts: an uncertain native delivery continues in a fresh native thread.
 fn context_delivery_is_pending_until_acceptance_and_ambiguous_delivery_is_not_repeated() {
     let mut s = state();
     let (_, a) = running(&mut s, "original");
@@ -2320,6 +2323,7 @@ fn context_delivery_is_pending_until_acceptance_and_ambiguous_delivery_is_not_re
             message: "connection lost".into(),
             message_id: None,
             turn_completed: false,
+            session_lost: false,
         },
     );
     let retry = command(
@@ -2327,37 +2331,30 @@ fn context_delivery_is_pending_until_acceptance_and_ambiguous_delivery_is_not_re
         "retry",
         send_message("retry", DispatchMode::StartImmediately),
     );
-    assert!(!retry.effects.iter().any(|effect| matches!(
-        effect.body,
-        EffectBody::Provider(ProviderCommand::Start { .. })
-    )));
-    assert!(s.items.iter().any(
-        |item| matches!(&item.kind,ItemKind::Error {message,..} if message==HANDOFF_UNCERTAIN_ERROR)
-    ));
-    let step = ThreadMachine::step(
-        &s,
-        &InputEnvelope {
-            at: at(),
-            key: "replace-native".into(),
-            input: Input::NativeSessionReset {
-                instance: "claude".into(),
-            },
-        },
-    );
-    s = fold(&s, &step.facts).unwrap();
-    let accepted = command(
-        &mut s,
-        "fresh",
-        send_message("fresh", DispatchMode::StartImmediately),
-    );
-    assert!(accepted.effects.iter().any(|effect| matches!(
-        effect.body,
-        EffectBody::Provider(ProviderCommand::Start {
-            native_thread: None,
-            context: Some(_),
-            ..
+    assert!(retry.facts.iter().any(|fact| matches!(&fact.body, FactBody::NativeSessionCleared { instance } if instance == "claude")));
+    let history = retry
+        .effects
+        .iter()
+        .find_map(|effect| match &effect.body {
+            EffectBody::Provider(ProviderCommand::Start {
+                native_thread: None,
+                context: Some(history),
+                ..
+            }) => Some(render_history(history)),
+            _ => None,
         })
-    )));
+        .unwrap();
+    assert!(history.contains("original") && history.contains("continue"));
+    assert_eq!(
+        s.items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ItemKind::Error { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ["connection lost"]
+    );
     let a = s.active_run().unwrap().attempt.clone().unwrap();
     provider(
         &mut s,
@@ -2811,6 +2808,7 @@ fn interrupt_failure_keeps_the_root_and_children_live_until_provider_confirmatio
             message: "temporary RPC failure".into(),
             message_id: None,
             turn_completed: false,
+            session_lost: false,
         },
     );
     assert_eq!(s.runs[0].status, RunStatus::Running);
@@ -2897,7 +2895,7 @@ proptest! {
         let (_,attempt)=running(&mut s,"run");
         let operation=[ProviderOperation::Steer,ProviderOperation::Interrupt,ProviderOperation::Respond,ProviderOperation::SetModel][op];
         for i in 0..failures {
-            result(&mut s,&format!("failed-{i}"),EffectResult::ProviderFailed{attempt:attempt.clone(),operation,message:"RPC failed".into(),message_id:None,turn_completed:false});
+            result(&mut s,&format!("failed-{i}"),EffectResult::ProviderFailed{attempt:attempt.clone(),operation,message:"RPC failed".into(),message_id:None,turn_completed:false,session_lost:false});
             prop_assert_eq!(s.runs[0].status,RunStatus::Running);
             prop_assert_eq!(s.attempts[0].status,AttemptStatus::Running);
         }
@@ -3064,4 +3062,224 @@ fn wire_encodings_round_trip_state_facts_commands_and_effects() {
     }
     round_trip(&s);
     assert!(!s.items.is_empty() && !s.requests.is_empty() && !s.tasks.is_empty());
+}
+fn switch_instance(s: &mut State, key: &str, instance: &str) {
+    let mut target = selection();
+    target.instance = instance.into();
+    command(s, key, Command::SwitchProvider { selection: target });
+}
+fn start_context(step: &Step) -> Option<(Option<String>, String)> {
+    step.effects.iter().find_map(|effect| match &effect.body {
+        EffectBody::Provider(ProviderCommand::Start {
+            native_thread,
+            context,
+            ..
+        }) => Some((
+            native_thread.clone(),
+            context.as_ref().map(render_history).unwrap_or_default(),
+        )),
+        _ => None,
+    })
+}
+// T3 ProviderTurnStartService.ts: a failed native resume continues in a fresh session with full history.
+#[test]
+fn lost_native_session_restarts_the_attempt_with_portable_history() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "earlier work");
+    finish(&mut s, &a);
+    command(
+        &mut s,
+        "resume",
+        send_message("resume", DispatchMode::StartImmediately),
+    );
+    let first = s.active_run().unwrap().attempt.clone().unwrap();
+    let step = result(
+        &mut s,
+        "lost",
+        EffectResult::ProviderFailed {
+            attempt: first.clone(),
+            operation: ProviderOperation::Start,
+            message: "thread not found".into(),
+            message_id: None,
+            turn_completed: false,
+            session_lost: true,
+        },
+    );
+    let (native, history) = start_context(&step).unwrap();
+    assert_eq!(native, None);
+    assert!(history.contains("earlier work") && history.contains("full_thread_summary"));
+    let run = s.active_run().unwrap();
+    assert_eq!(run.status, RunStatus::Starting);
+    assert_ne!(run.attempt.as_ref(), Some(&first));
+    assert_eq!(
+        s.attempts.iter().find(|a| a.id == first).unwrap().status,
+        AttemptStatus::Failed
+    );
+    assert!(
+        !s.items
+            .iter()
+            .any(|i| matches!(i.kind, ItemKind::Error { .. }))
+    );
+    let again = s.active_run().unwrap().attempt.clone().unwrap();
+    let step = result(
+        &mut s,
+        "lost-again",
+        EffectResult::ProviderFailed {
+            attempt: again,
+            operation: ProviderOperation::Start,
+            message: "spawn failed".into(),
+            message_id: None,
+            turn_completed: false,
+            session_lost: true,
+        },
+    );
+    assert!(step.effects.is_empty());
+    assert_eq!(s.runs[1].status, RunStatus::Failed);
+}
+// T3 ContextHandoffDelivery.ts: only a delivery recorded for a concrete native thread is uncertain.
+#[test]
+fn a_handoff_that_failed_before_a_native_thread_existed_is_delivered_again() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "original");
+    finish(&mut s, &a);
+    switch_instance(&mut s, "switch", "other");
+    command(
+        &mut s,
+        "first",
+        send_message("first", DispatchMode::StartImmediately),
+    );
+    let attempt = s.active_run().unwrap().attempt.clone().unwrap();
+    result(
+        &mut s,
+        "spawn-failed",
+        EffectResult::ProviderFailed {
+            attempt,
+            operation: ProviderOperation::Start,
+            message: "spawn failed".into(),
+            message_id: None,
+            turn_completed: false,
+            session_lost: false,
+        },
+    );
+    assert_eq!(
+        s.transfers[0].delivery.as_ref().unwrap().native_thread,
+        None
+    );
+    let retry = command(
+        &mut s,
+        "retry",
+        send_message("retry", DispatchMode::StartImmediately),
+    );
+    let (native, history) = start_context(&retry).unwrap();
+    assert_eq!(native, None);
+    assert!(history.contains("original"));
+}
+// T3 ProviderTurnStartService.ts: inputs the provider never accepted are handed to the same session.
+#[test]
+fn inputs_that_never_reached_the_native_session_are_handed_back_to_it() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    command(
+        &mut s,
+        "Please rename the module",
+        send_message("Please rename the module", DispatchMode::StartImmediately),
+    );
+    let attempt = s.active_run().unwrap().attempt.clone().unwrap();
+    result(
+        &mut s,
+        "start-failed",
+        EffectResult::ProviderFailed {
+            attempt,
+            operation: ProviderOperation::Start,
+            message: "overloaded".into(),
+            message_id: None,
+            turn_completed: false,
+            session_lost: false,
+        },
+    );
+    let step = command(
+        &mut s,
+        "continue",
+        send_message("continue", DispatchMode::StartImmediately),
+    );
+    let (native, history) = start_context(&step).unwrap();
+    assert_eq!(native.as_deref(), Some("native-thread"));
+    assert!(history.contains("Please rename the module"));
+    assert!(history.contains("run-status=failed"));
+    assert!(!history.contains("[Historical user; user_message; thread=thread; run=run:5:first"));
+    let delivered = s.active_run().unwrap().attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "accepted",
+        &delivered,
+        ProviderEvent::TurnStarted { native_turn: None },
+    );
+    finish(&mut s, &delivered);
+    let next = command(
+        &mut s,
+        "next",
+        send_message("next", DispatchMode::StartImmediately),
+    );
+    assert_eq!(start_context(&next).unwrap().1, "");
+}
+// T3 ProviderTurnStartService.ts: without telemetry, prior native attachments count against the window.
+#[test]
+fn native_occupancy_estimate_counts_inputs_and_attachments_that_reached_the_session() {
+    let outcome = |images: usize| {
+        let mut s = state();
+        let mut send = send_message("with images", DispatchMode::StartImmediately);
+        if let Command::Send(message) = &mut send {
+            message.attachments = (0..images)
+                .map(|index| {
+                    let mut image = captured_image();
+                    image.id = index.to_string();
+                    image.source = None;
+                    image
+                })
+                .collect();
+        }
+        command(&mut s, "with images", send);
+        let a = s.active_run().unwrap().attempt.clone().unwrap();
+        provider(
+            &mut s,
+            "session",
+            &a,
+            ProviderEvent::SessionReady {
+                native_thread: "native-thread".into(),
+            },
+        );
+        provider(
+            &mut s,
+            "started",
+            &a,
+            ProviderEvent::TurnStarted { native_turn: None },
+        );
+        finish(&mut s, &a);
+        switch_instance(&mut s, "away", "other");
+        let (_, b) = running(&mut s, "elsewhere");
+        finish(&mut s, &b);
+        switch_instance(&mut s, "back", "codex");
+        let step = ThreadMachine::step(
+            &s,
+            &InputEnvelope {
+                at: at(),
+                key: "policy".into(),
+                input: Input::HandoffPolicy {
+                    instance: "codex".into(),
+                    model_window: Some(60_000),
+                    token_cap: 16_000,
+                },
+            },
+        );
+        s = fold(&s, &step.facts).unwrap();
+        let step = command(
+            &mut s,
+            "return",
+            send_message("return", DispatchMode::StartImmediately),
+        );
+        start_context(&step).is_some()
+    };
+    assert!(outcome(0));
+    assert!(!outcome(6));
 }
