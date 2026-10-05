@@ -238,7 +238,9 @@ impl ClaudeAdapter {
             provider.native_conversation_head_ref = None;
         }
         provider.status = ProviderThreadStatus::Idle;
-        provider.last_run_ordinal = checkpoint.app_run_ordinal.filter(|n| *n > 0);
+        if let Some(ordinal) = checkpoint.app_run_ordinal {
+            provider.last_run_ordinal = (ordinal > 0).then_some(ordinal);
+        }
         provider.updated_at = now();
         Ok(provider)
     }

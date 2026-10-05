@@ -4,6 +4,7 @@
 pub mod adapter;
 pub mod attachments;
 pub mod checkpoint;
+pub mod checkpoint_scope;
 pub mod contracts;
 pub mod decider;
 pub mod delegation;

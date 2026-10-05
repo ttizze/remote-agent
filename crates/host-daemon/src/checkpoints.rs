@@ -21,6 +21,13 @@ const DURABLE: &[&str] = &[
     "core.fsyncMethod=fsync",
 ];
 
+pub(crate) fn validate_nested_workspace(cwd: &str, parent: &str) -> Result<()> {
+    if !dunce::canonicalize(cwd)?.starts_with(dunce::canonicalize(parent)?) {
+        return Err(anyhow!("nested checkpoint workspace escapes its parent"));
+    }
+    Ok(())
+}
+
 pub(crate) fn reference(scope: &CheckpointScopeId, ordinal: u64) -> CheckpointRef {
     let hash = ring::digest::digest(&ring::digest::SHA256, scope.as_str().as_bytes());
     let hex: String = hash.as_ref()[..16]
@@ -461,27 +468,29 @@ impl Checkpoints {
         Ok(CheckpointStatus::Ready)
     }
     pub async fn baseline(&self, scope: &CheckpointScope, now: &Timestamp) -> Vec<EventPayload> {
+        vec![
+            EventPayload::CheckpointScopeCreated(scope.clone()),
+            EventPayload::CheckpointCaptured(self.materialize_baseline(scope, 0, now).await),
+        ]
+    }
+    pub async fn materialize_baseline(
+        &self,
+        scope: &CheckpointScope,
+        ordinal: u64,
+        now: &Timestamp,
+    ) -> Checkpoint {
         let workspace = checkout_root(Path::new(&scope.cwd))
             .await
             .unwrap_or_else(|_| PathBuf::from(&scope.cwd));
         let lock = self.lock(&workspace);
         let _guard = lock.lock().await;
-        let reference = reference(&scope.id, 0);
+        let reference = reference(&scope.id, ordinal);
         let status = Self::capture_ref(Path::new(&scope.cwd), &reference)
             .await
             .unwrap_or(CheckpointStatus::Error);
-        vec![
-            EventPayload::CheckpointScopeCreated(scope.clone()),
-            EventPayload::CheckpointCaptured(record(
-                scope,
-                None,
-                0,
-                reference,
-                status,
-                vec![],
-                now,
-            )),
-        ]
+        let mut checkpoint = record(scope, None, ordinal, reference, status, vec![], now);
+        checkpoint.app_run_ordinal = (scope.advances_app_run_count && ordinal == 0).then_some(0);
+        checkpoint
     }
     pub async fn prepare_run(
         &self,
@@ -524,6 +533,30 @@ impl Checkpoints {
         ordinal: u64,
         now: &Timestamp,
     ) -> Checkpoint {
+        self.capture_scope(
+            scope,
+            &CheckpointCapture {
+                scope_id: scope.id.clone(),
+                run_id: Some(run_id.clone()),
+                attempt_id: None,
+                node_id: node_id.clone(),
+                ordinal_within_scope: ordinal,
+                app_run_ordinal: Some(ordinal),
+                parent_checkpoint_id: None,
+            },
+            None,
+            now,
+        )
+        .await
+    }
+    pub async fn capture_scope(
+        &self,
+        scope: &CheckpointScope,
+        capture: &CheckpointCapture,
+        previous: Option<&Checkpoint>,
+        now: &Timestamp,
+    ) -> Checkpoint {
+        let ordinal = capture.ordinal_within_scope;
         let workspace = checkout_root(Path::new(&scope.cwd))
             .await
             .unwrap_or_else(|_| PathBuf::from(&scope.cwd));
@@ -533,18 +566,28 @@ impl Checkpoints {
         let status = Self::capture_ref(Path::new(&scope.cwd), &reference)
             .await
             .unwrap_or(CheckpointStatus::Error);
-        let before = before_reference(&scope.id, run_id);
-        let has_before = text(
-            Path::new(&scope.cwd),
-            &["rev-parse", "--verify", before.as_str()],
-            None,
-        )
-        .await
-        .is_ok();
+        let before = capture
+            .run_id
+            .as_ref()
+            .filter(|_| scope.advances_app_run_count)
+            .map(|run| before_reference(&scope.id, run));
+        let has_before = if let Some(before) = &before {
+            text(
+                Path::new(&scope.cwd),
+                &["rev-parse", "--verify", before.as_str()],
+                None,
+            )
+            .await
+            .is_ok()
+        } else {
+            false
+        };
         let mut files = vec![];
         if status == CheckpointStatus::Ready {
             let previous = if has_before {
-                before
+                before.clone().expect("root baseline")
+            } else if let Some(previous) = previous {
+                previous.reference.clone()
             } else {
                 self::reference(&scope.id, 0)
             };
@@ -577,17 +620,21 @@ impl Checkpoints {
         }
         let mut checkpoint = record(
             scope,
-            Some(run_id.clone()),
+            capture.run_id.clone(),
             ordinal,
             reference,
             status,
             files,
             now,
         );
-        checkpoint.node_id = node_id.clone();
+        checkpoint.node_id = capture.node_id.clone();
+        checkpoint.app_run_ordinal = capture.app_run_ordinal;
+        checkpoint.parent_checkpoint_id = capture.parent_checkpoint_id.clone();
         if has_before {
-            checkpoint.parent_checkpoint_id =
-                Some(orchestration::checkpoint::before_run_id(&scope.id, run_id));
+            checkpoint.parent_checkpoint_id = Some(orchestration::checkpoint::before_run_id(
+                &scope.id,
+                capture.run_id.as_ref().expect("root run"),
+            ));
         }
         checkpoint
     }
@@ -627,14 +674,14 @@ fn record(
     now: &Timestamp,
 ) -> Checkpoint {
     Checkpoint {
-        id: CheckpointId::new(format!("checkpoint:{}:{ordinal}", scope.id)).expect("derived id"),
+        id: orchestration::checkpoint::scope_ordinal_id(&scope.id, ordinal),
         thread_id: scope.thread_id.clone(),
         scope_id: scope.id.clone(),
         run_id,
         node_id: scope.node_id.clone(),
         parent_checkpoint_id: None,
         ordinal_within_scope: ordinal,
-        app_run_ordinal: Some(ordinal),
+        app_run_ordinal: scope.advances_app_run_count.then_some(ordinal),
         reference,
         status,
         files,
@@ -711,6 +758,103 @@ mod tests {
         );
         assert_eq!(std::fs::read(cwd.join(".git/index")).unwrap(), index);
         assert_eq!(text(cwd, &["rev-parse", "HEAD"], None).await.unwrap(), head);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn nested_workspace_cannot_follow_a_symlink_outside_its_parent() {
+        let parent = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), parent.path().join("nested")).unwrap();
+        assert!(
+            validate_nested_workspace(
+                parent.path().join("nested").to_str().unwrap(),
+                parent.path().to_str().unwrap()
+            )
+            .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn nested_scope_captures_restore_and_diff_without_advancing_application_runs() {
+        let dir = repo().await;
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/file"), "baseline").unwrap();
+        std::fs::write(dir.path().join("sibling"), "original sibling").unwrap();
+        let root = scope(dir.path());
+        let nested = CheckpointScope {
+            id: CheckpointScopeId::new("nested-scope").unwrap(),
+            parent_scope_id: Some(root.id),
+            run_id: None,
+            node_id: NodeId::new("tool-node").unwrap(),
+            kind: ScopeKind::Tool,
+            advances_app_run_count: false,
+            cwd: dir.path().join("nested").to_string_lossy().into(),
+            ..root
+        };
+        let owner = Checkpoints::default();
+        let payloads = owner.baseline(&nested, &nested.created_at).await;
+        let EventPayload::CheckpointCaptured(baseline) = &payloads[1] else {
+            panic!()
+        };
+        assert_eq!(baseline.app_run_ordinal, None);
+        let mut input = CheckpointCapture {
+            scope_id: nested.id.clone(),
+            run_id: None,
+            attempt_id: None,
+            node_id: nested.node_id.clone(),
+            ordinal_within_scope: 4,
+            app_run_ordinal: None,
+            parent_checkpoint_id: Some(baseline.id.clone()),
+        };
+        std::fs::write(dir.path().join("nested/file"), "first change").unwrap();
+        std::fs::write(dir.path().join("sibling"), "keep sibling").unwrap();
+        let first = owner
+            .capture_scope(&nested, &input, Some(baseline), &nested.created_at)
+            .await;
+        assert_eq!(first.status, CheckpointStatus::Ready);
+        assert_eq!(first.app_run_ordinal, None);
+        assert_eq!(first.files.len(), 1);
+        assert_eq!(first.parent_checkpoint_id.as_ref(), Some(&baseline.id));
+        input.ordinal_within_scope = 9;
+        input.parent_checkpoint_id = Some(first.id.clone());
+        std::fs::write(dir.path().join("nested/file"), "second change").unwrap();
+        let second = owner
+            .capture_scope(&nested, &input, Some(&first), &nested.created_at)
+            .await;
+        assert!(
+            owner
+                .diff(&nested.cwd, &first, &second, false)
+                .await
+                .unwrap()
+                .contains("+second change")
+        );
+        owner.restore(&nested, &first).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("nested/file")).unwrap(),
+            "first change"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sibling")).unwrap(),
+            "keep sibling"
+        );
+        owner
+            .delete_stale_refs(&nested, std::slice::from_ref(&second))
+            .await
+            .unwrap();
+        assert!(
+            text(
+                dir.path(),
+                &["rev-parse", "--verify", second.reference.as_str()],
+                None
+            )
+            .await
+            .is_err()
+        );
+        let mut other = nested.clone();
+        other.id = CheckpointScopeId::new("other-scope").unwrap();
+        let other_cp = owner
+            .capture_scope(&other, &input, None, &nested.created_at)
+            .await;
+        assert_ne!(other_cp.reference, second.reference);
     }
     #[tokio::test]
     async fn captures_worktree_and_untracked_files_without_mutating_index_or_head() {

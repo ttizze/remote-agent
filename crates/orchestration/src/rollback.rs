@@ -29,8 +29,18 @@ pub fn target<'a>(
     let thread = projection
         .provider_threads
         .iter()
-        .find(|t| Some(&t.id) == projection.thread.active_provider_thread_id.as_ref())
-        .filter(|t| t.provider_instance_id == projection.thread.provider_instance_id)
+        .find(|t| {
+            Some(&t.id)
+                == if scope.advances_app_run_count {
+                    projection.thread.active_provider_thread_id.as_ref()
+                } else {
+                    scope.provider_thread_id.as_ref()
+                }
+        })
+        .filter(|t| {
+            !scope.advances_app_run_count
+                || t.provider_instance_id == projection.thread.provider_instance_id
+        })
         .ok_or_else(|| DecisionError("active provider thread is unavailable".into()))?;
     let session = projection
         .provider_sessions
@@ -84,7 +94,66 @@ pub fn target<'a>(
     } else {
         None
     };
+    if !scope.advances_app_run_count {
+        let target_ordinal = turn.map(|t| t.ordinal);
+        if turn.is_none()
+            || projection.provider_turns.iter().any(|t| {
+                t.provider_thread_id == thread.id
+                    && target_ordinal.is_none_or(|n| t.ordinal > n)
+                    && !crate::checkpoint_scope::owns_node(
+                        &projection.nodes,
+                        &scope.node_id,
+                        &t.node_id,
+                    )
+            })
+        {
+            return Err(DecisionError(
+                "nested rollback cannot rewind unrelated provider turns".into(),
+            ));
+        }
+    }
     Ok((scope, checkpoint, thread, turn))
+}
+
+pub fn invalidated_scopes(
+    scopes: &[CheckpointScope],
+    runs: &[Run],
+    target: &Checkpoint,
+) -> std::collections::BTreeSet<CheckpointScopeId> {
+    scopes
+        .iter()
+        .filter(|scope| {
+            if scope.id == target.scope_id
+                || !crate::checkpoint_scope::contains(scopes, &target.scope_id, &scope.id)
+            {
+                return false;
+            }
+            if target.app_run_ordinal.is_some_and(|n| {
+                scope
+                    .run_id
+                    .as_ref()
+                    .is_some_and(|id| runs.iter().any(|r| &r.id == id && r.ordinal > n))
+            }) {
+                return true;
+            }
+            let mut current = *scope;
+            for _ in 0..128 {
+                if current.parent_scope_id.as_ref() == Some(&target.scope_id) {
+                    return current.ordinal_within_parent > target.ordinal_within_scope;
+                }
+                let Some(parent) = current
+                    .parent_scope_id
+                    .as_ref()
+                    .and_then(|id| scopes.iter().find(|s| &s.id == id))
+                else {
+                    return false;
+                };
+                current = parent;
+            }
+            false
+        })
+        .map(|s| s.id.clone())
+        .collect()
 }
 
 pub fn request(
@@ -133,12 +202,15 @@ pub fn request(
 }
 
 pub fn stale_checkpoints(projection: &ThreadProjection, target: &Checkpoint) -> Vec<Checkpoint> {
-    let ordinal = target.app_run_ordinal.unwrap_or(0);
+    let ordinal = target.app_run_ordinal;
+    let descendants = invalidated_scopes(&projection.checkpoint_scopes, &projection.runs, target);
     let removed: std::collections::BTreeSet<_> = projection
         .runs
         .iter()
         .filter(|r| {
-            r.ordinal > ordinal && r.status.is_terminal() && r.status != RunStatus::RolledBack
+            ordinal.is_some_and(|n| r.ordinal > n)
+                && r.status.is_terminal()
+                && r.status != RunStatus::RolledBack
         })
         .map(|r| &r.id)
         .collect();
@@ -147,10 +219,14 @@ pub fn stale_checkpoints(projection: &ThreadProjection, target: &Checkpoint) -> 
         .iter()
         .filter(|c| {
             c.id != target.id
-                && c.scope_id == target.scope_id
                 && c.status == CheckpointStatus::Ready
-                && (c.app_run_ordinal.is_some_and(|n| n > ordinal)
-                    || c.run_id.as_ref().is_some_and(|id| removed.contains(id)))
+                && (descendants.contains(&c.scope_id)
+                    || c.scope_id == target.scope_id
+                        && (ordinal.is_none()
+                            && c.ordinal_within_scope > target.ordinal_within_scope
+                            || c.app_run_ordinal
+                                .is_some_and(|n| ordinal.is_some_and(|cut| n > cut))
+                            || c.run_id.as_ref().is_some_and(|id| removed.contains(id))))
         })
         .cloned()
         .collect()
@@ -163,11 +239,12 @@ pub fn finish(
     request_id: &CommandId,
     now: &Timestamp,
 ) -> Vec<DomainEvent> {
-    let ordinal = checkpoint.app_run_ordinal.unwrap_or(0);
+    let ordinal = checkpoint.app_run_ordinal;
     let mut payloads = vec![EventPayload::ProviderThreadUpdated(provider)];
     for other in projection.provider_threads.iter().filter(|p| {
         Some(&p.id) != projection.thread.active_provider_thread_id.as_ref()
-            && p.last_run_ordinal.is_some_and(|n| n > ordinal)
+            && p.last_run_ordinal
+                .is_some_and(|n| ordinal.is_some_and(|cut| n > cut))
     }) {
         let mut other = other.clone();
         other.native_thread_ref = None;
@@ -178,7 +255,9 @@ pub fn finish(
         payloads.push(EventPayload::ProviderThreadUpdated(other));
     }
     for run in &projection.runs {
-        if run.ordinal > ordinal && run.status.is_terminal() && run.status != RunStatus::RolledBack
+        if ordinal.is_some_and(|n| run.ordinal > n)
+            && run.status.is_terminal()
+            && run.status != RunStatus::RolledBack
         {
             let mut run = run.clone();
             run.status = RunStatus::RolledBack;
@@ -198,6 +277,18 @@ pub fn finish(
                 payloads.push(EventPayload::NodeUpdated(node.clone()));
             }
         }
+    }
+    let invalidated =
+        invalidated_scopes(&projection.checkpoint_scopes, &projection.runs, checkpoint);
+    for node in projection.nodes.iter().filter(|n| {
+        n.checkpoint_scope_id
+            .as_ref()
+            .is_some_and(|id| invalidated.contains(id))
+    }) {
+        let mut node = node.clone();
+        node.status = NodeStatus::RolledBack;
+        node.completed_at = Some(now.clone());
+        payloads.push(EventPayload::NodeUpdated(node));
     }
     for mut stale in stale_checkpoints(projection, checkpoint) {
         stale.status = CheckpointStatus::Stale;
@@ -341,5 +432,125 @@ mod tests {
         );
         projection.checkpoints[0].status = CheckpointStatus::Stale;
         assert!(target(&projection, &checkpoint.scope_id, &checkpoint.id).is_err());
+    }
+}
+
+#[cfg(test)]
+mod scoped_tests {
+    use super::*;
+    use crate::test_support::*;
+    #[test]
+    fn nested_rollback_stales_only_later_scoped_checkpoints_and_keeps_app_runs() {
+        let mut p = running();
+        p.runs[0].status = RunStatus::Completed;
+        let root = checkpoint_scope(&p.runs[0]);
+        let child = CheckpointScope {
+            id: CheckpointScopeId::new("child-scope").unwrap(),
+            parent_scope_id: Some(root.id.clone()),
+            kind: ScopeKind::Tool,
+            advances_app_run_count: false,
+            ordinal_within_parent: 1,
+            ..root.clone()
+        };
+        let grandchild = CheckpointScope {
+            id: CheckpointScopeId::new("grandchild").unwrap(),
+            parent_scope_id: Some(child.id.clone()),
+            ordinal_within_parent: 4,
+            ..child.clone()
+        };
+        p.checkpoint_scopes = vec![root.clone(), child.clone(), grandchild.clone()].into();
+        let root_cp = checkpoint(&p.runs[0], CheckpointStatus::Ready);
+        let target = Checkpoint {
+            id: CheckpointId::new("nested:three").unwrap(),
+            scope_id: child.id.clone(),
+            ordinal_within_scope: 3,
+            app_run_ordinal: None,
+            ..root_cp.clone()
+        };
+        let later = Checkpoint {
+            id: CheckpointId::new("nested:five").unwrap(),
+            ordinal_within_scope: 5,
+            ..target.clone()
+        };
+        let descendant = Checkpoint {
+            id: CheckpointId::new("grandchild:zero").unwrap(),
+            scope_id: grandchild.id,
+            ordinal_within_scope: 0,
+            ..target.clone()
+        };
+        p.checkpoints = vec![
+            root_cp.clone(),
+            target.clone(),
+            later.clone(),
+            descendant.clone(),
+        ]
+        .into();
+        let stale = stale_checkpoints(&p, &target);
+        assert_eq!(stale, vec![later, descendant]);
+        let events = finish(
+            &p,
+            &target,
+            p.provider_threads[0].clone(),
+            &CommandId::new("rewind").unwrap(),
+            &now(),
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.payload, EventPayload::RunUpdated(_)))
+        );
+        for e in events {
+            p = projector::apply(Some(&p), &e, Default::default()).unwrap();
+        }
+        assert_eq!(p.runs[0].status, RunStatus::Completed);
+        assert!(
+            p.checkpoints
+                .iter()
+                .any(|c| c.id == root_cp.id && c.status == CheckpointStatus::Ready)
+        );
+        assert!(
+            p.checkpoints
+                .iter()
+                .any(|c| c.id == target.id && c.status == CheckpointStatus::Ready)
+        );
+    }
+    #[test]
+    fn root_rollback_invalidates_removed_run_descendant_scopes_even_without_app_ordinals() {
+        let mut p = running();
+        p.runs[0].status = RunStatus::Completed;
+        let root = checkpoint_scope(&p.runs[0]);
+        let target = checkpoint(&p.runs[0], CheckpointStatus::Ready);
+        let mut later = p.runs[0].clone();
+        later.id = RunId::new("later").unwrap();
+        later.ordinal = 2;
+        p.runs.push(later.clone());
+        let child = CheckpointScope {
+            id: CheckpointScopeId::new("later-child").unwrap(),
+            run_id: Some(later.id),
+            parent_scope_id: Some(root.id.clone()),
+            kind: ScopeKind::Subagent,
+            advances_app_run_count: false,
+            ..root.clone()
+        };
+        let unrelated = CheckpointScope {
+            id: CheckpointScopeId::new("unrelated").unwrap(),
+            ..root.clone()
+        };
+        p.checkpoint_scopes = vec![root, child.clone(), unrelated.clone()].into();
+        let child_cp = Checkpoint {
+            id: CheckpointId::new("child:zero").unwrap(),
+            scope_id: child.id,
+            app_run_ordinal: None,
+            run_id: None,
+            ordinal_within_scope: 0,
+            ..target.clone()
+        };
+        let keep = Checkpoint {
+            id: CheckpointId::new("other").unwrap(),
+            scope_id: unrelated.id,
+            ..child_cp.clone()
+        };
+        p.checkpoints = vec![target.clone(), child_cp.clone(), keep].into();
+        assert_eq!(stale_checkpoints(&p, &target), vec![child_cp]);
     }
 }

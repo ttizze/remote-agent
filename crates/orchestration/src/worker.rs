@@ -224,6 +224,8 @@ async fn execute_inner(
             if !events.is_empty() {
                 if let EffectBody::Rollback { request_id, .. } = &claim.effect.body {
                     store.ingest_rollback(events, request_id, &timestamp)?;
+                } else if let EffectBody::CaptureScopedCheckpoint { capture } = &claim.effect.body {
+                    store.ingest_scoped_checkpoint(events, capture, &timestamp)?;
                 } else {
                     let ingest =
                         if matches!(claim.effect.body, EffectBody::CaptureCheckpoint { .. }) {

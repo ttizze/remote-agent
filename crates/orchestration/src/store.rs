@@ -11,6 +11,8 @@ use std::{
 use tokio::sync::broadcast;
 #[path = "native_ingest.rs"]
 mod native_ingest;
+#[path = "scoped_checkpoints.rs"]
+mod scoped_checkpoints;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -657,7 +659,9 @@ impl Store {
                             && run.root_node_id.as_ref() == Some(&checkpoint.node_id)
                             && checkpoint.app_run_ordinal == Some(run.ordinal)
                             && projection.checkpoint_scopes.iter().any(|scope|
-                                scope.id == checkpoint.scope_id && scope.kind == ScopeKind::RootRun)
+                                scope.id == checkpoint.scope_id && scope.kind == ScopeKind::RootRun
+                                    && scope.run_id.as_ref() == Some(run_id)
+                                    && run.root_node_id.as_ref() == Some(&scope.node_id))
                 )) {
                     return Err(StoreError::InvalidEvent("checkpoint capture does not match its run".into()));
                 }

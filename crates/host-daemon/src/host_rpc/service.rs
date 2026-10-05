@@ -1602,6 +1602,14 @@ impl ProviderAdapter for HostResources {
             if provider.id != *provider_thread_id {
                 return Err(adapter_error("active provider changed before rollback"));
             }
+            if let Some(parent) = scope
+                .parent_scope_id
+                .as_ref()
+                .and_then(|id| projection.checkpoint_scopes.iter().find(|s| &s.id == id))
+            {
+                crate::checkpoints::validate_nested_workspace(&scope.cwd, &parent.cwd)
+                    .map_err(adapter_error)?;
+            }
             if *restore_files {
                 self.ensure_restore_isolated(&projection.thread, &scope.cwd)
                     .await
@@ -1643,14 +1651,20 @@ impl ProviderAdapter for HostResources {
                 })?;
             }
             let stale = orchestration::rollback::stale_checkpoints(&projection, checkpoint);
-            self.checkpoints
-                .delete_stale_refs(scope, &stale)
-                .await
-                .map_err(|error| AdapterError {
-                    message: error.to_string(),
-                    retryable: true,
-                    turn_completed: false,
-                })?;
+            for stale_scope in projection
+                .checkpoint_scopes
+                .iter()
+                .filter(|s| stale.iter().any(|c| c.scope_id == s.id))
+            {
+                self.checkpoints
+                    .delete_stale_refs(stale_scope, &stale)
+                    .await
+                    .map_err(|error| AdapterError {
+                        message: error.to_string(),
+                        retryable: true,
+                        turn_completed: false,
+                    })?;
+            }
             return Ok(orchestration::rollback::finish(
                 &projection,
                 checkpoint,
@@ -1771,6 +1785,56 @@ impl ProviderAdapter for HostResources {
             if compact && !projection.visible_turn_items.iter().any(|row|matches!(&row.item.body,TurnItemBody::AssistantMessage{..}) || matches!(&row.item.body,TurnItemBody::UserMessage{message_id,..} if *message_id!=run.user_message_id)) {
                 return Err(adapter_error("Start a conversation before compacting this thread."));
             }
+        }
+        if let EffectBody::CaptureScopedCheckpoint { capture } = &effect.body {
+            let scope = projection
+                .checkpoint_scopes
+                .iter()
+                .find(|s| s.id == capture.scope_id);
+            let Some(scope) = scope.filter(|s| {
+                orchestration::checkpoint_scope::capture_owned(
+                    capture,
+                    s,
+                    &projection.runs,
+                    &projection.nodes,
+                    &projection.checkpoints,
+                )
+            }) else {
+                return Ok(vec![]);
+            };
+            let parent = capture
+                .parent_checkpoint_id
+                .as_ref()
+                .and_then(|id| projection.checkpoints.iter().find(|c| &c.id == id));
+            if let Some(parent) = scope
+                .parent_scope_id
+                .as_ref()
+                .and_then(|id| projection.checkpoint_scopes.iter().find(|s| &s.id == id))
+            {
+                crate::checkpoints::validate_nested_workspace(&scope.cwd, &parent.cwd)
+                    .map_err(adapter_error)?;
+            }
+            if projection.thread.deleted_at.is_some()
+                || projection.thread.rollback_request_id.is_some()
+                || projection.checkpoints.iter().any(|c| {
+                    c.scope_id == scope.id
+                        && c.ordinal_within_scope == capture.ordinal_within_scope
+                        && c.status == CheckpointStatus::Ready
+                })
+            {
+                return Ok(vec![]);
+            }
+            let timestamp = now();
+            let checkpoint = self
+                .checkpoints
+                .capture_scope(scope, capture, parent, &timestamp)
+                .await;
+            return Ok(orchestration::events(
+                &effect.thread_id,
+                &effect.id,
+                vec![EventPayload::CheckpointCaptured(checkpoint)],
+                &timestamp,
+            ));
         }
         if let EffectBody::CaptureCheckpoint { run_id } = &effect.body {
             let run = projection
@@ -2039,9 +2103,17 @@ impl ProviderAdapter for HostResources {
                     ordinal_within_parent: 0,
                     advances_app_run_count: true,
                     cwd: cwd.to_string_lossy().into(),
-                    created_at: now(),
+                    created_at: projection
+                        .checkpoint_scopes
+                        .iter()
+                        .find(|s| s.kind == ScopeKind::RootRun)
+                        .map(|s| s.created_at.clone())
+                        .unwrap_or_else(now),
                 };
                 let timestamp = now();
+                self.orchestration
+                    .ensure_checkpoint_scope(scope.clone(), &timestamp)
+                    .map_err(adapter_error)?;
                 let before = orchestration::checkpoint::before_run_id(&scope.id, run_id);
                 if !projection
                     .checkpoints
@@ -2063,6 +2135,7 @@ impl ProviderAdapter for HostResources {
                         .checkpoints
                         .prepare_run(&scope, &run.id, run.ordinal, previous, &timestamp)
                         .await;
+                    payloads.retain(|p| !matches!(p, EventPayload::CheckpointScopeCreated(_)));
                     payloads.retain(|payload| !matches!(payload, EventPayload::CheckpointCaptured(checkpoint) if projection.checkpoints.iter().any(|existing| existing.id == checkpoint.id && existing.status == CheckpointStatus::Ready)));
                     let (receipt, completed) = tokio::sync::oneshot::channel();
                     self.provider_output

@@ -915,6 +915,18 @@ pub struct CheckpointFileSummary {
     pub additions: u64,
     pub deletions: u64,
 }
+/// A scope ordinal is independent of the application's root-run ordinal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckpointCapture {
+    pub scope_id: CheckpointScopeId,
+    pub run_id: Option<RunId>,
+    pub attempt_id: Option<RunAttemptId>,
+    pub node_id: NodeId,
+    pub ordinal_within_scope: u64,
+    pub app_run_ordinal: Option<u64>,
+    pub parent_checkpoint_id: Option<CheckpointId>,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Checkpoint {
@@ -1359,6 +1371,8 @@ pub enum EffectBody {
     },
     #[serde(rename = "checkpoint.capture")]
     CaptureCheckpoint { run_id: RunId },
+    #[serde(rename = "checkpoint.capture-scoped")]
+    CaptureScopedCheckpoint { capture: Box<CheckpointCapture> },
     #[serde(rename = "provider-turn.start")]
     Start { run_id: RunId },
     #[serde(rename = "provider-turn.interrupt")]

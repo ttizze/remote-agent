@@ -186,3 +186,9 @@ app-owned 委任に続き、Codex の collabAgentToolCall/subAgentActivity と C
 3 クライアントの写真/ファイル選択、desktop の貼付け/drop、upload 状態、再試行、削除、72px preview と保存を core の下書きへ接続した。Host は size/digest 検証済み asset のみを claim し、同じ command の再送で変更済みファイルを上書きしない。部分失敗時の新規 claim を削除し、fork から参照される asset は保持する。送信 receipt は送った添付だけを消し、その後の入力・添付を残す。rollback と queue edit は元の添付を復元する。provider の実画像入力と制限、owned path 以外の拒否を単体テストで検証する。
 
 段階検証: 共通 path/limits、Host binary grant/claim、provider image、core receipt/queue edit の回帰テスト通過。変更 crate の Clippy/all-targets/bindings、fmt、Swiftformat/Swiftlint、Android detekt 通過。provider fixture を含む全体と同一 revision の native build は M2 最終検証で再実行する。Claude の親 return 後の background stop も process-lifetime regression を追加した。
+
+## M2 再開: nested checkpoint scope
+
+固定 T3 の汎用 scope/baseline/capture/restore/diff を移植した。run がない node、appRunOrdinal がない capture、scope 内の飛び番も扱う。scope/親 node/attempt/保存先の所有権、循環、symlink の逸脱を拒否し、専用 outbox の再取得は冪等にする。root Restart の scope を再結合し、nested rollback では app run を巻き戻さず、root rollback では子 scope の古い ref も削除する。無関係な native turn を戻す nested rollback は provider 操作前に拒否する。固定 T3 が自動作成する scope は root のみなので、native subagent の勝手な snapshot と新しいモバイル UI は追加しない。
+
+関連36回帰/property/Git fixture tests 通過、変更3 crate の all-targets Clippy と fmt 通過。未完了として記録していた O13 の native subagent/委任/添付/nested scope は今回の M2 再開分で実装した。M3 は引き続き対象外。

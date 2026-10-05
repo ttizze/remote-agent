@@ -1,6 +1,10 @@
 //! Checkpoint finalization is an explicit, durable step before queue promotion.
 use crate::*;
 
+pub fn scope_ordinal_id(scope: &CheckpointScopeId, ordinal: u64) -> CheckpointId {
+    CheckpointId::new(format!("checkpoint:{scope}:{ordinal}")).expect("derived id")
+}
+
 pub fn before_run_id(scope: &CheckpointScopeId, run: &RunId) -> CheckpointId {
     CheckpointId::new(format!("checkpoint:{scope}:before:{run}")).expect("derived id")
 }
