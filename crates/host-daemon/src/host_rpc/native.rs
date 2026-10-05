@@ -131,8 +131,24 @@ pub(crate) fn message_parts(value: &Value) -> Vec<MessagePart> {
                 Some("localImage") => MessagePart::Image {
                     source: string(part, "path"),
                 },
+                Some("audio") => MessagePart::Attachment {
+                    name: "音声".into(),
+                    path: part["url"]
+                        .as_str()
+                        .or_else(|| part["audio_url"].as_str())
+                        .unwrap_or_default()
+                        .into(),
+                },
+                Some("localAudio" | "local_audio") => MessagePart::Attachment {
+                    name: "音声".into(),
+                    path: string(part, "path"),
+                },
                 Some("image") => MessagePart::Image {
-                    source: string(part, "url"),
+                    source: part["url"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| part["fileId"].as_str().map(|id| format!("codex-file:{id}")))
+                        .unwrap_or_default(),
                 },
                 Some("skill") => MessagePart::Invocation {
                     name: string(part, "name"),
@@ -234,7 +250,17 @@ pub(crate) fn codex_item(mut value: Value) -> Result<Item, serde_json::Error> {
             result: value
                 .get_mut("result")
                 .filter(|v| !v.is_null())
-                .map(Value::take),
+                .map(Value::take)
+                .or_else(|| {
+                    value["contentItems"]
+                        .as_array()
+                        .filter(|items| {
+                            items.iter().any(|item| {
+                                !matches!(item["type"].as_str(), Some("inputText" | "inputImage"))
+                            })
+                        })
+                        .map(|items| Value::Array(items.clone()))
+                }),
             error: value
                 .get_mut("error")
                 .filter(|v| !v.is_null())

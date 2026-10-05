@@ -134,6 +134,25 @@ fn reply(session: &str, count: usize, text: &str, idle_before_result: bool) {
 }
 
 fn main() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic| {
+        // Record only the failing source location, never input or credential
+        // values from an assertion. The native fixture home is test-owned.
+        if let Some(home) = std::env::var_os("CLAUDE_CONFIG_DIR")
+            && let Some(location) = panic.location()
+            && let Ok(mut file) = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(Path::new(&home).join("fixture-failures.jsonl"))
+        {
+            let _ = writeln!(
+                file,
+                "{}",
+                json!({"pid":std::process::id(),"file":location.file(),"line":location.line(),"column":location.column()})
+            );
+        }
+        default_hook(panic);
+    }));
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("auth") {
         auth(&args);

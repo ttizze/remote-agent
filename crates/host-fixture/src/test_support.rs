@@ -83,17 +83,27 @@ impl HostFixture {
                 })?;
             }
         }
+        tracing::info!(target: "bex", operation = "fixture.start.credentials");
         let credentials =
             Arc::new(HostCredentials::load(memory.clone(), directory.join("state")).await?);
+        tracing::info!(target: "bex", operation = "fixture.start.endpoint");
         let endpoint = Endpoint::bind(credentials.host_identity().await, Relays::Disabled).await?;
         let ticket = endpoint.ticket();
+        tracing::info!(target: "bex", operation = "fixture.start.codex");
         let server = CodexAppServer::spawn(config.clone())
             .await
             .map(Arc::new)
             .map_err(|error| error.to_string());
+        tracing::info!(target: "bex", operation = "fixture.start.service");
         let service = HostRpcService::new(
             server.clone(),
             ProjectStore::new(directory.join("bex-worktrees.json")),
+            Some(
+                config
+                    .codex_home
+                    .clone()
+                    .unwrap_or_else(|| directory.join("codex-native")),
+            ),
         )?;
         #[cfg(unix)]
         service
@@ -111,12 +121,14 @@ impl HostFixture {
         {
             eprintln!("Claude fixture adapter unavailable: {error:#}");
         }
+        tracing::info!(target: "bex", operation = "fixture.start.accounts");
         if accounts && server.is_ok() {
             service
                 .enable_accounts(directory.join("state/accounts"), config)
                 .await
                 .map_err(anyhow::Error::msg)?;
         }
+        tracing::info!(target: "bex", operation = "fixture.start.runtime");
         service.start();
         let runtime = Arc::new(
             HostRuntime::new(
@@ -130,6 +142,7 @@ impl HostFixture {
         );
         let stop = CancellationToken::new();
         let running = tokio::spawn(runtime.run(stop.clone()));
+        tracing::info!(target: "bex", operation = "fixture.start.ready");
         Ok(Self {
             server: server.ok(),
             credentials,

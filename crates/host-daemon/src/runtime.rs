@@ -67,8 +67,12 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         tracing::error!(target: "bex", operation = "host.codex", message = %error);
     }
     let account_directory = config.account_state_dir.as_deref().unwrap_or(&directory);
-    let service = HostRpcService::new(app_server.clone(), projects)
-        .context("cannot initialize conversation runtime")?;
+    let service = HostRpcService::new(
+        app_server.clone(),
+        projects,
+        app_server_config.codex_home.clone(),
+    )
+    .context("cannot initialize conversation runtime")?;
     #[cfg(unix)]
     service
         .enable_browser(directory.join("browser"))

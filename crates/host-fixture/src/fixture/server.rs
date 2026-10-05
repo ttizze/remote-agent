@@ -238,8 +238,9 @@ impl Context {
             .create(true)
             .append(true)
             .open(self.home.join("rpc-trace.jsonl"))?;
-        serde_json::to_writer(&mut file, &facts)?;
-        file.write_all(b"\n")?;
+        let mut record = serde_json::to_vec(&facts)?;
+        record.push(b'\n');
+        file.write_all(&record)?;
         Ok(())
     }
 }

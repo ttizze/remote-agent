@@ -103,6 +103,7 @@ impl HostRpcService {
     pub fn new(
         codex: Result<Arc<CodexAppServer>, String>,
         projects: ProjectStore,
+        codex_home: Option<std::path::PathBuf>,
     ) -> anyhow::Result<Self> {
         let conversations = Arc::new(Conversations::open(
             &projects.path().with_file_name("bex-conversations.sqlite"),
@@ -110,7 +111,7 @@ impl HostRpcService {
         let files = crate::workspace_files::WorkspaceFiles::new(
             projects.path().with_file_name("bex-attachments"),
         );
-        let adapter = Arc::new(super::codex::Codex::new(codex.clone()));
+        let adapter = Arc::new(super::codex::Codex::new(codex.clone(), codex_home));
         let agents = HashMap::from([(ProviderKind::Codex, adapter.clone() as Arc<dyn Agent>)]);
         Ok(Self {
             inner: Arc::new(ServiceInner {
@@ -811,6 +812,7 @@ impl HostRpcService {
             .conversations
             .previous_command(input)
             .map_err(|error| Failure::new("invalid_input", error))?
+            && delivery != SubmissionDelivery::Sending
         {
             return replay_submission(delivery);
         }
@@ -827,6 +829,17 @@ impl HostRpcService {
         let _workspace = self.inner.worktree_access.read().await;
         let serial = self.inner.router.submission_lock(target);
         let mut _serial_guard = serial.clone().lock_owned().await;
+        // A concurrent sender can observe the durable Sending receipt before
+        // native IO completes. Wait for its session owner, then replay the
+        // settled receipt instead of reporting its in-flight result as Unknown.
+        if let Some(delivery) = self
+            .inner
+            .conversations
+            .previous_command(input)
+            .map_err(|error| Failure::new("invalid_input", error))?
+        {
+            return replay_submission(delivery);
+        }
         let held = self
             .inner
             .conversations
@@ -2383,6 +2396,7 @@ mod tests {
         let service = HostRpcService::new(
             Err("unavailable".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
+            Some(root.path().join("codex-native")),
         )
         .unwrap();
         let configure = || {
@@ -2436,6 +2450,7 @@ mod tests {
         let service = HostRpcService::new(
             Err("not used".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
+            Some(root.path().join("codex-native")),
         )
         .unwrap();
         service
@@ -2558,6 +2573,7 @@ mod tests {
             let service = HostRpcService::new(
                 Err("unavailable".into()),
                 ProjectStore::new(root.path().join("worktrees.json")),
+                Some(root.path().join("codex-native")),
             )
             .unwrap();
             let connection = service.open_session();
@@ -2685,6 +2701,7 @@ mod tests {
         let service = HostRpcService::new(
             Err("not available".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
+            Some(root.path().join("codex-native")),
         )
         .unwrap();
         service
@@ -2749,6 +2766,7 @@ mod tests {
         let service = HostRpcService::new(
             Err("not available".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
+            Some(root.path().join("codex-native")),
         )
         .unwrap();
         service
@@ -2807,6 +2825,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_duplicate_waits_for_the_owner_and_replays_its_settled_receipt() {
+        use super::*;
+        use agent_protocol::session::{SessionRef, SubmissionDelivery};
+        use futures_util::FutureExt;
+        let root = tempfile::tempdir().unwrap();
+        let service = HostRpcService::new(
+            Err("unavailable".into()),
+            ProjectStore::new(root.path().join("worktrees.json")),
+            Some(root.path().join("codex-native")),
+        )
+        .unwrap();
+        let target = service
+            .inner
+            .conversations
+            .bind(
+                &SessionRef {
+                    provider: ProviderKind::Codex,
+                    id: "source".into(),
+                },
+                &service.storage_scope(ProviderKind::Codex).unwrap(),
+            )
+            .unwrap();
+        let input = op::Submission {
+            thread_id: target.clone(),
+            client_user_message_id: "concurrent".into(),
+            input: vec![op::Input::Text {
+                text: "send once".into(),
+            }],
+            model: None,
+            effort: None,
+            service_tier: None,
+        };
+        let owner = service
+            .inner
+            .router
+            .submission_lock(&target)
+            .lock_owned()
+            .await;
+        service
+            .inner
+            .conversations
+            .admit(&input, SubmissionDelivery::Sending)
+            .unwrap();
+        let mut duplicate = Box::pin(service.execute_submission(&input, false));
+        assert!(duplicate.as_mut().now_or_never().is_none());
+        service
+            .inner
+            .router
+            .finish_submission(
+                &target,
+                "concurrent",
+                SubmissionDelivery::Accepted {
+                    turn_id: Some("native-turn".into()),
+                },
+            )
+            .unwrap();
+        drop(owner);
+        let replay = tokio::time::timeout(std::time::Duration::from_secs(1), duplicate)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.turn_id.as_deref(), Some("native-turn"));
+        assert_eq!(
+            service.execute_submission(&input, false).await.unwrap(),
+            replay
+        );
+    }
+
+    #[tokio::test]
     async fn held_queue_admits_once_without_a_provider_process() {
         use super::*;
         use agent_protocol::{
@@ -2817,6 +2904,7 @@ mod tests {
         let service = HostRpcService::new(
             Err("not available".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
+            Some(root.path().join("codex-native")),
         )
         .unwrap();
         let target = service
@@ -2889,6 +2977,7 @@ mod tests {
         let service = HostRpcService::new(
             Err("unavailable".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
+            Some(root.path().join("codex-native")),
         )
         .unwrap();
         let target = service
@@ -2929,6 +3018,7 @@ mod tests {
         let service = HostRpcService::new(
             Err("not used".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
+            Some(root.path().join("codex-native")),
         )
         .unwrap();
         service
@@ -3002,9 +3092,11 @@ mod tests {
     async fn stored_lists_do_not_wait_for_a_catalog_scan_and_expose_its_progress() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("codex-native"), "not a storage directory").unwrap();
         let service = HostRpcService::new(
             Err("unavailable".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
+            Some(root.path().join("codex-native")),
         )
         .unwrap();
         let source = agent_protocol::session::SessionRef {
@@ -3046,6 +3138,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_import_reads_codex_without_app_server_and_keeps_the_host_history_authoritative()
+    {
+        use super::*;
+        use serde_json::json;
+        let root = tempfile::tempdir().unwrap();
+        let native = root.path().join("codex-native");
+        let sessions = native.join("sessions/2026/10/05");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let native_id = "12345678-1234-4234-8234-123456789abc";
+        let source = sessions.join(format!("rollout-2026-10-05T00-00-00-{native_id}.jsonl"));
+        let bytes = [
+            json!({"type":"session_meta","payload":{"id":native_id,"cwd":"/fixture/project","history_mode":"legacy"}}),
+            json!({"type":"turn_context","payload":{"model":"fixture-codex"}}),
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"native-turn"}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"Saved Codex input"}}),
+            json!({"type":"event_msg","payload":{"type":"agent_message","message":"Saved Codex answer","phase":"final_answer"}}),
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"native-turn"}}),
+        ].into_iter().map(|record| format!("{record}\n")).collect::<String>();
+        std::fs::write(&source, &bytes).unwrap();
+        let service = HostRpcService::new(
+            Err("missing app-server".into()),
+            ProjectStore::new(root.path().join("bex-worktrees.json")),
+            Some(native),
+        )
+        .unwrap();
+        let target = service
+            .inner
+            .conversations
+            .bind(
+                &agent_protocol::session::SessionRef {
+                    provider: ProviderKind::Codex,
+                    id: native_id.into(),
+                },
+                &service.storage_scope(ProviderKind::Codex).unwrap(),
+            )
+            .unwrap();
+        let serial = service
+            .inner
+            .router
+            .submission_lock(&target)
+            .lock_owned()
+            .await;
+        service.initial_import();
+        drop(service.inner.catalog_import.lock().await);
+        assert!(service.inner.catalog_errors.read().unwrap().is_empty());
+        let titles = service.host_title_list(Default::default()).await.unwrap();
+        assert_eq!(titles.data.len(), 1);
+        assert_eq!(titles.data[0].name.as_deref(), Some("Saved Codex input"));
+        let session = service.open_session();
+        let call = Call::OpenSession(agent_protocol::session::OpenSession {
+            include_activity: true,
+            session: target.clone(),
+            limit: 5,
+        });
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.dispatch(session.id(), &call),
+        )
+        .await
+        .expect("metadata opens without waiting for source IO")
+        .unwrap();
+        let reply = agent_protocol::protocol::decode::<
+            Response<agent_protocol::session::OpenedSession>,
+        >(&response.initial)
+        .unwrap()
+        .into_value();
+        assert_eq!(
+            reply["result"]["response"]["thread"]["historyReadState"]["type"],
+            "importing"
+        );
+        drop(serial);
+        service
+            .import_conversation(&target, usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), bytes);
+        std::fs::remove_file(source).unwrap();
+        let response = service.dispatch(session.id(), &call).await.unwrap();
+        let reply = agent_protocol::protocol::decode::<
+            Response<agent_protocol::session::OpenedSession>,
+        >(&response.initial)
+        .unwrap()
+        .into_value();
+        assert!(reply.get("error").is_none(), "{reply}");
+        assert_eq!(reply["result"]["response"]["model"]["id"], "fixture-codex");
+        assert_eq!(
+            reply["result"]["response"]["thread"]["turns"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(reply.to_string().contains("Saved Codex answer"));
+        assert!(service.provider_errors().get("codex").is_some());
+    }
+
+    #[tokio::test]
     async fn first_import_preserves_claude_history_without_starting_a_cli() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
@@ -3061,6 +3250,7 @@ mod tests {
         let service = HostRpcService::new(
             Err("unavailable".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
+            Some(root.path().join("codex-native")),
         )
         .unwrap();
         service
@@ -3090,14 +3280,7 @@ mod tests {
             .await;
         service.initial_import();
         drop(service.inner.catalog_import.lock().await);
-        assert!(
-            service
-                .inner
-                .catalog_errors
-                .read()
-                .unwrap()
-                .contains_key(&ProviderKind::Codex)
-        );
+        assert!(service.inner.catalog_errors.read().unwrap().is_empty());
         let session = service.open_session();
         let call =
             agent_protocol::protocol::Call::OpenSession(agent_protocol::session::OpenSession {

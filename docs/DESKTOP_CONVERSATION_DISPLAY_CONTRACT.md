@@ -6,6 +6,11 @@ that bundle on 2026-08-25. The turn lifecycle and selection contracts below
 record Bex's current product requirements, updated on 2026-09-11; the original
 reference app's behavior does not override them. It is not a second wire protocol.
 
+Codex execution follows T3 Code's `codex app-server` child process and structured
+stdio RPC boundary. Conversation control, approvals, authentication and model
+operations use that boundary. Direct rollout reads are restricted to initial
+history import when app-server is unavailable; they do not execute conversations.
+
 Claude Code conversations use the same lifecycle, activity, draft and error
 contracts through the Host adapter. Streamed and completed blocks replace by
 stable block ID, so thinking cannot overwrite text and final text is not
@@ -89,6 +94,12 @@ hydration must not change this default.
   an import that is still progressing; explicit import retries failed histories.
   Keep provider source data. These ownership changes follow
   the October 5, 2026 native rewrite requirement in `T3_NATIVE_REWRITE_PLAN.md`.
+- If Codex app-server cannot start, import its native rollout storage read-only.
+  Honor the current index's immutable rollout after revert, compressed files,
+  inherited byte/ordinal boundaries and the subagent cutoff. Bound decompressed
+  reads and reject malformed or ambiguous sources explicitly. A bad conversation
+  must leave healthy catalog rows available. No import may repair or overwrite
+  native data. After import, source removal must not remove Host history.
 - Return stored titles immediately while the initial catalog is being scanned.
   Publish each committed page and expose import progress independently of list
   pagination. A blocked source must not block another provider's discovery.

@@ -3,6 +3,7 @@
 
 pub(crate) mod agent;
 mod codex;
+mod codex_history;
 mod composer;
 mod conversations;
 pub(crate) mod native;

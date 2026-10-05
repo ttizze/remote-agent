@@ -17,3 +17,10 @@ License is in `DMSans-OFL.txt`.
 | `dm_sans_bold.ttf` | `3764a2ce62fa95596c3315c1a0ca379e7cf827ed397c97fc036925b9b20b74dc` |
 
 The Apple bundles and Android assets include this directory.
+
+The read-only Codex history projection is adapted from
+[OpenAI Codex](https://github.com/openai/codex/tree/7f892275e31002f0422477c6219189284560e689)
+at commit `7f892275e31002f0422477c6219189284560e689`, specifically the persisted
+protocol, thread history builder and paginated history projection. Copyright
+OpenAI. Its Apache 2.0 license is in `Codex-LICENSE`. Bex owns the bounded source
+reads; it does not use Codex's rollout writer or database repair runtime.

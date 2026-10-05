@@ -506,11 +506,21 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
         chat_limit: 200,
         ..Default::default()
     });
-    local
-        .peer
-        .request::<Empty>(&Call::ImportHistory(Empty {}))
-        .await
-        .unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let list = local
+                .peer
+                .call(&op::ListSessions::new(Default::default()))
+                .await
+                .unwrap();
+            if !list.importing {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("automatic catalog import exceeded its deadline");
     let listing = local.peer.call(&query).await.unwrap();
     assert_eq!(listing.data.len(), 102);
     assert!(listing.provider_errors.is_none());

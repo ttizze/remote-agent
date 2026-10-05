@@ -850,7 +850,11 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                         store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Claude, id: "default".into() } }).await.unwrap();
                     }
                     let id = send(&store, &format!("independent {index}"), &format!("independent-{index}")).await;
-                    let snapshot = completed(&store, &id, index + 1, "completed").await;
+                    let snapshot = until(&store, |snapshot| snapshot.conversations.get(&id)
+                        .and_then(|thread| thread.turns.as_ref())
+                        .is_some_and(|turns| turns.len()==index+1 && turns.last().unwrap().status!=agent_protocol::execution::TurnStatus::Running)).await;
+                    assert_eq!(snapshot.conversations[&id].turns.as_ref().unwrap().last().unwrap().status,agent_protocol::execution::TurnStatus::Completed,
+                        "automatic={automatic}, selected={selected}, index={index}, fixture failures={}",std::fs::read_to_string(root.join("claude-native/fixture-failures.jsonl")).unwrap_or_default());
                     assert!(snapshot.error.is_none(), "{:?}", snapshot.error);
                     assert!(snapshot.drafts[&agent_core::state::DraftKey::from(&id)].text.is_empty() && snapshot.pending_submissions.is_empty());
                     let current = snapshot.conversations[&id].cwd.clone().unwrap();
@@ -1946,7 +1950,7 @@ async fn claude_host_queue_preserves_edits_order_and_hold_across_restart() {
             .items
             .iter()
             .flatten()
-            .any(|item| item_text(item) == Some("reply 2: edited follow-up"))
+            .any(|item| item_text(item) == Some("reply 3: edited follow-up"))
     );
     assert!(finished.conversations[&id].queued_inputs.is_empty());
     assert!(finished.pending_submissions.is_empty());

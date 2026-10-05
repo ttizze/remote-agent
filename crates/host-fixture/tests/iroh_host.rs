@@ -1898,6 +1898,7 @@ async fn title_lists_are_recent_scoped_small_and_expand_without_loading_bodies()
         assert_eq!(found["data"].as_array().unwrap().len(), 5);
         assert_eq!(found["data"][0]["name"], "Project 01 conversation 18");
         let target = imported_codex_session(&mobile.peer, "Project 05 conversation 01").await;
+        wait_for_import(&mobile.peer, &target).await;
         let body = open_session(&mobile.peer, &json!(target), 5).await.0["response"].clone();
         assert_eq!(body["thread"]["projectId"], json!({"Assigned":"project-5"}));
         assert_eq!(body_json(&body["thread"]["turns"][0]["items"][0])["assistantText"]["text"], "History for Project 05 conversation 01");
@@ -1929,7 +1930,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         let project_state = root.join("bex-projects.json");
         std::fs::write(&project_state, serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":workspace}]}])).unwrap()).unwrap();
         let server = Arc::new(CodexAppServer::spawn(codex_fixture::config(&root)).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json"))).unwrap();
+        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")),Some(root.join("codex-native"))).unwrap();
         let mut session = service.open_session();
         async fn request(service: &HostRpcService, session: &mut host_daemon::HostSession, method: &str, params: Value) -> Value {
             let reply = service.dispatch(session.id(), &agent_protocol::protocol::json_boundary::call(method, params).unwrap()).await.unwrap();
@@ -1970,7 +1971,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
                 assert_eq!(global["thread"]["projectId"], json!({"Unassigned":{}}));
                 chat_ids.push(global["thread"]["id"].clone());
         }
-        let restarted = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json"))).unwrap();
+        let restarted = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")),Some(root.join("codex-native"))).unwrap();
         let mut restarted_session = restarted.open_session();
         assert_eq!(request(&restarted, &mut restarted_session, "host/worktree/settings/read", json!({})).await, settings);
         for id in &chat_ids {
@@ -2382,6 +2383,7 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
         let service = HostRpcService::new(
             Ok(server.clone()),
             ProjectStore::new(root.join("bex-worktrees.json")),
+            None,
         )
         .unwrap();
         let runtime = Arc::new(

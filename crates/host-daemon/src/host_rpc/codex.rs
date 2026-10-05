@@ -69,13 +69,15 @@ pub(super) struct Codex {
     process: Result<Arc<CodexAppServer>, String>,
     stopped: tokio_util::sync::CancellationToken,
     processed: tokio::sync::watch::Sender<u64>,
+    history_catalog: tokio::sync::Mutex<Option<Arc<super::codex_history::Catalog>>>,
 }
 impl Codex {
-    pub(super) fn new(process: Result<Arc<CodexAppServer>, String>) -> Self {
+    pub(super) fn new(process: Result<Arc<CodexAppServer>, String>, home: Option<PathBuf>) -> Self {
         let directory = process
             .as_ref()
             .ok()
             .map(|server| server.initialize_response().codex_home.clone())
+            .or(home)
             .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
             .unwrap_or_else(|| {
                 directories::BaseDirs::new()
@@ -90,6 +92,7 @@ impl Codex {
             process,
             stopped: Default::default(),
             processed: tokio::sync::watch::channel(0).0,
+            history_catalog: Default::default(),
         }
     }
     pub(super) async fn enable_accounts(
@@ -120,6 +123,33 @@ impl Codex {
         self.process
             .as_deref()
             .map_err(|error| Failure::new("provider_unavailable", error))
+    }
+
+    async fn history_catalog(
+        &self,
+        refresh: bool,
+    ) -> Result<Arc<super::codex_history::Catalog>, Failure> {
+        let mut catalog = self.history_catalog.lock().await;
+        if refresh || catalog.is_none() {
+            let directory = self.directory.clone();
+            let scanned = tokio::task::spawn_blocking(move || {
+                super::codex_history::Catalog::scan(&directory)
+            })
+            .await
+            .map_err(|_| Failure::new("history_import_failed", "Codex history reader stopped"))?
+            .map_err(|error| Failure::new("history_import_failed", error))?;
+            *catalog = Some(Arc::new(scanned));
+        }
+        Ok(catalog.as_ref().unwrap().clone())
+    }
+
+    async fn file_history(&self, id: &str) -> Result<ThreadResponse, Failure> {
+        let catalog = self.history_catalog(false).await?;
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || catalog.read(&id))
+            .await
+            .map_err(|_| Failure::new("history_import_failed", "Codex history reader stopped"))?
+            .map_err(|error| Failure::new("history_import_failed", error))
     }
 
     // Also used by the Codex catalog and permission adapter implementations.
@@ -586,6 +616,17 @@ impl Agent for Codex {
         &self.directory
     }
     async fn list(&self, search: &str, cursor: Option<String>) -> Result<SessionPage, Failure> {
+        if cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.starts_with("codex-file:"))
+            || (cursor.is_none() && self.server().is_err())
+        {
+            return self
+                .history_catalog(cursor.is_none())
+                .await?
+                .page(search, cursor.as_deref())
+                .map_err(|error| Failure::new("history_import_failed", error));
+        }
         let value: Value = self
             .request(
                 "thread/list",
@@ -620,6 +661,9 @@ impl Agent for Codex {
         _limit: usize,
         include_activity: bool,
     ) -> Result<ThreadResponse, Failure> {
+        if self.server().is_err() {
+            return self.file_history(id).await;
+        }
         let params = serde_json::json!({"threadId":id,"includeTurns":false});
         let (mut response, page) = tokio::try_join!(
             self.thread_response("thread/read", &params),
