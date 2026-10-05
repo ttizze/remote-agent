@@ -1392,16 +1392,29 @@
                   "instanceId": "codex"
                 },
                 "displayName": "Model a",
-                "defaultReasoningEffort": "medium",
-                "supportedReasoningEfforts": [
-                  {
-                    "reasoningEffort": "medium"
-                  },
-                  {
-                    "reasoningEffort": "high"
-                  }
-                ],
-                "futureField": true
+                "futureField": true,
+                "capabilities": {
+                  "optionDescriptors": [
+                    {
+                      "id": "reasoningEffort",
+                      "label": "Reasoning",
+                      "type": "select",
+                      "options": [
+                        {
+                          "id": "medium",
+                          "label": "medium",
+                          "isDefault": true
+                        },
+                        {
+                          "id": "high",
+                          "label": "high",
+                          "isDefault": false
+                        }
+                      ],
+                      "currentValue": "medium"
+                    }
+                  ]
+                }
               }
             ],
             "nextCursor": "page-2"
@@ -1424,16 +1437,29 @@
                   "instanceId": "codex"
                 },
                 "displayName": "Model b",
-                "defaultReasoningEffort": "medium",
-                "supportedReasoningEfforts": [
-                  {
-                    "reasoningEffort": "medium"
-                  },
-                  {
-                    "reasoningEffort": "high"
-                  }
-                ],
-                "futureField": true
+                "futureField": true,
+                "capabilities": {
+                  "optionDescriptors": [
+                    {
+                      "id": "reasoningEffort",
+                      "label": "Reasoning",
+                      "type": "select",
+                      "options": [
+                        {
+                          "id": "medium",
+                          "label": "medium",
+                          "isDefault": true
+                        },
+                        {
+                          "id": "high",
+                          "label": "high",
+                          "isDefault": false
+                        }
+                      ],
+                      "currentValue": "medium"
+                    }
+                  ]
+                }
               },
               {
                 "id": "a",
@@ -1442,16 +1468,29 @@
                   "instanceId": "codex"
                 },
                 "displayName": "Updated A",
-                "defaultReasoningEffort": "medium",
-                "supportedReasoningEfforts": [
-                  {
-                    "reasoningEffort": "medium"
-                  },
-                  {
-                    "reasoningEffort": "high"
-                  }
-                ],
-                "futureField": true
+                "futureField": true,
+                "capabilities": {
+                  "optionDescriptors": [
+                    {
+                      "id": "reasoningEffort",
+                      "label": "Reasoning",
+                      "type": "select",
+                      "options": [
+                        {
+                          "id": "medium",
+                          "label": "medium",
+                          "isDefault": true
+                        },
+                        {
+                          "id": "high",
+                          "label": "high",
+                          "isDefault": false
+                        }
+                      ],
+                      "currentValue": "medium"
+                    }
+                  ]
+                }
               }
             ]
           }
@@ -1466,16 +1505,29 @@
           "instanceId": "codex"
         },
         "displayName": "Updated A",
-        "defaultReasoningEffort": "medium",
-        "supportedReasoningEfforts": [
-          {
-            "reasoningEffort": "medium"
-          },
-          {
-            "reasoningEffort": "high"
-          }
-        ],
-        "futureField": true
+        "futureField": true,
+        "capabilities": {
+          "optionDescriptors": [
+            {
+              "id": "reasoningEffort",
+              "label": "Reasoning",
+              "type": "select",
+              "options": [
+                {
+                  "id": "medium",
+                  "label": "medium",
+                  "isDefault": true
+                },
+                {
+                  "id": "high",
+                  "label": "high",
+                  "isDefault": false
+                }
+              ],
+              "currentValue": "medium"
+            }
+          ]
+        }
       },
       {
         "id": "b",
@@ -1484,16 +1536,29 @@
           "instanceId": "codex"
         },
         "displayName": "Model b",
-        "defaultReasoningEffort": "medium",
-        "supportedReasoningEfforts": [
-          {
-            "reasoningEffort": "medium"
-          },
-          {
-            "reasoningEffort": "high"
-          }
-        ],
-        "futureField": true
+        "futureField": true,
+        "capabilities": {
+          "optionDescriptors": [
+            {
+              "id": "reasoningEffort",
+              "label": "Reasoning",
+              "type": "select",
+              "options": [
+                {
+                  "id": "medium",
+                  "label": "medium",
+                  "isDefault": true
+                },
+                {
+                  "id": "high",
+                  "label": "high",
+                  "isDefault": false
+                }
+              ],
+              "currentValue": "medium"
+            }
+          ]
+        }
       }
     ]
   },
@@ -1518,16 +1583,29 @@
                   "instanceId": "codex"
                 },
                 "displayName": "Model a",
-                "defaultReasoningEffort": "medium",
-                "supportedReasoningEfforts": [
-                  {
-                    "reasoningEffort": "medium"
-                  },
-                  {
-                    "reasoningEffort": "high"
-                  }
-                ],
-                "futureField": true
+                "futureField": true,
+                "capabilities": {
+                  "optionDescriptors": [
+                    {
+                      "id": "reasoningEffort",
+                      "label": "Reasoning",
+                      "type": "select",
+                      "options": [
+                        {
+                          "id": "medium",
+                          "label": "medium",
+                          "isDefault": true
+                        },
+                        {
+                          "id": "high",
+                          "label": "high",
+                          "isDefault": false
+                        }
+                      ],
+                      "currentValue": "medium"
+                    }
+                  ]
+                }
               }
             ],
             "nextCursor": "loop"
@@ -1550,16 +1628,29 @@
                   "instanceId": "codex"
                 },
                 "displayName": "Model a",
-                "defaultReasoningEffort": "medium",
-                "supportedReasoningEfforts": [
-                  {
-                    "reasoningEffort": "medium"
-                  },
-                  {
-                    "reasoningEffort": "high"
-                  }
-                ],
-                "futureField": true
+                "futureField": true,
+                "capabilities": {
+                  "optionDescriptors": [
+                    {
+                      "id": "reasoningEffort",
+                      "label": "Reasoning",
+                      "type": "select",
+                      "options": [
+                        {
+                          "id": "medium",
+                          "label": "medium",
+                          "isDefault": true
+                        },
+                        {
+                          "id": "high",
+                          "label": "high",
+                          "isDefault": false
+                        }
+                      ],
+                      "currentValue": "medium"
+                    }
+                  ]
+                }
               }
             ],
             "nextCursor": "loop"

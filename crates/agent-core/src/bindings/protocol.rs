@@ -93,20 +93,38 @@ struct Model {
     pub id: String,
     pub model: ModelRef,
     pub display_name: String,
-    pub default_reasoning_effort: String,
-    pub supported_reasoning_efforts: Vec<ReasoningEffort>,
-    pub service_tiers: Option<Vec<ServiceTier>>,
-    pub default_service_tier: Option<String>,
+    pub capabilities: ModelCapabilities,
+    pub is_custom: bool,
     pub is_default: Option<bool>,
 }
 #[uniffi::remote(Record)]
-struct ServiceTier {
+struct ModelOptionChoice {
     pub id: String,
-    pub name: Option<String>,
+    pub label: String,
+    pub description: Option<String>,
+    pub is_default: bool,
+}
+#[uniffi::remote(Enum)]
+enum ModelOptionKind {
+    Select {
+        options: Vec<ModelOptionChoice>,
+        current_value: Option<String>,
+        prompt_injected_values: Vec<String>,
+    },
+    Boolean {
+        current_value: Option<bool>,
+    },
 }
 #[uniffi::remote(Record)]
-struct ReasoningEffort {
-    pub reasoning_effort: String,
+struct ModelOptionDescriptor {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub kind: ModelOptionKind,
+}
+#[uniffi::remote(Record)]
+struct ModelCapabilities {
+    pub option_descriptors: Vec<ModelOptionDescriptor>,
 }
 #[uniffi::remote(Record)]
 struct ListQuery {

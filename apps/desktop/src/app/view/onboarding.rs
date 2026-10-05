@@ -296,8 +296,8 @@ mod tests {
                 snapshot.connected = true;
                 snapshot.provider_instances = crate::app::fixture_instances();
                 snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
-                    {"id":"gpt","model":{"instanceId":"codex","id":"gpt"},"displayName":"GPT","defaultReasoningEffort":"","supportedReasoningEfforts":[]},
-                    {"id":"sonnet","model":{"instanceId":"claude","id":"sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+                    {"id":"gpt", "model":{"instanceId":"codex","id":"gpt"}, "displayName":"GPT", "capabilities":{"optionDescriptors":[]}},
+                    {"id":"sonnet", "model":{"instanceId":"claude","id":"sonnet"}, "displayName":"Sonnet", "capabilities":{"optionDescriptors":[]}}
                 ])).unwrap());
                 Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(serde_json::json!({"accounts":[],"selected":{}})).unwrap()));
             });

@@ -100,6 +100,7 @@ internal fun ThreadComposer(
                 ComposerInput(draft.text, { alternate -> if (controls.sendEnabled) send(false, alternate) }) {
                     perform(Intent.EditComposer(draftKey, it, it.toByteArray(Charsets.UTF_8).size.toUInt())) {}
                 }
+                ConversationModelPicker(snapshot, snapshot.connected() && !sending, perform)
                 ComposerActions(
                     controls,
                     { alternate -> send(false, alternate) },

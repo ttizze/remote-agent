@@ -1024,37 +1024,15 @@ pub(crate) fn supported_settings<'a>(
     };
     let changed = selected_model.is_some() && selected_model != Some(&model.model);
     let effort = model
-        .supported_reasoning_efforts
-        .iter()
-        .find(|effort| !changed && Some(effort.reasoning_effort.as_str()) == selected_effort)
-        .or_else(|| {
-            model
-                .supported_reasoning_efforts
-                .iter()
-                .find(|effort| effort.reasoning_effort == model.default_reasoning_effort)
-        })
-        .or_else(|| model.supported_reasoning_efforts.first());
-    let supported_tier = |id: &str| {
-        id == "default"
-            || model
-                .service_tiers
-                .as_ref()
-                .is_some_and(|tiers| tiers.iter().any(|tier| tier.id == id))
-    };
-    let tier = selected_tier
-        .filter(|tier| !changed && supported_tier(tier))
-        .or_else(|| {
-            model
-                .default_service_tier
-                .as_deref()
-                .filter(|tier| supported_tier(tier))
-        })
+        .capabilities
+        .select(&["reasoningEffort", "effort"])
+        .and_then(|descriptor| descriptor.selected(selected_effort.filter(|_| !changed)));
+    let tier = model
+        .capabilities
+        .select(&["serviceTier"])
+        .and_then(|descriptor| descriptor.selected(selected_tier.filter(|_| !changed)))
         .unwrap_or("default");
-    (
-        Some(&model.model),
-        effort.map(|effort| effort.reasoning_effort.as_str()),
-        Some(tier),
-    )
+    (Some(&model.model), effort, Some(tier))
 }
 
 fn shared_mut<'a, K: Ord + Clone + std::borrow::Borrow<Q>, Q: Ord + ?Sized, T: Clone>(

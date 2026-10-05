@@ -865,16 +865,8 @@ impl Agent for Codex {
         .await
     }
     async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
-        let mut native: Value = self.request("model/list", params).await?;
-        let data = native["data"]
-            .as_array_mut()
-            .ok_or_else(|| Failure::new("invalid_models", "native model catalog is missing"))?;
-        for model in data {
-            let id = model["model"].take();
-            model["model"] = serde_json::json!({"instanceId":self.reference.instance_id,"id":id});
-        }
-        native["instances"] = serde_json::json!([]);
-        serde_json::from_value(native).map_err(Into::into)
+        let native = self.request("model/list", params).await?;
+        super::model_catalog::codex_page(native, &self.reference.instance_id)
     }
     async fn catalog(&self, cwd: &str) -> agent_protocol::composer::ComposerCatalog {
         self.composer_catalog(cwd).await

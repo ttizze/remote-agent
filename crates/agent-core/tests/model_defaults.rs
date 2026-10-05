@@ -16,14 +16,8 @@ use std::sync::Arc;
 
 fn catalog() -> Vec<Model> {
     serde_json::from_value(json!([
-        {"id":"gpt","model":{"instanceId":"codex","id":"shared"},"displayName":"GPT",
-         "isDefault":true,"defaultReasoningEffort":"medium",
-         "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
-         "serviceTiers":[{"id":"priority"}]},
-        {"id":"claude","model":{"instanceId":"claude","id":"shared"},"displayName":"Claude",
-         "isDefault":true,"defaultReasoningEffort":"medium",
-         "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
-         "serviceTiers":[{"id":"fast"}]}
+        {"id":"gpt", "model":{"instanceId":"codex","id":"shared"}, "displayName":"GPT", "isDefault":true, "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"medium","label":"medium","isDefault":true},{"id":"high","label":"high","isDefault":false}],"currentValue":"medium"},{"id":"serviceTier","label":"Service Tier","type":"select","options":[{"id":"default","label":"Standard","isDefault":true},{"id":"priority","label":"priority","isDefault":false}],"currentValue":"default"}]}},
+        {"id":"claude", "model":{"instanceId":"claude","id":"shared"}, "displayName":"Claude", "isDefault":true, "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"medium","label":"medium","isDefault":true},{"id":"high","label":"high","isDefault":false}],"currentValue":"medium"},{"id":"serviceTier","label":"Service Tier","type":"select","options":[{"id":"default","label":"Standard","isDefault":true},{"id":"fast","label":"fast","isDefault":false}],"currentValue":"default"}]}}
     ]))
     .unwrap()
 }

@@ -206,7 +206,14 @@ async fn model_refresh_observes_catalog_changes_without_restarting_host() {
                 id: "new-model".into()
             }
         );
-        assert_eq!(claude[1].default_reasoning_effort, "high");
+        assert_eq!(
+            claude[1]
+                .capabilities
+                .select(&["effort"])
+                .unwrap()
+                .selected(None),
+            Some("high")
+        );
         assert!(snapshot.model_errors.is_empty());
         store.close().await.unwrap();
         endpoint.close().await;

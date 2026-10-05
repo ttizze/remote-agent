@@ -376,8 +376,8 @@ mod account_model_tests {
             "accounts":[{"id":"a","instanceId":"codex"},{"id":"b","instanceId":"codex"},{"id":"claude:c","instanceId":"claude"}],
             "selected":{"codex":"a","claude":"claude:c"}
         })).unwrap()));
-        let codex: Model = serde_json::from_value(json!({"id":"gpt","model":{"instanceId": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"fast"}]})).unwrap();
-        let claude: Model = serde_json::from_value(json!({"id":"claude:sonnet","model":{"instanceId": "claude", "id": "sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]})).unwrap();
+        let codex: Model = serde_json::from_value(json!({"id":"gpt", "model":{"instanceId": "codex", "id": "gpt"}, "displayName":"GPT", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"medium","label":"medium","isDefault":true},{"id":"high","label":"high","isDefault":false}],"currentValue":"medium"},{"id":"serviceTier","label":"Service Tier","type":"select","options":[{"id":"default","label":"Standard","isDefault":true},{"id":"fast","label":"fast","isDefault":false}],"currentValue":"default"}]}})).unwrap();
+        let claude: Model = serde_json::from_value(json!({"id":"claude:sonnet", "model":{"instanceId": "claude", "id": "sonnet"}, "displayName":"Sonnet", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"high","label":"high","isDefault":true}],"currentValue":"high"}]}})).unwrap();
         snapshot.models = Arc::new(vec![codex.clone(), claude.clone()]);
         Arc::make_mut(&mut snapshot.drafts).insert(
             "draft".into(),
@@ -506,8 +506,15 @@ mod account_model_tests {
             })
         );
         let mut restricted = codex;
-        restricted.supported_reasoning_efforts.truncate(1);
-        restricted.service_tiers = None;
+        restricted
+            .capabilities
+            .option_descriptors
+            .retain(|descriptor| descriptor.id != "serviceTier");
+        if let agent_protocol::models::ModelOptionKind::Select { options, .. } =
+            &mut restricted.capabilities.option_descriptors[0].kind
+        {
+            options.truncate(1);
+        }
         select(
             &mut snapshot,
             "b",

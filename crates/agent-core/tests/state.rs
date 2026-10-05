@@ -471,11 +471,7 @@ fn activity_corpus_applies_even_without_a_loaded_conversation() {
 #[test]
 fn new_chat_selects_catalog_defaults_in_either_load_order() {
     use agent_core::state::Intent;
-    let models = serde_json::from_value::<Vec<agent_protocol::models::Model>>(json!([{
-        "id":"model", "model":{"instanceId": "codex", "id": "model"}, "displayName":"Model",
-        "defaultReasoningEffort":"high", "supportedReasoningEfforts":[{"reasoningEffort":"high"}],
-        "defaultServiceTier":"priority", "serviceTiers":[{"id":"priority"}], "isDefault":true
-    }]))
+    let models = serde_json::from_value::<Vec<agent_protocol::models::Model>>(json!([{"id":"model", "model":{"instanceId": "codex", "id": "model"}, "displayName":"Model", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"high","label":"high","isDefault":true}],"currentValue":"high"},{"id":"serviceTier","label":"Service Tier","type":"select","options":[{"id":"default","label":"Standard","isDefault":false},{"id":"priority","label":"priority","isDefault":true}],"currentValue":"priority"}]}, "isDefault":true}]))
     .unwrap();
     for catalog_first in [false, true] {
         let mut current = Snapshot::default();
@@ -793,7 +789,7 @@ fn disconnected_catalog_reads_do_not_apply_or_retry_stale_responses() {
     let mut state = Snapshot::default();
     let before = state.clone();
     assert!(op::LoadModels {}.stale(&mut state, serde_json::from_value(json!({"instances":[],
-        "data":[{"id":"old","model":{"instanceId": "codex", "id": "old"},"displayName":"Old", "defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}]
+        "data":[{"id":"old", "model":{"instanceId": "codex", "id": "old"}, "displayName":"Old", "capabilities":{"optionDescriptors":[]}}]
     })).unwrap()).is_empty());
     assert!(
         op::ListAccounts {}
@@ -839,10 +835,7 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         };
         op::LoadModels {}.apply(
             &mut state,
-            serde_json::from_value(json!({"instances":[],"data":[{
-            "id":"claude:default","model":{"instanceId": "claude", "id": "default"},"displayName":"Claude",
-            "defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"}]
-        }],"providerErrors":errors}))
+            serde_json::from_value(json!({"instances":[],"data":[{"id":"claude:default", "model":{"instanceId": "claude", "id": "default"}, "displayName":"Claude", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"low","label":"low","isDefault":true}],"currentValue":"low"}]}}],"providerErrors":errors}))
             .unwrap(),
         );
         assert_eq!(*state.drafts[&DraftKey::from("saved")], draft);
@@ -879,11 +872,7 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         )
         .0;
         assert_eq!(*state.drafts[&DraftKey::from("saved")], draft);
-        let catalog = serde_json::from_value(json!({"instances":[],"data":[{
-            "id":"codex-model","model":{"instanceId": "codex", "id": "codex-model"},"displayName":"Codex",
-            "defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}],
-            "serviceTiers":[{"id":"priority"}]
-        }]})).unwrap();
+        let catalog = serde_json::from_value(json!({"instances":[],"data":[{"id":"codex-model", "model":{"instanceId": "codex", "id": "codex-model"}, "displayName":"Codex", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"high","label":"high","isDefault":true}],"currentValue":"high"},{"id":"serviceTier","label":"Service Tier","type":"select","options":[{"id":"default","label":"Standard","isDefault":true},{"id":"priority","label":"priority","isDefault":false}],"currentValue":"default"}]}}]})).unwrap();
         op::LoadModels {}.apply(&mut state, catalog);
         assert_eq!(*state.drafts[&DraftKey::from("saved")], draft);
         assert!(state.model_errors.is_empty());

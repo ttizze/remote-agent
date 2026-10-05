@@ -1479,7 +1479,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_full_command_queue_keeps_the_draft_and_all_submission_state() {
-        let store = Store::offline(Snapshot { models: Arc::new(vec![serde_json::from_value(serde_json::json!({"id":"fixture","model":{"instanceId":"codex","id":"fixture"},"displayName":"Fixture","defaultReasoningEffort":"","supportedReasoningEfforts":[]})).unwrap()]), ..Default::default() });
+        let store = Store::offline(Snapshot { models: Arc::new(vec![serde_json::from_value(serde_json::json!({"id":"fixture", "model":{"instanceId":"codex","id":"fixture"}, "displayName":"Fixture", "capabilities":{"optionDescriptors":[]}})).unwrap()]), ..Default::default() });
         let draft_key = store.snapshot().navigation.draft_key.clone();
         store
             .dispatch(Intent::SetDraftText {

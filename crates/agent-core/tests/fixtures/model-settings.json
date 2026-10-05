@@ -19,21 +19,46 @@
           "instanceId": "codex"
         },
         "displayName": "Model A",
-        "defaultReasoningEffort": "medium",
-        "defaultServiceTier": "priority",
-        "supportedReasoningEfforts": [
-          {
-            "reasoningEffort": "max"
-          },
-          {
-            "reasoningEffort": "medium"
-          }
-        ],
-        "serviceTiers": [
-          {
-            "id": "priority"
-          }
-        ]
+        "capabilities": {
+          "optionDescriptors": [
+            {
+              "id": "reasoningEffort",
+              "label": "Reasoning",
+              "type": "select",
+              "options": [
+                {
+                  "id": "max",
+                  "label": "max",
+                  "isDefault": false
+                },
+                {
+                  "id": "medium",
+                  "label": "medium",
+                  "isDefault": true
+                }
+              ],
+              "currentValue": "medium"
+            },
+            {
+              "id": "serviceTier",
+              "label": "Service Tier",
+              "type": "select",
+              "options": [
+                {
+                  "id": "default",
+                  "label": "Standard",
+                  "isDefault": false
+                },
+                {
+                  "id": "priority",
+                  "label": "priority",
+                  "isDefault": true
+                }
+              ],
+              "currentValue": "priority"
+            }
+          ]
+        }
       }
     ],
     "expected": {
@@ -67,14 +92,23 @@
           "instanceId": "codex"
         },
         "displayName": "Model A",
-        "defaultReasoningEffort": "medium",
-        "defaultServiceTier": "priority",
-        "supportedReasoningEfforts": [
-          {
-            "reasoningEffort": "medium"
-          }
-        ],
-        "serviceTiers": []
+        "capabilities": {
+          "optionDescriptors": [
+            {
+              "id": "reasoningEffort",
+              "label": "Reasoning",
+              "type": "select",
+              "options": [
+                {
+                  "id": "medium",
+                  "label": "medium",
+                  "isDefault": true
+                }
+              ],
+              "currentValue": "medium"
+            }
+          ]
+        }
       }
     ],
     "expected": {
@@ -108,21 +142,46 @@
           "instanceId": "codex"
         },
         "displayName": "Model A",
-        "defaultReasoningEffort": "unknown",
-        "defaultServiceTier": "priority",
-        "supportedReasoningEfforts": [
-          {
-            "reasoningEffort": "medium"
-          },
-          {
-            "reasoningEffort": "max"
-          }
-        ],
-        "serviceTiers": [
-          {
-            "id": "priority"
-          }
-        ]
+        "capabilities": {
+          "optionDescriptors": [
+            {
+              "id": "reasoningEffort",
+              "label": "Reasoning",
+              "type": "select",
+              "options": [
+                {
+                  "id": "medium",
+                  "label": "medium",
+                  "isDefault": true
+                },
+                {
+                  "id": "max",
+                  "label": "max",
+                  "isDefault": false
+                }
+              ],
+              "currentValue": "medium"
+            },
+            {
+              "id": "serviceTier",
+              "label": "Service Tier",
+              "type": "select",
+              "options": [
+                {
+                  "id": "default",
+                  "label": "Standard",
+                  "isDefault": false
+                },
+                {
+                  "id": "priority",
+                  "label": "priority",
+                  "isDefault": true
+                }
+              ],
+              "currentValue": "priority"
+            }
+          ]
+        }
       }
     ],
     "expected": {
@@ -179,21 +238,46 @@
           "instanceId": "codex"
         },
         "displayName": "Model A",
-        "defaultReasoningEffort": "medium",
-        "defaultServiceTier": "priority",
-        "supportedReasoningEfforts": [
-          {
-            "reasoningEffort": "medium"
-          },
-          {
-            "reasoningEffort": "max"
-          }
-        ],
-        "serviceTiers": [
-          {
-            "id": "priority"
-          }
-        ]
+        "capabilities": {
+          "optionDescriptors": [
+            {
+              "id": "reasoningEffort",
+              "label": "Reasoning",
+              "type": "select",
+              "options": [
+                {
+                  "id": "medium",
+                  "label": "medium",
+                  "isDefault": true
+                },
+                {
+                  "id": "max",
+                  "label": "max",
+                  "isDefault": false
+                }
+              ],
+              "currentValue": "medium"
+            },
+            {
+              "id": "serviceTier",
+              "label": "Service Tier",
+              "type": "select",
+              "options": [
+                {
+                  "id": "default",
+                  "label": "Standard",
+                  "isDefault": false
+                },
+                {
+                  "id": "priority",
+                  "label": "priority",
+                  "isDefault": true
+                }
+              ],
+              "currentValue": "priority"
+            }
+          ]
+        }
       },
       {
         "id": "model-b",
@@ -202,21 +286,46 @@
           "instanceId": "codex"
         },
         "displayName": "Model A",
-        "defaultReasoningEffort": "medium",
-        "defaultServiceTier": "priority",
-        "supportedReasoningEfforts": [
-          {
-            "reasoningEffort": "medium"
-          },
-          {
-            "reasoningEffort": "max"
-          }
-        ],
-        "serviceTiers": [
-          {
-            "id": "priority"
-          }
-        ]
+        "capabilities": {
+          "optionDescriptors": [
+            {
+              "id": "reasoningEffort",
+              "label": "Reasoning",
+              "type": "select",
+              "options": [
+                {
+                  "id": "medium",
+                  "label": "medium",
+                  "isDefault": true
+                },
+                {
+                  "id": "max",
+                  "label": "max",
+                  "isDefault": false
+                }
+              ],
+              "currentValue": "medium"
+            },
+            {
+              "id": "serviceTier",
+              "label": "Service Tier",
+              "type": "select",
+              "options": [
+                {
+                  "id": "default",
+                  "label": "Standard",
+                  "isDefault": false
+                },
+                {
+                  "id": "priority",
+                  "label": "priority",
+                  "isDefault": true
+                }
+              ],
+              "currentValue": "priority"
+            }
+          ]
+        }
       }
     ],
     "expected": {
@@ -254,21 +363,46 @@
           "instanceId": "codex"
         },
         "displayName": "Model A",
-        "defaultReasoningEffort": "medium",
-        "defaultServiceTier": "priority",
-        "supportedReasoningEfforts": [
-          {
-            "reasoningEffort": "medium"
-          },
-          {
-            "reasoningEffort": "max"
-          }
-        ],
-        "serviceTiers": [
-          {
-            "id": "priority"
-          }
-        ]
+        "capabilities": {
+          "optionDescriptors": [
+            {
+              "id": "reasoningEffort",
+              "label": "Reasoning",
+              "type": "select",
+              "options": [
+                {
+                  "id": "medium",
+                  "label": "medium",
+                  "isDefault": true
+                },
+                {
+                  "id": "max",
+                  "label": "max",
+                  "isDefault": false
+                }
+              ],
+              "currentValue": "medium"
+            },
+            {
+              "id": "serviceTier",
+              "label": "Service Tier",
+              "type": "select",
+              "options": [
+                {
+                  "id": "default",
+                  "label": "Standard",
+                  "isDefault": false
+                },
+                {
+                  "id": "priority",
+                  "label": "priority",
+                  "isDefault": true
+                }
+              ],
+              "currentValue": "priority"
+            }
+          ]
+        }
       },
       {
         "id": "model-b",
@@ -277,22 +411,47 @@
           "instanceId": "codex"
         },
         "displayName": "Model A",
-        "defaultReasoningEffort": "medium",
-        "defaultServiceTier": "priority",
-        "supportedReasoningEfforts": [
-          {
-            "reasoningEffort": "medium"
-          },
-          {
-            "reasoningEffort": "max"
-          }
-        ],
-        "serviceTiers": [
-          {
-            "id": "priority"
-          }
-        ],
-        "isDefault": true
+        "isDefault": true,
+        "capabilities": {
+          "optionDescriptors": [
+            {
+              "id": "reasoningEffort",
+              "label": "Reasoning",
+              "type": "select",
+              "options": [
+                {
+                  "id": "medium",
+                  "label": "medium",
+                  "isDefault": true
+                },
+                {
+                  "id": "max",
+                  "label": "max",
+                  "isDefault": false
+                }
+              ],
+              "currentValue": "medium"
+            },
+            {
+              "id": "serviceTier",
+              "label": "Service Tier",
+              "type": "select",
+              "options": [
+                {
+                  "id": "default",
+                  "label": "Standard",
+                  "isDefault": false
+                },
+                {
+                  "id": "priority",
+                  "label": "priority",
+                  "isDefault": true
+                }
+              ],
+              "currentValue": "priority"
+            }
+          ]
+        }
       }
     ],
     "expected": {

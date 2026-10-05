@@ -226,10 +226,10 @@ pub struct Model {
     pub id: String,
     pub model: ModelRef,
     pub display_name: String,
-    pub default_reasoning_effort: String,
-    pub supported_reasoning_efforts: Vec<ReasoningEffort>,
-    pub service_tiers: Option<Vec<ServiceTier>>,
-    pub default_service_tier: Option<String>,
+    #[serde(with = "crate::protocol::json")]
+    pub capabilities: ModelCapabilities,
+    #[serde(default)]
+    pub is_custom: bool,
     pub is_default: Option<bool>,
 }
 pub fn provider_models(
@@ -244,14 +244,197 @@ pub fn provider_models(
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ServiceTier {
+#[serde(rename_all = "camelCase")]
+pub struct ModelOptionChoice {
     pub id: String,
-    pub name: Option<String>,
+    pub label: String,
+    #[serde(
+        default,
+        deserialize_with = "present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub is_default: bool,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ModelOptionKind {
+    Select {
+        options: Vec<ModelOptionChoice>,
+        #[serde(
+            default,
+            rename = "currentValue",
+            deserialize_with = "present_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        current_value: Option<String>,
+        #[serde(default, rename = "promptInjectedValues")]
+        prompt_injected_values: Vec<String>,
+    },
+    Boolean {
+        #[serde(
+            default,
+            rename = "currentValue",
+            deserialize_with = "present_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        current_value: Option<bool>,
+    },
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelOptionDescriptor {
+    pub id: String,
+    pub label: String,
+    #[serde(
+        default,
+        deserialize_with = "present_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<String>,
+    #[serde(flatten)]
+    pub kind: ModelOptionKind,
+}
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReasoningEffort {
-    pub reasoning_effort: String,
+pub struct ModelCapabilities {
+    #[serde(default)]
+    pub option_descriptors: Vec<ModelOptionDescriptor>,
+}
+
+// Optional capability fields can be absent; an authored null is invalid in T3.
+fn present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+impl ModelCapabilities {
+    pub fn select(&self, ids: &[&str]) -> Option<&ModelOptionDescriptor> {
+        self.option_descriptors.iter().find(|descriptor| {
+            ids.contains(&descriptor.id.as_str())
+                && matches!(descriptor.kind, ModelOptionKind::Select { .. })
+        })
+    }
+}
+
+impl ModelOptionDescriptor {
+    pub fn choices(&self) -> &[ModelOptionChoice] {
+        match &self.kind {
+            ModelOptionKind::Select { options, .. } => options,
+            ModelOptionKind::Boolean { .. } => &[],
+        }
+    }
+
+    pub fn selected<'a>(&'a self, value: Option<&'a str>) -> Option<&'a str> {
+        let ModelOptionKind::Select {
+            options,
+            current_value,
+            prompt_injected_values,
+        } = &self.kind
+        else {
+            return None;
+        };
+        let default = || {
+            options
+                .iter()
+                .find(|choice| choice.is_default)
+                .map(|choice| choice.id.as_str())
+        };
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            if options.is_empty() {
+                return Some(value);
+            }
+            if options.iter().any(|choice| choice.id == value) {
+                return if prompt_injected_values.iter().any(|prompt| prompt == value) {
+                    default()
+                } else {
+                    Some(value)
+                };
+            }
+        }
+        current_value.as_deref().or_else(default)
+    }
+}
+
+/// Resolved custom entries; malformed rows do not hide valid neighboring models.
+// Custom-model decoding follows T3 Tools Inc.'s MIT implementation; license
+// and copyright notice: third-party/T3-Code-LICENSE.
+pub struct CustomModel {
+    pub slug: String,
+    pub name: String,
+    pub capabilities: Option<ModelCapabilities>,
+}
+
+pub fn read_custom_models(value: Option<&Value>) -> Vec<CustomModel> {
+    let Some(entries) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let slug = entry
+                .as_str()
+                .or_else(|| entry.get("slug").and_then(Value::as_str))?
+                .trim();
+            if slug.is_empty() || !seen.insert(slug) {
+                return None;
+            }
+            let name = entry
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(slug);
+            let capabilities = entry
+                .get("capabilities")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .and_then(normalize_custom_capabilities);
+            Some(CustomModel {
+                slug: slug.into(),
+                name: name.into(),
+                capabilities,
+            })
+        })
+        .collect()
+}
+
+fn normalize_custom_capabilities(mut capabilities: ModelCapabilities) -> Option<ModelCapabilities> {
+    fn trim(value: &mut String) -> Option<()> {
+        *value = value.trim().to_owned();
+        (!value.is_empty()).then_some(())
+    }
+    fn optional(value: &mut Option<String>) -> Option<()> {
+        if let Some(value) = value {
+            trim(value)?;
+        }
+        Some(())
+    }
+    for descriptor in &mut capabilities.option_descriptors {
+        trim(&mut descriptor.id)?;
+        trim(&mut descriptor.label)?;
+        optional(&mut descriptor.description)?;
+        if let ModelOptionKind::Select {
+            options,
+            current_value,
+            prompt_injected_values,
+        } = &mut descriptor.kind
+        {
+            optional(current_value)?;
+            for choice in options {
+                trim(&mut choice.id)?;
+                trim(&mut choice.label)?;
+                optional(&mut choice.description)?;
+            }
+            for value in prompt_injected_values {
+                trim(value)?;
+            }
+        }
+    }
+    Some(capabilities)
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -349,6 +532,126 @@ pub struct ChangedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_model_rows_keep_first_authored_identity_and_drop_only_bad_capabilities() {
+        let source = serde_json::json!([
+            null, 42, {}, "  ", " custom ", {"slug":"custom", "name":"ignored"},
+            {"slug":"Custom", "name":" Named ", "capabilities":{"optionDescriptors":[
+                {"id":" effort ","label":" Effort ","description":" Details ","type":"select","currentValue":" max ","options":[{"id":" max ","label":" Maximum ","description":" Choice ","isDefault":true}],"promptInjectedValues":[" max "]},
+                {"id":"fastMode","label":"Fast","type":"boolean","currentValue":false}
+            ]}},
+            {"slug":"bad-caps", "name":" ", "capabilities":{"optionDescriptors":[{"id":" ","label":"Empty","type":"boolean"}]}},
+            {"slug":"wrong-caps", "capabilities":{"optionDescriptors":"bad"}},
+            {"slug":"empty-caps", "capabilities":{}}
+        ]);
+        let original = source.clone();
+        let entries = read_custom_models(Some(&source));
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.slug.as_str(), entry.name.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("custom", "custom"),
+                ("Custom", "Named"),
+                ("bad-caps", "bad-caps"),
+                ("wrong-caps", "wrong-caps"),
+                ("empty-caps", "empty-caps")
+            ]
+        );
+        assert!(entries[0].capabilities.is_none());
+        let caps = entries[1].capabilities.as_ref().unwrap();
+        assert_eq!(caps.option_descriptors[0].id, "effort");
+        assert_eq!(caps.option_descriptors[0].choices()[0].label, "Maximum");
+        assert_eq!(
+            caps.option_descriptors[0].description.as_deref(),
+            Some("Details")
+        );
+        assert_eq!(
+            caps.option_descriptors[0].choices()[0]
+                .description
+                .as_deref(),
+            Some("Choice")
+        );
+        assert_eq!(caps.option_descriptors[0].selected(None), Some("max"));
+        assert_eq!(
+            caps.option_descriptors[0].selected(Some("max")),
+            Some("max")
+        );
+        assert!(matches!(
+            caps.option_descriptors[1].kind,
+            ModelOptionKind::Boolean {
+                current_value: Some(false)
+            }
+        ));
+        assert!(entries[2].capabilities.is_none());
+        assert!(entries[3].capabilities.is_none());
+        assert_eq!(
+            entries[4].capabilities.as_ref().unwrap().option_descriptors,
+            []
+        );
+        assert_eq!(source, original);
+        assert!(read_custom_models(Some(&serde_json::json!({"slug":"not-an-array"}))).is_empty());
+        for descriptor in [
+            serde_json::json!({"id":"fast","label":"Fast","type":"boolean","currentValue":null}),
+            serde_json::json!({"id":"fast","label":"Fast","type":"boolean","description":null}),
+            serde_json::json!({"id":"effort","label":"Effort","type":"select","currentValue":null,"options":[]}),
+            serde_json::json!({"id":"effort","label":"Effort","type":"select","options":[{"id":"low","label":"Low","description":null}]}),
+            serde_json::json!({"id":"fast","label":"Fast","type":"boolean","description":" "}),
+            serde_json::json!({"id":"effort","label":"Effort","type":"select","currentValue":" ","options":[]}),
+            serde_json::json!({"id":"effort","label":"Effort","type":"select","options":[{"id":"low","label":"Low","description":" "}]}),
+        ] {
+            let rows = serde_json::json!([{"slug":"kept","capabilities":{"optionDescriptors":[descriptor]}}]);
+            let kept = read_custom_models(Some(&rows));
+            assert_eq!(kept[0].slug, "kept");
+            assert!(kept[0].capabilities.is_none());
+        }
+    }
+
+    #[test]
+    fn descriptor_selections_respect_current_default_prompt_values_and_opaque_choices() {
+        let descriptor: ModelOptionDescriptor = serde_json::from_value(serde_json::json!({
+            "id":"effort","label":"Effort","type":"select","currentValue":"low",
+            "options":[{"id":"low","label":"Low"},{"id":"high","label":"High","isDefault":true},{"id":"ultrathink","label":"Ultra"}],
+            "promptInjectedValues":["ultrathink"]
+        })).unwrap();
+        for (saved, expected) in [
+            (None, "low"),
+            (Some(" "), "low"),
+            (Some(" high "), "high"),
+            (Some("unsupported"), "low"),
+            (Some("ultrathink"), "high"),
+        ] {
+            assert_eq!(descriptor.selected(saved), Some(expected));
+        }
+        let opaque: ModelOptionDescriptor = serde_json::from_value(
+            serde_json::json!({"id":"custom","label":"Custom","type":"select","options":[]}),
+        )
+        .unwrap();
+        assert_eq!(opaque.selected(Some(" arbitrary ")), Some("arbitrary"));
+        assert_eq!(opaque.selected(None), None);
+        let boolean: ModelOptionDescriptor = serde_json::from_value(
+            serde_json::json!({"id":"fast","label":"Fast","type":"boolean","currentValue":true}),
+        )
+        .unwrap();
+        assert_eq!(boolean.selected(Some("true")), None);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn custom_slugs_are_unique_case_sensitive_and_keep_the_first_name(slug in "[a-zA-Z][a-zA-Z0-9/_-]{0,30}") {
+            let source = serde_json::json!([
+                {"slug":format!(" {slug} "),"name":"First"},null,
+                {"slug":slug,"name":"Second"}, " ", {"slug":format!("other/{slug}"),"name":"Other"}
+            ]);
+            let entries = read_custom_models(Some(&source));
+            proptest::prop_assert_eq!(entries.len(),2);
+            proptest::prop_assert_eq!(&entries[0].slug,&slug);
+            proptest::prop_assert_eq!(&entries[0].name,"First");
+            proptest::prop_assert_eq!(&entries[1].slug,&format!("other/{slug}"));
+        }
+    }
     use proptest::prelude::*;
     use serde_json::json;
 

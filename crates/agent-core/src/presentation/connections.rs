@@ -134,10 +134,7 @@ mod tests {
         ) {
             let key = if provider == "codex".parse::<crate::session::ProviderInstanceId>().unwrap() { "codex" } else { "claude" };
             let models: Vec<Model> = if catalog {
-                serde_json::from_value(serde_json::json!([{
-                    "id":"same-native-id", "model":{"instanceId":key,"id":"same-native-id"},
-                    "displayName":"Agent", "defaultReasoningEffort":"", "supportedReasoningEfforts":[]
-                }])).unwrap()
+                serde_json::from_value(serde_json::json!([{"id":"same-native-id", "model":{"instanceId":key,"id":"same-native-id"}, "displayName":"Agent", "capabilities":{"optionDescriptors":[]}}])).unwrap()
             } else { Vec::new() };
             let accounts: Accounts = serde_json::from_value(serde_json::json!({
                 "accounts": if authenticated { vec![serde_json::json!({"id":"selected","instanceId":key})] } else { Vec::new() },
@@ -165,8 +162,8 @@ mod tests {
             connected: true,
             provider_instances: crate::test_support::instances(),
             models: std::sync::Arc::new(serde_json::from_value(serde_json::json!([
-                {"id":"gpt", "model":{"instanceId":"codex","id":"gpt"}, "displayName":"GPT", "defaultReasoningEffort":"", "supportedReasoningEfforts":[]},
-                {"id":"sonnet", "model":{"instanceId":"claude","id":"sonnet"}, "displayName":"Sonnet", "defaultReasoningEffort":"", "supportedReasoningEfforts":[]}
+                {"id":"gpt", "model":{"instanceId":"codex","id":"gpt"}, "displayName":"GPT", "capabilities":{"optionDescriptors":[]}},
+                {"id":"sonnet", "model":{"instanceId":"claude","id":"sonnet"}, "displayName":"Sonnet", "capabilities":{"optionDescriptors":[]}}
             ])).unwrap()),
             ..Default::default()
         };
@@ -198,10 +195,7 @@ mod tests {
 
     #[test]
     fn incomplete_checks_and_authentication_remain_distinct() {
-        let model: Model = serde_json::from_value(serde_json::json!({
-            "id":"gpt", "model":{"instanceId":"codex","id":"gpt"},
-            "displayName":"GPT", "defaultReasoningEffort":"", "supportedReasoningEfforts":[]
-        }))
+        let model: Model = serde_json::from_value(serde_json::json!({"id":"gpt", "model":{"instanceId":"codex","id":"gpt"}, "displayName":"GPT", "capabilities":{"optionDescriptors":[]}}))
         .unwrap();
         let accounts = Accounts {
             accounts: Vec::new(),

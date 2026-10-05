@@ -394,7 +394,7 @@ async fn connected(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, hos
 async fn setup(snapshot: Snapshot) -> (Arc<Store>, host_fixture::Reader, host_fixture::Writer) {
     let (store, mut reader, writer) = connected(snapshot.clone()).await;
     let models = if snapshot.models.is_empty() {
-        json!([{"id":"fixture-model","model":{"instanceId":"codex","id":"fixture-model"},"displayName":"Fixture model","defaultReasoningEffort":"","supportedReasoningEfforts":[],"isDefault":true}])
+        json!([{"id":"fixture-model", "model":{"instanceId":"codex","id":"fixture-model"}, "displayName":"Fixture model", "capabilities":{"optionDescriptors":[]}, "isDefault":true}])
     } else {
         json!(snapshot.models)
     };
@@ -616,12 +616,7 @@ async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
     use agent_core::state::Attachment;
     for attachment_first in [false, true] {
         let previous = Snapshot {
-            models: Arc::new(serde_json::from_value(json!([{
-                "id":"model", "model":{"instanceId": "codex", "id": "model"}, "displayName":"Model",
-                "defaultReasoningEffort":"medium", "defaultServiceTier":"priority",
-                "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"max"}],
-                "serviceTiers":[{"id":"priority"}]
-            }])).unwrap()),
+            models: Arc::new(serde_json::from_value(json!([{"id":"model", "model":{"instanceId": "codex", "id": "model"}, "displayName":"Model", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"medium","label":"medium","isDefault":true},{"id":"max","label":"max","isDefault":false}],"currentValue":"medium"},{"id":"serviceTier","label":"Service Tier","type":"select","options":[{"id":"default","label":"Standard","isDefault":false},{"id":"priority","label":"priority","isDefault":true}],"currentValue":"priority"}]}}])).unwrap()),
             drafts: Arc::new(BTreeMap::from([(SessionRef { id: "thread".into()}.into(), Arc::new(Draft {
                 text: "old".into(), model: Some(agent_protocol::models::ModelRef { instance_id: "codex".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "model".into() }), effort: Some("medium".into()),
                 service_tier: Some("priority".into()), ..Default::default()
@@ -3421,10 +3416,9 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
     for _ in 0..2 {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
-            "host/model/list" => json!({"instances":host_fixture::instances(),"data":[{
-                "id":"fresh","model":{"instanceId": "codex", "id": "fresh"},"displayName":"Fresh model",
-                "isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]
-            }]}),
+            "host/model/list" => {
+                json!({"instances":host_fixture::instances(),"data":[{"id":"fresh", "model":{"instanceId": "codex", "id": "fresh"}, "displayName":"Fresh model", "isDefault":true, "capabilities":{"optionDescriptors":[]}}]})
+            }
             "host/account/list" => json!({"accounts":[],"selected":{}}),
             method => panic!("unexpected retry: {method}"),
         };
@@ -3486,7 +3480,7 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
         ("host/account/list", json!({"accounts":[],"selected":{}})),
         (
             "host/model/list",
-            json!({"instances":host_fixture::instances(),"data":[{"id":"fresh","model":{"instanceId": "codex", "id": "fresh"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}),
+            json!({"instances":host_fixture::instances(),"data":[{"id":"fresh", "model":{"instanceId": "codex", "id": "fresh"}, "displayName":"Fresh", "capabilities":{"optionDescriptors":[]}}],"nextCursor":null}),
         ),
         (
             "host/session/list",
@@ -3816,7 +3810,7 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
                         json!({"accounts":[{"instanceId":provider,"id":id}],"selected":{(provider):id},"error":null})
                     }
                     "host/model/list" => {
-                        json!({"instances":host_fixture::instances(),"data":[{"id":model_id,"model":{"instanceId":provider,"id":model_id},"displayName":model_id,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}]})
+                        json!({"instances":host_fixture::instances(),"data":[{"id":model_id, "model":{"instanceId":provider,"id":model_id}, "displayName":model_id, "capabilities":{"optionDescriptors":[]}}]})
                     }
                     method => panic!("unexpected login effect: {method}"),
                 };
@@ -4292,7 +4286,7 @@ async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries()
         )
         .await
         .unwrap();
-    let model = |provider: &str, id: &str, title: &str| json!({"id":id,"model":{"instanceId":provider,"id":"same-native-model"},"displayName":title,"defaultReasoningEffort":"","supportedReasoningEfforts":[],"isDefault":false});
+    let model = |provider: &str, id: &str, title: &str| json!({"id":id, "model":{"instanceId":provider,"id":"same-native-model"}, "displayName":title, "capabilities":{"optionDescriptors":[]}, "isDefault":false});
     writer.reply(&pending["host/model/list"],json!({"result":{"instances":host_fixture::instances(),"data":[model("codex","shared-entry","Original Codex"),model("claude","shared-entry","Claude")],"nextCursor":"next"}})).await.unwrap();
     let next = read(&mut reader).await;
     assert_eq!(next["method"], "host/model/list");

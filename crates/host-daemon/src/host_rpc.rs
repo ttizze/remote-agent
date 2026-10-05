@@ -7,6 +7,7 @@ mod codex_history;
 mod codex_home;
 mod composer;
 mod conversations;
+pub(crate) mod model_catalog;
 pub(crate) mod native;
 pub(crate) mod permissions;
 pub(crate) mod requests;

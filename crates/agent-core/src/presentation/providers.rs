@@ -32,6 +32,38 @@ pub(crate) fn ordered_catalog(
             .copied()
             .unwrap_or(usize::MAX)
     });
+    // Preference applies after every native page has arrived. Provider dispatch
+    // IDs stay opaque, including the openai. prefix used by some installations.
+    for instance in instances
+        .iter()
+        .filter(|instance| instance.reference.driver.as_str() == "codex")
+    {
+        let preferred = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"]
+            .iter()
+            .find_map(|family| {
+                models
+                    .iter()
+                    .find(|model| {
+                        model.model.instance_id == instance.reference.instance_id
+                            && !model.is_custom
+                            && model
+                                .model
+                                .id
+                                .strip_prefix("openai.")
+                                .unwrap_or(&model.model.id)
+                                == *family
+                    })
+                    .map(|model| model.model.id.clone())
+            });
+        if let Some(preferred) = preferred {
+            for model in models
+                .iter_mut()
+                .filter(|model| model.model.instance_id == instance.reference.instance_id)
+            {
+                model.is_default = (model.model.id == preferred).then_some(true);
+            }
+        }
+    }
     (instances, models)
 }
 
@@ -55,6 +87,47 @@ mod tests {
     }
 
     #[test]
+    fn preferred_defaults_are_per_instance_and_never_promote_custom_models() {
+        let model = |instance: &str, id: &str, custom: bool, default: bool| {
+            serde_json::from_value(serde_json::json!({
+                "id":id,"model":{"instanceId":instance,"id":id},"displayName":id,
+                "capabilities":{"optionDescriptors":[]},"isCustom":custom,"isDefault":default
+            }))
+            .unwrap()
+        };
+        let instances = vec![
+            instance("work", "codex"),
+            instance("personal", "codex"),
+            instance("claudeAgent", "claudeAgent"),
+        ];
+        let models = vec![
+            model("work", "native-default", false, true),
+            model("work", "gpt-5.6-sol", false, false),
+            model("work", "openai.gpt-6-astra", false, false),
+            model("personal", "gpt-6-astra", true, false),
+            model("personal", "native-default", false, true),
+            model("claudeAgent", "gpt-6-astra", false, false),
+            model("claudeAgent", "native-default", false, true),
+        ];
+        let (instances, models) = ordered_catalog(instances, models);
+        let defaults: Vec<_> = models
+            .iter()
+            .filter(|model| model.is_default == Some(true))
+            .map(|model| (model.model.instance_id.as_str(), model.model.id.as_str()))
+            .collect();
+        assert_eq!(
+            defaults,
+            [
+                ("work", "openai.gpt-6-astra"),
+                ("personal", "native-default"),
+                ("claudeAgent", "native-default")
+            ]
+        );
+        let (_, again) = ordered_catalog(instances, models.clone());
+        assert_eq!(models, again);
+    }
+
+    #[test]
     fn driver_groups_and_defaults_preserve_custom_order_and_model_choices() {
         let instances = vec![
             instance("work", "codex"),
@@ -64,9 +137,9 @@ mod tests {
             instance("future", "FutureDriver"),
         ];
         let models: Vec<Model> = serde_json::from_value(serde_json::json!([
-            {"id":"c", "model":{"instanceId":"claudeAgent","id":"c"},"displayName":"C","defaultReasoningEffort":"","supportedReasoningEfforts":[]},
-            {"id":"a", "model":{"instanceId":"codex","id":"a"},"displayName":"A","defaultReasoningEffort":"","supportedReasoningEfforts":[]},
-            {"id":"b", "model":{"instanceId":"codex","id":"b"},"displayName":"B","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+            {"id":"c", "model":{"instanceId":"claudeAgent","id":"c"}, "displayName":"C", "capabilities":{"optionDescriptors":[]}},
+            {"id":"a", "model":{"instanceId":"codex","id":"a"}, "displayName":"A", "capabilities":{"optionDescriptors":[]}},
+            {"id":"b", "model":{"instanceId":"codex","id":"b"}, "displayName":"B", "capabilities":{"optionDescriptors":[]}}
         ])).unwrap();
         let (_, reordered_models) = ordered_catalog(instances.clone(), models.clone());
         assert_eq!(

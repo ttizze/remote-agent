@@ -242,6 +242,15 @@ transfer server just to delete that check would reverse A14.
   APFS or reflinks where supported, preserving timestamps. Tests recompile
   changed code and reuse unchanged artifacts; they do not build, install or
   restart the dev app. Keep unit tests close to the implementation they verify.
+  On macOS, `scripts/unit-tests-rust.sh` hard-links the current test binaries and
+  runtime libraries into a fresh, small directory and uses nextest's
+  [build-reuse metadata](https://nexte.st/docs/ci-features/archiving/#manually-creating-your-own-archives)
+  to run them with the original source directories and selection. It retains
+  the supervisor and native build-output paths. This avoids CoreFoundation
+  enumerating hundreds of thousands of cached Cargo dependency artifacts while
+  discovering system proxies. The cache, proxy configuration, TLS, test bodies
+  and timeout assertions are preserved; the temporary hard-links are removed
+  after the run.
   Enable the UniFFI CLI feature only when generating bindings, so an empty CLI
   test harness cannot replace the native library with test dependency features.
 - `scripts/dev-env.sh just quality rust` checks formatting, workspace

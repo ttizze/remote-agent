@@ -1,4 +1,5 @@
 //! Registry ownership: reconcile saved instances before exposing their resources.
+use super::super::model_catalog::{ModelProgress, custom_models_for_page};
 use super::*;
 use agent_protocol::providers::*;
 use std::path::{Path, PathBuf};
@@ -90,7 +91,7 @@ fn native_home(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ModelCursor {
     resources: BTreeMap<ProviderInstanceId, uuid::Uuid>,
-    remaining: BTreeMap<ProviderInstanceId, Option<String>>,
+    remaining: BTreeMap<ProviderInstanceId, ModelProgress>,
 }
 
 impl HostRpcService {
@@ -114,7 +115,16 @@ impl HostRpcService {
                 .collect();
             let backends: indexmap::IndexMap<_, _> = instances
                 .iter()
-                .map(|(id, instance)| (id.clone(), instance.backend.clone()))
+                .map(|(id, instance)| {
+                    (
+                        id.clone(),
+                        (
+                            instance.backend.clone(),
+                            instance.config.driver.clone(),
+                            instance.config.config.get("customModels").cloned(),
+                        ),
+                    )
+                })
                 .collect();
             (resources, descriptors, backends)
         };
@@ -133,7 +143,11 @@ impl HostRpcService {
             }
             cursor.remaining
         } else {
-            resources.keys().cloned().map(|id| (id, None)).collect()
+            resources
+                .keys()
+                .cloned()
+                .map(|id| (id, ModelProgress::default()))
+                .collect()
         };
         let mut page = op::ModelPage {
             data: Vec::new(),
@@ -142,15 +156,15 @@ impl HostRpcService {
             provider_errors: None,
         };
         let mut next = BTreeMap::new();
-        for (id, backend) in backends {
-            let Some(cursor) = remaining.get(&id) else {
+        for (id, (backend, driver, custom_models)) in backends {
+            let Some(progress) = remaining.get(&id) else {
                 continue;
             };
             let result = match backend {
                 Ok(agent) => {
                     agent
                         .models(&op::ListModels {
-                            cursor: cursor.clone(),
+                            cursor: progress.cursor.clone(),
                             ..params.clone()
                         })
                         .await
@@ -158,7 +172,7 @@ impl HostRpcService {
                 Err(error) => Err(error),
             };
             match result {
-                Ok(result) => {
+                Ok(mut result) => {
                     if result
                         .data
                         .iter()
@@ -169,9 +183,18 @@ impl HostRpcService {
                             "model catalog belongs to another instance",
                         ));
                     }
+                    let (progress, custom) = custom_models_for_page(
+                        driver.as_str(),
+                        &id,
+                        custom_models.as_ref(),
+                        progress,
+                        &result.data,
+                        result.next_cursor.as_deref(),
+                    );
+                    result.data.extend(custom);
                     page.data.extend(result.data);
-                    if let Some(cursor) = result.next_cursor {
-                        next.insert(id, Some(cursor));
+                    if progress.cursor.is_some() {
+                        next.insert(id, progress);
                     }
                 }
                 Err(error) => {
@@ -693,7 +716,7 @@ mod tests {
             .collect();
         let mut cursor = ModelCursor {
             resources,
-            remaining: [("work".parse().unwrap(), None)].into(),
+            remaining: [("work".parse().unwrap(), ModelProgress::default())].into(),
         };
         let params = |cursor: &ModelCursor| op::ListModels {
             limit: 1,
@@ -703,7 +726,9 @@ mod tests {
         assert_eq!(page.instances.len(), 1);
         assert!(page.data.is_empty());
         assert!(page.provider_errors.unwrap().contains_key("work"));
-        cursor.remaining.insert("missing".parse().unwrap(), None);
+        cursor
+            .remaining
+            .insert("missing".parse().unwrap(), ModelProgress::default());
         assert_eq!(
             service.model_page(&params(&cursor)).await.unwrap_err().code,
             "provider_catalog_changed"

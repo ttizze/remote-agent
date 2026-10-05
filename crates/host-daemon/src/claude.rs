@@ -20,8 +20,6 @@ use agent_protocol::models::Item;
 
 use agent_protocol::models::Model;
 
-use agent_protocol::models::ReasoningEffort;
-
 use agent_protocol::models::Thread;
 
 use agent_protocol::models::ThreadResponse;
@@ -224,30 +222,9 @@ impl Claude {
                 } else {
                     title.to_owned()
                 };
-                let values = match entry.get("supportedEffortLevels") {
-                    Some(value) => value
-                        .as_array()
-                        .ok_or("invalid Claude effort levels")?
-                        .as_slice(),
-                    None => &[],
-                };
-                let efforts = values
-                    .iter()
-                    .map(|value| {
-                        Ok(ReasoningEffort {
-                            reasoning_effort: value
-                                .as_str()
-                                .ok_or("invalid Claude effort level")?
-                                .into(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                let default = efforts
-                    .iter()
-                    .find(|effort| effort.reasoning_effort == "high")
-                    .or(efforts.first())
-                    .map(|effort| effort.reasoning_effort.clone())
-                    .unwrap_or_default();
+                let capabilities = crate::host_rpc::model_catalog::claude_capabilities(
+                    entry.get("supportedEffortLevels"),
+                )?;
                 let model = agent_protocol::models::ModelRef {
                     instance_id: self.reference.instance_id.clone(),
                     id: name.into(),
@@ -256,10 +233,8 @@ impl Claude {
                     id: name.into(),
                     model,
                     display_name: format!("Claude · {display}"),
-                    default_reasoning_effort: default,
-                    supported_reasoning_efforts: efforts,
-                    service_tiers: Some(Vec::new()),
-                    default_service_tier: None,
+                    capabilities,
+                    is_custom: false,
                     is_default: Some(false),
                 })
             })

@@ -18,12 +18,25 @@ import androidx.compose.ui.unit.dp
 import dev.remoteagent.core.FollowUpBehavior
 import dev.remoteagent.core.Intent
 
+private enum class SettingsPage {
+    Client,
+    Providers,
+    Models,
+}
+
 @Composable
 internal fun ClientSettings(model: AndroidAppModel) {
-    var providers by remember(model.profileId) { mutableStateOf(false) }
-    if (providers) {
-        ProviderSettings(model) { providers = false }
-        return
+    var page by remember(model.profileId) { mutableStateOf(SettingsPage.Client) }
+    when (page) {
+        SettingsPage.Providers -> {
+            ProviderSettings(model) { page = SettingsPage.Client }
+            return
+        }
+        SettingsPage.Models -> {
+            ModelSettings(model) { page = SettingsPage.Client }
+            return
+        }
+        SettingsPage.Client -> Unit
     }
     val snapshot = model.snapshot
     Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -39,6 +52,7 @@ internal fun ClientSettings(model: AndroidAppModel) {
             }
         }
         Text("Queueは次のターンまで待機し、Steerは実行中のターンへ送ります。送信ボタンの長押しで、今回だけ動作を選べます。")
-        TextButton(onClick = { providers = true }, enabled = snapshot.connected()) { Text("Providers") }
+        TextButton(onClick = { page = SettingsPage.Providers }, enabled = snapshot.connected()) { Text("Providers") }
+        TextButton(onClick = { page = SettingsPage.Models }, enabled = snapshot.connected()) { Text("新しい会話のモデル") }
     }
 }

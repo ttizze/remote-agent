@@ -50,6 +50,7 @@ async fn configured_launcher_pagination_and_inflight_models_remain_owned_by_the_
         let shadow = root.path().join("shadow");
         let fixture = host_fixture::fixture::Config {
             stream_delay_ms: 0,
+            trace: true,
             expected_launch_args: vec!["--fixture-label".into(), "two words".into()],
             expected_environment: [
                 ("PATH".into(), bin.to_string_lossy().into()),
@@ -105,7 +106,10 @@ async fn configured_launcher_pagination_and_inflight_models_remain_owned_by_the_
             .collect(),
             config: json!({
                 "binaryPath":command, "homePath":shared, "shadowHomePath":shadow,
-                "launchArgs":"--fixture-label 'two words'"
+                "launchArgs":"--fixture-label 'two words'",
+                "customModels":["first","second", "private-custom", {"slug":"named-custom", "name":"Named custom",
+                    "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select",
+                        "options":[{"id":"max","label":"Maximum","isDefault":true}],"currentValue":"max"}]}}]
             }),
         };
         let saved = update(
@@ -150,9 +154,32 @@ async fn configured_launcher_pagination_and_inflight_models_remain_owned_by_the_
                 .iter()
                 .map(|model| model.model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["second"]
+            ["second", "private-custom", "named-custom"]
         );
+        assert!(!second.data[0].is_custom);
+        assert!(second.data[1].is_custom);
+        assert!(second.data[1].capabilities.option_descriptors.is_empty());
+        assert_eq!(second.data[2].display_name,"Named custom");
+        assert_eq!(second.data[2].capabilities.select(&["reasoningEffort"]).unwrap().selected(None),Some("max"));
+        assert!(second.data.iter().all(|model|model.model.instance_id == id));
         assert!(second.next_cursor.is_none());
+        let selected = second.data[2].model.clone();
+        let opened: agent_protocol::session::OpenedSession = call(&service, Call::CreateSession(agent_protocol::operations::CreateSession {
+            instance_id: id.clone(), cwd: Some(root.path().to_string_lossy().into()), model: Some(selected.clone()),
+        })).await.unwrap();
+        let session = opened.session;
+        let receipt: agent_protocol::operations::SubmissionReceipt = call(&service, Call::Submit(agent_protocol::operations::Submission {
+            thread_id: session, client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
+            input: vec![agent_protocol::operations::Input::Text {text:"Custom model fixture".into()}],
+            model: Some(selected), effort: Some("max".into()), service_tier: Some("default".into()),
+        })).await.unwrap();
+        assert!(receipt.turn_id.is_some());
+        let trace = std::fs::read_to_string(bin.join("rpc-trace.jsonl")).unwrap();
+        let start = trace.lines().map(|line|serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|line|line["method"] == "turn/start").unwrap();
+        assert_eq!(start["model"],"named-custom");
+        assert_eq!(start["effort"],"max");
+        assert_eq!(start["serviceTierForTurn"],"default");
         std::fs::write(bin.join("models-wait"), []).unwrap();
         let pending_service = service.clone();
         let pending = tokio::spawn(async move {

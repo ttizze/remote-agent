@@ -324,28 +324,27 @@ fn quick_controls(
     let Some(model) = model else {
         return ModelQuickControls::default();
     };
-    let efforts: Vec<_> = model
-        .supported_reasoning_efforts
-        .iter()
-        .map(|choice| choice.reasoning_effort.clone())
+    let reasoning = model.capabilities.select(&["reasoningEffort", "effort"]);
+    let efforts: Vec<_> = reasoning
+        .into_iter()
+        .flat_map(|descriptor| descriptor.choices())
+        .map(|choice| choice.id.clone())
         .collect();
-    let effort = effort
-        .filter(|value| !value.is_empty())
-        .unwrap_or(&model.default_reasoning_effort)
+    let effort = reasoning
+        .and_then(|descriptor| descriptor.selected(effort))
+        .unwrap_or_default()
         .to_owned();
     let effort_level = efforts
         .iter()
         .position(|value| *value == effort)
         .map_or(0, |index| index as u32 + 1);
-    let tier = service_tier
-        .filter(|value| !value.is_empty())
-        .or(model.default_service_tier.as_deref())
+    let service = model.capabilities.select(&["serviceTier"]);
+    let tier = service
+        .and_then(|descriptor| descriptor.selected(service_tier))
         .unwrap_or("default");
-    let fast_tier = model
-        .service_tiers
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
+    let fast_tier = service
+        .into_iter()
+        .flat_map(|descriptor| descriptor.choices())
         .find(|tier| matches!(tier.id.as_str(), "priority" | "fast"));
     let fast = fast_tier.is_some_and(|fast| fast.id == tier);
     ModelQuickControls {
@@ -376,10 +375,8 @@ mod tests {
             let id = format!("claude:{suffix}");
             let mut snapshot = Snapshot {
                 models: Arc::new(serde_json::from_value(serde_json::json!([
-                    {"id":id,"model":{"instanceId":"codex","id":id},"displayName":"Codex","isDefault":true,
-                     "defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]},
-                    {"id":id,"model":{"instanceId":"claude","id":id},"displayName":"Claude","isDefault":true,
-                     "defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"}]}
+                    {"id":id, "model":{"instanceId":"codex","id":id}, "displayName":"Codex", "isDefault":true, "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"high","label":"high","isDefault":true}],"currentValue":"high"}]}},
+                    {"id":id, "model":{"instanceId":"claude","id":id}, "displayName":"Claude", "isDefault":true, "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"low","label":"low","isDefault":true}],"currentValue":"low"}]}}
                 ])).unwrap()),
                 ..Default::default()
             };
@@ -433,10 +430,8 @@ mod tests {
     #[test]
     fn quick_controls_use_capabilities_and_saved_values_without_inventing_quotas() {
         let mut snapshot = Snapshot { models: Arc::new(serde_json::from_value(serde_json::json!([
-            {"id":"gpt","model":{"instanceId": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium",
-             "supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
-             "serviceTiers":[{"id":"priority"}]},
-            {"id":"claude:haiku","model":{"instanceId": "claude", "id": "haiku"},"displayName":"Haiku","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+            {"id":"gpt", "model":{"instanceId": "codex", "id": "gpt"}, "displayName":"GPT", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"low","label":"low","isDefault":false},{"id":"medium","label":"medium","isDefault":true},{"id":"high","label":"high","isDefault":false}],"currentValue":"medium"},{"id":"serviceTier","label":"Service Tier","type":"select","options":[{"id":"default","label":"Standard","isDefault":true},{"id":"priority","label":"priority","isDefault":false}],"currentValue":"default"}]}},
+            {"id":"claude:haiku", "model":{"instanceId": "claude", "id": "haiku"}, "displayName":"Haiku", "capabilities":{"optionDescriptors":[]}}
         ])).unwrap()), ..Default::default() };
         Arc::make_mut(&mut snapshot.drafts).insert(
             "draft".into(),

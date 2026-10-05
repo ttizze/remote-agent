@@ -683,14 +683,10 @@ mod tests {
         #[case] saved_choice: bool,
     ) {
         let models: Vec<Model> = serde_json::from_value(serde_json::json!([
-            {"id":"codex-default","model":{"instanceId":"codex","id":"default"},"displayName":"Codex default",
-             "isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"}]},
-            {"id":"claude-default","model":{"instanceId":"claude","id":"default"},"displayName":"Claude default",
-             "isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]},
-            {"id":"codex-saved","model":{"instanceId":"codex","id":"saved"},"displayName":"Codex saved",
-             "defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"}]},
-            {"id":"claude-saved","model":{"instanceId":"claude","id":"saved"},"displayName":"Claude saved",
-             "defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"high"}]}
+            {"id":"codex-default", "model":{"instanceId":"codex","id":"default"}, "displayName":"Codex default", "isDefault":true, "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"medium","label":"medium","isDefault":true}],"currentValue":"medium"}]}},
+            {"id":"claude-default", "model":{"instanceId":"claude","id":"default"}, "displayName":"Claude default", "isDefault":true, "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"high","label":"high","isDefault":true}],"currentValue":"high"}]}},
+            {"id":"codex-saved", "model":{"instanceId":"codex","id":"saved"}, "displayName":"Codex saved", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"low","label":"low","isDefault":false},{"id":"medium","label":"medium","isDefault":true}],"currentValue":"medium"}]}},
+            {"id":"claude-saved", "model":{"instanceId":"claude","id":"saved"}, "displayName":"Claude saved", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"low","label":"low","isDefault":false},{"id":"high","label":"high","isDefault":true}],"currentValue":"high"}]}}
         ])).unwrap();
         let session = SessionRef::new("external".into()).unwrap();
         let key: DraftKey = session.clone().into();

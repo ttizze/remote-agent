@@ -1315,8 +1315,8 @@ mod tests {
                     {"instanceId":"claude","id":"claude:second"}],"selected":{"codex":"first","claude":"claude:second"}
                 })).unwrap()));
                 snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
-                    {"id":"gpt","model":{"instanceId": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"priority"}]},
-                    {"id":"claude:sonnet","model":{"instanceId": "claude", "id": "sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+                    {"id":"gpt", "model":{"instanceId": "codex", "id": "gpt"}, "displayName":"GPT", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"medium","label":"medium","isDefault":true},{"id":"high","label":"high","isDefault":false}],"currentValue":"medium"},{"id":"serviceTier","label":"Service Tier","type":"select","options":[{"id":"default","label":"Standard","isDefault":true},{"id":"priority","label":"priority","isDefault":false}],"currentValue":"default"}]}},
+                    {"id":"claude:sonnet", "model":{"instanceId": "claude", "id": "sonnet"}, "displayName":"Sonnet", "capabilities":{"optionDescriptors":[]}}
                 ])).unwrap());
                 Arc::make_mut(&mut snapshot.drafts).insert(key, Arc::new(Draft { model: Some(agent_protocol::models::ModelRef { instance_id: "codex".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "gpt".into() }), ..Default::default() }));
             });
@@ -1463,10 +1463,7 @@ mod tests {
                 view.settings_page = super::SettingsPage::Models;
                 let snapshot = Arc::make_mut(&mut view.snapshot);
                 snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
-                    {"id":"gpt","model":{"instanceId":"codex","id":"gpt"},"displayName":"GPT-6-Astra",
-                     "isDefault":true,"defaultReasoningEffort":"medium",
-                     "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
-                     "serviceTiers":[{"id":"priority"}]}
+                    {"id":"gpt", "model":{"instanceId":"codex","id":"gpt"}, "displayName":"GPT-6-Astra", "isDefault":true, "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"medium","label":"medium","isDefault":true},{"id":"high","label":"high","isDefault":false}],"currentValue":"medium"},{"id":"serviceTier","label":"Service Tier","type":"select","options":[{"id":"default","label":"Standard","isDefault":true},{"id":"priority","label":"priority","isDefault":false}],"currentValue":"default"}]}}
                 ])).unwrap());
             });
             cx.observe(&desktop, |_, _, cx| cx.notify()).detach();

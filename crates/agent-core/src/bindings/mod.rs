@@ -518,7 +518,7 @@ mod tests {
                 assert_eq!(open["params"]["session"]["id"], "thread");
                 // Finish the conversation before the lists; no reload invalidates another.
                 writer.reply(open, json!({"result":{"session":{"id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"after reconnect","phase":"unknown"}}}}}],"status":"unknown"}]}}}})).await.unwrap();
-                writer.reply(&requests["host/model/list"], json!({ "result":{"instances":[],"data":[{"id":"fresh-model","model":{"instanceId": "codex", "id": "fresh-model"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}})).await.unwrap();
+                writer.reply(&requests["host/model/list"], json!({ "result":{"instances":[],"data":[{"id":"fresh-model", "model":{"instanceId": "codex", "id": "fresh-model"}, "displayName":"Fresh", "capabilities":{"optionDescriptors":[]}}],"nextCursor":null}})).await.unwrap();
                 writer.reply(list, json!({ "result":{"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
                 assert!(!matches!(reader.read_request().await, Ok(Some(_))));
                 next.close();
@@ -568,24 +568,71 @@ mod tests {
         use crate::transport::Trust;
         use serde_json::{Value, json};
         let silent = mode == "silent";
-        let (store, host) = tokio::time::timeout(Duration::from_secs(10), async {
-                    let identity = Identity::generate();
-                    let trust = Trust { allowed: [identity.node_id()].into(), ..Default::default() };
-                    let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
-                    let connection = || Connection {
-                        ticket: host.ticket().to_string(), identity: identity.to_bytes().to_vec(),
-                        invitation: None, use_relays: false,
-                    };
-                    let snapshot = Snapshot {
-                        navigation: Arc::new(crate::state::Navigation {
-                            thread_id: selected.then(|| agent_protocol::session::SessionRef { id: "thread".into() }), draft_key: agent_protocol::session::SessionRef { id: "thread".into()}.into(),
-                            ..Default::default()
-                        }), ..Default::default()
-                    };
-                    let store = AgentStore::offline(crate::persistence::encode(&snapshot).unwrap(), None).await.unwrap();
-                    let (connected, (first, mut reader, writer)) = tokio::join!(store.reconnect(connection()), scoped_incoming(&host, &trust));
-                    connected.unwrap();
-                    let old_identity = store.endpoint.lock().await.as_ref().unwrap().endpoint.node_id();
+        // Initialize native networking before measuring foreground operations.
+        let (store, host, trust, first, mut reader, writer, old_identity, identity) =
+            tokio::time::timeout(Duration::from_secs(45), async {
+                let identity = Identity::generate();
+                let trust = Trust {
+                    allowed: [identity.node_id()].into(),
+                    ..Default::default()
+                };
+                let host = Endpoint::bind(Identity::generate(), Relays::Disabled)
+                    .await
+                    .unwrap();
+                let connection = Connection {
+                    ticket: host.ticket().to_string(),
+                    identity: identity.to_bytes().to_vec(),
+                    invitation: None,
+                    use_relays: false,
+                };
+                let snapshot = Snapshot {
+                    navigation: Arc::new(crate::state::Navigation {
+                        thread_id: selected.then(|| agent_protocol::session::SessionRef {
+                            id: "thread".into(),
+                        }),
+                        draft_key: agent_protocol::session::SessionRef {
+                            id: "thread".into(),
+                        }
+                        .into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                let store =
+                    AgentStore::offline(crate::persistence::encode(&snapshot).unwrap(), None)
+                        .await
+                        .unwrap();
+                let (connected, (first, reader, writer)) =
+                    tokio::join!(store.reconnect(connection), scoped_incoming(&host, &trust));
+                connected.unwrap();
+                let old_identity = store
+                    .endpoint
+                    .lock()
+                    .await
+                    .as_ref()
+                    .unwrap()
+                    .endpoint
+                    .node_id();
+                (
+                    store,
+                    host,
+                    trust,
+                    first,
+                    reader,
+                    writer,
+                    old_identity,
+                    identity,
+                )
+            })
+            .await
+            .expect("foreground fixture must initialize");
+        let connection = || Connection {
+            ticket: host.ticket().to_string(),
+            identity: identity.to_bytes().to_vec(),
+            invitation: None,
+            use_relays: false,
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
                     let response = |request: &Value, text: &str| {
                         let result = match request["method"].as_str().unwrap() {
                             "host/session/scope" => json!("fixture-storage"),
@@ -671,7 +718,6 @@ mod tests {
                     };
                     tokio::join!(server, client);
                     first.close();
-                    (store, host)
                 }).await.unwrap();
         // Graceful QUIC endpoint shutdown drains speculative connections with
         // PTOs. Keep that cleanup separate from the 500 ms recovery assertion.
