@@ -15,6 +15,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -31,6 +32,8 @@ import dev.remoteagent.core.Snapshot
 import dev.remoteagent.core.TerminalSize
 import dev.remoteagent.core.terminalHandle
 
+private const val TERMINAL_FONT_SIZE = 12
+
 @Composable
 internal fun TerminalDialog(
     snapshot: Snapshot,
@@ -45,7 +48,7 @@ internal fun TerminalDialog(
     Dialog(onDismissRequest = dismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxSize().imePadding()) {
             Column {
-                val terminal = snapshot.terminal(handle, 0u)
+                val terminal = snapshot.terminal(handle, ULong.MAX_VALUE)
                 if (terminal.loading) {
                     CircularProgressIndicator()
                 } else {
@@ -66,7 +69,7 @@ internal fun TerminalDialog(
                         Text("終了")
                     }
                 }
-                TerminalBody(snapshot, handle, cwd, perform, Modifier.weight(1f))
+                key(handle) { TerminalBody(snapshot, handle, cwd, perform, Modifier.weight(1f)) }
             }
         }
     }
@@ -80,6 +83,7 @@ private fun TerminalBody(
     perform: (Intent, (Result<Outcome>) -> Unit) -> Unit,
     modifier: Modifier,
 ) {
+    var sequence by remember(handle) { mutableStateOf(0uL) }
     var nativeTerminal by remember { mutableStateOf<NativeTerminal?>(null) }
     val currentPerform by rememberUpdatedState(perform)
     Column(modifier) {
@@ -105,7 +109,7 @@ private fun TerminalBody(
                         T3.color("terminalBackground").toArgb(),
                         T3.color("terminalForeground").toArgb(),
                         T3.color("terminalCursor").toArgb(),
-                        12,
+                        TERMINAL_FONT_SIZE,
                     )
                     .let { terminal ->
                         nativeTerminal = terminal
@@ -114,13 +118,14 @@ private fun TerminalBody(
             },
             update = { view ->
                 val terminal = requireNotNull(nativeTerminal)
-                snapshot.terminal(handle, 0u).output.forEach { chunk ->
+                snapshot.terminal(handle, sequence).output.forEach { chunk ->
                     terminal.feed(
                         chunk.sequence.toLong(),
                         chunk.data,
                         chunk.resetSize?.cols?.toInt() ?: 0,
                         chunk.resetSize?.rows?.toInt() ?: 0,
                     )
+                    sequence = chunk.sequence
                 }
             },
         )
@@ -158,6 +163,6 @@ private fun TerminalKeys(terminal: NativeTerminal?) {
 @Composable
 internal fun TerminalLauncher(snapshot: Snapshot, perform: (Intent, (Result<Outcome>) -> Unit) -> Unit) {
     var visible by remember { mutableStateOf(false) }
-    TextButton(onClick = { visible = true }) { Text("ターミナル") }
+    TextButton(onClick = { visible = true }, enabled = snapshot.canOpenTerminal()) { Text("ターミナル") }
     if (visible) TerminalDialog(snapshot, perform) { visible = false }
 }

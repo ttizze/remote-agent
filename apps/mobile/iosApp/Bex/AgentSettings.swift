@@ -2,7 +2,7 @@ import AgentCore
 import SwiftUI
 import UIKit
 
-enum T3 {
+enum T3Theme {
     static let palette = theme(dark: true)
     static func color(_ role: String) -> Color {
         Color(uiColor: uiColor(role))
@@ -43,7 +43,7 @@ struct SettingsSheet: View {
             List {
                 Section("Connection") {
                     Button(model.selectedProfileName ?? "Hosts") { dismiss(); model.showProfiles() }
-                    Text(model.isConnected ? "Connected" : "Offline").foregroundStyle(T3.color("textMuted"))
+                    Text(model.isConnected ? "Connected" : "Offline").foregroundStyle(T3Theme.color("textMuted"))
                     Button("Reconnect") { model.connect(afterForeground: true) }
                 }
                 Section("Provider accounts") {
@@ -91,12 +91,12 @@ struct SettingsSheet: View {
                 }
                 Section { PrivacyPolicyButton() }
             }
-            .scrollContentBackground(.hidden).background(T3.color("canvas"))
+            .scrollContentBackground(.hidden).background(T3Theme.color("canvas"))
             .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("Done") { dismiss() } }
             .onAppear { model.perform(.loadAccounts) }
         }
-        .tint(T3.color("mobilePrimaryText")).font(T3.font(14))
+        .tint(T3Theme.color("mobilePrimaryText")).font(T3Theme.font(14))
     }
 }
 
@@ -106,6 +106,7 @@ struct ThreadActions: View {
     let pinned: Bool
     let archived: Bool
     let settled: Bool
+    var snoozed: Bool = false
     var body: some View {
         Button(pinned ? "Unpin" : "Pin") { action(pinned ? .unpin : .pin) }
         if pinned {
@@ -113,15 +114,16 @@ struct ThreadActions: View {
             Button("Move down") { model.perform(.movePinned(threadId: id, up: false)) }
         }
         Button(settled ? "Un-settle" : "Settle") { action(settled ? .unsettle : .settle) }
+        if snoozed {
+            Button("Unsnooze") { action(.unsnooze) }
+        }
         Button("Snooze for 1 hour") {
             action(.snooze(until: ISO8601DateFormatter().string(from: Date().addingTimeInterval(3600))))
         }
         Button("Mark unread") { action(.markUnread) }
         Button(archived ? "Unarchive" : "Archive") { action(archived ? .unarchive : .archive) }
         Button("Delete", role: .destructive) {
-            action(.delete); if model.selectedThreadId == id {
-                model.showThreadList()
-            }
+            model.deleteThreadId = id
         }
     }
 

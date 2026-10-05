@@ -7,6 +7,29 @@ struct BexSwiftUIRoot: View {
 
     var body: some View {
         BexScreen(model: model)
+            .alert(
+                "Delete thread?",
+                isPresented: Binding(
+                    get: { model.deleteThreadId != nil },
+                    set: {
+                        if !$0 {
+                            model.deleteThreadId = nil
+                        }
+                    }
+                )
+            ) {
+                Button("Delete", role: .destructive) {
+                    if let id = model.deleteThreadId {
+                        model.perform(.thread(threadId: id, action: .delete)) { result in
+                            if case .success = result, model.screen == .thread, model.selectedThreadId == nil {
+                                model.showThreadList()
+                            }
+                        }
+                    }
+                    model.deleteThreadId = nil
+                }
+                Button("Cancel", role: .cancel) { model.deleteThreadId = nil }
+            } message: { Text("This permanently deletes the conversation.") }
             .sheet(isPresented: $model.isScanning) {
                 BexQrScannerSheet { model.scanned($0) }
                     .interactiveDismissDisabled()
@@ -61,7 +84,7 @@ private struct BexScreen: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .preferredColorScheme(.dark)
-        .tint(T3.color("mobilePrimaryText")).font(T3.font()).background(T3.color("canvas"))
+        .tint(T3Theme.color("mobilePrimaryText")).font(T3Theme.font()).background(T3Theme.color("canvas"))
     }
 
     private var pairingScreen: some View {
@@ -104,7 +127,7 @@ private struct PairingScreen: View {
                             .font(.system(size: hostName == nil ? 36 : 24, weight: .medium))
                             .foregroundStyle(Color.accentColor)
                             .frame(width: hostName == nil ? 72 : 32, height: hostName == nil ? 72 : 32)
-                            .background(T3.color("surface"))
+                            .background(T3Theme.color("surface"))
                             .clipShape(RoundedRectangle(cornerRadius: 28))
                         Text("どこでも、\nこれひとつで。")
                             .font(.system(size: hostName == nil ? 34 : 28, weight: .bold))
@@ -158,7 +181,7 @@ private struct PairingScreen: View {
                         .font(.footnote)
                         .padding(16)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(T3.color("surface"))
+                        .background(T3Theme.color("surface"))
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                     } else {
                         VStack(spacing: 16) {
@@ -196,7 +219,7 @@ private struct PairingScreen: View {
                             }
                         }
                         .padding(16)
-                        .background(T3.color("surface"))
+                        .background(T3Theme.color("surface"))
                         .clipShape(RoundedRectangle(cornerRadius: 20))
                     }
                     if connecting {
@@ -225,7 +248,7 @@ private struct PairingScreen: View {
             }
             .scrollDismissesKeyboard(.interactively)
         }
-        .background(T3.color("canvas").ignoresSafeArea())
+        .background(T3Theme.color("canvas").ignoresSafeArea())
         .navigationTitle("Bex")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -273,7 +296,7 @@ private struct ProfilesScreen: View {
                             }
                             .padding(20)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(T3.color("surface"))
+                            .background(T3Theme.color("surface"))
                             .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
                         .buttonStyle(.plain)
@@ -299,7 +322,7 @@ private struct ProfilesScreen: View {
                 .frame(minHeight: geometry.size.height, alignment: .top)
             }
         }
-        .background(T3.color("canvas").ignoresSafeArea())
+        .background(T3Theme.color("canvas").ignoresSafeArea())
         .safeAreaInset(edge: .top, spacing: 0) {
             SettingsScopeBar { Text("すべてのプロジェクト") } environment: { Text("このiPhone") }
         }
@@ -326,7 +349,7 @@ struct BexNotice: View {
 
     var body: some View {
         Text(text)
-            .foregroundColor(T3.color("errorForeground"))
+            .foregroundColor(T3Theme.color("errorForeground"))
             .accessibilityIdentifier("notice")
     }
 }
@@ -358,30 +381,4 @@ private struct BexQrScannerController: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_: BexQrCaptureViewController, context _: Context) {}
-}
-
-/// Keep native editing ahead of Store publication; every edit still dispatches synchronously.
-struct BufferedTextInput<Content: View>: View {
-    @Binding private var value: String
-    @State private var text: String
-    let content: (Binding<String>) -> Content
-
-    init(value: Binding<String>, @ViewBuilder content: @escaping (Binding<String>) -> Content) {
-        _value = value
-        _text = State(initialValue: value.wrappedValue)
-        self.content = content
-    }
-
-    var body: some View {
-        let input = Binding(get: { text }, set: {
-            guard text != $0 else { return }
-            text = $0
-            value = $0
-        })
-        content(input).onChange(of: value) { _, _ in
-            if text != value {
-                text = value
-            }
-        }
-    }
 }

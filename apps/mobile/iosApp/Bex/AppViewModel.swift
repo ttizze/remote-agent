@@ -11,15 +11,15 @@ final class BexAppViewModel: ObservableObject {
     @Published var isConnecting = false
     @Published var pairingError: String?
     @Published private(set) var pairingInvitation: Invitation?
+    @Published var deleteThreadId: String?
     @Published var notice: String?
     @Published var profiles: [HostProfile] = []
     @Published private(set) var selectedProfileId: String?
     @Published var composerText = ""
-    var draftRevision: UInt64 = 0
-    var pendingDraft: UInt64?
-    var conversation: ConversationView {
-        snapshot.conversation()
-    }
+    var draftEdits = DraftRevision()
+    private var composerKey = ""
+    @Published private(set) var conversation = AgentCore.Snapshot.empty().conversation()
+    private var presentation: Task<Void, Never>?
 
     var models: [Model] {
         snapshot.models()
@@ -83,8 +83,7 @@ final class BexAppViewModel: ObservableObject {
     /// Save and stop the current Host's work; the caller shuts down the returned store.
     private func detachStore() -> AgentStore? {
         persist()
-        draftRevision += 1
-        pendingDraft = nil
+        draftEdits.reset()
         connection?.cancel()
         observation?.cancel()
         cancelInitialization()
@@ -234,7 +233,7 @@ final class BexAppViewModel: ObservableObject {
                 do { result = try await .success(receipt.wait()) } catch { result = .failure(error) }
                 guard let self else { return }
                 operations[id] = nil
-                if selectedProfileId == host {
+                if selectedProfileId == host, store === owner {
                     publish(owner.snapshot())
                     if case let .failure(error) = result {
                         notice = snapshot.error() ?? error.localizedDescription
@@ -270,7 +269,7 @@ extension BexAppViewModel {
                 try await owner.resume(connection: Connection(ticket: profile.ticket,
                                                               identity: identity,
                                                               invitation: nil, useRelays: true))
-                guard let self, selectedProfileId == profile.id, !Task.isCancelled else { return }
+                guard let self, selectedProfileId == profile.id, store === owner, !Task.isCancelled else { return }
                 let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1_000_000
                 owner.recordConnectionEvent(phase: .uiConnectReady, value: UInt64(elapsed))
                 publish(owner.snapshot())
@@ -281,7 +280,7 @@ extension BexAppViewModel {
                     phase: Task.isCancelled ? .uiConnectCancelled : .uiConnectFailed,
                     value: UInt64((ProcessInfo.processInfo.systemUptime - started) * 1_000_000)
                 )
-                guard self?.selectedProfileId == profile.id, !Task.isCancelled else { return }
+                guard self?.selectedProfileId == profile.id, self?.store === owner, !Task.isCancelled else { return }
                 self?.isConnecting = false
                 self?.notice = error.localizedDescription
             }
@@ -295,7 +294,7 @@ extension BexAppViewModel {
             while !Task.isCancelled {
                 do {
                     _ = try await owner.nextSnapshot(previous: previous)
-                    guard let self, selectedProfileId == host, !Task.isCancelled else { return }
+                    guard let self, selectedProfileId == host, store === owner, !Task.isCancelled else { return }
                     let latest = owner.snapshot()
                     publish(latest)
                     if previous.connected(), !latest.connected(), !isConnecting {
@@ -309,6 +308,12 @@ extension BexAppViewModel {
     }
 
     private func publish(_ next: AgentCore.Snapshot) {
+        if store != nil, next.revision() < snapshot.revision() {
+            return
+        }
+        if next === snapshot {
+            return
+        }
         if let name = next.hostName(),
            let index = profiles.firstIndex(where: { $0.id == selectedProfileId }),
            profiles[index].name != name {
@@ -319,13 +324,50 @@ extension BexAppViewModel {
             notice = next.error()
         }
         snapshot = next
-        if pendingDraft == nil {
-            composerText = next.draft().text
+        let key = next.currentDraftKey()
+        if key != composerKey {
+            draftEdits.reset(); composerKey = key
         }
+        if draftEdits.pending == nil {
+            composerText = next.draft().text
+            draftEdits.base = composerText
+        }
+        schedulePresentation()
         persistence?.cancel()
         persistence = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
             self?.persist()
+        }
+    }
+
+    private func schedulePresentation() {
+        if store == nil {
+            presentation?.cancel()
+            presentation = nil
+            conversation = snapshot.conversation()
+        } else if presentation == nil {
+            let expectedOwner = store
+            let expectedHost = selectedProfileId
+            presentation = Task { [weak self] in
+                guard let self else { return }
+                defer {
+                    if store === expectedOwner, selectedProfileId == expectedHost {
+                        presentation = nil
+                    }
+                }
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .milliseconds(16)) } catch { return }
+                    let latest = snapshot
+                    let view = await Task.detached(priority: .userInitiated) { latest.conversation() }.value
+                    guard !Task.isCancelled, store === expectedOwner, selectedProfileId == expectedHost else { return }
+                    if snapshot.selectedThreadId() == latest.selectedThreadId() {
+                        conversation = view
+                    }
+                    if snapshot === latest {
+                        return
+                    }
+                }
+            }
         }
     }
 

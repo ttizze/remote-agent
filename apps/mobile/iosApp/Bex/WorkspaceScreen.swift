@@ -23,11 +23,19 @@ struct ConversationDestination: View {
 enum WorkspaceTab: String, CaseIterable {
     case terminal, browser, files
     var icon: String {
-        switch self { case .terminal: "terminal"; case .browser: "globe"; case .files: "folder" }
+        switch self {
+        case .terminal: "terminal"
+        case .browser: "globe"
+        case .files: "folder"
+        }
     }
 
     var label: String {
-        switch self { case .terminal: "Terminal"; case .browser: "Browser"; case .files: "Files" }
+        switch self {
+        case .terminal: "Terminal"
+        case .browser: "Browser"
+        case .files: "Files"
+        }
     }
 }
 
@@ -47,10 +55,10 @@ private struct WorkspaceToolsScreen: View {
                         .selectedThreadId {
                         WorkspaceBrowserScreen(model: model, thread: thread).id(thread)
                     } else {
-                        Text("Start a thread to open its browser.").foregroundStyle(T3.color("textMuted"))
+                        Text("Start a thread to open its browser.").foregroundStyle(T3Theme.color("textMuted"))
                     }
                 } else if model.cwd.isEmpty {
-                    Text("Select a project folder.").foregroundStyle(T3.color("textMuted"))
+                    Text("Select a project folder.").foregroundStyle(T3Theme.color("textMuted"))
                 } else if tab == .terminal {
                     TerminalScreen(model: model, cwd: model.cwd).id(model.cwd)
                 } else {
@@ -58,7 +66,7 @@ private struct WorkspaceToolsScreen: View {
                         .id("\(model.cwd):\(model.snapshot.selectedThreadId() ?? "new")")
                 }
             }
-        }.background(T3.color("canvas")).navigationTitle(tab.label).navigationBarTitleDisplayMode(.inline)
+        }.background(T3Theme.color("canvas")).navigationTitle(tab.label).navigationBarTitleDisplayMode(.inline)
     }
 }
 

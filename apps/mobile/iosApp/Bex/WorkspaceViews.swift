@@ -119,7 +119,7 @@ struct WorkspaceScreen: View {
                 }
             }
         }
-        .background(T3.color("canvas"))
+        .background(T3Theme.color("canvas"))
     }
 
     private func request(_ intent: Intent, completion: @escaping (AgentCore.Snapshot, Result<Outcome, Error>) -> Void) {
@@ -310,16 +310,16 @@ private struct WorkspaceDiffCard: View {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                     Text(file.path).fontWeight(.semibold).frame(maxWidth: .infinity, alignment: .leading)
                     if let additions = file.additions {
-                        Text("+\(additions)").foregroundColor(T3.color("successForeground"))
+                        Text("+\(additions)").foregroundColor(T3Theme.color("successForeground"))
                     }
                     if let deletions = file.deletions {
-                        Text("−\(deletions)").foregroundColor(T3.color("errorForeground"))
+                        Text("−\(deletions)").foregroundColor(T3Theme.color("errorForeground"))
                     }
                 }.font(.subheadline).padding(12).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("diff.file.\(file.path)")
-            .background(T3.color("mobileGroupedCard"))
+            .background(T3Theme.color("mobileGroupedCard"))
             if expanded {
                 if file.rows.isEmpty {
                     Text("テキスト差分はありません").font(.caption).foregroundColor(.secondary).padding()
@@ -341,13 +341,13 @@ private struct WorkspaceDiffCard: View {
                     }
                     .font(.system(.footnote, design: .monospaced))
                     .padding(.vertical, 3).padding(.horizontal, 8)
-                    .background(row.kind == "+" ? T3.color("successForeground").opacity(0.18) :
-                        row.kind == "-" ? T3.color("errorForeground").opacity(0.18) :
+                    .background(row.kind == "+" ? T3Theme.color("successForeground").opacity(0.18) :
+                        row.kind == "-" ? T3Theme.color("errorForeground").opacity(0.18) :
                         row.kind == "@" ? Color.secondary.opacity(0.12) : Color.clear)
                 }
             }
         }
-        .background(T3.color("surface"))
+        .background(T3Theme.color("surface"))
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }

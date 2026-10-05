@@ -10,7 +10,7 @@ struct AccountUsageView: View {
             if let usage {
                 if let error = usage.error {
                     Label(accountErrorMessage(message: error), systemImage: "exclamationmark.circle")
-                        .font(.caption).foregroundStyle(T3.color("warningForeground"))
+                        .font(.caption).foregroundStyle(T3Theme.color("warningForeground"))
                 }
                 ForEach(Array(usage.windows.enumerated()), id: \.offset) { _, window in
                     UsageWindowView(window: window)
@@ -32,14 +32,13 @@ private struct UsageWindowView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack { Text(window.label); Spacer(); Text("残り \(window.remainingPercent)%").monospacedDigit() }
-                .font(T3.font(12))
+                .font(T3Theme.font(12))
             ProgressView(value: Double(window.remainingPercent), total: 100)
-                .tint(T3.color(window.remainingPercent <= 20 ? "warningForeground" : "successForeground"))
+                .tint(T3Theme.color(window.remainingPercent <= 20 ? "warningForeground" : "successForeground"))
             if let reset = window.resetsAt {
-                Text(
-                    "リセット: \(Date(timeIntervalSince1970: Double(reset)).formatted(date: .abbreviated, time: .shortened))"
-                )
-                .font(T3.font(11)).foregroundStyle(T3.color("textMuted"))
+                let date = Date(timeIntervalSince1970: Double(reset))
+                Text("リセット: \(date.formatted(date: .abbreviated, time: .shortened))")
+                    .font(T3Theme.font(11)).foregroundStyle(T3Theme.color("textMuted"))
             }
         }
     }
@@ -106,7 +105,8 @@ struct AccountLoginSection: View {
                 ProgressView("ブラウザでの認証を待っています…")
             }
             if let error = loginError {
-                Text(accountErrorMessage(message: error)).font(.caption).foregroundStyle(T3.color("errorForeground"))
+                Text(accountErrorMessage(message: error)).font(.caption)
+                    .foregroundStyle(T3Theme.color("errorForeground"))
                 Button("認証状態を再確認", action: retry)
             }
         }

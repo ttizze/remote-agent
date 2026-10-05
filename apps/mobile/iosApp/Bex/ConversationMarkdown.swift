@@ -4,35 +4,39 @@ import UIKit
 
 struct ConversationMarkdown: View {
     let source: String
+    @State private var blocks: [MarkdownBlock] = []
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(markdownBlocks(source: source).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
                 case let .paragraph(runs, style):
                     if style.code {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
                                 Spacer(); Button("Copy") { UIPasteboard.general.string = runs.map(\.text).joined() }
-                                    .font(T3.font(11))
+                                    .font(T3Theme.font(11))
                             }
                             ScrollView(.horizontal) { Text(runs.map(\.text).joined()).font(.system(
                                 size: 13,
                                 design: .monospaced
                             )).textSelection(.enabled) }
-                        }.padding(12).background(T3.color("codeBackground"), in: RoundedRectangle(cornerRadius: 10))
-                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(T3.color("border")))
+                        }.padding(12).background(
+                            T3Theme.color("codeBackground"),
+                            in: RoundedRectangle(cornerRadius: 10)
+                        )
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(T3Theme.color("border")))
                     } else {
                         HStack(alignment: .top, spacing: 8) {
                             if let marker = style
                                 .marker {
-                                Text(marker).font(T3.font(16)).foregroundStyle(T3.color("textMuted"))
+                                Text(marker).font(T3Theme.font(16)).foregroundStyle(T3Theme.color("textMuted"))
                             }
                             Text(attributed(runs, header: style.header)).lineSpacing(4).textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }.padding(.leading, style.quoted ? 12 : 0)
                             .overlay(alignment: .leading) {
                                 if style.quoted {
-                                    Rectangle().fill(T3.color("border")).frame(width: 2)
+                                    Rectangle().fill(T3Theme.color("border")).frame(width: 2)
                                 }
                             }
                     }
@@ -43,15 +47,21 @@ struct ConversationMarkdown: View {
                                 GridRow { ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in Text(attributed(
                                     cell.runs,
                                     header: nil
-                                )).font(T3.font(12)).textSelection(.enabled) } }
+                                )).font(T3Theme.font(12)).textSelection(.enabled) } }
                             }
-                        }.padding(12).background(T3.color("surface"), in: RoundedRectangle(cornerRadius: 8))
+                        }.padding(12).background(T3Theme.color("surface"), in: RoundedRectangle(cornerRadius: 8))
                     }
                 case let .visualization(path):
-                    Text(path).font(T3.font(12)).foregroundStyle(T3.color("textMuted")).textSelection(.enabled)
+                    Text(path).font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
+                        .textSelection(.enabled)
                 }
             }
-        }.tint(T3.color("mobileMarkdownLink"))
+        }.tint(T3Theme.color("mobileMarkdownLink"))
+            .task(id: source) {
+                let parsed = await Task.detached(priority: .userInitiated) { markdownBlocks(source: source) }.value
+                guard !Task.isCancelled else { return }
+                blocks = parsed
+            }
     }
 
     private func attributed(_ runs: [MarkdownRun], header: UInt8?) -> AttributedString {
@@ -59,7 +69,7 @@ struct ConversationMarkdown: View {
         let size: CGFloat = header == 1 ? 21 : header == 2 ? 19 : header == 3 ? 17 : header != nil ? 15 : 16
         for run in runs {
             var text = AttributedString(run.text)
-            text.font = run.code ? .system(size: 13, design: .monospaced) : T3.font(
+            text.font = run.code ? .system(size: 13, design: .monospaced) : T3Theme.font(
                 size,
                 weight: run.strong || header != nil ? .bold : .regular
             )
@@ -69,8 +79,7 @@ struct ConversationMarkdown: View {
             if run.strikethrough {
                 text.strikethroughStyle = .single
             }
-            if let link = run.link, let url = URL(string: link),
-               ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") {
+            if let link = run.link, safeMarkdownUrl(url: link), let url = URL(string: link) {
                 text.link = url
             }
             result += text

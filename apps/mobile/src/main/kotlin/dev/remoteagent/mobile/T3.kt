@@ -1,6 +1,8 @@
 package dev.remoteagent.mobile
 
-import androidx.compose.material3.*
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
@@ -53,6 +55,8 @@ internal object T3 {
     private fun style(size: Int, line: Int, weight: FontWeight = FontWeight.Normal) =
         TextStyle(fontFamily = fonts, fontWeight = weight, fontSize = size.sp, lineHeight = line.sp)
 
+    // These sizes and line heights are the fixed T3 typography specification.
+    @Suppress("MagicNumber")
     val typography =
         Typography(
             bodyLarge = style(16, 23),

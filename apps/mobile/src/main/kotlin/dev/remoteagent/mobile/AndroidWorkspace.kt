@@ -1,3 +1,5 @@
+@file:Suppress("TooGenericExceptionCaught")
+
 package dev.remoteagent.mobile
 
 import android.graphics.BitmapFactory
@@ -8,26 +10,70 @@ import android.widget.ImageView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import dev.remoteagent.core.*
+import dev.remoteagent.core.BrowserAction
+import dev.remoteagent.core.BrowserFrame
+import dev.remoteagent.core.BrowserKey
+import dev.remoteagent.core.BrowserRequest
+import dev.remoteagent.core.FileEntry
+import dev.remoteagent.core.Intent
+import dev.remoteagent.core.ProviderKind
+import dev.remoteagent.core.TurnDiffOption
+import dev.remoteagent.core.accountErrorMessage
+import dev.remoteagent.core.privacyPolicy
 import java.io.File
 import java.util.UUID
-import kotlinx.coroutines.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+private const val BROWSER_REFRESH_MILLIS = 500L
 
 @Composable
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
 internal fun SettingsDialog(model: AndroidAppModel, dismiss: () -> Unit) {
     val context = LocalContext.current
     var code by remember { mutableStateOf("") }
@@ -115,7 +161,7 @@ internal fun SettingsDialog(model: AndroidAppModel, dismiss: () -> Unit) {
                                     code,
                                     { code = it },
                                     label = { Text("Authorization code") },
-                                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                                    visualTransformation = PasswordVisualTransformation(),
                                 )
                                 Button(
                                     onClick = {
@@ -164,6 +210,8 @@ internal fun WorkspaceDialog(model: AndroidAppModel, tab: String, dismiss: () ->
 }
 
 @Composable
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
 private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -322,6 +370,8 @@ private fun WorkspaceFiles(model: AndroidAppModel, modifier: Modifier) {
 }
 
 @Composable
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
 private fun WorkspaceDiff(model: AndroidAppModel, modifier: Modifier) {
     val cwd = model.snapshot.currentDirectory()
     val thread = model.snapshot.selectedThreadId()
@@ -334,7 +384,7 @@ private fun WorkspaceDiff(model: AndroidAppModel, modifier: Modifier) {
     }
     LaunchedEffect(cwd, thread, selection) { refresh() }
     val review = model.snapshot.review()
-    val files = remember(review) { review?.diffFiles().orEmpty() }
+    val files = remember(model.snapshot.reviewRevision()) { review?.diffFiles().orEmpty() }
     Column(modifier) {
         Row {
             Box(Modifier.weight(1f)) {
@@ -396,6 +446,8 @@ private fun WorkspaceDiff(model: AndroidAppModel, modifier: Modifier) {
 }
 
 @Composable
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
 private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
     val thread = model.snapshot.selectedThreadId()
     if (thread == null) {
@@ -440,7 +492,7 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
     LaunchedEffect(thread, active) {
         while (active && isActive) {
             if (model.snapshot.connected()) request(BrowserAction.Read)
-            delay(500)
+            delay(BROWSER_REFRESH_MILLIS)
         }
     }
     Column(modifier.padding(horizontal = 12.dp)) {
@@ -492,14 +544,17 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
                     fun point(event: MotionEvent): FloatArray? {
                         val drawable = drawable ?: return null
                         val matrix = Matrix()
-                        if (!imageMatrix.invert(matrix)) return null
-                        val point = floatArrayOf(event.x, event.y)
-                        matrix.mapPoints(point)
-                        return point.takeIf {
-                            it[0] >= 0 &&
-                                it[1] >= 0 &&
-                                it[0] < drawable.intrinsicWidth &&
-                                it[1] < drawable.intrinsicHeight
+                        return if (!imageMatrix.invert(matrix)) {
+                            null
+                        } else {
+                            val point = floatArrayOf(event.x, event.y)
+                            matrix.mapPoints(point)
+                            point.takeIf {
+                                it[0] >= 0 &&
+                                    it[1] >= 0 &&
+                                    it[0] < drawable.intrinsicWidth &&
+                                    it[1] < drawable.intrinsicHeight
+                            }
                         }
                     }
                     val gestures =
@@ -553,7 +608,7 @@ private fun WorkspaceBrowser(model: AndroidAppModel, modifier: Modifier) {
                 { input = it },
                 Modifier.weight(1f),
                 label = { Text("Type in browser") },
-                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                visualTransformation = PasswordVisualTransformation(),
             )
             TextButton(
                 onClick = {

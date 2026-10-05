@@ -92,3 +92,29 @@ struct FileEditorSheet: View {
         }
     }
 }
+
+/// Keep native editing ahead of Store publication; every edit still dispatches synchronously.
+struct BufferedTextInput<Content: View>: View {
+    @Binding private var value: String
+    @State private var text: String
+    let content: (Binding<String>) -> Content
+
+    init(value: Binding<String>, @ViewBuilder content: @escaping (Binding<String>) -> Content) {
+        _value = value
+        _text = State(initialValue: value.wrappedValue)
+        self.content = content
+    }
+
+    var body: some View {
+        let input = Binding(get: { text }, set: {
+            guard text != $0 else { return }
+            text = $0
+            value = $0
+        })
+        content(input).onChange(of: value) { _, _ in
+            if text != value {
+                text = value
+            }
+        }
+    }
+}

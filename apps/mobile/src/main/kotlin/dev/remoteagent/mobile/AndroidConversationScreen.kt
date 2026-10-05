@@ -1,21 +1,67 @@
 package dev.remoteagent.mobile
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import dev.remoteagent.core.*
+import dev.remoteagent.core.Intent
+import dev.remoteagent.core.Model
+import dev.remoteagent.core.QueueAction
+import dev.remoteagent.core.RowKind
+import dev.remoteagent.core.SendBehavior
+import dev.remoteagent.core.ThreadAction
+import dev.remoteagent.core.TimelineRow
+import dev.remoteagent.core.runtimeModeChoices
 import kotlinx.coroutines.flow.collect
+
+private const val AUTO_FOLLOW_DISTANCE_PX = 80
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
 internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Modifier) {
     val conversation = model.conversation
     val list = rememberLazyListState()
@@ -33,7 +79,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
                     list.isScrollInProgress,
                     list.canScrollForward,
                     list.layoutInfo.visibleItemsInfo.lastOrNull()?.let {
-                        it.offset + it.size - list.layoutInfo.viewportEndOffset < 80 &&
+                        it.offset + it.size - list.layoutInfo.viewportEndOffset < AUTO_FOLLOW_DISTANCE_PX &&
                             it.index == list.layoutInfo.totalItemsCount - 1
                     } == true,
                 )
@@ -46,7 +92,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
         if (conversation.rows.isNotEmpty() && (!initialized || following)) {
             programmaticScroll = true
             try {
-                list.scrollToItem(conversation.rows.lastIndex + if (conversation.hasMoreHistory) 1 else 0)
+                list.scrollToItem(conversation.rows.size + if (conversation.hasMoreHistory) 1 else 0)
             } finally {
                 programmaticScroll = false
             }
@@ -65,7 +111,14 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
                 TextButton(onClick = { actions = true }) { Text("•••") }
                 DropdownMenu(actions, { actions = false }) {
                     conversation.threadId?.let { id ->
-                        if (conversation.canMergeBack) DropdownMenuItem(text = { Text("Merge back to source") }, onClick = { actions = false; model.perform(Intent.MergeBack) })
+                        if (conversation.canMergeBack)
+                            DropdownMenuItem(
+                                text = { Text("Merge back to source") },
+                                onClick = {
+                                    actions = false
+                                    model.perform(Intent.MergeBack)
+                                },
+                            )
                         ThreadActionItems(model, id, conversation.pinned, conversation.archived, conversation.settled) {
                             actions = false
                         }
@@ -99,6 +152,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
                     listOf("Terminal", "Files", "Diff", "Browser").forEach { tool ->
                         DropdownMenuItem(
                             text = { Text(tool) },
+                            enabled = tool != "Terminal" || model.snapshot.canOpenTerminal(),
                             onClick = {
                                 actions = false
                                 tools = tool
@@ -120,7 +174,9 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
                 }
             if (conversation.loading && conversation.rows.isEmpty()) item { CircularProgressIndicator() }
             items(conversation.rows, key = { it.id }) { row -> TimelineCard(model, row) }
+            item(key = "conversation-bottom") { Spacer(Modifier.height(1.dp)) }
         }
+        conversation.requests.forEach { request -> RequestCard(model, request) }
         ThreadComposer(model) { queue = true }
     }
     if (queue) QueueSheet(model) { queue = false }
@@ -142,7 +198,7 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
             dismissButton = { TextButton(onClick = { rename = false }) { Text("Cancel") } },
         )
     when (tools) {
-        "Terminal" -> TerminalDialog(model.snapshot, model::perform) { tools = null }
+        "Terminal" -> key(model.profileId) { TerminalDialog(model.snapshot, model::perform) { tools = null } }
         "Files",
         "Diff",
         "Browser" -> WorkspaceDialog(model, tools!!) { tools = null }
@@ -150,6 +206,8 @@ internal fun ThreadDetailScreen(model: AndroidAppModel, modifier: Modifier = Mod
 }
 
 @Composable
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
 internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
     when (row.kind) {
         RowKind.USER ->
@@ -168,12 +226,14 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 ConversationBody(row.text)
                 if (row.streaming) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.dp)
-                else Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    CopyButton(row.text)
-                    val source = row.forkSourceThreadId
-                    val run = row.runId
-                    if (source != null && run != null) TextButton(onClick = { model.perform(Intent.Fork(source, run)) }) { Text("Fork") }
-                }
+                else
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        CopyButton(row.text)
+                        val source = row.forkSourceThreadId
+                        val run = row.runId
+                        if (source != null && run != null)
+                            TextButton(onClick = { model.perform(Intent.Fork(source, run)) }) { Text("Fork") }
+                    }
             }
         RowKind.APPROVAL,
         RowKind.QUESTION -> RequestCard(model, row)
@@ -216,9 +276,20 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
                     ConversationBody(row.text)
                 }
             }
+        RowKind.DIFF -> {
+            var expanded by remember(row.id) { mutableStateOf(false) }
+            Column {
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text("${if (expanded) "⌄" else "›"} ${row.title.ifEmpty { "File changes" }}")
+                }
+                if (expanded)
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(row.text, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    }
+            }
+        }
         RowKind.NOTICE,
-        RowKind.ERROR,
-        RowKind.DIFF ->
+        RowKind.ERROR ->
             Column {
                 if (row.title.isNotEmpty()) Text(row.title, style = MaterialTheme.typography.labelLarge)
                 Text(
@@ -231,26 +302,18 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
 }
 
 @Composable
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
 private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit) {
     val composer = model.conversation.composer
     val draft = model.snapshot.draft()
-    val models = model.snapshot.models()
-    val selected = models.firstOrNull {
-        it.model.id == draft.model &&
-            (if (it.model.provider == ProviderKind.CLAUDE) "claude" else "codex") == draft.instanceId
-    }
+    val choices = model.snapshot.modelChoices()
+    val selected = choices.firstOrNull { it.selected }?.model
     var modelMenu by remember { mutableStateOf(false) }
     var modeMenu by remember { mutableStateOf(false) }
     var behaviorMenu by remember { mutableStateOf(false) }
-    fun select(value: Model, effort: String?, tier: String?) {
-        model.perform(
-            Intent.SetModel(
-                if (value.model.provider == ProviderKind.CLAUDE) "claude" else "codex",
-                value.model.id,
-                effort,
-                tier,
-            )
-        )
+    fun select(value: Model, instanceId: String, effort: String?, tier: String?) {
+        model.perform(Intent.SetModel(instanceId, value.model.id, effort, tier))
         modelMenu = false
     }
     Column(
@@ -303,10 +366,18 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit) {
                             )
                         }
                         DropdownMenu(modelMenu, { modelMenu = false }) {
-                            models.forEach { value ->
+                            choices.forEach { choice ->
+                                val value = choice.model
                                 DropdownMenuItem(
                                     text = { Text(value.displayName) },
-                                    onClick = { select(value, value.defaultReasoningEffort, value.defaultServiceTier) },
+                                    onClick = {
+                                        select(
+                                            value,
+                                            choice.instanceId,
+                                            value.defaultReasoningEffort,
+                                            value.defaultServiceTier,
+                                        )
+                                    },
                                 )
                             }
                             selected?.let { value ->
@@ -314,13 +385,15 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit) {
                                 value.supportedReasoningEfforts.forEach { effort ->
                                     DropdownMenuItem(
                                         text = { Text(effort.reasoningEffort) },
-                                        onClick = { select(value, effort.reasoningEffort, draft.serviceTier) },
+                                        onClick = {
+                                            select(value, draft.instanceId, effort.reasoningEffort, draft.serviceTier)
+                                        },
                                     )
                                 }
                                 value.serviceTiers.orEmpty().forEach { tier ->
                                     DropdownMenuItem(
                                         text = { Text(tier.name ?: tier.id) },
-                                        onClick = { select(value, draft.effort, tier.id) },
+                                        onClick = { select(value, draft.instanceId, draft.effort, tier.id) },
                                     )
                                 }
                             }
@@ -334,12 +407,12 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit) {
                             )
                         }
                         DropdownMenu(modeMenu, { modeMenu = false }) {
-                            listOf("approval-required", "auto-accept-edits", "auto", "full-access").forEach { mode ->
+                            runtimeModeChoices().forEach { mode ->
                                 DropdownMenuItem(
-                                    text = { Text(mode) },
+                                    text = { Text("${if (draft.runtimeMode == mode.id) "✓ " else ""}${mode.label}") },
                                     onClick = {
                                         modeMenu = false
-                                        model.perform(Intent.SetRuntimeMode(mode))
+                                        model.perform(Intent.SetRuntimeMode(mode.id))
                                     },
                                 )
                             }

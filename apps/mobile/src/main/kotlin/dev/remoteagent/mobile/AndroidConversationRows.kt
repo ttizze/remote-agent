@@ -1,26 +1,44 @@
 package dev.remoteagent.mobile
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import dev.remoteagent.core.*
+import dev.remoteagent.core.Intent
+import dev.remoteagent.core.QuestionAnswer
+import dev.remoteagent.core.TimelineRow
+import dev.remoteagent.core.questionAnswerValues
+import dev.remoteagent.core.questionError
+import dev.remoteagent.core.questionOptionSelected
 
 @Composable
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
 internal fun RequestCard(model: AndroidAppModel, row: TimelineRow) {
     var selected by remember(row.id) { mutableStateOf(emptyMap<String, Set<String>>()) }
     var custom by remember(row.id) { mutableStateOf(emptyMap<String, String>()) }
     val answers =
         row.questions.map { question ->
             val text = custom[question.id].orEmpty()
-            val values =
-                if (text.isNotBlank())
-                    (if (question.multiSelect) selected[question.id].orEmpty().sorted() else emptyList()) + text
-                else selected[question.id].orEmpty().sorted()
+            val values = questionAnswerValues(selected[question.id].orEmpty().sorted(), text, question.multiSelect)
             QuestionAnswer(question.id, values)
         }
     Surface(
@@ -70,7 +88,18 @@ internal fun RequestCard(model: AndroidAppModel, row: TimelineRow) {
                                     verticalAlignment = Alignment.Top,
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
-                                    Text(if (option.value in selected[question.id].orEmpty()) "●" else "○")
+                                    Text(
+                                        if (
+                                            questionOptionSelected(
+                                                selected[question.id].orEmpty().toList(),
+                                                custom[question.id].orEmpty(),
+                                                question.multiSelect,
+                                                option.value,
+                                            )
+                                        )
+                                            "●"
+                                        else "○"
+                                    )
                                     Column {
                                         Text(option.label, style = MaterialTheme.typography.bodyMedium)
                                         if (option.description.isNotEmpty())

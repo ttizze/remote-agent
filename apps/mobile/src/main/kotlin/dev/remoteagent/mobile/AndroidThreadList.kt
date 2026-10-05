@@ -1,22 +1,53 @@
 package dev.remoteagent.mobile
 
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import dev.remoteagent.core.*
+import dev.remoteagent.core.Intent
+import dev.remoteagent.core.ShelfKind
+import dev.remoteagent.core.ThreadAction
+import dev.remoteagent.core.ThreadRow
 import java.time.Instant
 import kotlinx.coroutines.delay
 
+private const val LIST_CLOCK_INTERVAL_MILLIS = 1000L
+private const val SNOOZE_HOUR_SECONDS = 3600L
+
 @Composable
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
 internal fun ThreadListScreen(model: AndroidAppModel, modifier: Modifier = Modifier) {
-    var search by remember { mutableStateOf("") }
+    var search by remember(model.profileId) { mutableStateOf(model.snapshot.searchQuery()) }
     var collapsed by remember { mutableStateOf(emptySet<ShelfKind>()) }
     var settledLimit by remember { mutableStateOf(10u) }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
@@ -27,7 +58,7 @@ internal fun ThreadListScreen(model: AndroidAppModel, modifier: Modifier = Modif
     var path by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
         while (true) {
-            delay(1000)
+            delay(LIST_CLOCK_INTERVAL_MILLIS)
             now = System.currentTimeMillis()
         }
     }
@@ -68,6 +99,12 @@ internal fun ThreadListScreen(model: AndroidAppModel, modifier: Modifier = Modif
             TextButton(onClick = { addProject = true }) { Text("+") }
             TextButton(onClick = { model.newThread() }) { Text("New") }
         }
+        model.snapshot.selectedProjectId()?.let { id ->
+            Row {
+                Text("Project: " + (model.snapshot.projects().firstOrNull { it.id == id }?.name ?: "Chats"))
+                TextButton(onClick = { model.perform(Intent.FilterProject(null)) }) { Text("Clear") }
+            }
+        }
         LazyColumn(
             Modifier.weight(1f),
             contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
@@ -87,14 +124,13 @@ internal fun ThreadListScreen(model: AndroidAppModel, modifier: Modifier = Modif
                     }
                 }
                 if (shelf.kind !in collapsed) {
-                    items(shelf.rows, key = { it.id }) { row ->
-                        ThreadCard(model, row, shelf.kind == ShelfKind.SETTLED)
-                    }
+                    items(shelf.rows, key = { it.id }) { row -> ThreadCard(model, row, row.settled) }
                     if (shelf.hasMore) item { TextButton(onClick = { settledLimit += 25u }) { Text("Load 25 more") } }
                 }
             }
             item { TextButton(onClick = { archive = !archive }) { Text("${if (archive) "⌄" else "›"} Archived") } }
-            if (archive) items(model.snapshot.archivedThreads(now), key = { it.id }) { ThreadCard(model, it, false) }
+            if (archive)
+                items(model.snapshot.archivedThreads(now), key = { it.id }) { ThreadCard(model, it, it.settled) }
             item { TextButton(onClick = { settings = true }) { Text("Settings") } }
         }
     }
@@ -120,6 +156,8 @@ internal fun ThreadListScreen(model: AndroidAppModel, modifier: Modifier = Modif
 }
 
 @Composable
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
 private fun ThreadCard(model: AndroidAppModel, row: ThreadRow, settled: Boolean) {
     var menu by remember(row.id) { mutableStateOf(false) }
     Box {
@@ -183,23 +221,25 @@ private fun ThreadCard(model: AndroidAppModel, row: ThreadRow, settled: Boolean)
             }
         }
         DropdownMenu(menu, { menu = false }) {
-            ThreadActionItems(model, row.id, row.pinned, row.archived, settled) { menu = false }
+            ThreadActionItems(model, row.id, row.pinned, row.archived, row.settled, row.snoozed) { menu = false }
         }
     }
 }
 
 @Composable
+@Suppress("LongParameterList") // Pass the explicit core capabilities needed by this menu.
 internal fun ThreadActionItems(
     model: AndroidAppModel,
     id: String,
     pinned: Boolean,
     archived: Boolean,
     settled: Boolean,
+    snoozed: Boolean = false,
     close: () -> Unit,
 ) {
     fun action(value: ThreadAction) {
         close()
-        model.perform(Intent.Thread(id, value))
+        if (value == ThreadAction.Delete) model.deleteThreadId = id else model.perform(Intent.Thread(id, value))
     }
     DropdownMenuItem(
         text = { Text(if (pinned) "Unpin" else "Pin") },
@@ -225,9 +265,10 @@ internal fun ThreadActionItems(
         text = { Text(if (settled) "Un-settle" else "Settle") },
         onClick = { action(if (settled) ThreadAction.Unsettle else ThreadAction.Settle) },
     )
+    if (snoozed) DropdownMenuItem(text = { Text("Unsnooze") }, onClick = { action(ThreadAction.Unsnooze) })
     DropdownMenuItem(
         text = { Text("Snooze 1 hour") },
-        onClick = { action(ThreadAction.Snooze(Instant.now().plusSeconds(3600).toString())) },
+        onClick = { action(ThreadAction.Snooze(Instant.now().plusSeconds(SNOOZE_HOUR_SECONDS).toString())) },
     )
     DropdownMenuItem(text = { Text("Mark unread") }, onClick = { action(ThreadAction.MarkUnread) })
     DropdownMenuItem(
@@ -236,9 +277,6 @@ internal fun ThreadActionItems(
     )
     DropdownMenuItem(
         text = { Text("Delete", color = T3.color("errorForeground")) },
-        onClick = {
-            action(ThreadAction.Delete)
-            if (model.snapshot.selectedThreadId() == id) model.showThreads()
-        },
+        onClick = { action(ThreadAction.Delete) },
     )
 }

@@ -3,17 +3,67 @@ package dev.remoteagent.mobile
 import android.content.Context
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
-import dev.remoteagent.core.*
-import kotlinx.coroutines.*
+import dev.remoteagent.core.AgentStore
+import dev.remoteagent.core.BrowserFrame
+import dev.remoteagent.core.BrowserRequest
+import dev.remoteagent.core.Connection
+import dev.remoteagent.core.Intent
+import dev.remoteagent.core.Invitation
+import dev.remoteagent.core.Outcome
+import dev.remoteagent.core.Snapshot
+import dev.remoteagent.core.ThreadAction
+import dev.remoteagent.core.applyModelPreferences
+import dev.remoteagent.core.generateIdentity
+import dev.remoteagent.core.parseInvitation
+import dev.remoteagent.core.validateInvitation
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+private const val PERSISTENCE_QUEUE_CAPACITY = 8
+private const val MILLIS_PER_SECOND = 1000L
+private const val PRESENTATION_COALESCE_MILLIS = 16L
+private const val PERSISTENCE_DEBOUNCE_MILLIS = 250L
 
 internal enum class Screen {
     Hosts,
@@ -22,14 +72,20 @@ internal enum class Screen {
     Conversation,
 }
 
+// One owner coordinates native lifecycle, receipts and persistence.
+@Suppress("TooManyFunctions", "TooGenericExceptionCaught", "ReturnCount")
 internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val repository = AndroidMobileRepository(context)
     var snapshot by mutableStateOf(Snapshot.empty())
         private set
 
-    val conversation
-        get() = snapshot.conversation()
+    var conversation by mutableStateOf(snapshot.conversation())
+        private set
+
+    private var presentation: Job? = null
+    private val draftEdits = DraftRevision()
+    private var composerKey = ""
 
     var profiles by mutableStateOf(emptyList<HostProfile>())
         private set
@@ -41,6 +97,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var busy by mutableStateOf(false)
         private set
 
+    var deleteThreadId by mutableStateOf<String?>(null)
     var notice by mutableStateOf<String?>(null)
     var invitation by mutableStateOf<Invitation?>(null)
         private set
@@ -48,8 +105,6 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     var composerText by mutableStateOf("")
         private set
 
-    private var draftRevision = 0L
-    private var pendingDraft: Long? = null
     private var owner: AgentStore? = null
     private var initialization: Job? = null
     private var connection: Job? = null
@@ -57,7 +112,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     private var persistence: Job? = null
     private val pending = ArrayDeque<Pair<Intent, (Result<Outcome>) -> Unit>>()
     private val operations = mutableSetOf<Job>()
-    private val writes = Channel<Pair<String, Snapshot>>(8)
+    private val writes = Channel<Pair<String, Snapshot>>(PERSISTENCE_QUEUE_CAPACITY)
     private val writer =
         scope.launch(Dispatchers.IO) {
             for ((id, current) in writes) {
@@ -77,7 +132,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun perform(intent: Intent, complete: (Result<Outcome>) -> Unit = {}) {
         val store = owner
         if (store == null) {
-            if (initialization != null && pending.size < 64) pending.addLast(intent to complete)
+            if (initialization != null) pending.addLast(intent to complete)
             else complete(Result.failure(IllegalStateException("Host not connected")))
             return
         }
@@ -93,7 +148,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             scope.launch(start = CoroutineStart.LAZY) {
                 try {
                     val result = runCatching { receipt.wait() }
-                    if (host == profileId) {
+                    if (host == profileId && owner === store) {
                         publish(store.snapshot())
                         result.exceptionOrNull()?.let { notice = snapshot.error() ?: it.message }
                         complete(result)
@@ -107,18 +162,16 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     }
 
     private fun resetEditor() {
-        draftRevision += 1
-        pendingDraft = null
+        draftEdits.reset()
     }
 
     fun editDraft(text: String) {
         composerText = text
-        val revision = ++draftRevision
-        pendingDraft = revision
-        perform(Intent.EditDraft(snapshot.draft().copy(text = text))) {
-            if (pendingDraft == revision) {
-                pendingDraft = null
+        val (revision, base) = draftEdits.edit(text)
+        perform(Intent.EditDraft(snapshot.draft().copy(text = text), base)) {
+            if (draftEdits.acknowledge(revision)) {
                 composerText = snapshot.draft().text
+                draftEdits.base = composerText
             }
         }
     }
@@ -223,7 +276,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
     fun preparePairing(contents: String) {
         invitation = null
         notice = null
-        runCatching { parseInvitation(contents, (System.currentTimeMillis() / 1000).toULong()) }
+        runCatching { parseInvitation(contents, (System.currentTimeMillis() / MILLIS_PER_SECOND).toULong()) }
             .onSuccess { invitation = it }
             .onFailure { notice = it.message }
     }
@@ -242,7 +295,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         connection = scope.launch {
             var paired: AgentStore? = null
             try {
-                val id = validateInvitation(target, (System.currentTimeMillis() / 1000).toULong())
+                val id = validateInvitation(target, (System.currentTimeMillis() / MILLIS_PER_SECOND).toULong())
                 val identity =
                     withContext(Dispatchers.IO) { AndroidCredentialStore(context, id).loadOrCreate(::generateIdentity) }
                 val bytes =
@@ -307,14 +360,14 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
                 } finally {
                     identity.fill(0)
                 }
-                if (profileId == profile.id) {
+                if (profileId == profile.id && owner === store) {
                     publish(store.snapshot())
                     busy = false
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                if (profileId == profile.id) {
+                if (profileId == profile.id && owner === store) {
                     busy = false
                     notice = error.message
                 }
@@ -328,7 +381,7 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             try {
                 while (isActive) {
                     store.nextSnapshot(previous)
-                    if (profileId != id) return@launch
+                    if (profileId != id || owner !== store) return@launch
                     val latest = store.snapshot()
                     publish(latest)
                     if (previous.connected() && !latest.connected() && !busy) connect()
@@ -337,29 +390,62 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                if (profileId == id) notice = error.message
+                if (profileId == id && owner === store) notice = error.message
             }
         }
     }
 
     private fun publish(next: Snapshot) {
+        if (owner != null && next.revision() < snapshot.revision()) return
+        if (next === snapshot) return
+
         val name = next.hostName()
         if (name != null && profiles.any { it.id == profileId && it.name != name }) {
             profiles = profiles.map { if (it.id == profileId) it.copy(name = name) else it }
             repository.saveProfiles(profiles)
         }
         snapshot = next
-        if (pendingDraft == null) composerText = next.draft().text
+        val key = next.currentDraftKey()
+        if (key != composerKey) {
+            draftEdits.reset()
+            composerKey = key
+        }
+        if (draftEdits.pending == null) {
+            composerText = next.draft().text
+            draftEdits.base = composerText
+        }
+        schedulePresentation()
         persistence?.cancel()
         persistence = scope.launch {
-            delay(250)
+            delay(PERSISTENCE_DEBOUNCE_MILLIS)
             persist()
+        }
+    }
+
+    private fun schedulePresentation() {
+        if (owner == null) {
+            presentation?.cancel()
+            presentation = null
+            conversation = snapshot.conversation()
+        } else if (presentation?.isActive != true) {
+            val expectedOwner = owner
+            val expectedHost = profileId
+            presentation = scope.launch {
+                while (isActive) {
+                    delay(PRESENTATION_COALESCE_MILLIS)
+                    val latest = snapshot
+                    val view = withContext(Dispatchers.Default) { latest.conversation() }
+                    if (owner !== expectedOwner || profileId != expectedHost) return@launch
+                    if (snapshot.selectedThreadId() == latest.selectedThreadId()) conversation = view
+                    if (snapshot === latest) return@launch
+                }
+            }
         }
     }
 
     fun persist() {
         val id = profileId ?: return
-        val current = owner?.snapshot() ?: snapshot
+        val current = owner?.snapshot() ?: return
         scope.launch { writes.send(id to current) }
     }
 
@@ -406,6 +492,8 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+// Declarative native layout; the conversation decisions are supplied by core.
+@Suppress("LongMethod", "CyclomaticComplexMethod")
 internal fun RemoteAgentApp(
     activity: ComponentActivity,
     model: AndroidAppModel,
@@ -420,6 +508,31 @@ internal fun RemoteAgentApp(
         if (model.screen == Screen.Conversation) model.showThreads() else model.showHosts()
     }
     T3Theme {
+        model.deleteThreadId?.let { id ->
+            AlertDialog(
+                onDismissRequest = { model.deleteThreadId = null },
+                title = { Text("Delete thread?") },
+                text = { Text("This permanently deletes the conversation.") },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            model.perform(Intent.Thread(id, ThreadAction.Delete)) { result ->
+                                if (
+                                    result.isSuccess &&
+                                        model.screen == Screen.Conversation &&
+                                        model.snapshot.selectedThreadId() == null
+                                )
+                                    model.showThreads()
+                            }
+                            model.deleteThreadId = null
+                        }
+                    ) {
+                        Text("Delete")
+                    }
+                },
+                dismissButton = { TextButton(onClick = { model.deleteThreadId = null }) { Text("Cancel") } },
+            )
+        }
         Scaffold(
             topBar = {
                 TopAppBar(

@@ -9,11 +9,7 @@ struct ConversationComposer: View {
     @State private var preparation: DictationPreparation?
     @State private var transcribing = false
     private var selectedModel: Model? {
-        let draft = model.snapshot.draft()
-        return model.models
-            .first {
-                $0.model.id == draft.model && ($0.model.provider == .claude ? "claude" : "codex") == draft.instanceId
-            }
+        model.snapshot.modelChoices().first { $0.selected }?.model
     }
 
     var body: some View {
@@ -27,18 +23,18 @@ struct ConversationComposer: View {
                             "\(composer.queueCount) queued\(composer.queueHeld ? " · paused" : "")"
                         ); Spacer(); Image(systemName: "chevron.up")
                     }
-                    .font(T3.font(12)).foregroundStyle(T3.color("textMuted"))
+                    .font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
                 }.padding(.horizontal, 4)
             }
             if composer.editing {
                 HStack {
-                    Text("Editing queued message").font(T3.font(12))
+                    Text("Editing queued message").font(T3Theme.font(12))
                     Spacer()
-                    Button("Cancel") { model.perform(.queue(action: .cancelEdit)) }.font(T3.font(12))
+                    Button("Cancel") { model.perform(.queue(action: .cancelEdit)) }.font(T3Theme.font(12))
                 }
             }
             if let notice = composer.notice {
-                Text(notice).font(T3.font(12)).foregroundStyle(T3.color("textMuted"))
+                Text(notice).font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
             }
             VStack(alignment: .leading, spacing: 12) {
                 TextField(
@@ -46,13 +42,15 @@ struct ConversationComposer: View {
                     text: Binding(get: { model.composerText }, set: { model.editDraft($0) }),
                     axis: .vertical
                 )
-                .lineLimit(2 ... 8).font(T3.font(16)).focused($focused).textInputAutocapitalization(.sentences)
-                .accessibilityIdentifier("composer.text")
+                .lineLimit(2 ... 8).font(T3Theme.font(16)).focused($focused).textInputAutocapitalization(.sentences)
+                .accessibilityIdentifier("composer.text").disabled(!composer.canEdit)
                 HStack(spacing: 12) {
                     Menu {
-                        ForEach(model.models, id: \.id) { value in
+                        ForEach(model.snapshot.modelChoices(), id: \.model.id) { choice in
+                            let value = choice.model
                             Button(value.displayName) { select(
                                 value,
+                                instanceId: choice.instanceId,
                                 effort: value.defaultReasoningEffort,
                                 tier: value.defaultServiceTier
                             ) }
@@ -62,29 +60,39 @@ struct ConversationComposer: View {
                             ForEach(selectedModel.supportedReasoningEfforts, id: \.reasoningEffort) { effort in
                                 Button(effort.reasoningEffort) { select(
                                     selectedModel,
+                                    instanceId: draft.instanceId,
                                     effort: effort.reasoningEffort,
                                     tier: draft.serviceTier
                                 ) }
                             }
                             ForEach(selectedModel.serviceTiers ?? [], id: \.id) { tier in
                                 Button(tier.name ?? tier.id) {
-                                    select(selectedModel, effort: draft.effort, tier: tier.id)
+                                    select(
+                                        selectedModel,
+                                        instanceId: draft.instanceId,
+                                        effort: draft.effort,
+                                        tier: tier.id
+                                    )
                                 }
                             }
                         }
                     } label: {
                         HStack(spacing: 4) {
-                            Image(draft.instanceId == "claude" ? "claude" : "openai").resizable().scaledToFit().frame(
-                                width: 13,
-                                height: 13
-                            )
+                            Image(selectedModel?.model.provider == .claude ? "claude" : "openai").resizable()
+                                .scaledToFit().frame(
+                                    width: 13,
+                                    height: 13
+                                )
                             Text(selectedModel?.displayName ?? draft.model).lineLimit(1)
                             Image(systemName: "chevron.down").font(.system(size: 8))
-                        }.font(T3.font(12))
+                        }.font(T3Theme.font(12))
                     }
                     Menu {
-                        ForEach(["approval-required", "auto-accept-edits", "auto", "full-access"], id: \.self) { mode in
-                            Button(mode) { model.perform(.setRuntimeMode(mode: mode)) }
+                        ForEach(runtimeModeChoices(), id: \.id) { mode in
+                            Button { model.perform(.setRuntimeMode(mode: mode.id)) } label: { Label(
+                                mode.label,
+                                systemImage: draft.runtimeMode == mode.id ? "checkmark" : "circle"
+                            ) }
                         }
                         Divider()
                         Button("Chat") { model.perform(.setInteractionMode(mode: "default")) }
@@ -127,22 +135,25 @@ struct ConversationComposer: View {
                         width: 32,
                         height: 32
                     ) }
-                    .background(T3.color("text"), in: Circle()).foregroundStyle(T3.color("canvas"))
+                    .background(T3Theme.color("text"), in: Circle()).foregroundStyle(T3Theme.color("canvas"))
                     .disabled(!composer.enabled).opacity(composer.enabled ? 1 : 0.35)
                     .accessibilityLabel(composer.sendLabel)
-                }.foregroundStyle(T3.color("textMuted"))
+                }.foregroundStyle(T3Theme.color("textMuted"))
             }
-            .padding(14).background(T3.color("mobileComposer").opacity(0.9), in: RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(T3.color("border").opacity(0.8)))
+            .padding(14).background(
+                T3Theme.color("mobileComposer").opacity(0.9),
+                in: RoundedRectangle(cornerRadius: 18)
+            )
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(T3Theme.color("border").opacity(0.8)))
         }
-        .padding(.horizontal, 14).padding(.vertical, 10).background(T3.color("canvas"))
+        .padding(.horizontal, 14).padding(.vertical, 10).background(T3Theme.color("canvas"))
         .onChange(of: model.selectedThreadId) { _, _ in recorder.cancel(); preparation = nil }
         .onDisappear { recorder.cancel(); preparation = nil }
     }
 
-    private func select(_ value: Model, effort: String?, tier: String?) {
+    private func select(_ value: Model, instanceId: String, effort: String?, tier: String?) {
         model.perform(.setModel(
-            instanceId: value.model.provider == .claude ? "claude" : "codex",
+            instanceId: instanceId,
             model: value.model.id,
             effort: effort,
             serviceTier: tier
@@ -180,8 +191,8 @@ struct QueueSheet: View {
                 }
                 ForEach(model.conversation.queue, id: \.runId) { row in
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(row.text).font(T3.font(14)).lineLimit(5)
-                        Text(row.model).font(T3.font(11)).foregroundStyle(T3.color("textMuted"))
+                        Text(row.text).font(T3Theme.font(14)).lineLimit(5)
+                        Text(row.model).font(T3Theme.font(11)).foregroundStyle(T3Theme.color("textMuted"))
                         HStack {
                             Button("Edit") { model.perform(.queue(action: .edit(runId: row.runId))); dismiss() }
                             if row
@@ -191,7 +202,7 @@ struct QueueSheet: View {
                             Button("Cancel", role: .destructive) {
                                 model.perform(.queue(action: .cancel(runId: row.runId)))
                             }
-                        }.font(T3.font(12)).buttonStyle(.borderless)
+                        }.font(T3Theme.font(12)).buttonStyle(.borderless)
                     }
                 }.onMove { offsets, destination in
                     var ids = model.conversation.queue.map(\.runId)
@@ -199,7 +210,7 @@ struct QueueSheet: View {
                     model.perform(.queue(action: .reorder(runIds: ids)))
                 }
             }
-            .scrollContentBackground(.hidden).background(T3.color("canvas"))
+            .scrollContentBackground(.hidden).background(T3Theme.color("canvas"))
             .navigationTitle("Queue").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { EditButton() }; ToolbarItem(placement: .topBarTrailing) {

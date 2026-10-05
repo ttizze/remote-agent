@@ -56,9 +56,6 @@ impl Snapshot {
     pub fn draft(&self) -> Draft {
         self.current_draft()
     }
-    pub fn draft_context_key(&self) -> String {
-        self.draft_key()
-    }
     pub fn conversation(&self) -> ConversationView {
         presentation::conversation(self)
     }

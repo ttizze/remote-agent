@@ -2,23 +2,51 @@ package dev.remoteagent.mobile
 
 import android.content.ClipData
 import android.content.ClipboardManager
-import androidx.compose.foundation.*
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.*
-import androidx.compose.ui.text.font.*
-import androidx.compose.ui.text.style.*
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.remoteagent.core.*
+import dev.remoteagent.core.MarkdownAlignment
+import dev.remoteagent.core.MarkdownBlock
+import dev.remoteagent.core.MarkdownRun
+import dev.remoteagent.core.markdownBlocks
+import dev.remoteagent.core.safeMarkdownUrl
 
 @Composable
 internal fun ProviderIcon(provider: String, modifier: Modifier = Modifier) {
@@ -142,7 +170,8 @@ private fun markdownText(runs: List<MarkdownRun>, header: Boolean = false, marke
                 )
             ) {
                 val link = run.link
-                if (link != null) withLink(LinkAnnotation.Url(link)) { append(run.text) } else append(run.text)
+                if (link != null && safeMarkdownUrl(link)) withLink(LinkAnnotation.Url(link)) { append(run.text) }
+                else append(run.text)
             }
         }
     }

@@ -139,7 +139,7 @@ struct SettingsScopeBar<Projects: View, Environment: View>: View {
         .font(.caption)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 20).padding(.vertical, 12)
-        .background(T3.color("surface"))
+        .background(T3Theme.color("surface"))
     }
 }
 
