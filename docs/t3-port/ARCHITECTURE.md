@@ -148,3 +148,6 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-06: replay harness は、翻訳層が送る frame がないときだけ記録から利用者の操作を作り、生成した frame を T3 の replay.ts と同じ正規化で次の `expect_outbound` と比較する。期待されない frame が残れば失敗にする。Claude は SDK の記録語彙（prompt.offer / query.interrupt / permission.response）に変換して比較し、query.open では thread が持つ session と境界での resume を確認する。fork / rollback / merge の graph replay は1つの記録プロセスに複数の native thread があり、本設計の thread ごとの session と JSON-RPC ID の空間が異なるため、従来どおり記録を種にして境界の command を検証する。
 - 2026-10-06: Claude の forkSession は SDK 0.3.276 の transcript 変換を純粋関数として移植した。project directory の解決・読み書きと mode 0600 は Host が行う。fork 後のタイトルの推定は記録の customTitle / aiTitle と最初の prompt を使い、SDK の貼り付け展開は持ち込まない（Claude の session 一覧の表示にだけ使われる）。
 - 2026-10-06: 段階 3 の Host は2つの前提を守る。attempt と effect の ID の元になる envelope key を thread をまたいで一意にする（`{thread}#{input_seq}`）。継続の effect は実行時に現在の設定で `enabled` を置き換える。
+- 2026-10-06: Host ランタイムは `crates/agent-runtime` に置く。Host の I/O（プロセス起動、Git、worktree、添付）は trait で注入し、`cargo test -p agent-runtime` を Host の重い依存なしで回せるようにする。
+- 2026-10-06: project は fact log の外にあるので、再開した shell 購読は最初に生きている project の完全な一覧（`ShellUpdate::Projects`）を送る。クライアントはそこにない project を消す。切断中の改名・追加・削除はこれで届く。
+- 2026-10-06: effect の結果は、その outbox 行が同じ worker の lease で実行中のときだけ確定する。取り消された effect の結果は事実を残さない。T3 の executor のテスト（EffectWorker のうち handler の振る舞いを確かめるもの）は、各 handler を実装する段で移植する。
