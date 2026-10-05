@@ -155,7 +155,14 @@ impl EffectWorker {
             attempt: row.attempts,
             will_retry: row.attempts < self.options.max_attempts,
         };
-        let execution = AssertUnwindSafe(handler.run(job)).catch_unwind();
+        // A handler can panic while building its future as well as while polling it.
+        let execution = match std::panic::catch_unwind(AssertUnwindSafe(|| handler.run(job))) {
+            Ok(future) => AssertUnwindSafe(future)
+                .catch_unwind()
+                .map(|outcome| outcome.unwrap_or_else(|panic| Err(panicked(panic.as_ref()))))
+                .boxed(),
+            Err(panic) => futures_util::future::ready(Err(panicked(panic.as_ref()))).boxed(),
+        };
         let outcome = tokio::select! {
             biased;
             () = cancellation.cancelled() => None,
@@ -165,7 +172,7 @@ impl EffectWorker {
         let Some(outcome) = outcome else {
             return Ok(true);
         };
-        match outcome.unwrap_or_else(|panic| Err(panicked(panic.as_ref()))) {
+        match outcome {
             Ok(result) => self.complete(&row, result).await,
             Err(error) => self.reschedule(&row, &*handler, error).await,
         }

@@ -1575,6 +1575,46 @@ async fn retries_a_panicking_handler_and_keeps_working() {
     assert_eq!(db.row(effect_id).await.status, EffectStatus::Succeeded);
 }
 
+/// Panics while building its future, before any `.await` could catch it.
+struct PanicsOnRun {
+    calls: AtomicUsize,
+}
+impl EffectHandler for PanicsOnRun {
+    fn durability(&self) -> Durability {
+        Durability::ReplaySafe
+    }
+    fn run(&self, _: EffectJob) -> BoxFuture<'_, Outcome> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            panic!("handler setup bug");
+        }
+        async { Ok(None) }.boxed()
+    }
+}
+
+#[tokio::test]
+async fn retries_a_handler_that_panics_before_returning_its_future() {
+    let db = db();
+    let id = thread("thread:outbox-sync-panic");
+    let effect_id = "effect:outbox-sync-panic";
+    db.enqueue(&id, vec![cleanup(effect_id)]).await;
+    let handler = Arc::new(PanicsOnRun {
+        calls: AtomicUsize::new(0),
+    });
+    let worker = db.worker(
+        EffectHandlers::default().with(CLEANUP, handler.clone()),
+        options("sync-panic-worker"),
+    );
+
+    assert!(worker.run_once().await.unwrap());
+    let row = db.row(effect_id).await;
+    assert_eq!(row.status, EffectStatus::Pending);
+    assert!(row.last_error.unwrap().contains("handler setup bug"));
+    db.clock.advance(100);
+    assert!(worker.run_once().await.unwrap());
+    assert_eq!(db.row(effect_id).await.status, EffectStatus::Succeeded);
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 2);
+}
+
 #[tokio::test]
 async fn fails_rows_without_a_handler() {
     let db = db();
