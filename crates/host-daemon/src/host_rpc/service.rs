@@ -1896,15 +1896,16 @@ impl ProviderAdapter for HostResources {
             return Ok(vec![]);
         }
         if matches!(effect.body, EffectBody::AttachmentCleanup) {
-            self.files
-                .cleanup_unreferenced_attachments(
-                    effect.thread_id.as_str(),
-                    self.orchestration
-                        .live_attachment_references(&effect.thread_id)
-                        .map_err(adapter_error)?,
-                )
-                .await
+            let (owners, references) = self
+                .orchestration
+                .attachment_cleanup(&effect.thread_id)
                 .map_err(adapter_error)?;
+            for owner in owners {
+                self.files
+                    .cleanup_unreferenced_attachments(owner.as_str(), &references)
+                    .await
+                    .map_err(adapter_error)?;
+            }
             return Ok(vec![]);
         }
         let driver = match &effect.body {

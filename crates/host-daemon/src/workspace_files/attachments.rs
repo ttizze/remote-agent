@@ -19,7 +19,7 @@ impl WorkspaceFiles {
     pub(crate) async fn cleanup_unreferenced_attachments(
         &self,
         thread: &str,
-        references: std::collections::BTreeSet<String>,
+        references: &std::collections::BTreeSet<String>,
     ) -> Result<()> {
         let prefix = format!("chat:{}:", hash(thread.as_bytes()));
         let retained: Vec<_> = references
@@ -301,13 +301,13 @@ mod tests {
         files
             .cleanup_unreferenced_attachments(
                 "thread",
-                std::collections::BTreeSet::from([claimed[0].id.clone()]),
+                &std::collections::BTreeSet::from([claimed[0].id.clone()]),
             )
             .await
             .unwrap();
         assert!(path.exists());
         files
-            .cleanup_unreferenced_attachments("thread", Default::default())
+            .cleanup_unreferenced_attachments("thread", &Default::default())
             .await
             .unwrap();
         assert!(!path.exists());

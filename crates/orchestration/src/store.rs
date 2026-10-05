@@ -131,7 +131,10 @@ impl Store {
     pub fn projection(&self, id: &ThreadId) -> Result<ThreadProjection> {
         load_projection(&*self.lock()?, id)?.ok_or(StoreError::ThreadNotFound)
     }
-    pub fn live_attachment_references(&self, excluding: &ThreadId) -> Result<BTreeSet<String>> {
+    pub fn attachment_cleanup(
+        &self,
+        excluding: &ThreadId,
+    ) -> Result<(Vec<ThreadId>, BTreeSet<String>)> {
         let connection = self.lock()?;
         let mut references = BTreeSet::new();
         let mut query =
@@ -139,8 +142,28 @@ impl Store {
         let threads = query
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        for json in threads {
-            let thread: AppThread = serde_json::from_str(&json)?;
+        let threads: BTreeMap<_, _> = threads
+            .into_iter()
+            .map(|json| {
+                serde_json::from_str::<AppThread>(&json).map(|thread| (thread.id.clone(), thread))
+            })
+            .collect::<std::result::Result<_, _>>()?;
+        let mut owners = vec![excluding.clone()];
+        let mut ancestor = threads.get(excluding);
+        let mut seen = BTreeSet::from([excluding.clone()]);
+        for _ in 0..128 {
+            ancestor = ancestor
+                .and_then(|thread| thread.lineage.parent_thread_id.as_ref())
+                .and_then(|id| threads.get(id));
+            let Some(thread) = ancestor else { break };
+            if !seen.insert(thread.id.clone()) {
+                break;
+            }
+            if thread.deleted_at.is_some() {
+                owners.push(thread.id.clone());
+            }
+        }
+        for thread in threads.values() {
             if thread.id == *excluding || thread.deleted_at.is_some() {
                 continue;
             }
@@ -158,7 +181,7 @@ impl Store {
                 }
             }
         }
-        Ok(references)
+        Ok((owners, references))
     }
     pub fn sequence(&self) -> Result<u64> {
         latest_sequence(&*self.lock()?, None)
@@ -1778,6 +1801,40 @@ fn bounded_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deleting_the_last_fork_revisits_deleted_attachment_owners_only() {
+        let store = Store::memory().unwrap();
+        let mut root = crate::test_support::projection().thread;
+        root.deleted_at = Some(now());
+        let mut live = root.clone();
+        live.id = ThreadId::new("live-parent").unwrap();
+        live.deleted_at = None;
+        live.lineage.parent_thread_id = Some(root.id.clone());
+        let mut child = live.clone();
+        child.id = ThreadId::new("deleted-fork").unwrap();
+        child.deleted_at = Some(now());
+        child.lineage.parent_thread_id = Some(live.id.clone());
+        child.lineage.relationship_to_parent = Some(Relationship::Fork);
+        let child_id = child.id.clone();
+        let root_id = root.id.clone();
+        for thread in [root, live, child] {
+            store
+                .ingest(
+                    crate::events(
+                        &thread.id.clone(),
+                        &format!("seed:{}", thread.id),
+                        vec![EventPayload::ThreadCreated(thread)],
+                        &now(),
+                    ),
+                    None,
+                    &now(),
+                )
+                .unwrap();
+        }
+        let (owners, references) = store.attachment_cleanup(&child_id).unwrap();
+        assert_eq!(owners, vec![child_id, root_id]);
+        assert!(references.is_empty());
+    }
     use crate::test_support::*;
     fn setup() -> Store {
         let store = Store::memory().unwrap();

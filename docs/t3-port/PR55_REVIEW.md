@@ -192,3 +192,5 @@ app-owned 委任に続き、Codex の collabAgentToolCall/subAgentActivity と C
 固定 T3 の汎用 scope/baseline/capture/restore/diff を移植した。run がない node、appRunOrdinal がない capture、scope 内の飛び番も扱う。scope/親 node/attempt/保存先の所有権、循環、symlink の逸脱を拒否し、専用 outbox の再取得は冪等にする。root Restart の scope を再結合し、nested rollback では app run を巻き戻さず、root rollback では子 scope の古い ref も削除する。無関係な native turn を戻す nested rollback は provider 操作前に拒否する。固定 T3 が自動作成する scope は root のみなので、native subagent の勝手な snapshot と新しいモバイル UI は追加しない。
 
 関連36回帰/property/Git fixture tests 通過、変更3 crate の all-targets Clippy と fmt 通過。未完了として記録していた O13 の native subagent/委任/添付/nested scope は今回の M2 再開分で実装した。M3 は引き続き対象外。
+
+M2 最終 cleanup: 親削除後に fork が参照していた asset は、最後の fork の削除でも回収する。削除済み祖先の bounded lineage と live reference を同じ store lock で取得し、live 祖先には cleanup をかけない。所有権と partial claim のテストを維持し、削除済み owner の再訪の回帰テストを追加した。
