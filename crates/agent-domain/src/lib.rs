@@ -8,6 +8,7 @@ mod machine;
 mod model;
 mod notification;
 mod recovery;
+mod shell;
 mod task;
 mod usage;
 pub use answers::*;
@@ -18,6 +19,7 @@ pub use machine::*;
 pub use model::*;
 pub use notification::*;
 pub use recovery::*;
+pub use shell::*;
 pub use task::*;
 pub use usage::*;
 
