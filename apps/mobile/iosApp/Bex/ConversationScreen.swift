@@ -130,6 +130,12 @@ struct ThreadScreen: View {
                     }
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .defaultScrollAnchor(.bottom, for: .alignment)
+                    // Tail updates preserve a detached reader; prepends retain native offset correction.
+                    .transaction(value: lastRowId) { transaction in
+                        if !isFollowingLatest {
+                            transaction.scrollContentOffsetAdjustmentBehavior = .disabled
+                        }
+                    }
                     .accessibilityIdentifier("task.detail")
                     .accessibilityValue(threadAccessibilityValue(thread))
                     .buttonStyle(.plain)
