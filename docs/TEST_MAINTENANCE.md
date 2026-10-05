@@ -214,6 +214,10 @@ transfer server just to delete that check would reverse A14.
   bounded startup stack sample, sampler output, memory counters, and process
   memory usage under `qa/chrome-startup-*`. Process arguments are not recorded.
   Xcode collects verbose diagnostics on test failure in the retained result bundle.
+  During CI acceptance, the owning worker records process memory when its app
+  first launches. If XCTest stops writing progress for 30 seconds, it takes one
+  three-second stack sample per app process before XCTest can terminate it.
+  Sampling matches that worker's Simulator path, and retains sampler failures.
   Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.

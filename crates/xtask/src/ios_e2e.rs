@@ -138,6 +138,89 @@ const BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(300);
 const SIMULATOR_DEVICE_TYPE: &str = "com.apple.CoreSimulator.SimDeviceType.iPhone-17";
 
+fn simulator_app_pid(processes: &str, simulator: &str) -> Option<u32> {
+    let device = format!("/Devices/{simulator}/");
+    processes.lines().find_map(|line| {
+        if line.contains(&device) && line.trim_end().ends_with("/Bex.app/Bex") {
+            line.split_whitespace().next()?.parse().ok()
+        } else {
+            None
+        }
+    })
+}
+
+/// Sample a stalled test before XCTest terminates the app. Never inspect another worker.
+async fn monitor_diagnostics(
+    simulator: &str,
+    prefix: &Path,
+    cwd: &Path,
+    cancel: &watch::Receiver<bool>,
+) -> Result<()> {
+    let mut recorded_startup = false;
+    let mut sampled = BTreeSet::new();
+    let timeout = Duration::from_secs(10);
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let processes = supervision::run(
+            &args!["/bin/ps", "-axo", "pid,ppid,rss,pcpu,comm", "-m"],
+            cwd,
+            Io::Capture,
+            cancel,
+            timeout,
+        )
+        .await?;
+        let Some(pid) = simulator_app_pid(std::str::from_utf8(&processes.stdout)?, simulator)
+        else {
+            continue;
+        };
+        if !recorded_startup {
+            recorded_startup = true;
+            fs::write(
+                prefix.with_extension("startup-processes.txt"),
+                &processes.stdout,
+            )?;
+            let memory = File::create(prefix.with_extension("startup-memory.txt"))?;
+            supervision::run(
+                &args!["/usr/bin/vm_stat"],
+                cwd,
+                Io::Log(&memory),
+                cancel,
+                timeout,
+            )
+            .await?;
+        }
+        let quiet = fs::metadata(prefix.with_extension("log"))?
+            .modified()?
+            .elapsed()
+            .unwrap_or_default();
+        if quiet < Duration::from_secs(30) || !sampled.insert(pid) {
+            continue;
+        }
+        fs::write(
+            prefix.with_extension(format!("hang-{pid}-processes.txt")),
+            &processes.stdout,
+        )?;
+        let output = File::create(prefix.with_extension(format!("hang-{pid}-sample-output.txt")))?;
+        // Hosted macOS permits passwordless diagnostics of this worker's Debug app.
+        let _ = supervision::run(
+            &args![
+                "sudo",
+                "-n",
+                "/usr/bin/sample",
+                pid.to_string(),
+                "3",
+                "-file",
+                prefix.with_extension(format!("hang-{pid}-sample.txt"))
+            ],
+            cwd,
+            Io::Log(&output),
+            cancel,
+            timeout,
+        )
+        .await;
+    }
+}
+
 #[derive(Serialize)]
 struct WorkerResult {
     tests: Vec<String>,
@@ -350,7 +433,21 @@ async fn run_case(
             arguments.push("test-without-building".into());
             let setup_seconds = started.elapsed().as_secs_f64();
             println!("{label}: Simulator and Host ready in {setup_seconds:.2}s");
-            let status = supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, BUILD_TIMEOUT).await;
+            let acceptance = supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, BUILD_TIMEOUT);
+            tokio::pin!(acceptance);
+            let status = if std::env::var("CI").as_deref() == Ok("true") {
+                tokio::select! {
+                    status = &mut acceptance => status,
+                    diagnostics = monitor_diagnostics(simulator, &prefix, &cwd, &cancel) => {
+                        if let Err(error) = diagnostics {
+                            eprintln!("{label}: diagnostic monitor stopped: {error}");
+                        }
+                        acceptance.await
+                    }
+                }
+            } else {
+                acceptance.await
+            };
             if *cancel.borrow() { return Err(supervision::interrupted()); }
             let summary = supervision::run(&args!["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", &bundle, "--format", "json"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
             let summary: Value = serde_json::from_slice(&summary.stdout)?;
@@ -702,6 +799,19 @@ mod tests {
     use serde_json::json;
 
     proptest! {
+        #[test]
+        fn diagnostic_sampling_stays_with_its_simulator(pid in 1u32..100_000, simulator in "[A-F0-9-]{36}") {
+            let processes = format!(
+                "44 1 100 99 /Devices/{simulator}0/data/Applications/Bex.app/Bex\n\
+                 45 1 100 99 /Devices/{simulator}/data/Applications/Bex.app/BexUITests-Runner\n\
+                 46 1 100 99 /Devices/{simulator}/data/Applications/Bex.app/BexHelper\n\
+                 {pid} 1 100 99 /Devices/{simulator}/data/Applications/Bex.app/Bex\n"
+            );
+            prop_assert_eq!(simulator_app_pid(&processes, &simulator), Some(pid));
+            prop_assert_eq!(simulator_app_pid(&processes, "other-device"), None);
+            prop_assert_eq!(simulator_app_pid("", &simulator), None);
+        }
+
         #[test]
         fn partitions_cover_every_test_once_and_balance_counts(length in 1usize..64, count in 1usize..16) {
             let count = count.min(length);
