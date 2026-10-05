@@ -166,10 +166,7 @@ impl RecordReader {
             Token::Num { state, keep } => match next_number(state, byte) {
                 Some(next) => {
                     self.token = Token::Num { state: next, keep };
-                    if keep {
-                        self.text.push(byte);
-                    }
-                    Ok(())
+                    self.push_bytes(keep, &[byte], reserve)
                 }
                 None => {
                     self.end_number(state, keep, reserve)?;
@@ -270,9 +267,9 @@ impl RecordReader {
             b'-' | b'0'..=b'9' => {
                 let (keep, _) = self.child(reserve)?;
                 self.text.clear();
-                if keep {
-                    self.text.push(byte);
-                }
+                self.charged = 0;
+                self.high = None;
+                self.push_bytes(keep, &[byte], reserve)?;
                 let state = match byte {
                     b'-' => Num::Minus,
                     b'0' => Num::Zero,
@@ -479,7 +476,8 @@ impl RecordReader {
         }
         self.token = Token::None;
         let value = if keep {
-            reserve(192 + 2 * self.text.len())?;
+            reserve(192 + 2 * (self.text.len() - self.charged))?;
+            self.charged = 0;
             let parsed =
                 serde_json::from_slice::<Value>(&self.text).map_err(|_| Fault::Malformed)?;
             self.text.clear();

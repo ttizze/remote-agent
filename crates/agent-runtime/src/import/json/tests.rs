@@ -82,3 +82,52 @@ fn retains_the_import_allocation_and_depth_limits() {
     let nested = format!("{}0{}", "[".repeat(129), "]".repeat(129));
     assert_eq!(read_with(&nested, 10, everything), Err(LimitExceeded));
 }
+
+#[test]
+fn charges_selected_numbers_while_they_are_read() {
+    const BUDGET: usize = 1024 * 1024;
+    let mut reader = RecordReader::new(everything);
+    let mut used = 0;
+    let mut reserve = |bytes: usize| {
+        used += bytes;
+        if used > BUDGET {
+            Err(LimitExceeded)
+        } else {
+            Ok(())
+        }
+    };
+    reader.write(br#"{"a":1"#, &mut reserve).unwrap();
+    let digits = [b'7'; 4096];
+    let mut written = 0;
+    let outcome = loop {
+        if let Err(limit) = reader.write(&digits, &mut reserve) {
+            break Err(limit);
+        }
+        written += digits.len();
+        if written > 4 * BUDGET {
+            break Ok(());
+        }
+    };
+    assert_eq!(outcome, Err(LimitExceeded));
+    assert!(reader.text.len() <= BUDGET / 2 + CHARGE_STEP);
+}
+
+#[test]
+fn charges_a_long_number_in_full_exactly_once() {
+    let digits = "9".repeat(3 * CHARGE_STEP + 17);
+    let text = format!(r#"{{"a":0.{digits}}}"#);
+    let mut reader = RecordReader::new(everything);
+    let mut used = 0;
+    let mut reserve = |bytes: usize| {
+        used += bytes;
+        Ok(())
+    };
+    reader.write(text.as_bytes(), &mut reserve).unwrap();
+    let value = reader.finish(&mut reserve).unwrap();
+    assert_eq!(value, Some(serde_json::from_str::<Value>(&text).unwrap()));
+    let number = digits.len() + 2;
+    assert!(
+        (2 * number..2 * number + 1024).contains(&used),
+        "{used} for {number}"
+    );
+}
