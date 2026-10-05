@@ -216,6 +216,37 @@ async fn paginates_catch_up_beyond_the_read_limit() {
     );
 }
 
+// T3 OrchestrationEventStore.ts getAgentReplayStats: octet_length over replay limit + 1.
+#[tokio::test]
+async fn measures_a_replay_gap_in_utf8_bytes_within_the_replay_limit() {
+    let (_dir, store) = temp_store();
+    let id = thread("thread:replay-gap");
+    let wide = "é".repeat(4_000);
+    let facts: Vec<Fact> = std::iter::once(created(&id))
+        .chain((0..9).map(|_| renamed(wide.clone())))
+        .collect();
+    let stored_bytes = |facts: &[Fact]| -> u64 {
+        facts
+            .iter()
+            .map(|fact| serde_json::to_value(&fact.body).unwrap().to_string().len() as u64)
+            .sum()
+    };
+    store.commit(batch(&id, 0, 1, facts.clone())).await.unwrap();
+
+    let all = store.fact_gap(&id, 0, 100).unwrap();
+    assert_eq!(all.facts, 10);
+    assert_eq!(all.bytes, stored_bytes(&facts));
+    assert!(all.bytes > 9 * 8_000);
+    assert!(all.contains_created);
+
+    let bounded = store.fact_gap(&id, 0, 3).unwrap();
+    assert_eq!(bounded.facts, 4);
+    assert_eq!(bounded.bytes, stored_bytes(&facts[..4]));
+    let after_creation = store.fact_gap(&id, 1, 3).unwrap();
+    assert_eq!(after_creation.facts, 4);
+    assert!(!after_creation.contains_created);
+}
+
 #[tokio::test]
 async fn rebuilds_event_history_one_bounded_page_at_a_time() {
     let (_dir, store) = temp_store();

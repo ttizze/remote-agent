@@ -747,7 +747,7 @@ impl Actor {
         let gap = self
             .context
             .store
-            .blocking(move |store| store.fact_gap(&thread, after))
+            .blocking(move |store| store.fact_gap(&thread, after, RESUME_MAX_REPLAY_FACTS))
             .await?;
         // A recreated thread replaces its replay with a snapshot unless it is deleted.
         let live = self

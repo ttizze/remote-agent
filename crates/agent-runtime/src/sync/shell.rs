@@ -422,7 +422,7 @@ fn initial(c: &Connection, after: Option<u64>) -> Result<Initial, StoreError> {
     let high = high_water(c)?;
     if let Some(after) = after.filter(|after| *after <= high) {
         let mut statement = c.prepare_cached(&format!(
-            "SELECT {SHELL_COLUMNS}, LENGTH(payload) FROM thread_shells
+            "SELECT {SHELL_COLUMNS}, octet_length(payload) FROM thread_shells
              WHERE global_seq > ?1 ORDER BY global_seq LIMIT ?2"
         ))?;
         let raw = statement

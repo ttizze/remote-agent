@@ -460,6 +460,39 @@ async fn falls_back_to_a_snapshot_when_the_replay_is_too_large() {
 }
 
 #[tokio::test]
+async fn measures_the_replay_budget_in_utf8_bytes() {
+    let h = host();
+    // Under the byte budget in characters, over it in UTF-8 bytes.
+    let title = "é".repeat(SHELL_REPLAY_MAX_BYTES as usize / 2 + 1);
+    assert!(title.chars().count() < SHELL_REPLAY_MAX_BYTES as usize);
+    let payload = serde_json::json!({ "title": title }).to_string();
+    h.store
+        .write(move |tx| {
+            tx.execute(
+                "INSERT INTO thread_shells
+                     (thread_id, global_seq, project, archived, deleted, needs_recovery, payload)
+                 VALUES ('thread-wide', 1, 'project', 0, 0, 0, ?1)",
+                [payload],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut subscription = h
+        .hub
+        .subscribe(ShellSubscribe {
+            after_global_seq: Some(0),
+            ..ShellSubscribe::default()
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        next(&mut subscription).await,
+        ShellUpdate::Snapshot(snapshot) if snapshot.threads.len() == 1
+    ));
+}
+
+#[tokio::test]
 async fn reports_project_changes_from_the_directory() {
     let (dir, store) = temp_store();
     let projects = Arc::new(Projects(Mutex::new(vec![project("project-a")])));

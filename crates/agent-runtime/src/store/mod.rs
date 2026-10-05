@@ -200,17 +200,26 @@ impl Store {
         })
     }
 
+    /// Statistics of at most `max_facts + 1` facts after the cursor, enough to tell
+    /// whether the gap exceeds `max_facts` without scanning all of it. Bytes are UTF-8.
     pub fn fact_gap(
         &self,
         thread: &ThreadId,
         after_global_seq: u64,
+        max_facts: u64,
     ) -> Result<FactGap, StoreError> {
         self.read(|c| {
             Ok(c.query_row(
-                "SELECT COUNT(*), COALESCE(SUM(LENGTH(payload)), 0),
+                "SELECT COUNT(*), COALESCE(SUM(octet_length(payload)), 0),
                         COALESCE(MAX(kind = 'ThreadCreated'), 0)
-                 FROM facts WHERE thread_id = ?1 AND global_seq > ?2",
-                params![thread.as_str(), after_global_seq as i64],
+                 FROM (SELECT payload, kind FROM facts
+                       WHERE thread_id = ?1 AND global_seq > ?2
+                       ORDER BY global_seq LIMIT ?3)",
+                params![
+                    thread.as_str(),
+                    after_global_seq as i64,
+                    max_facts.saturating_add(1).min(i64::MAX as u64) as i64
+                ],
                 |row| {
                     Ok(FactGap {
                         facts: row.get::<_, i64>(0)? as u64,
