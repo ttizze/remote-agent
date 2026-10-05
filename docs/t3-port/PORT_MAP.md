@@ -1063,14 +1063,14 @@ SDK の取得記録（tarball の integrity/hash と制御関数）、persistenc
 | SQLite の control-read 回数、Effect service の mock 呼出し構造 | domain の入力→事実→projection、Host の境界テストへ分離 | T3 の内部 service 配線は対象外：actor が唯一の書込 owner |
 | V1 import / migration と他 provider 専用テスト | 対象外 | 現行形式だけ、provider は Codex と Claude の指定 |
 
-Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機械・fold・子 actor への command に流す。固定版の 71 NDJSON は改変せず保存し、manifest の SHA-256 と全 native frame の decoding を検証する。71 本すべてを projection の挙動テストでも使い、下表と追加記録に run / attempt / item / 子スレッド / fork・rollback 境界の原本期待値との対応を示す。hash / decoding の成功だけを挙動一致の根拠にしない。Host の SQLite・実プロセス境界と、core / クライアントの接続 reducer 全体の移植完了を意味するものではない。
+Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機械・fold・子 actor への command に流す。単一 session の transcript は、翻訳層が生成した outbound frame を T3 `replay.ts` と同じ正規化で各 `expect_outbound` と順に比較し、余分な frame も失敗にする。固定版の 71 NDJSON は改変せず保存し、manifest の SHA-256 と全 native frame の decoding を検証する。71 本すべてを projection の挙動テストでも使い、下表と追加記録に run / attempt / item / 子スレッド / fork・rollback 境界の原本期待値との対応を示す。hash / decoding の成功だけを挙動一致の根拠にしない。Host の SQLite・実プロセス境界と、core / クライアントの接続 reducer 全体の移植完了を意味するものではない。
 
 | T3 fixture / adapter test | projection・制御の検証 |
 |---|---|
 | `simple`, `multi_turn`（両 driver） | run 数・status・ordinal・role・応答文・native thread の共有 |
 | `queued_turn`, `message_steering`（両 driver） | queued の受付→昇格、timeline の順序、1 run / 1 attempt の steer、元の input intent |
 | `proposed_plan`, `todo_list`（Codex） | proposal の active 状態、replay / fixture を含む内容、todo の completed ×3 |
-| `tool_call_read_only_on_request`, `tool_call_restricted_granular`（両 driver）, `tool_call_denied_write`（Claude） | 1 件の承認の解決、decline の保持、元の応答文 |
+| `tool_call_read_only_on_request`, `tool_call_restricted_granular`（両 driver）, `tool_call_denied_write`（Claude） | output.ts と同じ判定：1 件の要求、accept / decline の決定、承認カードと要求の対応、要求の種類、承認された書き込みの完了と書いた内容、拒否された file change の failed、元の応答文 |
 | `claude_compact_after_peer_turn`, `_no_echo` | 元の 3 run / 2 run の分岐、PEER_ACK の帰属、27445→1192 の compaction |
 | `claude_background_task_wake`, `claude_background_monitor_wake` | 元の run 数・応答・通知・roster 種別・continuation detail |
 | `claude_result_is_error` | 認証の文言、api_error_401 / provider_error、assistant の二重表示なし、次の run の成功 |
@@ -1086,7 +1086,7 @@ Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機�
 | `subagent_v2_approval` / `subagent_v2_nested_approval` | 親の承認解決、親 attempt への帰属、子に要求と承認カードがないこと。 |
 | `claude_local_bash_task` / `web_search`（両 provider） / `claude_mcp_tool_presentation` | 原本の assistant 文言、検索 query/result URL、command output、記録された MCP title/source と metadata がない場合の空値。 |
 | `AttachmentPrompt.test.ts` | `agent-providers::attachments::tests`。パスの全文、escaped JSON、accessibility 圧縮と bounds、入力上限、image/file 判定の期待値を維持。 |
-| `CheckpointCaptureService.ts` の stopped/at-least-once 規則 | `agent-domain::tests::failed_capture_is_retryable_and_stopped_capture_keeps_its_terminal_status`。失敗でキューを解放せず、保存結果で terminal status を変えない。 |
+| `CheckpointCaptureService.ts` の stopped / missing / error 規則 | `agent-domain::tests::failed_capture_settles_the_run_and_stopped_capture_keeps_its_terminal_status`。missing / error の保存でも run を確定してキューを進め、停止した run の status は変えない。ready でない checkpoint への rollback は拒否する。 |
 
 | 追加した原本の検証 | Rust の検証 |
 | --- | --- |
@@ -1133,6 +1133,34 @@ R3 O6/O8/O9/O13 の再発検証を追加した。control RPC の失敗は run/at
 `RestartBackgroundNote.test.ts` の provider switch、completion 時刻での順序、同じ label の異なる ID、steer の旧 attempt による配送確認、未受領の chained continuation、ラベル・件数の bounds を `agent-domain/src/recovery.rs` と状態機械テストへ移植した。ID がなかった旧形式の kind + label fallback だけは対象外：未公開製品の現行形式だけを保持する規則に従う。
 
 `RestartContinuation.test.ts` と `ProviderRuntimeRecoveryService.test.ts` の未完了ターン・admitted continuation・held queue・停止／完了／maintenance の除外・新しいユーザー発言の優先・委任結果の復旧を domain の command→projection で検証する。再起動の chain と queue の不変条件は proptest に含めた。startup / shutdown の取消文言を保持し、native 子は旧 attempt の出力を拒否する。`CodexAdapterV2.ts` の継続時の空 input と Claude の通常 prompt を翻訳テストで確認する。native session の強い参照・プロセスの status・設定の取得は段階 3 の Host の入力準備で検証する。
+
+### 段階 3 前のレビュー指摘への対応（2026-10-06）
+
+| T3 の原本 | 新設計の検証 |
+| --- | --- |
+| `SelectionRestart.integration.test.ts`、`RunExecutionService.test.ts:3192`、`CommandPolicy.test.ts:318` | `restart_supersedes_attempt_and_leaves_native_children_to_their_provider`、`restart_and_steering_respect_capabilities_and_maintenance_turns`。superseded / pending の attempt、子の task は running のまま、停止カードなし。Claude の restart と maintenance の steer を拒否。 |
+| `ClaudeAdapterV2.test.ts:2304`（停止後の result） | `a_stopped_claude_turn_finishes_on_its_wrapped_result`。interrupted、partial usage、停止結果カード。 |
+| `runtimeLayer.test.ts:3321`（provider / usage limit の失敗後の queue） | `provider_failures_hold_the_queue_and_usage_limits_block_it`。 |
+| archive / settle / delete（`runtimeLayer.test.ts:2730, 2795, 2920`、`ThreadDeletion.test.ts`） | `archive_cancels_queued_work_and_detaches_without_unarchive_resuming`、`settle_rejects_blocked_work_and_cancels_automatic_deliveries`、`deletion_cancels_pending_requests_and_releases_thread_resources`、`sending_a_message_clears_settled_and_snoozed_state`。 |
+| `SteeringCompletion.integration.test.ts:563, 638` | `dispatch_saves_the_requested_selection_and_late_steers_use_it`。遅れた steer は同じ発言・timeline 行のまま新しい turn に移る。 |
+| `CheckpointRollbackService.test.ts`、`runtimeLayer.test.ts` の rollback | `rollback_discards_pending_captures_and_invalidates_later_checkpoints`、`rollback_without_provider_rewind_or_file_restore_still_reports_one_result`、`rollback_resets_post_boundary_sessions_and_uses_replacement_native_identity`。 |
+| `ThreadForkService.test.ts:129`、`ThreadFork.execution.test.ts:57`、`ProjectionStore.test.ts`（継承） | `unsuccessful_and_cancelled_runs_fork_from_bounded_portable_history`、`forking_a_fork_keeps_the_ancestor_conversation_and_its_messages`、`a_failed_native_fork_still_creates_the_fork_with_portable_history`。 |
+| merge back の受付（`Orchestrator.ts:3442`） | `merge_back_requires_a_fork_of_the_target_and_a_finished_source`。 |
+| `ContextHandoffBudget.test.ts:621`、`ProviderSwitch.integration.test.ts:891, 2504`、`ProviderTurnStartService.ts:1032, 1070` | `context_delivery_is_pending_until_acceptance_and_ambiguous_delivery_is_not_repeated`（新しい native thread へ fallback）、`lost_native_session_restarts_the_attempt_with_portable_history`、`a_handoff_that_failed_before_a_native_thread_existed_is_delivered_again`、`inputs_that_never_reached_the_native_session_are_handed_back_to_it`、`native_occupancy_estimate_counts_inputs_and_attachments_that_reached_the_session`、`inline_history_and_restart_notes_precede_the_labelled_user_message`。 |
+| `DelegatedCompletionDelivery.test.ts:296, 1211`、`Orchestrator.ts:4570, 7333, 8722` | `always_completions_steer_into_the_running_parent_and_are_delivered_with_it`、`settled_only_completion_waits_only_for_its_spawning_run`、`queued_siblings_share_one_wake_and_cancelling_it_disposes_the_cohort`。 |
+| `SubagentProjection.test.ts`、`ClaudeAdapterV2.test.ts:6486` | `delegated_results_use_the_failure_or_latest_answer`、`a_resumed_native_task_reopens_its_card_and_rejects_stale_results`。 |
+| queue 編集・要求の応答（`runtimeLayer.test.ts:1114, 3611`、`Orchestrator.ts:6866, 7022, 7228, 7402`）、`ProviderEventIngestor.test.ts:735` | `queued_edits_are_validated_and_automatic_deliveries_are_fixed`、`declined_requests_and_dismissed_questions_close_their_cards_as_cancelled`、`message_capable_questions_stay_answerable_after_their_turn_ends`。 |
+| proposed plan の消費（`Orchestrator.control-reads.test.ts:283`）、委任の入力（contracts `:2878`、`SubagentProjection.ts:28`） | `a_proposed_plan_is_consumed_once_at_acceptance`、`delegation_requires_a_task_and_titles_the_child_from_it`。 |
+| `ThreadTitleRegenerationService.test.ts`、`ThreadLaunchService.test.ts`（title） | `titles_are_generated_once_and_a_rename_supersedes_the_request`。 |
+| `AgentSessionImporter.test.ts` | `imported_sessions_keep_message_times_and_resume_their_native_session`。 |
+| `ProjectionStore.ts` の `threadShellFromProjection`、`ProjectionStore.test.ts` の shell | `agent-domain/src/shell.rs` のテスト。 |
+| `ProviderFailure.ts` の上限 | `large_text_is_split_across_facts_without_truncation`。 |
+| `CodexAdapterV2.test.ts:3805, 4004, 2242, 6670, 5719, 2837, 3348–3687, 6455, 1321, 806–936` | `commands_running_at_turn_end_report_later_and_stop_without_a_turn_interrupt`、`a_retained_command_keeps_its_row_and_wakes_the_thread_when_it_finishes`、`asynchronous_codex_questions_become_message_requests_without_prose`、`codex_item_and_subagent_states_use_the_reference_mapping`、`collaboration_calls_do_not_reparent_existing_children`、`codex_failures_and_retries_keep_their_reference_classification_and_lifecycle`、`final_answers_drop_repeats_and_late_empty_completions`、`rerouted_child_models_update_the_child`、`skills::tests`、`codex_tools::tests`、`codex_start_and_steer_send_prepared_images_after_the_text`。 |
+| `ClaudeAdapterV2.test.ts:3326, 3130, 3204, 4328, 2376, 2441, 2691`、`ClaudeSkillDispatch.test.ts`、`claudeModelOptions.test.ts`、`model.test.ts:227` | `claude_rosters_replace_background_work_and_foreground_tasks_stay_foreground`、`claude_server_tools_and_typed_results_are_tool_activity`、`claude_bash_output_joins_stdout_and_stderr`、`claude_api_retries_update_one_item_until_recovery_or_failure`、`claude_success_results_marked_as_errors_add_no_answer_or_failure`、`claude_refusal_fallbacks_and_mcp_names_use_the_reference_fields`、`claude_rate_limits_announce_rejected_windows_unless_overage_is_allowed`、`claude_prompts_run_known_skills_and_request_ultrathink_effort`、`claude_models::tests`、`background_rosters_replace_work_and_usage_limits_render_their_wait`。 |
+| SDK `forkSession` | `claude_fork::tests`。境界までの main chain、progress を飛ばした親子関係、新 session ID への付け替え、fork title、境界が見つからない場合のエラー、project key。 |
+| wire の encoding | `wire_encodings_round_trip_state_facts_commands_and_effects`、`wire_encodings_round_trip_imports_titles_rollbacks_and_workspaces`（JSON と Postcard）。 |
+
+graph replay（fork / rollback / merge back / delegated_task_status）は記録プロセスの複数 native thread を種にする従来の方式のまま、境界の command を検証する。外部 frame の完全一致の比較は単一 session の transcript に限る。
 
 ### 段階 1・2 の検証記録（2026-10-06）
 
