@@ -17,7 +17,7 @@ pub const FACT_PAGE: usize = 500;
 const SCHEMA_VERSION: &str = "1";
 const IDLE_READERS: usize = 4;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StoredFact {
     pub global_seq: u64,
     pub thread_seq: u64,

@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 agent-domain = { path = "../agent-domain" }
+base64.workspace = true
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
