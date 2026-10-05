@@ -21,6 +21,7 @@ url.workspace = true
 uuid = { version = "1", features = ["v5"] }
 
 [dev-dependencies]
+agent-providers = { path = "../agent-providers", features = ["test-support"] }
 proptest = "1.11"
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
