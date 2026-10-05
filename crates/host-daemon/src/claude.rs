@@ -958,8 +958,11 @@ impl Worker {
             retained = Some(process);
             outcome
         } else {
-            let exited = process.finish().await;
-            outcome.and(exited)
+            // Keep the exit status and stderr when the turn already failed.
+            match (outcome, process.finish().await) {
+                (Err(error), Err(detail)) => Err(format!("{error}. {detail}")),
+                (outcome, exited) => outcome.and(exited),
+            }
         };
         let owned_record = self.record.clone();
         let mut record = owned_record.lock().await;
