@@ -78,6 +78,7 @@
           };
           native = pkgs.mkShell {
             RUST_TOOLCHAIN_VERSION = rustToolchain.version;
+            NEXTEST_VERSION = pkgs.cargo-nextest.version;
             packages = with pkgs; [ rustToolchain sccache cargo-mutants cargo-nextest just jq git pkg-config cmake clang workflowLinter nodejs ]
               ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 lsof

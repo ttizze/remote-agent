@@ -660,6 +660,8 @@ pub async fn run(tests: Vec<String>, without_codex: bool) -> Result<()> {
             "generic/platform=iOS Simulator",
             "-configuration",
             "Debug",
+            "ARCHS=arm64",
+            "ONLY_ACTIVE_ARCH=YES",
             "-derivedDataPath",
             &build,
             "CODE_SIGNING_ALLOWED=YES",

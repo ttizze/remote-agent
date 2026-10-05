@@ -185,6 +185,14 @@ transfer server just to delete that check would reverse A14.
   The Mac runner uses `nix develop . --command just quality rust` for Rust
   contracts and Mac Browser E2E. Four iPhone runners use
   `nix develop . --command just quality swift` for Swift checks and acceptance.
+  Linux and Windows run the same library, binary and integration assertions
+  with Nix-pinned cargo-nextest, allowing independent test binaries to run
+  together; documentation examples remain a separate Cargo check. Their
+  executable builds use the same native-bindings features as the tests so
+  Cargo does not rebuild the common crates under a second feature set.
+  Mac integration assertions also use nextest with two test processes to
+  stay within the runner's memory budget. Linux, Windows and Android use four
+  Cargo build jobs; Apple runners retain two.
   They partition the same maintained test list with `BEX_IOS_TEST_SHARDS=4`
   and zero-based `BEX_IOS_TEST_SHARD` values 0 through 3. Each runs one isolated
   Simulator/Host pair; an omitted shard setting selects the complete list.
@@ -192,6 +200,9 @@ transfer server just to delete that check would reverse A14.
   so equal test counts do not leave one runner with all the slow cases.
   Swift formatting, linting and headless Markdown checks run on shard zero;
   all four shards run their selected Simulator acceptance tests.
+  The Simulator app, package dependencies and UI test runner build only arm64,
+  matching the supported Apple Silicon test host rather than also compiling
+  unused x86_64 test products.
   Each runner has separate processes,
   memory and logs. iPhone acceptance uses the Host's normal preinstalled Google
   Chrome with unchanged launch arguments, retaining its startup time and stderr
@@ -225,6 +236,11 @@ transfer server just to delete that check would reverse A14.
   Logs and Xcode result bundles are
   retained for seven days, including failures. Linux, Windows and Android run
   alongside this job, including Android emulator acceptance on Ubuntu with KVM.
+  Android restores Gradle dependencies and build-cache outputs through the
+  action's open-source GitHub cache provider, with read-only caching on PRs.
+  Gradle retains the pinned wrapper and runs with four workers and its build
+  cache enabled. Configuration-cache entries are not uploaded without an
+  encryption key. These checks require no paid runner or caching account.
 - `scripts/dev-env.sh just unit-tests` runs every Rust workspace library
   and binary test with native bindings, runs the standalone agent-peer CLI
   assertions with Cargo, and runs headless Swift Markdown tests on macOS. Nix-pinned
