@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 use xtask::Result;
 
-const USAGE: &str = "Usage: cargo xtask <command>\n  clean-builds [--dry-run]\n  connection-diagnostics [--log PATH] [--platform Ios|Macos] [--trace ID] [--attempt ID]\n  android-console SOCKET\n  android-network-permission SERIAL LOG ADB_PORT\n  terminal-query-probe\nBuilds and manual checks: just --list\n";
+const USAGE: &str = "Usage: cargo xtask <command>\n  clean-builds [--dry-run]\n  connection-diagnostics [--log PATH] [--platform Ios|Macos] [--trace ID] [--attempt ID]\n  terminal-query-probe\nBuilds and manual checks: just --list\n";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -29,24 +29,6 @@ async fn execute(arguments: &[String]) -> Result<()> {
         #[cfg(unix)]
         ("terminal-query-probe", []) => xtask::terminal_probe::run(),
         ("connection-diagnostics", arguments) => xtask::connection_diagnostics::run(arguments),
-        #[cfg(unix)]
-        ("android-console", [path]) => {
-            println!(
-                "{}",
-                xtask::android_e2e::console_port(std::path::Path::new(path)).await?
-            );
-            Ok(())
-        }
-        #[cfg(unix)]
-        ("android-network-permission", [serial, log, port]) => {
-            xtask::android_e2e::network_permission(
-                std::ffi::OsStr::new("adb"),
-                serial,
-                std::path::Path::new(log),
-                port,
-            )
-            .await
-        }
         _ => Err(USAGE.into()),
     }
 }

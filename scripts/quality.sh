@@ -8,12 +8,15 @@ if [[ $language == apple || $language == rust ]]; then
     cargo fmt --all --check
     cargo clippy --locked --workspace --all-targets --features agent-core/bindings -- -D warnings
     just unit-tests
-    cargo nextest run --locked -p xtask --test crate_boundaries --test build_cleanup
+    cargo xtask clean-builds --dry-run
 fi
 if [[ $language == kotlin ]]; then
-    ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:assembleDebug --console=plain
+    ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt :apps:mobile:testDebugUnitTest :apps:mobile:assembleDebug --console=plain
 fi
 if [[ $language == apple || $language == swift ]]; then
+    swiftformat --lint apps/mobile/iosApp/Bex
+    swiftlint lint --strict
+    /usr/bin/xcrun swift test --package-path apps/mobile/iosApp --scratch-path target/qa/ios-unit
     scripts/build-agent-ios.sh simulator
     xcodebuild -project apps/mobile/iosApp/Bex.xcodeproj -scheme Bex \
         -configuration Debug -destination 'generic/platform=iOS Simulator' \

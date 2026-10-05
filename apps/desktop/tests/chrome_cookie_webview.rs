@@ -5,6 +5,9 @@ include!("../src/browser.rs");
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
+    if std::env::args().any(|arg| arg == "--list") {
+        return;
+    }
     eprintln!("Chrome Cookie import uses macOS WebKit; run this test on macOS.");
     std::process::exit(1);
 }
@@ -14,9 +17,9 @@ fn main() {
     let args: Vec<_> = std::env::args().collect();
     // Listing must never initialize WebKit or create the test's native windows.
     if args.iter().any(|arg| arg == "--list") {
-        if !args.iter().any(|arg| arg == "--ignored") {
-            println!("chrome_cookie_webview: test");
-        }
+        // Listing in both modes marks this manual native-window probe ignored
+        // in nextest, while the explicit cargo --test command still runs it.
+        println!("chrome_cookie_webview: test");
         return;
     }
     if args.get(1).is_some_and(|s| s == "--phase") {

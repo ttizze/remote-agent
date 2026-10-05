@@ -5,13 +5,13 @@ set positional-arguments
 default:
     @just --list
 
-# Run all unit tests; CI can add explicit integration targets to the same build.
+# Run unit and retained integration tests; retired conversation/E2E runners are absent.
 unit-tests *targets:
     #!/usr/bin/env bash
     set -uo pipefail
     failed=0
     cargo build --locked -p bex-process --bin bex-provider-supervisor || failed=1
-    cargo nextest run --locked --no-fail-fast --workspace --lib --bins --features agent-core/bindings "$@" &
+    cargo nextest run --locked --no-fail-fast --workspace --features agent-core/bindings "$@" &
     rust_pid=$!
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}" cargo test --locked --no-fail-fast --manifest-path tools/agent-peer/Cargo.toml || failed=1
     wait "$rust_pid" || failed=1

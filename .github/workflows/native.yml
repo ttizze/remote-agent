@@ -130,7 +130,7 @@ jobs:
       - name: Build desktop and Host
         run: nix develop .#native --command cargo build --locked --features agent-core/bindings -p codex-app-server -p bex-process -p bex-desktop -p host-daemon
       - name: Orchestration and native contracts
-        run: nix develop .#native --command cargo nextest run --locked --lib --bins --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p orchestration -p provider-adapters
+        run: nix develop .#native --command cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p orchestration -p provider-adapters
       - name: Documentation examples
         run: nix develop .#native --command cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p orchestration -p provider-adapters
   android:
@@ -163,7 +163,7 @@ jobs:
           ANDROID_USER_HOME: ${{ runner.temp }}/android
         run: >-
           nix develop .#android --command ./gradlew
-          :apps:mobile:ktfmtCheck :apps:mobile:assembleDebug
+          :apps:mobile:ktfmtCheck :apps:mobile:detekt :apps:mobile:testDebugUnitTest :apps:mobile:assembleDebug
           --no-daemon --parallel --max-workers=4 --build-cache --console=plain
   mac:
     name: Mac
@@ -295,6 +295,6 @@ jobs:
       - name: Build desktop and Host
         run: cargo build --locked --features agent-core/bindings -p codex-app-server -p bex-process -p bex-desktop -p host-daemon
       - name: Orchestration and native contracts
-        run: cargo nextest run --locked --lib --bins --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p orchestration -p provider-adapters
+        run: cargo nextest run --locked --no-fail-fast --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p orchestration -p provider-adapters
       - name: Documentation examples
         run: cargo test --locked --doc --features agent-core/bindings -p codex-app-server -p bex-process -p agent-protocol -p agent-transport -p agent-core -p host-daemon -p xtask -p orchestration -p provider-adapters
