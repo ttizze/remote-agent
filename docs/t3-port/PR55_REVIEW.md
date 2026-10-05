@@ -226,3 +226,9 @@ R2 の O4（native rollback 境界）、O6（resume fallback）、O7（interrupt
 | H14（Ctrl-C） | supervisor を別 process group にし、Host の group SIGINT で cleanup を妨げない | 隔離した Host stand-in の group SIGINT 後、provider と tool の消滅 |
 
 接続/PTY の段階検証は6件通過。残りの指摘と最終検証は、各修正の検証後に追記する。
+
+## 翻訳へ切り替え（ユーザーの追加指示）
+
+ここまでの「M1/M2 完成」「修正済み」は独自実装・独自テストに対する記録であり、T3 のファイル・関数・元テストを移植済みという意味ではなかった。以後は PORT_MAP.md の対応と移植した T3 テストを根拠とし、この文書の R3 判定も翻訳後のコードで全件やり直す。
+
+中断時の12ファイルは PORT_MAP.md に採否を記録して暫定差分を保存し、HEAD に戻した。特に R3 O22 の worker 4並列は固定 T3 にもあるため、上限そのものは削除しない。ack の再発行・cancel の cohort disposal、transcript ごとの取り込み記録、Claude rollback の null/error 分岐を省略した修正は採用しない。現在の短縮実装を翻訳済みと見なさず、元実装へ置き換えて検証する。
