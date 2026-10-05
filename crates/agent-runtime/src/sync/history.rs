@@ -1,6 +1,6 @@
 //! Timeline windows and history pages, ported from T3 `threadHistoryPaging.ts`.
 //! A row is one visible item (local or inherited) with the message and plan it shows.
-use super::wire::strip_transfers;
+use super::wire::strip_host_only;
 use agent_domain::{
     InputIntent, Item, ItemKind, Message, MessageAuthor, MessageId, Plan, RunAttemptId, RunId,
     RunStatus, State, ThreadId, TurnItemId,
@@ -376,7 +376,7 @@ pub fn bounded_state(state: &State, snapshot_seq: u64, policy: PagePolicy) -> Bo
         .sum();
 
     let mut bounded = state.clone();
-    strip_transfers(&mut bounded);
+    strip_host_only(&mut bounded);
     let active_runs: HashSet<&RunId> = state
         .runs
         .iter()
