@@ -2,11 +2,29 @@ use crate::*;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WireContext {
     pub cwd: String,
     pub client_name: String,
     pub client_version: String,
+    pub approval_policy: Option<Json>,
+    pub sandbox_policy: Option<Json>,
+    pub developer_instructions: Option<String>,
+    pub additional_context: Option<Json>,
+    pub omit_service_tier: bool,
+    pub thread_model: Option<String>,
+    pub thread_config: BTreeMap<String, Json>,
+}
+impl WireContext {
+    fn thread_params(&self, model: Option<&str>) -> Value {
+        let mut config = json!(self.thread_config);
+        config["tools.update_plan.enabled"] = json!(true);
+        let mut params = json!({"cwd":self.cwd,"config":config});
+        if let Some(model) = model {
+            params["model"] = json!(model);
+        }
+        params
+    }
 }
 #[derive(Debug, Clone)]
 enum Pending {
@@ -22,6 +40,7 @@ enum Pending {
     RevertRead {
         thread: String,
         head: Option<String>,
+        runtime_params: Value,
     },
     RevertResume {
         thread: String,
@@ -84,14 +103,31 @@ impl CodexProtocol {
                 input.push(json!({"type":"text","text":text}));
                 let (approval, reviewer, sandbox) = codex_runtime(*runtime_mode);
                 let mut start = json!({"input":input,"cwd":context.cwd,"model":selection.model,"summary":"detailed","approvalPolicy":approval,"approvalsReviewer":reviewer,"sandboxPolicy":{"type":sandbox}});
+                if let Some(policy) = &context.approval_policy {
+                    start["approvalPolicy"] = policy.0.clone();
+                }
+                if let Some(policy) = &context.sandbox_policy {
+                    start["sandboxPolicy"] = policy.0.clone();
+                }
+                if let Some(additional_context) = &context.additional_context {
+                    start["additionalContext"] = additional_context.0.clone();
+                }
                 if let Some(effort) = selection.options.get("reasoningEffort") {
                     start["effort"] = json!(effort);
                 }
-                if let Some(tier) = selection.options.get("serviceTier") {
+                if let Some(tier) = selection.options.get("serviceTier")
+                    && !context.omit_service_tier
+                {
                     start["serviceTier"] = json!(tier);
                 }
-                if *interaction_mode == InteractionMode::Plan {
-                    start["collaborationMode"] = json!({"mode":"plan","settings":{"model":selection.model,"reasoning_effort":selection.options.get("reasoningEffort").map(String::as_str).unwrap_or("medium")}});
+                if *interaction_mode == InteractionMode::Plan
+                    || context.developer_instructions.is_some()
+                {
+                    let mut settings = json!({"model":selection.model,"reasoning_effort":selection.options.get("reasoningEffort").map(String::as_str).unwrap_or("medium")});
+                    if let Some(instructions) = &context.developer_instructions {
+                        settings["developer_instructions"] = json!(instructions);
+                    }
+                    start["collaborationMode"] = json!({"mode":if *interaction_mode == InteractionMode::Plan {"plan"} else {"default"},"settings":settings});
                 }
                 if let Some(thread) = self
                     .thread
@@ -101,9 +137,26 @@ impl CodexProtocol {
                     start["threadId"] = json!(thread);
                     self.start_or_inject(start, handoff.clone())
                 } else if let Some(thread) = native_thread {
-                    self.request("thread/resume",json!({"threadId":thread,"excludeTurns":true,"model":selection.model,"cwd":context.cwd}),Pending::Thread { start, history: handoff.clone() })
+                    let mut params = context.thread_params(Some(&selection.model));
+                    params["threadId"] = json!(thread);
+                    params["excludeTurns"] = json!(true);
+                    self.request(
+                        "thread/resume",
+                        params,
+                        Pending::Thread {
+                            start,
+                            history: handoff.clone(),
+                        },
+                    )
                 } else {
-                    self.request("thread/start",json!({"model":selection.model,"cwd":context.cwd,"config":{"tools.update_plan.enabled":true}}),Pending::Thread { start, history: handoff.clone() })
+                    self.request(
+                        "thread/start",
+                        context.thread_params(Some(&selection.model)),
+                        Pending::Thread {
+                            start,
+                            history: handoff.clone(),
+                        },
+                    )
                 }
             }
             ProviderCommand::Steer { text, attachments } => {
@@ -201,13 +254,15 @@ impl CodexProtocol {
                 Pending::RevertRead {
                     thread: native_thread.clone(),
                     head: absolute_head.clone(),
+                    runtime_params: context.thread_params(context.thread_model.as_deref()),
                 },
             ),
             ProviderCommand::Fork {
                 native_thread,
                 through_turn,
             } => {
-                let mut params = json!({"threadId":native_thread,"cwd":context.cwd});
+                let mut params = context.thread_params(context.thread_model.as_deref());
+                params["threadId"] = json!(native_thread);
                 if let Some(turn) = through_turn {
                     params["lastTurnId"] = json!(turn);
                 }
@@ -356,16 +411,22 @@ impl CodexProtocol {
                         ));
                     }
                 }
-                Pending::RevertRead { thread, head } => {
+                Pending::RevertRead {
+                    thread,
+                    head,
+                    mut runtime_params,
+                } => {
                     if result["thread"]["historyMode"] != "paginated" {
                         return Err(ProtocolError::Invalid(format!(
                             "Cannot roll back Codex thread {thread}: the thread uses legacy history, which Codex 0.156 cannot revert."
                         )));
                     }
                     if result["thread"]["status"]["type"] == "notLoaded" {
+                        runtime_params["threadId"] = json!(thread);
+                        runtime_params["excludeTurns"] = json!(true);
                         output.outbound.push(self.request(
                             "thread/resume",
-                            json!({"threadId":thread,"excludeTurns":true}),
+                            runtime_params,
                             Pending::RevertResume { thread, head },
                         ));
                     } else {

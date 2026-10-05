@@ -383,6 +383,7 @@ fn wire_context() -> WireContext {
         cwd: "<workspace>".into(),
         client_name: "agent-client".into(),
         client_version: "test".into(),
+        ..WireContext::default()
     }
 }
 fn visible_text(state: &State) -> String {

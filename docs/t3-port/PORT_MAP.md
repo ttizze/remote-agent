@@ -1125,3 +1125,5 @@ R3 O6/O8/O9/O13 の再発検証を追加した。control RPC の失敗は run/at
 `ClaudeAdapterV2.test.ts` の runtime query policy と makeClaudeQueryOptions の thinking/resume/permission override の期待値は `claude_control.rs` の CLI 引数・設定テストで検証する。read-only の 3 tools、global read の allowlist、approval callback、plan の skip-permissions 抑止、300,000 の compaction window を維持する。`claude_subagent_resume_after_restart` replay は query.open ごとに翻訳器を新規作成し、domain の native correlation を復元して子が増えないことを検証する。
 
 `Orchestrator.ts` の provider switch と queued dispatch の coveredRuns / lastDeliveredRunForProviderThread は dispatch 時の handoff 決定に移した。provider を戻した場合は既知の native history を再送せず、その後の run だけを配送する。選択後に戻しただけでは transfer を作らず、queued run の昇格時の selection で差分を固定する。
+
+`CodexAdapterV2.test.ts` の runtime mode 4 種、explicit approval/sandbox、per-turn effort/serviceTier、plan/default collaboration と thread config を wire のテストへ移植した。instructions と認証済み MCP config の生成・可用性は段階 3 の Host が所有し、翻訳層には値を明示的に渡す。新設計の rollback resume でも固定版の cwd/model/tools config を保つ。

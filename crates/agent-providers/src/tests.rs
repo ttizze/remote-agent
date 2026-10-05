@@ -83,7 +83,180 @@ fn wire_context() -> WireContext {
         cwd: "/workspace".into(),
         client_name: "agent-client".into(),
         client_version: "1".into(),
+        ..WireContext::default()
     }
+}
+fn codex_turn_params(command: &ProviderCommand, context: &WireContext) -> Value {
+    let mut protocol = CodexProtocol::default();
+    let start = protocol.command(command, context).unwrap();
+    protocol
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
+        .unwrap()
+        .outbound[0]["params"]
+        .clone()
+}
+#[test]
+fn codex_runtime_policy_keeps_reference_defaults_and_explicit_overrides() {
+    for (mode, approval, reviewer, sandbox) in [
+        (
+            RuntimeMode::ApprovalRequired,
+            "untrusted",
+            "user",
+            "readOnly",
+        ),
+        (
+            RuntimeMode::AutoAcceptEdits,
+            "on-request",
+            "user",
+            "workspaceWrite",
+        ),
+        (
+            RuntimeMode::Auto,
+            "on-request",
+            "auto_review",
+            "workspaceWrite",
+        ),
+        (RuntimeMode::FullAccess, "never", "user", "dangerFullAccess"),
+    ] {
+        let mut command = codex_start();
+        if let ProviderCommand::Start { runtime_mode, .. } = &mut command {
+            *runtime_mode = mode;
+        }
+        let params = codex_turn_params(&command, &wire_context());
+        assert_eq!(params["approvalPolicy"], approval);
+        assert_eq!(params["approvalsReviewer"], reviewer);
+        assert_eq!(params["sandboxPolicy"]["type"], sandbox);
+        let context = WireContext {
+            approval_policy: Some(Json(json!("on-request"))),
+            sandbox_policy: Some(Json(
+                json!({"type":"readOnly","access":{"type":"restricted","includePlatformDefaults":false,"readableRoots":[]},"networkAccess":false}),
+            )),
+            ..wire_context()
+        };
+        let params = codex_turn_params(&command, &context);
+        assert_eq!(params["approvalPolicy"], "on-request");
+        assert_eq!(params["sandboxPolicy"], context.sandbox_policy.unwrap().0);
+        assert_eq!(params["approvalsReviewer"], reviewer);
+    }
+}
+#[test]
+fn codex_turn_selection_is_explicit_and_managed_sessions_omit_service_tiers() {
+    let mut command = codex_start();
+    if let ProviderCommand::Start {
+        selection,
+        interaction_mode,
+        ..
+    } = &mut command
+    {
+        selection.model = "gpt-5.4".into();
+        selection
+            .options
+            .insert("reasoningEffort".into(), "xhigh".into());
+        selection
+            .options
+            .insert("serviceTier".into(), "priority".into());
+        *interaction_mode = InteractionMode::Plan;
+    }
+    let params = codex_turn_params(&command, &wire_context());
+    assert_eq!(params["model"], "gpt-5.4");
+    assert_eq!(params["effort"], "xhigh");
+    assert_eq!(params["serviceTier"], "priority");
+    assert_eq!(
+        params["collaborationMode"]["settings"]["reasoning_effort"],
+        "xhigh"
+    );
+    assert_eq!(params["collaborationMode"]["mode"], "plan");
+    assert!(
+        params["collaborationMode"]["settings"]
+            .get("developer_instructions")
+            .is_none()
+    );
+    let params = codex_turn_params(
+        &command,
+        &WireContext {
+            omit_service_tier: true,
+            ..wire_context()
+        },
+    );
+    assert!(params.get("serviceTier").is_none());
+    if let ProviderCommand::Start {
+        interaction_mode, ..
+    } = &mut command
+    {
+        *interaction_mode = InteractionMode::Default;
+    }
+    assert!(
+        codex_turn_params(&command, &wire_context())
+            .get("collaborationMode")
+            .is_none()
+    );
+    let context = WireContext {
+        developer_instructions: Some(
+            "Use `delegate_task` with a structured object, never as JSON text.".into(),
+        ),
+        additional_context: Some(Json(
+            json!({"t3_code_orchestration":{"value":"Use `delegate_task` with a structured object, never as JSON text."}}),
+        )),
+        ..wire_context()
+    };
+    let params = codex_turn_params(&command, &context);
+    assert_eq!(params["collaborationMode"]["mode"], "default");
+    assert_eq!(
+        params["collaborationMode"]["settings"]["developer_instructions"],
+        context.developer_instructions.unwrap()
+    );
+    assert_eq!(
+        params["additionalContext"],
+        context.additional_context.unwrap().0
+    );
+}
+#[test]
+fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume() {
+    let context = WireContext {
+        thread_model: Some("gpt-5.4".into()),
+        thread_config: std::collections::BTreeMap::from([(
+            "mcp_servers".into(),
+            Json(json!({"runtime":{"url":"http://127.0.0.1:43123/mcp"}})),
+        )]),
+        ..wire_context()
+    };
+    let mut start = codex_start();
+    let mut protocol = CodexProtocol::default();
+    let expected = json!({"tools.update_plan.enabled":true,"mcp_servers":{"runtime":{"url":"http://127.0.0.1:43123/mcp"}}});
+    assert_eq!(
+        protocol.command(&start, &context).unwrap()[0]["params"]["config"],
+        expected
+    );
+    if let ProviderCommand::Start { native_thread, .. } = &mut start {
+        *native_thread = Some("resumed".into());
+    }
+    let resume = protocol.command(&start, &context).unwrap();
+    assert_eq!(resume[0]["method"], "thread/resume");
+    assert_eq!(resume[0]["params"]["config"], expected);
+    let fork = protocol
+        .command(
+            &ProviderCommand::Fork {
+                native_thread: "resumed".into(),
+                through_turn: Some("head".into()),
+            },
+            &context,
+        )
+        .unwrap();
+    assert_eq!(fork[0]["params"]["config"], expected);
+    assert_eq!(fork[0]["params"]["model"], "gpt-5.4");
+    let revert = protocol
+        .command(
+            &ProviderCommand::Rollback {
+                native_thread: "resumed".into(),
+                absolute_head: Some("head".into()),
+            },
+            &context,
+        )
+        .unwrap();
+    let resume = protocol.receive(&json!({"id":revert[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"notLoaded"}}}})).unwrap();
+    assert_eq!(resume.outbound[0]["params"]["config"], expected);
+    assert_eq!(resume.outbound[0]["params"]["model"], "gpt-5.4");
+    assert_eq!(resume.outbound[0]["params"]["cwd"], "/workspace");
 }
 #[test]
 fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start() {
@@ -394,7 +567,7 @@ fn rollback_resolves_an_absolute_boundary_across_pages_and_is_safe_to_repeat() {
     assert_eq!(page["method"], "thread/resume");
     assert_eq!(
         page["params"],
-        json!({"threadId":"thread","excludeTurns":true})
+        json!({"threadId":"thread","excludeTurns":true,"cwd":"/workspace","config":{"tools.update_plan.enabled":true}})
     );
     let page = protocol
         .receive(&json!({"id":page["id"],"result":{"thread":{"id":"thread"}}}))
