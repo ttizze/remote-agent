@@ -119,10 +119,19 @@ CREATE TABLE attachment_refs (
 ) STRICT;
 
 CREATE TABLE imported_sources (
-    driver TEXT NOT NULL,
-    native_session TEXT NOT NULL,
+    instance TEXT NOT NULL,
     path TEXT NOT NULL,
     fingerprint TEXT NOT NULL,
+    project_root TEXT NOT NULL,
+    native_session TEXT NOT NULL,
     thread_id TEXT NOT NULL,
-    PRIMARY KEY (driver, native_session)
+    source TEXT NOT NULL,
+    PRIMARY KEY (instance, path, fingerprint)
 ) STRICT;
+CREATE INDEX imported_sources_root ON imported_sources (project_root);
+CREATE INDEX facts_native_session
+    ON facts (COALESCE(
+        json_extract(payload, '$.SessionBound.native_thread'),
+        json_extract(payload, '$.NativeSessionBound.native_thread'),
+        json_extract(payload, '$.NativeChildBound.native_thread')))
+    WHERE kind IN ('SessionBound', 'NativeSessionBound', 'NativeChildBound');

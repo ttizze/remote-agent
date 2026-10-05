@@ -64,6 +64,7 @@ pub fn internal_command(command: &Command) -> bool {
 fn created_thread(command: &Command) -> Option<&ThreadId> {
     match command {
         Command::Create { thread, .. }
+        | Command::Import { thread, .. }
         | Command::AcceptFork { thread, .. }
         | Command::AcceptDelegation { thread, .. } => Some(thread),
         _ => None,

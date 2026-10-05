@@ -2,6 +2,7 @@
 mod actor;
 mod clock;
 mod error;
+mod import;
 mod keyed;
 mod outbox;
 mod query;
@@ -12,6 +13,7 @@ mod sync;
 pub use actor::*;
 pub use clock::*;
 pub use error::*;
+pub use import::*;
 pub use keyed::*;
 pub use outbox::*;
 pub use query::*;
