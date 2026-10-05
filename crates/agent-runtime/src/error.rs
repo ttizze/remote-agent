@@ -9,6 +9,8 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("command id is already used by thread {0}")]
     CommandConflict(ThreadId),
+    #[error("native session {session} is already bound to thread {owner}")]
+    NativeSessionOwned { session: String, owner: ThreadId },
     #[error("thread {thread} expected sequence {expected} but the store has {stored}")]
     Stale {
         thread: ThreadId,

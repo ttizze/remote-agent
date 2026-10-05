@@ -630,6 +630,10 @@ impl Actor {
                 self.reload().await;
                 Ok(self.unpersisted(rejected("command-id-conflict")))
             }
+            Err(StoreError::NativeSessionOwned { .. }) => {
+                self.reload().await;
+                Ok(self.unpersisted(rejected("native-session-owned")))
+            }
             Err(error) => {
                 tracing::warn!(thread = %self.thread, %error, "discarding an uncommitted step");
                 self.reload().await;

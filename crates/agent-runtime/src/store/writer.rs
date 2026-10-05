@@ -1,6 +1,6 @@
-use super::{Store, StoredFact, ThreadHead, head};
+use super::{Store, StoredFact, ThreadHead, head, native_session_owner};
 use crate::{EffectStatus, SearchChanges, ShellRow, StoreError};
-use agent_domain::{Effect, EffectBody, Fact, Receipt, ThreadId, Timestamp};
+use agent_domain::{Effect, EffectBody, Fact, FactBody, Receipt, ThreadId, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 use std::sync::{Arc, RwLock};
@@ -200,6 +200,24 @@ fn write_batch(
             return Err(StoreError::CommandConflict(
                 ThreadId::new(owner).map_err(|error| StoreError::Corrupt(error.to_string()))?,
             ));
+        }
+    }
+    // An import adopts a session that already exists outside the Host, so it must not
+    // take one any thread has bound. The single writer makes this check atomic.
+    if batch
+        .facts
+        .iter()
+        .any(|fact| matches!(fact.body, FactBody::ThreadImported))
+    {
+        for fact in &batch.facts {
+            if let FactBody::NativeSessionBound { native_thread, .. } = &fact.body
+                && let Some(owner) = native_session_owner(tx, native_thread, &batch.thread)?
+            {
+                return Err(StoreError::NativeSessionOwned {
+                    session: native_thread.clone(),
+                    owner,
+                });
+            }
         }
     }
     let at_millis = batch.at.millis();

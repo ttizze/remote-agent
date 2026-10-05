@@ -341,15 +341,11 @@ async fn an_import_command_cannot_create_another_thread() {
     );
 }
 
-// The Host's own provider sessions write to the same homes; importing them would
-// let two threads drive one native session.
-#[tokio::test]
-async fn skips_sessions_that_a_host_thread_already_owns() {
-    let h = harness();
-    let own = thread("thread:own");
-    let handle = h.registry.get_or_load(&own).await.unwrap();
+/// Runs a Host thread whose provider reports `native` as its session.
+async fn bind_host_session(h: &Harness, own: &ThreadId, native: &str) {
+    let handle = h.registry.get_or_load(own).await.unwrap();
     handle
-        .dispatch(command_id("create"), create(&own), CommandOrigin::Client)
+        .dispatch(command_id("create"), create(own), CommandOrigin::Client)
         .await
         .unwrap();
     let committed = handle
@@ -372,11 +368,59 @@ async fn skips_sessions_that_a_host_thread_already_owns() {
         .provider(
             attempt,
             ProviderEvent::SessionReady {
-                native_thread: "host-session".into(),
+                native_thread: native.into(),
             },
         )
         .await
         .unwrap();
+}
+
+// The ownership check belongs to the commit: an import decided before the Host bound
+// the session must still lose, and may be retried once the conflict is gone.
+#[tokio::test]
+async fn an_import_commit_rejects_a_session_bound_after_the_scan() {
+    let h = harness();
+    let RecentThread::Importable {
+        thread: session, ..
+    } = importable(Driver::Codex, "codex", "raced", "/tmp/raced.jsonl")
+    else {
+        unreachable!()
+    };
+    let target = thread("import:codex:raced");
+    let import = import_command(&project("p", "/w"), &target, session);
+    bind_host_session(&h, &thread("thread:own"), "raced").await;
+
+    let committed = h
+        .registry
+        .dispatch(
+            &target,
+            command_id("import"),
+            import.clone(),
+            CommandOrigin::Internal,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        committed.reply,
+        Reply::Rejected {
+            reason: "native-session-owned".into()
+        }
+    );
+    assert!(h.facts("import:codex:raced").is_empty());
+    assert!(h.store().receipt(&command_id("import")).unwrap().is_none());
+    let handle = h.registry.get_or_load(&target).await.unwrap();
+    assert!(handle.view().await.unwrap().state.thread.is_none());
+}
+
+// The Host's own provider sessions write to the same homes; importing them would
+// let two threads drive one native session.
+#[tokio::test]
+async fn skips_sessions_that_a_host_thread_already_owns() {
+    let h = harness();
+    let own = thread("thread:own");
+    bind_host_session(&h, &own, "host-session").await;
+    let handle = h.registry.get_or_load(&own).await.unwrap();
     assert_eq!(
         handle.view().await.unwrap().state.native_sessions["codex"],
         "host-session"
@@ -558,7 +602,7 @@ fn the_native_owner_lookup_uses_its_index() {
         .read(|c| {
             let mut statement = c.prepare(&format!(
                 "EXPLAIN QUERY PLAN {}",
-                crate::import::sources::NATIVE_OWNER_QUERY
+                crate::store::NATIVE_OWNER_QUERY
             ))?;
             let rows = statement.query_map(rusqlite::params!["session", "thread"], |row| {
                 row.get::<_, String>(3)

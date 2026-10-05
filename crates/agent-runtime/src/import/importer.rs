@@ -1,8 +1,6 @@
 //! Turns recent transcripts into settled threads bound to their native sessions.
 use super::paths::comparison_key;
-use super::sources::{
-    completed_sources, first_run_done, mark_first_run, native_session_owner, record_source,
-};
+use super::sources::{completed_sources, first_run_done, mark_first_run, record_source};
 use super::{ImportProject, ImportSource, RecentThread, Scanner, SessionThread};
 use crate::{ActorRegistry, CommandOrigin, RuntimeError, Store, StoreError};
 use agent_domain::{
@@ -259,15 +257,7 @@ impl Importer {
                 .await
                 .map_err(|error| error.to_string());
         }
-        let (native, except) = (thread.session.clone(), id.clone());
-        let owner = self
-            .store()
-            .blocking(move |store| native_session_owner(store, &native, &except))
-            .await
-            .map_err(|error| error.to_string())?;
-        if let Some(owner) = owner {
-            return Err(format!("thread {owner} already owns the native session"));
-        }
+        // The commit itself rejects a native session another thread already owns.
         let command_id =
             CommandId::new(format!("{id}@{}", source.fingerprint())).map_err(|e| e.to_string())?;
         let committed = self

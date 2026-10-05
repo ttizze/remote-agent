@@ -344,6 +344,33 @@ pub(crate) fn thread_id(value: String) -> Result<ThreadId, StoreError> {
     ThreadId::new(value).map_err(|error| StoreError::Corrupt(error.to_string()))
 }
 
+/// Matches the `facts_native_session` index expression.
+pub(crate) const NATIVE_OWNER_QUERY: &str = "SELECT thread_id FROM facts
+     WHERE kind IN ('SessionBound', 'NativeSessionBound', 'NativeChildBound')
+       AND COALESCE(
+               json_extract(payload, '$.SessionBound.native_thread'),
+               json_extract(payload, '$.NativeSessionBound.native_thread'),
+               json_extract(payload, '$.NativeChildBound.native_thread')) = ?1
+       AND thread_id <> ?2
+     LIMIT 1";
+
+/// Another thread bound to this native session: one the Host ran, forked, imported or
+/// adopted as a native child.
+pub(crate) fn native_session_owner(
+    c: &Connection,
+    native: &str,
+    except: &ThreadId,
+) -> Result<Option<ThreadId>, StoreError> {
+    c.query_row(
+        NATIVE_OWNER_QUERY,
+        params![native, except.as_str()],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(thread_id)
+    .transpose()
+}
+
 pub(crate) fn head(c: &Connection, thread: &ThreadId) -> Result<ThreadHead, StoreError> {
     Ok(c.query_row(
         "SELECT thread_seq, input_seq, last_global_seq FROM threads WHERE thread_id = ?1",

@@ -1,9 +1,9 @@
-//! Per-transcript import records and the native sessions threads already own.
+//! Per-transcript import records and the first-run marker.
 use super::ImportSource;
 use super::paths::comparison_key;
 use crate::{Store, StoreError};
 use agent_domain::{ThreadId, Timestamp};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use std::path::Path;
 
 /// `runtime_meta` key set once the first-run import has finished.
@@ -50,32 +50,6 @@ pub(crate) async fn record_source(
             Ok(())
         })
         .await
-}
-
-/// Matches the `facts_native_session` index expression.
-pub(crate) const NATIVE_OWNER_QUERY: &str = "SELECT thread_id FROM facts
-     WHERE kind IN ('SessionBound', 'NativeSessionBound', 'NativeChildBound')
-       AND COALESCE(
-               json_extract(payload, '$.SessionBound.native_thread'),
-               json_extract(payload, '$.NativeSessionBound.native_thread'),
-               json_extract(payload, '$.NativeChildBound.native_thread')) = ?1
-       AND thread_id <> ?2
-     LIMIT 1";
-
-/// Another thread bound to this native session: one the Host ran, forked or adopted as a native child.
-pub(crate) fn native_session_owner(
-    store: &Store,
-    native: &str,
-    except: &ThreadId,
-) -> Result<Option<String>, StoreError> {
-    store.read(|c| {
-        Ok(c.query_row(
-            NATIVE_OWNER_QUERY,
-            params![native, except.as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?)
-    })
 }
 
 pub(crate) fn first_run_done(store: &Store) -> Result<bool, StoreError> {
