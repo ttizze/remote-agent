@@ -346,6 +346,7 @@ pub fn combine_handoffs(
         TransferKind::Fork => "manual_context",
         TransferKind::MergeBack => "merge_back / fork_delta_summary",
         TransferKind::ProviderHandoff => "full_thread_summary",
+        TransferKind::ProviderHandoffDelta => "delta_since_target_last_seen",
         TransferKind::SubagentSpawn => "subagent_spawn",
         TransferKind::SubagentResult => "subagent_result",
     };

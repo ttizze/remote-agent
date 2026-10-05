@@ -23,7 +23,7 @@ values! {
     RecoveryTrigger { Startup, Shutdown }
     CompletionWake { Always, SettledOnly }
     DeliveryState { Pending, Claimed, Acknowledged, Delivered, Disposed }
-    TransferKind { Fork, MergeBack, ProviderHandoff, SubagentSpawn, SubagentResult }
+    TransferKind { Fork, MergeBack, ProviderHandoff, ProviderHandoffDelta, SubagentSpawn, SubagentResult }
     BackgroundKind { Command, Monitor, Subagent, BackgroundTask }
     AttachmentKind { Image, File }
     PlanKind { Proposed, Todo }

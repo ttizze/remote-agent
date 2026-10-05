@@ -722,6 +722,107 @@ fn compact_keeps_pending_handoff_for_the_next_real_prompt() {
     assert!(s.transfers[0].delivery.is_none());
 }
 #[test]
+fn provider_handoff_returns_only_runs_since_the_target_last_received_a_turn() {
+    let mut s = state();
+    let original_selection = selection();
+    let (_, a) = running(&mut s, "original-native-history");
+    finish(&mut s, &a);
+    let mut target = original_selection.clone();
+    target.instance = "other".into();
+    command(
+        &mut s,
+        "switch-other",
+        Command::SwitchProvider {
+            selection: target.clone(),
+        },
+    );
+    assert!(s.transfers.is_empty());
+    let (_, b) = running(&mut s, "other-history");
+    finish(&mut s, &b);
+    command(
+        &mut s,
+        "switch-back",
+        Command::SwitchProvider {
+            selection: original_selection.clone(),
+        },
+    );
+    let step = command(
+        &mut s,
+        "return",
+        send_message("return", DispatchMode::StartImmediately),
+    );
+    let history = step
+        .effects
+        .iter()
+        .find_map(|effect| match &effect.body {
+            EffectBody::Provider(ProviderCommand::Start {
+                context: Some(history),
+                ..
+            }) => Some(history),
+            _ => None,
+        })
+        .unwrap();
+    assert!(render_history(history).contains("other-history"));
+    assert!(!render_history(history).contains("original-native-history"));
+    assert!(render_history(history).contains("delta_since_target_last_seen"));
+    let returned = s.active_run().unwrap().attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "return-bound",
+        &returned,
+        ProviderEvent::SessionReady {
+            native_thread: "native-thread".into(),
+        },
+    );
+    provider(
+        &mut s,
+        "return-injected",
+        &returned,
+        ProviderEvent::ContextInjected,
+    );
+    provider(
+        &mut s,
+        "return-started",
+        &returned,
+        ProviderEvent::TurnStarted {
+            native_turn: Some("return-turn".into()),
+        },
+    );
+    finish(&mut s, &returned);
+
+    // The queued run's selection is authoritative when it is promoted; the
+    // thread may have changed selection again while it was waiting.
+    let (_, active) = running(&mut s, "active-again");
+    let mut queued = send_message("queued-other", DispatchMode::QueueAfterActive);
+    if let Command::Send(message) = &mut queued {
+        message.selection = Some(target);
+    }
+    command(&mut s, "queue-other", queued);
+    let promoted = provider(
+        &mut s,
+        "active-finish",
+        &active,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Completed,
+            native_head: None,
+        },
+    );
+    let history = promoted
+        .effects
+        .iter()
+        .find_map(|effect| match &effect.body {
+            EffectBody::Provider(ProviderCommand::Start {
+                context: Some(history),
+                ..
+            }) => Some(history),
+            _ => None,
+        })
+        .unwrap();
+    assert!(render_history(history).contains("active-again"));
+    assert!(!render_history(history).contains("other-history"));
+    assert!(!render_history(history).contains("original-native-history"));
+}
+#[test]
 fn plan_followup_preserves_attachments_and_consumes_the_proposal() {
     let mut s = state();
     let (_, a) = running(&mut s, "plan");

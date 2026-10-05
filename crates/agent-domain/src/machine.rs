@@ -157,6 +157,96 @@ impl Decision {
             status: ItemStatus::Completed,
         });
     }
+    fn prepare_provider_handoff(&mut self, target_run: &Run, native_thread: Option<&str>) {
+        let is_source = |run: &Run| {
+            matches!(
+                run.status,
+                RunStatus::Completed | RunStatus::Failed | RunStatus::Interrupted
+            )
+        };
+        let Some(latest) = self.state.runs.iter().rev().find(|run| is_source(run)) else {
+            return;
+        };
+        let needs_backfill = native_thread.is_none()
+            && self.state.attempts.iter().any(|attempt| {
+                attempt.native_thread.is_some()
+                    && self.state.runs.iter().any(|run| {
+                        run.id == attempt.run
+                            && run.selection.instance == target_run.selection.instance
+                            && is_source(run)
+                    })
+            });
+        if latest.selection.instance == target_run.selection.instance && !needs_backfill {
+            return;
+        }
+        let boundary = latest.ordinal;
+        if self.state.transfers.iter().any(|transfer| {
+            !transfer.superseded
+                && transfer.instance == target_run.selection.instance
+                && matches!(
+                    transfer.kind,
+                    TransferKind::ProviderHandoff | TransferKind::ProviderHandoffDelta
+                )
+                && transfer.boundary == boundary
+                && (native_thread.is_some() || transfer.kind == TransferKind::ProviderHandoff)
+        }) {
+            return;
+        }
+        let last_seen = native_thread
+            .and_then(|native| {
+                self.state.runs.iter().rev().find(|run| {
+                    is_source(run)
+                        && run.selection.instance == target_run.selection.instance
+                        && run
+                            .attempt
+                            .as_ref()
+                            .and_then(|id| {
+                                self.state.attempts.iter().find(|attempt| &attempt.id == id)
+                            })
+                            .is_some_and(|attempt| {
+                                attempt.native_thread.as_deref() == Some(native)
+                                    && (run.status == RunStatus::Completed
+                                        || attempt.native_turn.is_some())
+                            })
+                })
+            })
+            .map_or(0, |run| run.ordinal);
+        let items = self
+            .state
+            .visible_items()
+            .into_iter()
+            .filter(|item| {
+                item.run.as_ref().is_some_and(|id| {
+                    self.state.runs.iter().any(|run| {
+                        &run.id == id
+                            && is_source(run)
+                            && run.ordinal > last_seen
+                            && run.ordinal <= boundary
+                    })
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            return;
+        }
+        let thread = self.state.thread.as_ref().unwrap().id.clone();
+        self.fact(FactBody::TransferOpened {
+            native_fork: None,
+            id: ContextTransferId::new(self.key("provider-handoff", target_run.id.as_str()))
+                .unwrap(),
+            kind: if native_thread.is_some() {
+                TransferKind::ProviderHandoffDelta
+            } else {
+                TransferKind::ProviderHandoff
+            },
+            source: thread.clone(),
+            target: thread,
+            boundary,
+            instance: target_run.selection.instance.clone(),
+            history: prepare_history(&self.state, &items, boundary),
+        });
+    }
     fn start_run(&mut self, id: &RunId) {
         let checkpoint_scope = self
             .state
@@ -228,6 +318,7 @@ impl Decision {
             .native_sessions
             .get(&run.selection.instance)
             .cloned();
+        self.prepare_provider_handoff(&run, native_thread.as_deref());
         let native_forks = self
             .state
             .transfers
@@ -353,6 +444,7 @@ impl Decision {
                 .state
                 .transfers
                 .iter()
+                .filter(|transfer| transfer.instance == run.selection.instance)
                 .filter_map(|transfer| transfer.delivery.as_ref())
                 .filter(|delivery| {
                     delivery.native_thread == native_thread
@@ -1246,32 +1338,8 @@ impl Decision {
                 Reply::Accepted
             }
             SelectModel { selection } | SwitchProvider { selection } => {
-                let t = self.state.thread.as_ref().unwrap().clone();
                 if matches!(command, SwitchProvider { .. }) && self.state.active_run().is_some() {
                     return reject("provider-switch-while-active");
-                }
-                if t.selection.instance != selection.instance
-                    && !self.state.visible_items().is_empty()
-                {
-                    self.fact(FactBody::TransferOpened {
-                        native_fork: None,
-                        id: ContextTransferId::new(self.key("transfer", id.as_str())).unwrap(),
-                        kind: TransferKind::ProviderHandoff,
-                        source: t.id.clone(),
-                        target: t.id,
-                        boundary: self.state.runs.iter().map(|r| r.ordinal).max().unwrap_or(0),
-                        instance: selection.instance.clone(),
-                        history: prepare_history(
-                            &self.state,
-                            &self
-                                .state
-                                .visible_items()
-                                .into_iter()
-                                .cloned()
-                                .collect::<Vec<_>>(),
-                            self.state.runs.iter().map(|r| r.ordinal).max().unwrap_or(0),
-                        ),
-                    });
                 }
                 self.fact(FactBody::ModelSelected {
                     selection: selection.clone(),

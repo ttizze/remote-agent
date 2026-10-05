@@ -1209,7 +1209,17 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             for transfer in &mut state.transfers {
                 if transfer.source == *source
                     && transfer.target == *target
-                    && transfer.kind == *kind
+                    && (transfer.kind == *kind
+                        || matches!(
+                            (transfer.kind, *kind),
+                            (
+                                TransferKind::ProviderHandoff,
+                                TransferKind::ProviderHandoffDelta
+                            ) | (
+                                TransferKind::ProviderHandoffDelta,
+                                TransferKind::ProviderHandoff
+                            )
+                        ))
                     && transfer.instance == *instance
                     && transfer.delivery.is_none()
                 {
