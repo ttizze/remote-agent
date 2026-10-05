@@ -1,4 +1,7 @@
-use agent_domain::{Fact, FactBody, MessageId, State};
+use agent_domain::{
+    Fact, FactBody, ItemKind, MessageId, NodeId, RequestStatus, ResponseCapability,
+    RuntimeRequestId, State,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -32,12 +35,41 @@ impl ShellProjector for ThreadShellProjector {
     }
 }
 
-/// Work that a restarted Host must hand back to the state machine through `Recover`.
+/// Work that a restarted Host must hand back to the state machine through `Recover`:
+/// unsettled effects and everything `Recover` closes, including background work and
+/// native children that outlive a finished run.
 pub fn needs_recovery(state: &State) -> bool {
+    let app_owned_task = |task: &NodeId| {
+        state
+            .tasks
+            .iter()
+            .any(|candidate| &candidate.id == task && candidate.app_owned())
+    };
+    let message_request = |request: &RuntimeRequestId| {
+        state.requests.iter().any(|candidate| {
+            &candidate.id == request && candidate.capability == ResponseCapability::Message
+        })
+    };
     state.runs.iter().any(|run| run.status.blocking())
         || !state.captures.is_empty()
         || state.rollback.is_some()
         || !state.pending_forks.is_empty()
+        || state.native_owner.is_some()
+        || !state.background_work.is_empty()
+        || state.messages.iter().any(|message| message.streaming)
+        || state.requests.iter().any(|request| {
+            request.status == RequestStatus::Pending
+                && request.capability != ResponseCapability::Message
+        })
+        || state
+            .tasks
+            .iter()
+            .any(|task| !task.app_owned() && !task.status.terminal())
+        || state.items.iter().any(|item| {
+            !item.status.terminal()
+                && !matches!(&item.kind, ItemKind::Subagent { task } if app_owned_task(task))
+                && !matches!(&item.kind, ItemKind::UserInputRequest { request } if message_request(request))
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,3 +149,6 @@ pub fn attachment_paths(facts: &[Fact]) -> Vec<String> {
     }
     paths.into_iter().collect()
 }
+
+#[cfg(test)]
+mod tests;
