@@ -943,31 +943,38 @@ mod tests {
         pending_preparation: bool,
     ) -> Result<String, String> {
         tokio::time::timeout(Duration::from_secs(if pending_preparation { 25 } else { 3 }), async {
-            // Keep IPv4 port-discovery probes out of the isolated provider.
             let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
             let address = listener.local_addr().unwrap();
+            // A loopback listener can receive discovery traffic from other
+            // processes. Exercise that case without changing provider assertions.
+            let mut probe = tokio::net::TcpStream::connect(address).await.unwrap();
+            probe.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").await.unwrap();
+            drop(probe);
             let token = format!("local.{}.signature", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
                 br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"isolated-test-account"}}"#));
             let provider = async {
                 for streaming in [true, false].into_iter().filter(|stream| !api_key || !stream) {
+                    loop {
                     let (mut socket, _) = listener.accept().await.unwrap();
                     if streaming && secure_stream {
                         // Reject TLS after ClientHello, before any credentials
                         // can reach the isolated provider.
-                        assert_eq!(socket.read_u8().await.unwrap(), 0x16);
+                        if socket.read_u8().await.ok() != Some(0x16) { continue; }
                         socket.shutdown().await.unwrap();
-                        continue;
+                        break;
                     }
                     let mut request = Vec::new();
                     let mut buffer = [0_u8; 1024];
                     let header_end = loop {
                         let count = socket.read(&mut buffer).await.unwrap();
-                        assert_ne!(count, 0);
+                        if count == 0 { break None; }
                         request.extend_from_slice(&buffer[..count]);
                         assert!(request.len() < 16_384);
-                        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") { break end + 4; }
+                        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") { break Some(end + 4); }
                     };
+                    let Some(header_end) = header_end else { continue; };
                     let headers = String::from_utf8(request[..header_end].to_vec()).unwrap().to_ascii_lowercase();
+                    if !headers.starts_with("get /stream ") && !headers.starts_with("post /transcribe ") { continue; }
                     assert_eq!(headers.contains("user-agent: isolated-codex/1.0"), !api_key);
                     if streaming {
                         assert!(headers.starts_with("get /stream "));
@@ -979,7 +986,7 @@ mod tests {
                         } else {
                             socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
                         }
-                        continue;
+                        break;
                     }
                     assert!(headers.starts_with("post /transcribe "));
                     assert!(headers.contains(&format!("authorization: bearer {}", token.to_ascii_lowercase())));
@@ -1004,6 +1011,8 @@ mod tests {
                     assert_eq!(&wav[44..], &[1, 0, 255, 127]);
                     let response = format!("HTTP/1.1 {response_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}", response_body.len());
                     socket.write_all(response.as_bytes()).await.unwrap();
+                    break;
+                    }
                 }
             };
             let scheme = if secure_stream { "wss" } else { "ws" };
@@ -1102,7 +1111,7 @@ mod tests {
 
     #[tokio::test]
     async fn first_dictation_initializes_tls_for_both_auth_methods() {
-        const CHILD: &str = "BEX_TEST_COLD_DICTATION_TLS";
+        const CHILD: &str = "AGENT_TEST_COLD_DICTATION_TLS";
         if std::env::var_os(CHILD).is_none() {
             // A separate process prevents another test from installing the
             // global TLS provider first and hiding cold-start failures.
