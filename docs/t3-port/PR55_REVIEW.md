@@ -174,3 +174,9 @@
 - iOS: swiftformat/Swiftlint strict、native unit **2件**、Rust bindings と generic Simulator destination のアプリ **build 成功**。Simulator 起動/操作なし。
 - Android: ktfmt/detekt、JVM unit **3件**、arm64-v8a/x86_64 **assembleDebug 成功**。
 - R2 実装 commit は `08b680e9` から `4cec8e2e` まで（末尾 ID は git log を参照）。M2 の残りと M3 はこのレビュー修正には含めない。
+
+## M2 再開: native subagent
+
+app-owned 委任に続き、Codex の collabAgentToolCall/subAgentActivity と Claude の Agent/Task、task_started/progress/notification、parent_tool_use_id を native task と runless 子履歴へ変換した。実 native ID による停止、親 return 後の出力、早着した子 frame、再開・復旧、権限境界と別 thread の出力拒否、子入力の待ち合わせ、Agents roster を検証する。Claude の完了応答は保持した CLI frame を通常の通知 queue から昇格して取り込む。
+
+対象3 crate の191件通過、変更4 crate と bindings の clippy（all-targets、warnings denied）通過。wire 契約を拡張した3 client の最終ビルドと全体検証は残り M2 完了時に再実行する。

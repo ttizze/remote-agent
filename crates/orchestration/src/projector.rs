@@ -102,18 +102,20 @@ pub fn apply(
         PlanUpdated(value) => upsert!(plans, value),
         TurnItemUpdated(value) => upsert!(turn_items, value),
         TurnItemTextDelta(delta) => {
-            if let Some(item) = next.turn_items.iter_mut().find(|item| {
-                item.id == delta.item_id && item.run_id.as_ref() == Some(&delta.run_id)
-            }) && append_text_delta(
-                item,
-                &mut next.messages,
-                &mut next.plans,
-                delta,
-                &event.occurred_at,
-            ) && let Some(row) = next
-                .visible_turn_items
+            if let Some(item) = next
+                .turn_items
                 .iter_mut()
-                .find(|row| row.visibility == Visibility::Local && row.source_item_id == item.id)
+                .find(|item| item.id == delta.item_id && item.run_id == delta.run_id)
+                && append_text_delta(
+                    item,
+                    &mut next.messages,
+                    &mut next.plans,
+                    delta,
+                    &event.occurred_at,
+                )
+                && let Some(row) = next.visible_turn_items.iter_mut().find(|row| {
+                    row.visibility == Visibility::Local && row.source_item_id == item.id
+                })
             {
                 row.item = item.clone();
             }
@@ -147,7 +149,7 @@ pub fn append_text_delta(
     delta: &TurnItemTextDelta,
     now: &Timestamp,
 ) -> bool {
-    if item.status != ItemStatus::Running || item.run_id.as_ref() != Some(&delta.run_id) {
+    if item.status != ItemStatus::Running || item.run_id != delta.run_id {
         return false;
     }
     let plan_id = match &item.body {
@@ -449,7 +451,7 @@ mod tests {
             id: EventId::new("delta").unwrap(),
             payload: EventPayload::TurnItemTextDelta(TurnItemTextDelta {
                 item_id: item.id.clone(),
-                run_id: run,
+                run_id: Some(run),
                 offset: "日本".len(),
                 text: "語".into(),
             }),
@@ -516,7 +518,7 @@ mod tests {
             }];
             let delta = TurnItemTextDelta {
                 item_id: item.id.clone(),
-                run_id: item.run_id.clone().unwrap(),
+                run_id: item.run_id.clone(),
                 offset: "日".len(),
                 text: "本語".into(),
             };

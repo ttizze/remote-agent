@@ -203,7 +203,7 @@ struct QueueSheet: View {
                         Text(row.text).font(T3Theme.font(14)).lineLimit(5)
                         Text(row.model).font(T3Theme.font(11)).foregroundStyle(T3Theme.color("textMuted"))
                         HStack {
-                            Button("Edit") { model.perform(.queue(action: .edit(runId: row.runId))); dismiss() }
+                            if row.canEdit { Button("Edit") { model.perform(.queue(action: .edit(runId: row.runId))); dismiss() } }
                             if row
                                 .canSteer {
                                 Button("Steer") { model.perform(.queue(action: .steer(runId: row.runId))) }

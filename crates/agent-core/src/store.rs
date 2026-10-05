@@ -1302,7 +1302,7 @@ impl Owner {
                 .map_err(invalid)?;
                 sent = Some((self.state.draft_key(), draft.clone()));
                 if target.is_some() {
-                    body = Some(CommandBody::MessageDispatch(input));
+                    body = Some(CommandBody::MessageDispatch(input.into()));
                     None
                 } else {
                     let thread_id = ThreadId::new(id("thread")).unwrap();
@@ -1431,7 +1431,7 @@ impl Owner {
                     if let Some(d) = self.state.drafts.get_mut(&key) {
                         d.interaction_mode = mode.as_str().into();
                     }
-                    body = Some(CommandBody::MessageDispatch(input));
+                    body = Some(CommandBody::MessageDispatch(input.into()));
                     None
                 }
             }
@@ -1507,8 +1507,14 @@ impl Owner {
                 None
             }
             Intent::Stop => {
+                let run = self
+                    .state
+                    .projection()
+                    .and_then(|p| orchestration::decider::interruptible_run(&p.runs, &p.subagents))
+                    .map(|r| r.id.clone())
+                    .ok_or_else(|| invalid("No active work"))?;
                 body = Some(CommandBody::RunInterrupt {
-                    run_id: self.active().ok_or_else(|| invalid("No active run"))?,
+                    run_id: run,
                     reason: Some("user".into()),
                     hold_queue: true,
                 });
@@ -1548,8 +1554,14 @@ impl Owner {
                             .messages
                             .iter()
                             .find(|m| m.id == run.user_message_id)
+                            .filter(|m| {
+                                orchestration::decider::editable_message(
+                                    m.native_continuation.is_some(),
+                                    m.delegated_completion.is_some(),
+                                )
+                            })
                             .map(|m| m.text.clone())
-                            .unwrap_or_default();
+                            .ok_or_else(|| invalid("Notifications cannot be edited"))?;
                         let mut draft = self.state.current_draft();
                         draft.text = text;
                         self.state.editing_run = Some(id);
@@ -2671,7 +2683,8 @@ mod tests {
                         mode,
                         CreationSource::Desktop,
                     )
-                    .unwrap(),
+                    .unwrap()
+                    .into(),
                 ),
             );
             let decision = orchestration::decider::decide(
@@ -3048,7 +3061,7 @@ mod tests {
                 });
                 Call::DispatchCommand(command(
                     owner.state.selected_thread.clone().unwrap(),
-                    CommandBody::MessageDispatch(input),
+                    CommandBody::MessageDispatch(input.into()),
                 ))
             };
             match call {

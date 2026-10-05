@@ -602,6 +602,7 @@ fn events(transcript: &Transcript, project_id: ProjectId) -> Vec<DomainEvent> {
             CreatedBy::Agent
         };
         let message = ConversationMessage {
+            native_continuation: None,
             delegated_completion: None,
             created_by,
             creation_source: CreationSource::Server,
@@ -852,19 +853,23 @@ mod tests {
         let input = Command {
             command_id: CommandId::new("continue").unwrap(),
             thread_id: thread_id.clone(),
-            body: CommandBody::MessageDispatch(MessageDispatch {
-                delegated_completion: None,
-                source_plan_ref: None,
-                created_by: CreatedBy::User,
-                creation_source: CreationSource::Desktop,
-                message_id: MessageId::new("next").unwrap(),
-                text: "continue".into(),
-                context: None,
-                attachments: vec![],
-                model_selection: None,
-                delivery_intent: None,
-                dispatch_mode: DispatchMode::StartImmediately,
-            }),
+            body: CommandBody::MessageDispatch(
+                MessageDispatch {
+                    native_continuation: None,
+                    delegated_completion: None,
+                    source_plan_ref: None,
+                    created_by: CreatedBy::User,
+                    creation_source: CreationSource::Desktop,
+                    message_id: MessageId::new("next").unwrap(),
+                    text: "continue".into(),
+                    context: None,
+                    attachments: vec![],
+                    model_selection: None,
+                    delivery_intent: None,
+                    dispatch_mode: DispatchMode::StartImmediately,
+                }
+                .into(),
+            ),
         };
         store
             .dispatch(

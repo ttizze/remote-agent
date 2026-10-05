@@ -182,6 +182,7 @@ pub struct QueueRow {
     pub model: String,
     pub held: bool,
     pub can_steer: bool,
+    pub can_edit: bool,
     pub editing: bool,
 }
 #[derive(Debug, Clone, PartialEq)]
@@ -330,23 +331,7 @@ pub fn agent_roster(runs: &[Run], subagents: &[Subagent], now: &Timestamp) -> Ag
             } else {
                 detail
             };
-            let title = s
-                .title
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or(&s.prompt)
-                .trim();
-            let title = if title.is_empty() {
-                "Subagent".into()
-            } else if title.chars().count() > 80 {
-                format!("{}...", title.chars().take(77).collect::<String>())
-            } else {
-                title.to_owned()
-            };
-            let title = title
-                .strip_prefix("Subagent: ")
-                .unwrap_or(&title)
-                .to_owned();
+            let title = agent_title(s.title.as_deref(), &s.prompt);
             let live = matches!(
                 s.status,
                 NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
@@ -378,6 +363,49 @@ pub fn agent_roster(runs: &[Run], subagents: &[Subagent], now: &Timestamp) -> Ag
         rows,
         pill_label,
         accessibility_label,
+    }
+}
+fn agent_title(title: Option<&str>, prompt: &str) -> String {
+    if let Some(title) = title.map(str::trim).filter(|s| !s.is_empty()) {
+        let title = if title
+            .get(..9)
+            .is_some_and(|s| s.eq_ignore_ascii_case("Subagent:"))
+        {
+            title[9..].trim_start()
+        } else {
+            title
+        };
+        if let Some(path) = title.strip_prefix("/root/") {
+            let name = path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .replace('_', " ");
+            let display = name
+                .split_whitespace()
+                .map(|word| {
+                    let mut chars = word.chars();
+                    chars
+                        .next()
+                        .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !display.is_empty() {
+                return display;
+            }
+        }
+        return title.into();
+    }
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        "Subagent".into()
+    } else if prompt.chars().count() > 80 {
+        format!("{}...", prompt.chars().take(77).collect::<String>())
+    } else {
+        prompt.into()
     }
 }
 
@@ -1032,6 +1060,8 @@ pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
     let projection = snapshot.projection();
     let draft = snapshot.current_draft();
     let active = projection.and_then(|p| p.runs.iter().find(|r| r.status.is_blocking()));
+    let busy =
+        active.is_some() || projection.is_some_and(|p| decider::has_native_turn(&p.provider_turns));
     let pending = projection.and_then(|p| {
         p.runtime_requests
             .iter()
@@ -1087,7 +1117,24 @@ pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
                 .unwrap_or_default(),
             model: r.model_selection.model.clone(),
             held: r.queue_held,
-            can_steer,
+            can_steer: can_steer
+                && projection
+                    .unwrap()
+                    .messages
+                    .iter()
+                    .find(|m| m.id == r.user_message_id)
+                    .is_some_and(|m| m.native_continuation.is_none()),
+            can_edit: projection
+                .unwrap()
+                .messages
+                .iter()
+                .find(|m| m.id == r.user_message_id)
+                .is_some_and(|m| {
+                    decider::editable_message(
+                        m.native_continuation.is_some(),
+                        m.delegated_completion.is_some(),
+                    )
+                }),
             editing: snapshot.editing_run.as_ref() == Some(&r.id),
         })
         .collect::<Vec<_>>();
@@ -1134,7 +1181,7 @@ pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
             "Creating thread…"
         } else if editing {
             "Update queued message"
-        } else if active.is_some() {
+        } else if busy {
             "Queue"
         } else {
             "Send"
@@ -1160,13 +1207,15 @@ pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
             && !live_request
             && !draft.text.trim().is_empty()
             && !draft.model.is_empty(),
-        can_stop: active.is_some() && snapshot.connected,
+        can_stop: projection
+            .is_some_and(|p| decider::interruptible_run(&p.runs, &p.subagents).is_some())
+            && snapshot.connected,
         can_steer: can_steer && snapshot.connected && !live_request,
         can_restart: can_restart && snapshot.connected && !live_request,
         queue_count: queue.len() as u64,
         queue_held: queue.iter().any(|r| r.held),
         editing,
-        working: active.is_some(),
+        working: busy,
         notice: if let Some(error) = thread.and_then(|t| t.rollback_failure.clone()) {
             Some(error)
         } else if thread.is_some_and(|t| t.rollback_request_id.is_some()) {
@@ -1780,6 +1829,12 @@ mod review_presentation_tests {
     }
     #[test]
     fn agent_roster_uses_the_current_turn_and_hides_a_settled_pill() {
+        assert_eq!(
+            agent_title(Some("subagent: /root/workers/my_worker/"), "ignored"),
+            "My Worker"
+        );
+        assert_eq!(agent_title(Some(&"A".repeat(100)), "ignored").len(), 100);
+        assert_eq!(agent_title(None, &"A".repeat(100)).len(), 80);
         use crate::test_support::{now, projection};
         let p = projection();
         let mut task = Subagent {

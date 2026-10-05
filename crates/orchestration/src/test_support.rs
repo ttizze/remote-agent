@@ -44,19 +44,23 @@ pub fn create() -> Command {
 pub fn send(id: &str, mode: DispatchMode) -> Command {
     command(
         id,
-        CommandBody::MessageDispatch(MessageDispatch {
-            delegated_completion: None,
-            source_plan_ref: None,
-            created_by: CreatedBy::User,
-            creation_source: CreationSource::Desktop,
-            message_id: MessageId::new(format!("message:{id}")).unwrap(),
-            text: format!("Input {id}"),
-            context: None,
-            attachments: vec![],
-            model_selection: None,
-            delivery_intent: None,
-            dispatch_mode: mode,
-        }),
+        CommandBody::MessageDispatch(
+            MessageDispatch {
+                native_continuation: None,
+                delegated_completion: None,
+                source_plan_ref: None,
+                created_by: CreatedBy::User,
+                creation_source: CreationSource::Desktop,
+                message_id: MessageId::new(format!("message:{id}")).unwrap(),
+                text: format!("Input {id}"),
+                context: None,
+                attachments: vec![],
+                model_selection: None,
+                delivery_intent: None,
+                dispatch_mode: mode,
+            }
+            .into(),
+        ),
     )
 }
 fn project(projection: Option<&ThreadProjection>, decision: &Decision) -> Option<ThreadProjection> {

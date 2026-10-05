@@ -260,20 +260,24 @@ pub fn request(
     let input = Command {
         command_id: CommandId::new(format!("{}:input", command.command_id)).expect("derived id"),
         thread_id: child_id.clone(),
-        body: CommandBody::MessageDispatch(MessageDispatch {
-            delegated_completion: None,
-            source_plan_ref: None,
-            created_by: *created_by,
-            creation_source: *creation_source,
-            message_id: MessageId::new(format!("message:delegated:{}", command.command_id))
-                .expect("derived id"),
-            text: prompt,
-            context: None,
-            attachments: vec![],
-            model_selection: Some(model_selection.clone()),
-            delivery_intent: None,
-            dispatch_mode: DispatchMode::StartImmediately,
-        }),
+        body: CommandBody::MessageDispatch(
+            MessageDispatch {
+                native_continuation: None,
+                delegated_completion: None,
+                source_plan_ref: None,
+                created_by: *created_by,
+                creation_source: *creation_source,
+                message_id: MessageId::new(format!("message:delegated:{}", command.command_id))
+                    .expect("derived id"),
+                text: prompt,
+                context: None,
+                attachments: vec![],
+                model_selection: Some(model_selection.clone()),
+                delivery_intent: None,
+                dispatch_mode: DispatchMode::StartImmediately,
+            }
+            .into(),
+        ),
     };
     let input_decision = decider::decide(
         &input,
@@ -663,39 +667,43 @@ pub fn offer(
                 command_id: CommandId::new(format!("command:delegated:{}:{generation}", source.id))
                     .expect("derived id"),
                 thread_id: current.thread.id.clone(),
-                body: CommandBody::MessageDispatch(MessageDispatch {
-                    delegated_completion: Some(Box::new(metadata)),
-                    source_plan_ref: None,
-                    created_by: CreatedBy::System,
-                    creation_source: CreationSource::Server,
-                    message_id: message_id.clone(),
-                    text,
-                    context: None,
-                    attachments: vec![],
-                    model_selection: None,
-                    delivery_intent: if current.runs.iter().any(|r| {
-                        r.status == RunStatus::Running
-                            && current.provider_turns.iter().any(|t| {
-                                t.run_attempt_id.as_ref() == r.active_attempt_id.as_ref()
-                                    && t.status == TurnStatus::Running
-                            })
-                    }) && !current
-                        .runtime_requests
-                        .iter()
-                        .any(|r| matches!(r.status, RequestStatus::Pending))
-                        && !current.messages.iter().any(|m| {
-                            current
-                                .runs
-                                .iter()
-                                .any(|r| r.status.is_blocking() && r.user_message_id == m.id)
-                                && native_maintenance(&m.text, !m.attachments.is_empty())
-                        }) {
-                        Some(DeliveryIntent::Auto)
-                    } else {
-                        None
-                    },
-                    dispatch_mode: DispatchMode::QueueAfterActive,
-                }),
+                body: CommandBody::MessageDispatch(
+                    MessageDispatch {
+                        native_continuation: None,
+                        delegated_completion: Some(Box::new(metadata)),
+                        source_plan_ref: None,
+                        created_by: CreatedBy::System,
+                        creation_source: CreationSource::Server,
+                        message_id: message_id.clone(),
+                        text,
+                        context: None,
+                        attachments: vec![],
+                        model_selection: None,
+                        delivery_intent: if current.runs.iter().any(|r| {
+                            r.status == RunStatus::Running
+                                && current.provider_turns.iter().any(|t| {
+                                    t.run_attempt_id.as_ref() == r.active_attempt_id.as_ref()
+                                        && t.status == TurnStatus::Running
+                                })
+                        }) && !current
+                            .runtime_requests
+                            .iter()
+                            .any(|r| matches!(r.status, RequestStatus::Pending))
+                            && !current.messages.iter().any(|m| {
+                                current
+                                    .runs
+                                    .iter()
+                                    .any(|r| r.status.is_blocking() && r.user_message_id == m.id)
+                                    && native_maintenance(&m.text, !m.attachments.is_empty())
+                            }) {
+                            Some(DeliveryIntent::Auto)
+                        } else {
+                            None
+                        },
+                        dispatch_mode: DispatchMode::QueueAfterActive,
+                    }
+                    .into(),
+                ),
             };
             let driver = capabilities::driver(&current.thread.provider_instance_id)
                 .ok_or_else(|| fail("unknown wake provider"))?;

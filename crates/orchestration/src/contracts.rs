@@ -628,6 +628,7 @@ pub enum ContextRecord {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationMessage {
+    pub native_continuation: Option<Box<NativeContinuationRef>>,
     pub delegated_completion: Option<Box<DelegatedCompletion>>,
     pub created_by: CreatedBy,
     pub creation_source: CreationSource,
@@ -1097,9 +1098,30 @@ events! {
 #[serde(rename_all = "camelCase")]
 pub struct TurnItemTextDelta {
     pub item_id: TurnItemId,
-    pub run_id: RunId,
+    pub run_id: Option<RunId>,
     pub offset: usize,
     pub text: String,
+}
+/// A provider-native child belongs to an accepted parent attempt, even after
+/// that attempt has returned while the child is still working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSubagentOwner {
+    pub parent_thread_id: ThreadId,
+    pub task_id: NodeId,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeContinuationRef {
+    pub provider_thread_id: ProviderThreadId,
+    pub run_id: RunId,
+    pub attempt_id: RunAttemptId,
+    pub task_id: NodeId,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeContinuationOffer {
+    pub message_id: MessageId,
+    pub source: NativeContinuationRef,
+    pub summary: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1204,7 +1226,7 @@ pub enum CommandBody {
         provider_session_id: ProviderSessionId,
     },
     #[serde(rename = "message.dispatch")]
-    MessageDispatch(MessageDispatch),
+    MessageDispatch(Box<MessageDispatch>),
     #[serde(rename = "prepared-run.release")]
     PreparedRunRelease { run_id: RunId },
     #[serde(rename = "prepared-run.fail")]
@@ -1289,6 +1311,7 @@ pub enum CommandBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageDispatch {
+    pub native_continuation: Option<Box<NativeContinuationRef>>,
     pub delegated_completion: Option<Box<DelegatedCompletion>>,
     pub source_plan_ref: Option<SourcePlanRef>,
     pub created_by: CreatedBy,

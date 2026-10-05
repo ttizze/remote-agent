@@ -22,6 +22,11 @@ pub struct ClaudeConfig {
 }
 enum ProcessInput {
     Frame(Value),
+    DrainWake {
+        run_id: RunId,
+        message_id: MessageId,
+        acknowledged: tokio::sync::oneshot::Sender<Result<(), AdapterError>>,
+    },
     Prompt {
         run_id: RunId,
         frame: Value,
@@ -44,6 +49,8 @@ struct PromptGate {
     confirmed: bool,
     frames_before_echo: usize,
     held: Vec<Value>,
+    wake_frames: Vec<Value>,
+    wake_covered: bool,
 }
 impl PromptGate {
     fn begin(&mut self, uuid: String) {
@@ -66,6 +73,7 @@ impl PromptGate {
                 && (!echoed.is_empty() && !echoed.contains(&uuid)
                     || !frame["origin"].is_null() && frame["origin"]["kind"] != "human")
             {
+                self.wake_covered = frame["num_turns"] != 0;
                 return vec![];
             }
             return vec![frame];
@@ -95,6 +103,21 @@ impl PromptGate {
             _ => false,
         };
         if !root {
+            let tool = frame["parent_tool_use_id"]
+                .as_str()
+                .or_else(|| frame["tool_use_id"].as_str());
+            if tool.is_some_and(|tool| {
+                self.held.iter().any(|held| {
+                    held["message"]["content"].as_array().is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block["type"] == "tool_use" && block["id"].as_str() == Some(tool)
+                        })
+                    }) || held["event"]["content_block"]["id"].as_str() == Some(tool)
+                })
+            }) {
+                self.held.push(frame);
+                return vec![];
+            }
             return vec![frame];
         }
         self.frames_before_echo += 1;
@@ -105,7 +128,13 @@ impl PromptGate {
                     && frame["origin"]["kind"] != "human")
         {
             if frame["num_turns"] != 0 {
-                self.held.clear();
+                if self.mode == EchoMode::Early {
+                    self.wake_frames.extend(std::mem::take(&mut self.held));
+                    self.wake_frames.push(frame.clone());
+                } else {
+                    self.held.clear();
+                    self.wake_covered = true;
+                }
             }
             self.frames_before_echo = 0;
             return vec![];
@@ -473,18 +502,39 @@ impl ClaudeAdapter {
             .await
             .get(&provider_thread.id)
             .cloned();
+        let wake = projection
+            .messages
+            .iter()
+            .find(|m| m.id == run.user_message_id)
+            .filter(|m| m.native_continuation.is_some())
+            .map(|m| m.id.clone());
+        if let Some(id) = &wake
+            && existing.as_ref().is_none_or(|h| {
+                *h.done.borrow()
+                    || !h
+                        .state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .native_agents
+                        .as_ref()
+                        .is_some_and(|a| a.has_buffered_wake(id))
+            })
+        {
+            return Err(error("Native continuation buffer is no longer available"));
+        }
         let reusable = existing.as_ref().is_some_and(|handle| {
-            handle.cwd == cwd
-                && handle.credentials_home == credentials_home
-                && handle.model == run.model_selection
-                && handle.runtime_mode == projection.thread.runtime_mode
-                && handle.interaction_mode == projection.thread.interaction_mode
-                && provider_thread
-                    .native_thread_ref
-                    .as_ref()
-                    .and_then(|r| r.native_id.as_ref())
-                    == Some(&handle.native_session)
-                && !*handle.done.borrow()
+            wake.is_some()
+                || handle.cwd == cwd
+                    && handle.credentials_home == credentials_home
+                    && handle.model == run.model_selection
+                    && handle.runtime_mode == projection.thread.runtime_mode
+                    && handle.interaction_mode == projection.thread.interaction_mode
+                    && provider_thread
+                        .native_thread_ref
+                        .as_ref()
+                        .and_then(|r| r.native_id.as_ref())
+                        == Some(&handle.native_session)
+                    && !*handle.done.borrow()
         });
         if !reusable && let Some(handle) = &existing {
             self.processes.lock().await.remove(&provider_thread.id);
@@ -564,6 +614,7 @@ impl ClaudeAdapter {
             ordinal,
             &timestamp,
         );
+        state.native_wake_drain = wake.clone();
         let permit = if reusable {
             None
         } else {
@@ -580,6 +631,9 @@ impl ClaudeAdapter {
             )
         };
         let mut initial = state.batch(state.initial_payloads(), &timestamp);
+        state.native_agents = Some(Box::new(crate::native_agents::NativeAgents::new(
+            projection.thread.clone(),
+        )));
         let (acknowledged, receipt) = tokio::sync::oneshot::channel();
         initial.acknowledged = Some(acknowledged);
         self.output.send(initial).await.map_err(error)?;
@@ -588,7 +642,19 @@ impl ClaudeAdapter {
         }
         let handle = if reusable {
             let handle = existing.expect("reusable process exists");
-            *handle.state.lock().unwrap_or_else(|e| e.into_inner()) = state;
+            {
+                let mut previous = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                if previous.native_agents.is_some() {
+                    state.native_agents = previous.native_agents.take();
+                    if let Some(agents) = &mut state.native_agents {
+                        agents.update_template(projection.thread.clone());
+                        if let Some(id) = &wake {
+                            agents.begin_drain(id);
+                        }
+                    }
+                }
+                *previous = state;
+            }
             handle
         } else {
             let (mut command, tool_config) = process_command(
@@ -686,6 +752,19 @@ impl ClaudeAdapter {
             .find(|message| message.id == run.user_message_id)
             .ok_or_else(|| error("run input missing"))?;
         let mut message = message.clone();
+        if let Some(message_id) = wake {
+            let (acknowledged, received) = tokio::sync::oneshot::channel();
+            handle
+                .input
+                .send(ProcessInput::DrainWake {
+                    run_id: run_id.clone(),
+                    message_id,
+                    acknowledged,
+                })
+                .await
+                .map_err(error)?;
+            return received.await.map_err(error)?;
+        }
         message.text = orchestration::context::input_text(projection, &run, &message.text);
         send_prompt(
             &handle,
@@ -704,11 +783,8 @@ impl ClaudeAdapter {
             let id = processes
                 .iter()
                 .find(|(_, handle)| {
-                    handle
-                        .state
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .terminal
+                    let state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.terminal && !state.native_agents.as_ref().is_some_and(|a| a.is_live())
                 })
                 .map(|(id, _)| id.clone());
             id.and_then(|id| processes.remove(&id))
@@ -933,6 +1009,17 @@ fn spawn(
                 _=flush.tick()=>{if let Some(frame)=buffer.flush(){ingest_claude_frame(&state,&output,&mut writer,frame).await?;changed.notify_waiters();}}
                 command=commands.recv()=>{let Some(command)=command else{break;}; match command {
                     ProcessInput::Frame(frame) => writer.write_line(&frame.to_string()).await.map_err(error)?,
+                    ProcessInput::DrainWake { run_id,message_id,acknowledged } => {
+                        if let Some(frame)=buffer.flush() { ingest_claude_frame(&state,&output,&mut writer,frame).await?; }
+                        let frames={ let mut current=state.lock().unwrap_or_else(|e|e.into_inner());let admission=admit_prompt(&current.run.id,&run_id,current.terminal,current.interrupted,*shutdown.borrow());
+                            match admission { Err(failure)=>Err(failure),Ok(())=>{ current.native_wake_drain=None;current.native_agents.as_mut().and_then(|a|a.take_wake(&message_id)).ok_or_else(||error("Native continuation buffer is unavailable")) } }
+                        };
+                        match frames { Err(failure)=>{ let _=acknowledged.send(Err(failure)); },Ok(frames)=>{
+                            gate.prompt=None;gate.held.clear();
+                            for frame in frames { ingest_claude_frame(&state,&output,&mut writer,frame).await?; }
+                            let _=acknowledged.send(Ok(()));
+                        } }
+                    }
                     ProcessInput::Prompt { run_id, frame, steer, acknowledged } => {
                         if let Some(buffered) = buffer.flush() { ingest_claude_frame(&state, &output, &mut writer, buffered).await?; }
                         let admission = {
@@ -951,8 +1038,17 @@ fn spawn(
                 }}
                 line=reader.read_line()=>{let Some(line)=line.map_err(error)?else{break;};let frame:Value=serde_json::from_str(&line).map_err(error)?;
                     if frame["type"]=="control_response"&&frame["response"]["request_id"]=="initialize" {ready.send_replace(Some(if frame["response"]["subtype"]=="success"{Ok(())}else{Err("Claude initialization rejected".into())}));continue;}
+                    { let current=state.lock().unwrap_or_else(|e|e.into_inner());if current.terminal && !current.interrupted && current.native_agents.as_ref().is_some_and(|a|a.has_wake()) { gate.prompt=None;gate.held.clear(); } }
                     for routed in gate.route(frame) {
                         for frame in buffer.push(routed) { ingest_claude_frame(&state, &output, &mut writer, frame).await?; }
+                    }
+                    if std::mem::take(&mut gate.wake_covered) && let Some(agents)=&mut state.lock().unwrap_or_else(|e|e.into_inner()).native_agents { agents.clear_wake_report(); }
+                    if !gate.wake_frames.is_empty() {
+                        let batch={ let mut current=state.lock().unwrap_or_else(|e|e.into_inner());let mut agents=current.native_agents.take();let mut offer=None;
+                            if let Some(agents)=&mut agents { for frame in std::mem::take(&mut gate.wake_frames) { if let Some(next)=agents.buffer_wake(&current,frame) { offer=Some(next); } } }
+                            current.native_agents=agents;current.native_continuation_offer=offer;current.batch(vec![],&now())
+                        };
+                        send_provider_batch(&state,&output,batch).await?;
                     }
                     changed.notify_waiters();
                 }
@@ -971,20 +1067,26 @@ fn spawn(
         if ready.borrow().is_none() {
             ready.send_replace(Some(Err("Claude exited before initialization".into())));
         }
-        let batch = {
+        let (batch, native_batches) = {
             let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
             if initialized {
                 let translated = normalize::disconnected(&state, message, &timestamp);
                 *state = translated.state;
-                Some(state.batch(translated.payloads, &timestamp))
+                (
+                    Some(state.batch(translated.payloads, &timestamp)),
+                    std::mem::take(&mut state.native_batches),
+                )
             } else {
-                None
+                (None, vec![])
             }
         };
         if let Some(batch) = batch
             && !batch.events.is_empty()
         {
             let _ = output.send(batch).await;
+        }
+        for batch in native_batches {
+            let _ = output.send(batch.batch()).await;
         }
         drop(writer);
         let _ = child.wait().await;
@@ -1014,18 +1116,53 @@ async fn ingest_claude_frame<W: tokio::io::AsyncWrite + Unpin>(
     frame: Value,
 ) -> Result<(), AdapterError> {
     let timestamp = now();
-    let (batch, responses) = {
+    let (batch, native_batches, responses) = {
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
         let translated = normalize::claude(state.take_owned(), &frame, &timestamp);
         *state = translated.state;
         let batch = state.batch(translated.payloads, &timestamp);
-        (batch, translated.immediate_responses)
+        let native_batches = std::mem::take(&mut state.native_batches);
+        (batch, native_batches, translated.immediate_responses)
     };
-    if !batch.events.is_empty() {
-        output.send(batch).await.map_err(error)?;
+    send_provider_batch(state, output, batch).await?;
+    for batch in native_batches {
+        send_provider_batch(state, output, batch.batch()).await?;
     }
     for (id, response) in responses {
         writer.write_line(&json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":response}}).to_string()).await.map_err(error)?;
+    }
+    Ok(())
+}
+
+async fn send_provider_batch(
+    state: &Mutex<TurnState>,
+    output: &mpsc::Sender<ProviderBatch>,
+    mut batch: ProviderBatch,
+) -> Result<(), AdapterError> {
+    if batch.events.is_empty() && batch.native_continuation_offer.is_none() {
+        return Ok(());
+    }
+    let offer_id = batch
+        .native_continuation_offer
+        .as_ref()
+        .map(|o| o.message_id.clone());
+    let receipt = if offer_id.is_some() {
+        let (ack, received) = tokio::sync::oneshot::channel();
+        batch.acknowledged = Some(ack);
+        Some(received)
+    } else {
+        None
+    };
+    output.send(batch).await.map_err(error)?;
+    if let Some(receipt) = receipt
+        && !receipt.await.map_err(error)?
+        && let Some(id) = offer_id
+        && let Some(agents) = &mut state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .native_agents
+    {
+        agents.discard_wake(&id);
     }
     Ok(())
 }
@@ -1124,6 +1261,9 @@ mod tests {
                 .is_empty()
         );
         assert!(gate.held.is_empty());
+        assert_eq!(gate.wake_frames.len(), 2);
+        assert_eq!(gate.wake_frames[0]["message"]["content"], "previous output");
+        gate.wake_frames.clear();
         assert!(gate.route(json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":"current output"}})).is_empty());
         let released = gate.route(
             json!({"type":"stream_event","parent_tool_use_id":null,"user_message_uuid":"second"}),

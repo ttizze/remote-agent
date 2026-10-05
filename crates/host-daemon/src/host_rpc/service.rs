@@ -278,7 +278,7 @@ impl HostRpcService {
             loop {
                 tokio::select! {
                     changed=shutdown.changed()=>{if changed.is_err()||*shutdown.borrow(){break;}}
-                    batch=receiver.recv()=>{let Some(batch)=batch else{break;};let result=store.ingest(batch.events,Some((&batch.run_id,Some(&batch.attempt_id))),&batch.occurred_at);let accepted=match result{Ok(commit)=>!commit.events.is_empty(),Err(error)=>{tracing::error!(operation="orchestration.provider.ingest",message=%error);false}};if let Some(receipt)=batch.acknowledged{let _=receipt.send(accepted);}}
+                    batch=receiver.recv()=>{let Some(batch)=batch else{break;};let result=if let Some(owner)=&batch.native_owner {store.ingest_native(batch.events,&batch.thread_id,&batch.run_id,&batch.attempt_id,owner,&batch.occurred_at)}else if let Some(offer)=&batch.native_continuation_offer { store.offer_native_continuation(&batch.thread_id,offer,&batch.occurred_at) }else{store.ingest(batch.events,Some((&batch.run_id,Some(&batch.attempt_id))),&batch.occurred_at)};let accepted=match result{Ok(commit)=>!commit.events.is_empty(),Err(error)=>{tracing::error!(operation="orchestration.provider.ingest",message=%error);false}};if let Some(receipt)=batch.acknowledged{let _=receipt.send(accepted);}}
                 }
             }
         });
@@ -903,7 +903,7 @@ impl HostRpcService {
         let input_command = Command {
             command_id: CommandId::new(format!("{}:input", create.command_id)).expect("derived id"),
             thread_id: create.thread_id.clone(),
-            body: CommandBody::MessageDispatch(params.input.clone()),
+            body: CommandBody::MessageDispatch(params.input.clone().into()),
         };
         orchestration::decider::decide(
             &input_command,
@@ -1491,6 +1491,8 @@ impl HostResources {
             && projection.visible_turn_items.iter().any(|row| {
                 row.visibility == Visibility::Inherited
                     || matches!(&row.item.body, TurnItemBody::AssistantMessage { .. })
+                    || row.item.run_id.is_none()
+                        && matches!(&row.item.body, TurnItemBody::UserMessage { .. })
             });
         if pending.is_empty()
             && !projection
@@ -2058,6 +2060,8 @@ impl ProviderAdapter for HostResources {
                             ),
                             occurred_at: timestamp,
                             acknowledged: Some(receipt),
+                            native_owner: None,
+                            native_continuation_offer: None,
                         })
                         .await
                         .map_err(adapter_error)?;
@@ -2097,6 +2101,7 @@ mod tests {
     use super::*;
     fn input(text: &str) -> MessageDispatch {
         MessageDispatch {
+            native_continuation: None,
             delegated_completion: None,
             source_plan_ref: None,
             created_by: CreatedBy::User,
@@ -2331,7 +2336,7 @@ mod tests {
             .dispatch_command(&Command {
                 command_id: CommandId::new("send").unwrap(),
                 thread_id: create().thread_id,
-                body: CommandBody::MessageDispatch(input("start")),
+                body: CommandBody::MessageDispatch(input("start").into()),
             })
             .unwrap();
         let mut projection = service.inner.store.projection(&create().thread_id).unwrap();

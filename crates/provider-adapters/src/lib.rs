@@ -1,6 +1,7 @@
 //! Codex app-server and Claude stream-json adapters for orchestration-v2.
 pub mod claude;
 pub mod codex;
+mod native_agents;
 pub mod normalize;
 use orchestration::*;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,6 +16,8 @@ pub struct ProviderBatch {
     pub events: Vec<DomainEvent>,
     pub occurred_at: Timestamp,
     pub acknowledged: Option<tokio::sync::oneshot::Sender<bool>>,
+    pub native_owner: Option<NativeSubagentOwner>,
+    pub native_continuation_offer: Option<NativeContinuationOffer>,
 }
 pub(crate) fn now() -> Timestamp {
     let millis = SystemTime::now()
@@ -123,6 +126,8 @@ async fn portable_fallback(
             events,
             occurred_at: timestamp,
             acknowledged: Some(ack),
+            native_owner: None,
+            native_continuation_offer: None,
         })
         .await
         .map_err(error)?;

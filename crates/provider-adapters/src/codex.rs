@@ -9,7 +9,7 @@ use orchestration::capabilities::capabilities;
 use orchestration::*;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -18,6 +18,7 @@ use tokio::sync::{Notify, mpsc, watch};
 pub struct CodexAdapter {
     server: Arc<CodexAppServer>,
     states: Mutex<BTreeMap<String, TurnState>>,
+    pending_native: Mutex<VecDeque<Value>>,
     output: mpsc::Sender<ProviderBatch>,
     changed: Notify,
     shutdown: watch::Sender<bool>,
@@ -123,6 +124,7 @@ impl CodexAdapter {
         let adapter = Arc::new(Self {
             server,
             states: Mutex::new(BTreeMap::new()),
+            pending_native: Mutex::new(VecDeque::new()),
             output,
             changed: Notify::new(),
             shutdown,
@@ -433,12 +435,23 @@ impl CodexAdapter {
             &timestamp,
         );
         let mut initial = state.batch(state.initial_payloads(), &timestamp);
+        state.native_agents = Some(Box::new(crate::native_agents::NativeAgents::new(
+            projection.thread.clone(),
+        )));
         let (acknowledged, receipt) = tokio::sync::oneshot::channel();
         initial.acknowledged = Some(acknowledged);
-        self.states
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(native.clone(), state);
+        {
+            let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(previous) = states.get_mut(&native)
+                && previous.native_agents.is_some()
+            {
+                state.native_agents = previous.native_agents.take();
+                if let Some(agents) = &mut state.native_agents {
+                    agents.update_template(projection.thread.clone());
+                }
+            }
+            states.insert(native.clone(), state);
+        }
         self.output.send(initial).await.map_err(error)?;
         if !receipt.await.map_err(error)? {
             self.states
@@ -512,26 +525,40 @@ impl CodexAdapter {
     }
     async fn interrupt(&self, provider_thread_id: &ProviderThreadId) -> Result<(), AdapterError> {
         let (native, state) = self.state(provider_thread_id)?;
-        if state.terminal {
-            return Ok(());
+        let (children, closed) = {
+            let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
+            let state = states
+                .get_mut(&native)
+                .ok_or_else(|| error("runtime lost"))?;
+            state.interrupted = true;
+            state
+                .native_agents
+                .as_mut()
+                .map(|a| (a.live_codex_turns(), a.stop(&now())))
+                .unwrap_or_default()
+        };
+        for batch in closed {
+            self.output.send(batch.batch()).await.map_err(error)?;
         }
-        self.states
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_mut(&native)
-            .ok_or_else(|| error("runtime lost"))?
-            .interrupted = true;
-        let turn_id = state
-            .turn
-            .native_turn_ref
-            .as_ref()
-            .and_then(|reference| reference.native_id.as_ref())
-            .ok_or_else(|| error("native turn is not started"))?;
-        self.request(
-            "turn/interrupt",
-            json!({"threadId":native,"turnId":turn_id}),
-        )
-        .await?;
+        let mut turns = children;
+        if !state.terminal
+            && let Some(id) = state
+                .turn
+                .native_turn_ref
+                .as_ref()
+                .and_then(|r| r.native_id.as_ref())
+        {
+            turns.push((native, id.clone()));
+        }
+        for (thread, turn) in turns {
+            if let Err(failure) = self
+                .request("turn/interrupt", json!({"threadId":thread,"turnId":turn}))
+                .await
+            {
+                self.shutdown();
+                return Err(failure);
+            }
+        }
         Ok(())
     }
     async fn handle(
@@ -547,24 +574,51 @@ impl CodexAdapter {
             return Ok(());
         };
         let timestamp = now();
-        let batch = {
+        let (batch, native_batches) = {
             let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(state) = states.get(native) else {
+            let owner = if states.contains_key(native) {
+                native.to_owned()
+            } else {
+                match states
+                    .iter()
+                    .find(|(_, s)| s.native_agents.as_ref().is_some_and(|a| a.contains(native)))
+                {
+                    Some((id, _)) => id.clone(),
+                    None => {
+                        let mut pending = self
+                            .pending_native
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        let frame = json!({"method":method,"params":params,"id":request_id});
+                        if pending.len() < 512
+                            && pending.iter().map(|v| v.to_string().len()).sum::<usize>()
+                                + frame.to_string().len()
+                                <= 1024 * 1024
+                        {
+                            pending.push_back(frame);
+                        }
+                        return Ok(());
+                    }
+                }
+            };
+            let Some(state) = states.get(&owner) else {
                 return Ok(());
             };
-            if let (Some(received), Some(current)) = (
-                params["turnId"].as_str(),
-                state
-                    .turn
-                    .native_turn_ref
-                    .as_ref()
-                    .and_then(|reference| reference.native_id.as_deref()),
-            ) && received != current
+            if owner == native
+                && let (Some(received), Some(current)) = (
+                    params["turnId"].as_str(),
+                    state
+                        .turn
+                        .native_turn_ref
+                        .as_ref()
+                        .and_then(|reference| reference.native_id.as_deref()),
+                )
+                && received != current
             {
                 return Ok(());
             }
             let translated = normalize::codex(
-                states.remove(native).expect("validated live turn"),
+                states.remove(&owner).expect("validated live turn"),
                 method,
                 params,
                 request_id,
@@ -572,13 +626,43 @@ impl CodexAdapter {
             );
             let mut state = translated.state;
             let batch = state.batch(translated.payloads, &timestamp);
-            states.insert(native.into(), state);
-            batch
+            let native_batches = std::mem::take(&mut state.native_batches);
+            states.insert(owner, state);
+            (batch, native_batches)
         };
         if !batch.events.is_empty() {
             self.output.send(batch).await.map_err(error)?;
         }
+        for batch in native_batches {
+            self.output.send(batch.batch()).await.map_err(error)?;
+        }
         self.changed.notify_waiters();
+        let ready = {
+            let states = self.states.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pending = self
+                .pending_native
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let (ready, held): (VecDeque<_>, VecDeque<_>) =
+                std::mem::take(&mut *pending).into_iter().partition(|f| {
+                    f["params"]["threadId"].as_str().is_some_and(|id| {
+                        states.contains_key(id)
+                            || states
+                                .values()
+                                .any(|s| s.native_agents.as_ref().is_some_and(|a| a.contains(id)))
+                    })
+                });
+            *pending = held;
+            ready
+        };
+        for frame in ready {
+            Box::pin(self.handle(
+                frame["method"].as_str().unwrap_or_default(),
+                &frame["params"],
+                frame.get("id").filter(|id| !id.is_null()),
+            ))
+            .await?;
+        }
         if method == "turn/started" {
             let provider = self
                 .states
@@ -595,7 +679,7 @@ impl CodexAdapter {
     }
     async fn disconnected(&self, native: &str, message: &str) -> Result<(), AdapterError> {
         let timestamp = now();
-        let batch = {
+        let (batch, native_batches) = {
             let mut states = self.states.lock().unwrap_or_else(|e| e.into_inner());
             let Some(state) = states.get(native) else {
                 return Ok(());
@@ -603,11 +687,15 @@ impl CodexAdapter {
             let translated = normalize::disconnected(state, message, &timestamp);
             let mut state = translated.state;
             let batch = state.batch(translated.payloads, &timestamp);
+            let native_batches = std::mem::take(&mut state.native_batches);
             states.insert(native.into(), state);
-            batch
+            (batch, native_batches)
         };
         if !batch.events.is_empty() {
             self.output.send(batch).await.map_err(error)?;
+        }
+        for batch in native_batches {
+            self.output.send(batch.batch()).await.map_err(error)?;
         }
         self.changed.notify_waiters();
         Ok(())
@@ -715,11 +803,11 @@ async fn pump(
                         let natives: Vec<_> = adapter.states.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
                         for native in natives {
                             let state = adapter.states.lock().unwrap_or_else(|e| e.into_inner()).get(&native).cloned();
-                            if let Some(state) = state
-                                && !state.terminal && let Some(turn) = state.turn.native_turn_ref.as_ref().and_then(|r| r.native_id.as_ref())
-                                    && adapter.request("turn/interrupt", json!({"threadId":native,"turnId":turn})).await.is_err() {
-                                        adapter.server.shutdown().await.ok();
-                                    }
+                            if let Some(state) = state {
+                                let mut turns = state.native_agents.as_ref().map(|a|a.live_codex_turns()).unwrap_or_default();
+                                if !state.terminal && let Some(turn) = state.turn.native_turn_ref.as_ref().and_then(|r|r.native_id.as_ref()) { turns.push((native.clone(),turn.clone())); }
+                                for (thread, turn) in turns { if adapter.request("turn/interrupt",json!({"threadId":thread,"turnId":turn})).await.is_err() { adapter.server.shutdown().await.ok(); } }
+                            }
                             let _ = adapter.disconnected(&native, "Codex notification stream lost events").await;
                         }
                     }
@@ -751,6 +839,61 @@ async fn ingest_frame(adapter: &CodexAdapter, value: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_frames_before_spawn_are_replayed_in_order() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let program = directory.path().join("fixture-provider");
+        std::fs::write(&program, "#!/bin/sh\nread -r initialize\nprintf '%s\\n' '{\"id\":1,\"result\":{\"userAgent\":\"fixture\",\"codexHome\":\"/tmp\"}}'\ncat >/dev/null\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let server = Arc::new(
+            CodexAppServer::spawn(codex_app_server::AppServerConfig {
+                program,
+                ..Default::default()
+            })
+            .await
+            .unwrap(),
+        );
+        let (output, mut batches) = mpsc::channel(16);
+        let adapter = CodexAdapter::new(server.clone(), output);
+        let mut state = crate::normalize::tests::state(Driver::Codex);
+        state.native_agents = Some(Box::new(crate::native_agents::NativeAgents::new(
+            crate::normalize::tests::projection(Driver::Codex).thread,
+        )));
+        adapter
+            .states
+            .lock()
+            .unwrap()
+            .insert("root-native".into(), state);
+        adapter
+            .handle(
+                "turn/started",
+                &json!({"threadId":"child","turn":{"id":"actual-turn"}}),
+                None,
+            )
+            .await
+            .unwrap();
+        adapter
+            .handle(
+                "item/agentMessage/delta",
+                &json!({"threadId":"child","itemId":"answer","delta":"Early output"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(batches.try_recv().is_err());
+        adapter.handle("item/completed",&json!({"threadId":"root-native","item":{"type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child"],"prompt":"Task"}}),None).await.unwrap();
+        let mut received = vec![];
+        while let Ok(batch) = batches.try_recv() {
+            received.push(batch);
+        }
+        assert!(received.iter().all(|b| b.native_owner.is_some()));
+        assert!(received.iter().flat_map(|b|&b.events).any(|e| matches!(&e.payload,EventPayload::MessageUpdated(m) if m.text=="Early output" && m.run_id.is_none())));
+        assert!(adapter.pending_native.lock().unwrap().is_empty());
+        adapter.shutdown();
+        server.shutdown().await.unwrap();
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn a_retried_rollback_does_not_revert_valid_native_turns_again() {
@@ -961,6 +1104,7 @@ for line in sys.stdin:
         let adapter = Arc::new(CodexAdapter {
             server: server.clone(),
             states: Mutex::new(BTreeMap::from([("native".into(), state)])),
+            pending_native: Mutex::new(VecDeque::new()),
             output,
             changed: Notify::new(),
             shutdown,
@@ -1012,6 +1156,7 @@ for line in sys.stdin:
         let adapter = Arc::new(CodexAdapter {
             server: server.clone(),
             states: Mutex::new(BTreeMap::new()),
+            pending_native: Mutex::new(VecDeque::new()),
             output,
             changed: Notify::new(),
             shutdown,

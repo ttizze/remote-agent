@@ -548,7 +548,7 @@ private fun QueueSheet(model: AndroidAppModel, dismiss: () -> Unit) {
                     Text(row.text, maxLines = 5)
                     Text(row.model, style = MaterialTheme.typography.labelSmall, color = T3.color("textMuted"))
                     Row {
-                        TextButton(
+                        if (row.canEdit) TextButton(
                             onClick = {
                                 model.perform(Intent.Queue(QueueAction.Edit(row.runId)))
                                 dismiss()

@@ -1165,16 +1165,18 @@ impl Desktop {
             for (index, row) in conversation.queue.iter().enumerate() {
                 let mut actions = h_flex()
                     .gap_1()
-                    .child(self.action(
-                        SharedString::from(format!("edit-{}", row.run_id)),
-                        "Edit",
-                        Intent::Queue {
-                            action: QueueAction::Edit {
-                                run_id: row.run_id.clone(),
+                    .when(row.can_edit, |v| {
+                        v.child(self.action(
+                            SharedString::from(format!("edit-{}", row.run_id)),
+                            "Edit",
+                            Intent::Queue {
+                                action: QueueAction::Edit {
+                                    run_id: row.run_id.clone(),
+                                },
                             },
-                        },
-                        cx,
-                    ))
+                            cx,
+                        ))
+                    })
                     .when(row.can_steer, |v| {
                         v.child(self.action(
                             SharedString::from(format!("steer-{}", row.run_id)),

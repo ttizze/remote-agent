@@ -41,6 +41,25 @@ fn active(runs: &[Run]) -> Option<&Run> {
         .filter(|run| run.status.is_blocking())
         .max_by_key(|run| run.ordinal)
 }
+pub fn interruptible_run<'a>(runs: &'a [Run], tasks: &[Subagent]) -> Option<&'a Run> {
+    active(runs).or_else(|| {
+        runs.iter()
+            .filter(|r| {
+                r.status == RunStatus::Completed
+                    && tasks.iter().any(|t| {
+                        t.run_id.as_ref() == Some(&r.id)
+                            && matches!(
+                                t.status,
+                                NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
+                            )
+                    })
+            })
+            .max_by_key(|r| r.ordinal)
+    })
+}
+pub fn editable_message(native_continuation: bool, delegated_completion: bool) -> bool {
+    !native_continuation && !delegated_completion
+}
 pub fn queued_runs<'a>(runs: &'a [Run], messages: &[ConversationMessage]) -> Vec<&'a Run> {
     let mut queue: Vec<_> = runs
         .iter()
@@ -223,7 +242,19 @@ pub fn decide(
             hold_queue,
         } => {
             let target = run(&projection.runs, run_id)?;
-            require(target.status.is_blocking(), "run is not interruptible")?;
+            let background = !target.status.is_blocking()
+                && target.status == RunStatus::Completed
+                && projection.subagents.iter().any(|t| {
+                    t.run_id.as_ref() == Some(run_id)
+                        && matches!(
+                            t.status,
+                            NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
+                        )
+                });
+            require(
+                target.status.is_blocking() || background,
+                "run is not interruptible",
+            )?;
             require(
                 capabilities.supports_interrupt,
                 "provider does not support interrupts",
@@ -256,7 +287,39 @@ pub fn decide(
                     );
                 }
             }
-            if let Some(turn) = projection.provider_turns.iter().find(|turn| {
+            if background {
+                let mut owner = target.clone();
+                owner
+                    .delegated_completion
+                    .get_or_insert(DelegatedCompletionCohort {
+                        disposition: CohortDisposition::Stopped,
+                        next_generation: 1,
+                        delivery: None,
+                    })
+                    .disposition = CohortDisposition::Stopped;
+                emit(&mut decision, command, now, EventPayload::RunUpdated(owner));
+                if projection.subagents.iter().any(|t| {
+                    t.run_id.as_ref() == Some(run_id)
+                        && t.origin == SubagentOrigin::ProviderNative
+                        && matches!(
+                            t.status,
+                            NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
+                        )
+                }) && let Some(turn) = projection
+                    .provider_turns
+                    .iter()
+                    .find(|t| t.run_attempt_id == target.active_attempt_id)
+                {
+                    effect(
+                        &mut decision,
+                        command,
+                        EffectBody::Interrupt {
+                            run_id: run_id.clone(),
+                            provider_turn_id: turn.id.clone(),
+                        },
+                    );
+                }
+            } else if let Some(turn) = projection.provider_turns.iter().find(|turn| {
                 turn.run_attempt_id == target.active_attempt_id
                     && matches!(turn.status, TurnStatus::Pending | TurnStatus::Running)
             }) {
@@ -298,8 +361,8 @@ pub fn decide(
                     promote_next(
                         &mut decision,
                         command,
-                        &projection.runs,
-                        &projection.messages,
+                        (&projection.runs, &projection.messages),
+                        has_native_turn(&projection.provider_turns),
                         next_ordinal(projection),
                         now,
                         Some(run_id),
@@ -326,8 +389,8 @@ pub fn decide(
                 promote_next(
                     &mut decision,
                     command,
-                    &runs,
-                    &projection.messages,
+                    (&runs, &projection.messages),
+                    has_native_turn(&projection.provider_turns),
                     next_ordinal(projection),
                     now,
                     None,
@@ -420,6 +483,13 @@ pub fn decide(
                 .find(|message| message.id == target.user_message_id)
                 .cloned()
                 .ok_or_else(|| DecisionError("queued message not found".into()))?;
+            require(
+                editable_message(
+                    message.native_continuation.is_some(),
+                    message.delegated_completion.is_some(),
+                ),
+                "notifications cannot be edited",
+            )?;
             message.text = text.clone();
             message.context = context.clone();
             message.updated_at = now.clone();
@@ -468,8 +538,13 @@ pub fn decide(
                 .iter()
                 .find(|message| message.id == queued.user_message_id)
                 .ok_or_else(|| DecisionError("queued message not found".into()))?;
+            require(
+                message.native_continuation.is_none(),
+                "native continuations cannot be promoted to steer",
+            )?;
             let input = crate::MessageDispatch {
-                delegated_completion: None,
+                native_continuation: message.native_continuation.clone(),
+                delegated_completion: message.delegated_completion.clone(),
                 source_plan_ref: None,
                 created_by: message.created_by,
                 creation_source: message.creation_source,
@@ -597,8 +672,8 @@ pub fn decide(
             promote_next(
                 &mut decision,
                 command,
-                &projection.runs,
-                &projection.messages,
+                (&projection.runs, &projection.messages),
+                has_native_turn(&projection.provider_turns),
                 next_ordinal(projection),
                 now,
                 Some(run_id),
@@ -1153,16 +1228,23 @@ pub fn failed_effect(
     );
     decision
 }
+/// Native child histories have no application run; input waits for their real turn.
+pub fn has_native_turn(turns: &[ProviderTurn]) -> bool {
+    turns.iter().any(|t| {
+        t.run_attempt_id.is_none() && matches!(t.status, TurnStatus::Pending | TurnStatus::Running)
+    })
+}
 fn promote_next(
     decision: &mut Decision,
     command: &Command,
-    runs: &[Run],
-    messages: &[ConversationMessage],
+    queue: (&[Run], &[ConversationMessage]),
+    native_busy: bool,
     ordinal: u64,
     now: &Timestamp,
     excluding: Option<&RunId>,
 ) {
-    if active(runs).is_some_and(|run| Some(&run.id) != excluding) {
+    let (runs, messages) = queue;
+    if native_busy || active(runs).is_some_and(|run| Some(&run.id) != excluding) {
         return;
     }
     if let Some(next) = queued_runs(runs, messages)
@@ -1228,14 +1310,28 @@ fn user_item(
         started_at: Some(now.clone()),
         completed_at: Some(now.clone()),
         updated_at: now.clone(),
-        body: TurnItemBody::UserMessage {
-            created_by: message.created_by,
-            creation_source: message.creation_source,
-            message_id: message.id.clone(),
-            input_intent,
-            text: message.text.clone(),
-            context: message.context.clone(),
-            attachments: message.attachments.clone(),
+        body: if message.native_continuation.is_some() || message.delegated_completion.is_some() {
+            TurnItemBody::Notification {
+                source: if message.native_continuation.is_some() {
+                    "background_task"
+                } else {
+                    "delegated_task"
+                }
+                .into(),
+                outcome: ItemStatus::Completed,
+                summary: message.text.clone(),
+                detail: None,
+            }
+        } else {
+            TurnItemBody::UserMessage {
+                created_by: message.created_by,
+                creation_source: message.creation_source,
+                message_id: message.id.clone(),
+                input_intent,
+                text: message.text.clone(),
+                context: message.context.clone(),
+                attachments: message.attachments.clone(),
+            }
         },
     }
 }
@@ -1254,6 +1350,39 @@ fn dispatch(
     driver: Driver,
     steer_intent: InputIntent,
 ) -> Result<(), DecisionError> {
+    if let Some(source) = &message.native_continuation {
+        require(
+            message.created_by == CreatedBy::Agent
+                && message.creation_source == CreationSource::Provider
+                && message.attachments.is_empty()
+                && message.context.is_none()
+                && message.delegated_completion.is_none(),
+            "invalid native continuation",
+        )?;
+        require(
+            projection.thread.active_provider_thread_id.as_ref()
+                == Some(&source.provider_thread_id)
+                && projection.provider_threads.iter().any(|p| {
+                    p.id == source.provider_thread_id
+                        && p.provider_instance_id == projection.thread.provider_instance_id
+                })
+                && projection.runs.iter().any(|r| {
+                    r.id == source.run_id
+                        && r.active_attempt_id.as_ref() == Some(&source.attempt_id)
+                        && r.provider_thread_id.as_ref() == Some(&source.provider_thread_id)
+                        && (r.status.is_blocking() || r.status == RunStatus::Completed)
+                        && r.delegated_completion
+                            .as_ref()
+                            .is_none_or(|c| c.disposition == CohortDisposition::Open)
+                })
+                && projection.subagents.iter().any(|t| {
+                    t.id == source.task_id
+                        && t.origin == SubagentOrigin::ProviderNative
+                        && matches!(t.status, NodeStatus::Completed | NodeStatus::Failed)
+                }),
+            "native continuation is no longer owned",
+        )?;
+    }
     require(
         projection.thread.archived_at.is_none(),
         "thread is archived",
@@ -1320,6 +1449,11 @@ fn dispatch(
             "wait for maintenance to finish before steering",
         )?;
     }
+    require(
+        !has_native_turn(&projection.provider_turns)
+            || matches!(mode, DispatchMode::QueueAfterActive),
+        "native child turn is active; queue input until it returns",
+    )?;
     let target = match &mode {
         DispatchMode::SteerActive { target_run_id }
         | DispatchMode::RestartActive { target_run_id } => {
@@ -1350,7 +1484,7 @@ fn dispatch(
             .model_selection
             .clone()
             .unwrap_or_else(|| projection.thread.model_selection.clone());
-        let queue = active.is_some();
+        let queue = active.is_some() || has_native_turn(&projection.provider_turns);
         if queue {
             require(
                 capabilities.supports_queued_messages,
@@ -1511,6 +1645,7 @@ fn dispatch(
         InputIntent::TurnStart
     };
     let conversation = ConversationMessage {
+        native_continuation: message.native_continuation.clone(),
         delegated_completion: message.delegated_completion.clone(),
         created_by: message.created_by,
         creation_source: message.creation_source,
@@ -1848,6 +1983,7 @@ fn respond(
                     }
                 });
             let input = MessageDispatch {
+                native_continuation: None,
                 delegated_completion: None,
                 source_plan_ref: None,
                 created_by: CreatedBy::User,
@@ -1937,7 +2073,16 @@ pub fn recover(
     for run in &projection.runs {
         let mut run = run.clone();
         if run.status == RunStatus::Queued {
-            run.queue_held = true;
+            if projection
+                .messages
+                .iter()
+                .any(|m| m.id == run.user_message_id && m.native_continuation.is_some())
+            {
+                run.status = RunStatus::Cancelled;
+                run.completed_at = Some(now.clone());
+            } else {
+                run.queue_held = true;
+            }
             result.push(EventPayload::RunUpdated(run));
         } else if run.status.is_blocking() && !replayable_captures.contains(&run.id) {
             run.status = RunStatus::Interrupted;
@@ -2000,6 +2145,20 @@ pub fn recover(
             result.push(EventPayload::RuntimeRequestUpdated(request));
         }
     }
+    for task in &projection.subagents {
+        if task.origin == SubagentOrigin::ProviderNative
+            && matches!(
+                task.status,
+                NodeStatus::Pending | NodeStatus::Running | NodeStatus::Waiting
+            )
+        {
+            let mut task = task.clone();
+            task.status = NodeStatus::Interrupted;
+            task.completed_at = Some(now.clone());
+            task.updated_at = now.clone();
+            result.push(EventPayload::SubagentUpdated(task));
+        }
+    }
     for session in &projection.provider_sessions {
         result.push(EventPayload::ProviderSessionDetached(session.id.clone()));
     }
@@ -2030,8 +2189,8 @@ pub fn after_terminal(
         promote_next(
             &mut decision,
             &command,
-            &projection.runs,
-            &projection.messages,
+            (&projection.runs, &projection.messages),
+            has_native_turn(&projection.provider_turns),
             next_ordinal(projection),
             now,
             None,

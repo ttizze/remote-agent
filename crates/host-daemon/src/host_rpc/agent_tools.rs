@@ -666,19 +666,23 @@ impl HostRpcService {
                 self.agent_dispatch(
                     &target.thread.id,
                     id,
-                    CommandBody::MessageDispatch(MessageDispatch {
-                        delegated_completion: None,
-                        source_plan_ref: None,
-                        created_by: CreatedBy::Agent,
-                        creation_source: CreationSource::Mcp,
-                        message_id: message_id.clone(),
-                        text: text(&input, "message")?.trim().to_owned(),
-                        context: None,
-                        attachments: vec![],
-                        model_selection: None,
-                        delivery_intent: intent,
-                        dispatch_mode: mode,
-                    }),
+                    CommandBody::MessageDispatch(
+                        MessageDispatch {
+                            native_continuation: None,
+                            delegated_completion: None,
+                            source_plan_ref: None,
+                            created_by: CreatedBy::Agent,
+                            creation_source: CreationSource::Mcp,
+                            message_id: message_id.clone(),
+                            text: text(&input, "message")?.trim().to_owned(),
+                            context: None,
+                            attachments: vec![],
+                            model_selection: None,
+                            delivery_intent: intent,
+                            dispatch_mode: mode,
+                        }
+                        .into(),
+                    ),
                 )?;
                 let target = self.agent_projection(&target.thread.id)?;
                 let message = target
@@ -1020,19 +1024,23 @@ mod tests {
             .agent_dispatch(
                 &thread,
                 CommandId::new("send").unwrap(),
-                CommandBody::MessageDispatch(MessageDispatch {
-                    delegated_completion: None,
-                    source_plan_ref: None,
-                    created_by: CreatedBy::User,
-                    creation_source: CreationSource::Desktop,
-                    message_id: MessageId::new("input").unwrap(),
-                    text: "Parent input".into(),
-                    context: None,
-                    attachments: vec![],
-                    model_selection: None,
-                    delivery_intent: None,
-                    dispatch_mode: DispatchMode::StartImmediately,
-                }),
+                CommandBody::MessageDispatch(
+                    MessageDispatch {
+                        native_continuation: None,
+                        delegated_completion: None,
+                        source_plan_ref: None,
+                        created_by: CreatedBy::User,
+                        creation_source: CreationSource::Desktop,
+                        message_id: MessageId::new("input").unwrap(),
+                        text: "Parent input".into(),
+                        context: None,
+                        attachments: vec![],
+                        model_selection: None,
+                        delivery_intent: None,
+                        dispatch_mode: DispatchMode::StartImmediately,
+                    }
+                    .into(),
+                ),
             )
             .unwrap();
         (directory, service, thread)

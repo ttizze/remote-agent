@@ -1,10 +1,15 @@
 //! Provider messages become complete records. This module performs no I/O.
+pub use crate::native_agents::{claude, codex};
 use orchestration::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct TurnState {
+    pub(crate) native_agents: Option<Box<crate::native_agents::NativeAgents>>,
+    pub(crate) native_batches: Vec<crate::native_agents::NativeOutput>,
+    pub(crate) native_continuation_offer: Option<NativeContinuationOffer>,
+    pub(crate) native_wake_drain: Option<MessageId>,
     pub run: Run,
     pub attempt: RunAttempt,
     pub session: ProviderSession,
@@ -56,6 +61,10 @@ impl TurnState {
             turn_token_usage: None,
         };
         Self {
+            native_agents: None,
+            native_batches: vec![],
+            native_continuation_offer: None,
+            native_wake_drain: None,
             run,
             attempt,
             session,
@@ -107,6 +116,8 @@ impl TurnState {
             events,
             occurred_at: now.clone(),
             acknowledged: None,
+            native_owner: None,
+            native_continuation_offer: self.native_continuation_offer.take(),
         }
     }
     pub fn take_request(
@@ -114,7 +125,9 @@ impl TurnState {
         id: &RuntimeRequestId,
         now: &Timestamp,
     ) -> Option<NativeRequest> {
-        let request = self.requests.remove(id)?;
+        let Some(request) = self.requests.remove(id) else {
+            return self.native_agents.as_mut()?.take_request(id, now);
+        };
         for item in self
             .items
             .values_mut()
@@ -193,7 +206,7 @@ impl TurnState {
         {
             let delta = TurnItemTextDelta {
                 item_id: item.id.clone(),
-                run_id: self.run.id.clone(),
+                run_id: Some(self.run.id.clone()),
                 offset: before.len(),
                 text: after[before.len()..].into(),
             };
@@ -243,6 +256,7 @@ impl TurnState {
         } = &item.body
         {
             let message = ConversationMessage {
+                native_continuation: None,
                 delegated_completion: None,
                 created_by: CreatedBy::Agent,
                 creation_source: CreationSource::Provider,
@@ -311,7 +325,7 @@ impl TurnState {
         self.items.insert(key.into(), item.clone());
         payloads.push(EventPayload::TurnItemUpdated(item));
     }
-    fn started(
+    pub(crate) fn started(
         &mut self,
         native_turn_id: Option<&str>,
         now: &Timestamp,
@@ -368,7 +382,7 @@ impl TurnState {
             completed_at: self.terminal.then(|| now.clone()),
         }
     }
-    fn finish(
+    pub(crate) fn finish(
         &mut self,
         status: TurnStatus,
         failure: Option<ProviderFailure>,
@@ -584,7 +598,7 @@ fn questions(value: &Value) -> Vec<UserInputQuestion> {
         .collect()
 }
 
-pub fn codex(
+pub(crate) fn codex_plain(
     state: TurnState,
     method: &str,
     params: &Value,
@@ -999,7 +1013,7 @@ pub fn codex_response(
     }
 }
 
-pub fn claude(state: TurnState, frame: &Value, now: &Timestamp) -> Translation {
+pub(crate) fn claude_plain(state: TurnState, frame: &Value, now: &Timestamp) -> Translation {
     let mut next = state;
     let mut payloads = vec![];
     let mut immediate_responses = vec![];
@@ -1105,6 +1119,9 @@ pub fn claude(state: TurnState, frame: &Value, now: &Timestamp) -> Translation {
             }
         }
         "assistant" => {
+            if next.turn.status == TurnStatus::Pending {
+                next.started(None, now, &mut payloads);
+            }
             if let Some(cursor) = frame["uuid"]
                 .as_str()
                 .filter(|id| uuid::Uuid::parse_str(id).is_ok())
@@ -1496,6 +1513,9 @@ pub fn disconnected(state: &TurnState, message: &str, now: &Timestamp) -> Transl
         now,
         &mut payloads,
     );
+    if let Some(agents) = &mut next.native_agents {
+        next.native_batches.extend(agents.stop(now));
+    }
     Translation {
         state: next,
         payloads,
@@ -1540,19 +1560,23 @@ pub(crate) mod tests {
         let command = Command {
             command_id: CommandId::new("send").unwrap(),
             thread_id: command.thread_id,
-            body: CommandBody::MessageDispatch(MessageDispatch {
-                delegated_completion: None,
-                source_plan_ref: None,
-                created_by: CreatedBy::User,
-                creation_source: CreationSource::Desktop,
-                message_id: MessageId::new("user-message").unwrap(),
-                text: "Test".into(),
-                context: None,
-                attachments: vec![],
-                model_selection: None,
-                delivery_intent: None,
-                dispatch_mode: DispatchMode::StartImmediately,
-            }),
+            body: CommandBody::MessageDispatch(
+                MessageDispatch {
+                    native_continuation: None,
+                    delegated_completion: None,
+                    source_plan_ref: None,
+                    created_by: CreatedBy::User,
+                    creation_source: CreationSource::Desktop,
+                    message_id: MessageId::new("user-message").unwrap(),
+                    text: "Test".into(),
+                    context: None,
+                    attachments: vec![],
+                    model_selection: None,
+                    delivery_intent: None,
+                    dispatch_mode: DispatchMode::StartImmediately,
+                }
+                .into(),
+            ),
         };
         for event in decider::decide(
             &command,

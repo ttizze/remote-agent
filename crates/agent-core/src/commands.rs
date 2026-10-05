@@ -89,6 +89,7 @@ pub fn message(
         return Err("Enter a message".into());
     }
     Ok(MessageDispatch {
+        native_continuation: None,
         delegated_completion: None,
         source_plan_ref: None,
         created_by: CreatedBy::User,

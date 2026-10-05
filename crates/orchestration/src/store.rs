@@ -9,6 +9,8 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 use tokio::sync::broadcast;
+#[path = "native_ingest.rs"]
+mod native_ingest;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -159,19 +161,23 @@ impl Store {
             command_id: CommandId::new(format!("command:steer-follow-up:{}", effect.id))
                 .expect("derived id"),
             thread_id: effect.thread_id.clone(),
-            body: CommandBody::MessageDispatch(MessageDispatch {
-                delegated_completion: message.delegated_completion.clone(),
-                source_plan_ref: None,
-                created_by: message.created_by,
-                creation_source: message.creation_source,
-                message_id: message.id.clone(),
-                text: message.text.clone(),
-                context: message.context.clone(),
-                attachments: message.attachments.clone(),
-                model_selection: None,
-                delivery_intent: None,
-                dispatch_mode: DispatchMode::QueueAfterActive,
-            }),
+            body: CommandBody::MessageDispatch(
+                MessageDispatch {
+                    native_continuation: None,
+                    delegated_completion: message.delegated_completion.clone(),
+                    source_plan_ref: None,
+                    created_by: message.created_by,
+                    creation_source: message.creation_source,
+                    message_id: message.id.clone(),
+                    text: message.text.clone(),
+                    context: message.context.clone(),
+                    attachments: message.attachments.clone(),
+                    model_selection: None,
+                    delivery_intent: None,
+                    dispatch_mode: DispatchMode::QueueAfterActive,
+                }
+                .into(),
+            ),
         };
         self.dispatch_inner(&command, now, &capabilities, driver, Some(message_id))
     }
@@ -314,6 +320,23 @@ impl Store {
         let mut events = commit_decision(&transaction, decision, Some(&command.command_id), now)?;
         if matches!(
             command.body,
+            CommandBody::RunInterrupt { .. } | CommandBody::ThreadDelete
+        ) && let Some(p) = load_projection(&transaction, &command.thread_id)?
+        {
+            let stopped = match &command.body {
+                CommandBody::RunInterrupt { run_id, .. } => Some(BTreeSet::from([run_id.clone()])),
+                _ => None,
+            };
+            events.extend(native_ingest::stop_children(
+                &transaction,
+                &p,
+                stopped.as_ref(),
+                now,
+                &mut BTreeSet::new(),
+            )?);
+        }
+        if matches!(
+            command.body,
             CommandBody::DelegatedTaskRequest(_)
                 | CommandBody::DelegatedTaskWakePolicy { .. }
                 | CommandBody::DelegatedTaskAcknowledge { .. }
@@ -361,6 +384,48 @@ impl Store {
     ) -> Result<Commit> {
         self.ingest_events(events, expected_run, now, false)
     }
+    pub fn offer_native_continuation(
+        &self,
+        thread: &ThreadId,
+        offer: &NativeContinuationOffer,
+        now: &Timestamp,
+    ) -> Result<Commit> {
+        let p = self.projection(thread)?;
+        let driver = p
+            .provider_threads
+            .iter()
+            .find(|t| t.id == offer.source.provider_thread_id)
+            .map(|t| t.driver)
+            .ok_or(StoreError::InvalidQuery("unknown continuation provider"))?;
+        let command = Command {
+            command_id: CommandId::new(format!("provider-continuation:{}", offer.message_id))
+                .expect("derived id"),
+            thread_id: thread.clone(),
+            body: CommandBody::MessageDispatch(
+                MessageDispatch {
+                    native_continuation: Some(Box::new(offer.source.clone())),
+                    delegated_completion: None,
+                    source_plan_ref: None,
+                    created_by: CreatedBy::Agent,
+                    creation_source: CreationSource::Provider,
+                    message_id: offer.message_id.clone(),
+                    text: offer.summary.clone(),
+                    context: None,
+                    attachments: vec![],
+                    model_selection: None,
+                    delivery_intent: None,
+                    dispatch_mode: DispatchMode::QueueAfterActive,
+                }
+                .into(),
+            ),
+        };
+        self.dispatch(
+            &command,
+            now,
+            &crate::capabilities::capabilities(driver).turns,
+            driver,
+        )
+    }
     pub fn ingest_rollback(
         &self,
         mut events: Vec<DomainEvent>,
@@ -404,6 +469,21 @@ impl Store {
             now,
         )?;
         stored.extend(reconcile_delegations(&transaction, &thread_id, now)?);
+        let current =
+            load_projection(&transaction, &thread_id)?.ok_or(StoreError::ThreadNotFound)?;
+        let rewound = current
+            .runs
+            .iter()
+            .filter(|r| r.status == RunStatus::RolledBack)
+            .map(|r| r.id.clone())
+            .collect();
+        stored.extend(native_ingest::stop_children(
+            &transaction,
+            &current,
+            Some(&rewound),
+            now,
+            &mut BTreeSet::new(),
+        )?);
         let sequence = latest_sequence(&transaction, None)?;
         transaction.commit()?;
         self.publish(&stored);
@@ -490,6 +570,15 @@ impl Store {
                     && let Some(previous) = projection.runs.iter().find(|r| r.id == run.id)
                 {
                     run.delegated_completion = previous.delegated_completion.clone();
+                    run.ordinal = previous.ordinal;
+                }
+                if let EventPayload::ProviderThreadUpdated(provider) = &mut event.payload
+                    && let Some(run) = projection.runs.iter().find(|r| {
+                        r.id == *run_id && r.provider_thread_id.as_ref() == Some(&provider.id)
+                    })
+                    && provider.last_run_ordinal.is_some()
+                {
+                    provider.last_run_ordinal = Some(run.ordinal);
                 }
                 if let EventPayload::PlanUpdated(plan) = &event.payload {
                     if matches!(plan.status, PlanStatus::Draft | PlanStatus::Active) {
