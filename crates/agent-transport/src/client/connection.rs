@@ -1,4 +1,4 @@
-//! Bex requests own independent QUIC streams. Provider JSONL state stays in `peer`.
+//! Requests own independent QUIC streams. Provider JSONL state stays in `peer`.
 use crate::protocol;
 use crate::{
     diagnostics::{ConnectionPhase as Phase, connection::Trace},
