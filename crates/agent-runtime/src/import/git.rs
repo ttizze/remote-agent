@@ -90,10 +90,10 @@ fn remote_section(line: &str) -> Option<Option<String>> {
         return None;
     }
     let header = inner[..close].trim();
-    if header.len() < 6 || !header[..6].eq_ignore_ascii_case("remote") {
-        return None;
-    }
-    let tail = &header[6..];
+    let tail = header
+        .get(..6)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("remote"))
+        .map(|_| &header[6..])?;
     if let Some(dotted) = tail.strip_prefix('.') {
         return (!dotted.is_empty() && !dotted.contains(char::is_whitespace))
             .then(|| Some(dotted.to_lowercase()));
@@ -243,3 +243,6 @@ pub(crate) fn github_repository(url: Option<&str>) -> Option<String> {
     };
     (valid(owner) && valid(name)).then(|| rest.to_owned())
 }
+
+#[cfg(test)]
+mod tests;
