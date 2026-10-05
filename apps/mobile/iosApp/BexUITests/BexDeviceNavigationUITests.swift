@@ -229,8 +229,9 @@ extension BexLaunchUITests {
     private func replaceFieldText(_ field: XCUIElement, text: String) {
         field.tap()
         if let value = field.value as? String, !value.isEmpty, value != field.placeholderValue {
-            field.tap(withNumberOfTaps: 3, numberOfTouches: 1)
-            field.typeText(XCUIKeyboardKey.delete.rawValue)
+            // A triple tap can select one word of a URL such as about:blank; delete from the end instead.
+            field.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: 0.5)).tap()
+            field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: value.count))
             XCTAssertEqual(field.value as? String, field.placeholderValue)
         }
         field.typeText(text)
