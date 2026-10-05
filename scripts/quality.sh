@@ -10,10 +10,14 @@ if [[ $language == apple || $language == rust ]]; then
     cargo fmt --all --check || failed=1
     cargo clippy --locked --workspace --all-targets -- --no-deps -D warnings || failed=1
     just unit-tests || failed=1
+    native_tests=()
+    if [[ $(uname -s) == Darwin ]]; then
+        native_tests+=(--test chrome_cookie_webview)
+    fi
     cargo nextest run --locked --no-fail-fast --workspace --features agent-core/bindings \
         --test errors --test iroh --test iroh_host --test browser_bridge \
         --test management --test codex_accounts --test claude --test adapter_conformance \
-        --test crate_boundaries --test build_cleanup --test diagnostics || failed=1
+        --test crate_boundaries --test build_cleanup --test diagnostics "${native_tests[@]}" || failed=1
 fi
 if [[ $language == kotlin ]]; then
     ./gradlew :apps:mobile:ktfmtCheck :apps:mobile:detekt --continue --console=plain || failed=1
@@ -27,16 +31,8 @@ if [[ ( $language == apple || $language == swift ) && ${BEX_IOS_TEST_SHARD:-0} =
         just ios-markdown || failed=1
     fi
 fi
-macos_pid=
-if [[ $(uname -s) == Darwin && ( $language == apple || $language == rust ) ]]; then
-    just macos-e2e &
-    macos_pid=$!
-fi
 if [[ $language == apple || $language == swift ]]; then
     just conversation-ui || failed=1
-fi
-if [[ -n $macos_pid ]]; then
-    wait "$macos_pid" || failed=1
 fi
 cargo xtask clean-builds || failed=1
 exit "$failed"

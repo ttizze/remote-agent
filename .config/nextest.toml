@@ -1,0 +1,5 @@
+# Decoding and transferring this history fills the runner's CPU and memory.
+# Preserve its real request deadlines without competing with other Host tests.
+[[profile.default.overrides]]
+filter = 'test(=oversized_session_opens_repeatedly_and_downloads_lossless_items_without_reconnecting)'
+threads-required = "num-test-threads"

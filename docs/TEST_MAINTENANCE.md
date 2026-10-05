@@ -196,6 +196,15 @@ transfer server just to delete that check would reverse A14.
   Independent contract tests use sixteen test processes on Linux and Windows
   to overlap waits for their isolated Hosts and network replies. Mac integration
   assertions use six test processes within the Apple runner's memory budget.
+  The oversized-history transfer case reserves all test slots while it runs,
+  retaining its real request deadlines without competing with other Hosts for
+  CPU and memory. Mac's WebKit persistence harness supports headless test listing
+  and runs with the integration targets in the same nextest build, avoiding a
+  separate build with a different dependency feature graph.
+  Its local HTTP server handles each connection independently, with the same
+  three-second read deadline, so closed or idle WebKit preconnections cannot
+  terminate the server or block navigation. Native authentication and reopened
+  process persistence assertions remain unchanged.
   The stalled item-transfer regression advances the Store's production deadline
   with virtual time while its real QUIC connection runs on a separate clock;
   an interrupt still completes while the transfer is blocked. The merged
