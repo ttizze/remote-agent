@@ -188,8 +188,13 @@ pub(crate) fn timeline(state: &State) -> Vec<Row<'_>> {
         return vec![];
     };
     let parent = thread.parent.as_ref().unwrap_or(&thread.id);
-    let messages: HashMap<&MessageId, &Message> =
-        state.messages.iter().map(|m| (&m.id, m)).collect();
+    // Inherited rows show the parent's messages, with their intent and author.
+    let messages: HashMap<&MessageId, &Message> = state
+        .inherited_messages
+        .iter()
+        .chain(&state.messages)
+        .map(|m| (&m.id, m))
+        .collect();
     let plans: HashMap<_, &Plan> = state.plans.iter().map(|p| (&p.id, p)).collect();
     let inherited = state.inherited_items.as_ptr_range();
     state
@@ -387,6 +392,7 @@ pub fn bounded_state(state: &State, snapshot_seq: u64, policy: PagePolicy) -> Bo
     let items = std::mem::take(&mut bounded.items);
     let all_messages = std::mem::take(&mut bounded.messages);
     let inherited = std::mem::take(&mut bounded.inherited_items);
+    let inherited_messages = std::mem::take(&mut bounded.inherited_messages);
     let control = json_len(&bounded);
 
     let rows = timeline(state);
@@ -421,6 +427,15 @@ pub fn bounded_state(state: &State, snapshot_seq: u64, policy: PagePolicy) -> Bo
     bounded.inherited_items = inherited
         .into_iter()
         .filter(|item| inherited_ids.contains(&item.id))
+        .collect();
+    let inherited_shown: HashSet<&MessageId> = bounded
+        .inherited_items
+        .iter()
+        .filter_map(message_of)
+        .collect();
+    bounded.inherited_messages = inherited_messages
+        .into_iter()
+        .filter(|m| inherited_shown.contains(&m.id))
         .collect();
 
     let shown: HashSet<&MessageId> = bounded.items.iter().filter_map(message_of).collect();

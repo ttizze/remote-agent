@@ -418,6 +418,98 @@ fn carries_a_full_projection_watermark_when_the_bounded_window_is_inherited_only
     );
 }
 
+/// A forked thread whose inherited history is one turn steered `steers` times.
+fn forked_steered_turn(steers: usize) -> State {
+    let mut source = created();
+    prompt(
+        &mut source,
+        0,
+        "prompt",
+        MessageAuthor::User,
+        "Original prompt",
+    );
+    for index in 1..=steers {
+        prompt(
+            &mut source,
+            index,
+            &format!("steer-{index}"),
+            MessageAuthor::User,
+            &format!("Steer {index}"),
+        );
+        source.messages.last_mut().unwrap().intent = InputIntent::Steer;
+    }
+    let mut fork = created();
+    fold_into(
+        &mut fork,
+        FactBody::ForkAccepted {
+            parent: ThreadId::new("parent-thread").unwrap(),
+            boundary: 1,
+            history: source.items,
+            messages: source.messages,
+        },
+    );
+    fork
+}
+
+#[test]
+fn keeps_an_inherited_steered_turn_whole_using_the_inherited_intents() {
+    let fork = forked_steered_turn(10);
+    let page = recent_history(&fork, 1, PagePolicy::RECENT);
+    assert_eq!(page.rows.len(), 11);
+    assert!(!page.has_more);
+    assert_eq!(page.rows[0].item.id.as_str(), "item-0");
+    assert!(page.rows.iter().all(|row| row.inherited));
+    assert_eq!(
+        page.rows[1].message.as_ref().map(|m| m.intent),
+        Some(InputIntent::Steer)
+    );
+
+    let one_turn = PagePolicy {
+        max_user_turns: Some(1),
+        ..PagePolicy::RECENT
+    };
+    assert_eq!(recent_history(&fork, 1, one_turn).rows.len(), 11);
+}
+
+#[test]
+fn bounds_inherited_messages_to_the_inherited_rows_in_the_window() {
+    let mut fork = created();
+    let mut source = created();
+    for turn in 0..15 {
+        prompt(
+            &mut source,
+            turn,
+            &format!("prompt-{turn}"),
+            MessageAuthor::User,
+            &format!("Prompt {turn}"),
+        );
+    }
+    fold_into(
+        &mut fork,
+        FactBody::ForkAccepted {
+            parent: ThreadId::new("parent-thread").unwrap(),
+            boundary: 15,
+            history: source.items,
+            messages: source.messages,
+        },
+    );
+    let bounded = bounded_state(&fork, 1, PagePolicy::RECENT);
+    assert_eq!(bounded.state.inherited_items.len(), HISTORY_MAX_USER_TURNS);
+    let kept: Vec<_> = bounded
+        .state
+        .inherited_messages
+        .iter()
+        .map(|m| m.id.to_string())
+        .collect();
+    assert_eq!(
+        kept,
+        (5..15)
+            .map(|turn| format!("prompt-{turn}"))
+            .collect::<Vec<_>>()
+    );
+    assert!(bounded.has_more_history);
+}
+
 #[test]
 fn retains_an_out_of_window_interrupt_request_needed_by_a_visible_result() {
     let mut full = created();
