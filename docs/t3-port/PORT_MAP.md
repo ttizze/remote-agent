@@ -1133,3 +1133,17 @@ R3 O6/O8/O9/O13 の再発検証を追加した。control RPC の失敗は run/at
 `RestartBackgroundNote.test.ts` の provider switch、completion 時刻での順序、同じ label の異なる ID、steer の旧 attempt による配送確認、未受領の chained continuation、ラベル・件数の bounds を `agent-domain/src/recovery.rs` と状態機械テストへ移植した。ID がなかった旧形式の kind + label fallback だけは対象外：未公開製品の現行形式だけを保持する規則に従う。
 
 `RestartContinuation.test.ts` と `ProviderRuntimeRecoveryService.test.ts` の未完了ターン・admitted continuation・held queue・停止／完了／maintenance の除外・新しいユーザー発言の優先・委任結果の復旧を domain の command→projection で検証する。再起動の chain と queue の不変条件は proptest に含めた。startup / shutdown の取消文言を保持し、native 子は旧 attempt の出力を拒否する。`CodexAdapterV2.ts` の継続時の空 input と Claude の通常 prompt を翻訳テストで確認する。native session の強い参照・プロセスの status・設定の取得は段階 3 の Host の入力準備で検証する。
+
+### 段階 1・2 の検証記録（2026-10-06）
+
+実装・テストの最終 revision は `4a52416ab649fa888b80322f7a2884715d270beb`。以後のコミットは検証記録のみ。新しい domain / provider 層の実装と上記の挙動検証を終え、push と PR 更新後にレビューを待つ。
+
+- `cargo test -p agent-domain -p agent-providers`: **128 件通過**（各 64 件）。状態機械の proptest と、固定版 71 transcript の projection replay を含む。
+- `NEXTEST_TEST_THREADS=4 scripts/dev-env.sh just unit-tests`: **533 件通過、既存 5 件 skip**。standalone agent-peer の 5 テスト群も通過。
+- `scripts/dev-env.sh cargo clippy --workspace --all-targets --features agent-core/bindings -- -D warnings` と standalone agent-peer の all-targets clippy: 通過。
+- workspace と standalone agent-peer の `cargo fmt -- --check`、`git diff --check`: 通過。
+- `python3 scripts/t3-port/inventory.py --check`: **960 ファイル**の固定 source hash 一致。新しい 2 crate と書き直した文書・Host 音声テスト・transport のコメントに製品名がないことを確認。
+
+途中の全体実行では既存 adapter・transport・Host の起動／通信のタイムアウトが発生した。単独検証を行い、音声 fixture が無関係な loopback 接続を provider の要求として数える問題を修正した。fixture に discovery の GET を入れて再現し、対象 route と TLS の接続だけで既存の期待値を検証する。タイムアウト値は変更せず、最終の全体実行は同時実行数 4 で通過した。
+
+段階 3 の actor / SQLite / outbox / provider session / 同期 / 履歴取り込み、段階 4 の core と 3 クライアントの接続、段階 5 の旧 crate 削除は未実施。稼働 Host・他 worktree・main に操作を加えていない。CI 待ち、cargo-mutants、E2E、Simulator の UI テスト、実 provider の受入検証は実施していない。
