@@ -95,6 +95,9 @@ pub fn request(
     restore_files: bool,
     now: &Timestamp,
 ) -> Result<Decision, DecisionError> {
+    if projection.thread.rollback_request_id.is_some() {
+        return Err(DecisionError("rollback is already in progress".into()));
+    }
     let (_, _, provider, _) = target(projection, scope_id, checkpoint_id)?;
     let mut thread = projection.thread.clone();
     thread.rollback_request_id = Some(command.command_id.clone());
@@ -183,6 +186,32 @@ pub fn finish(
 mod tests {
     use super::*;
     use crate::test_support::*;
+
+    #[test]
+    fn concurrent_rollback_is_rejected_before_replacing_the_request() {
+        let mut projection = projection();
+        projection.thread.rollback_request_id = Some(CommandId::new("first").unwrap());
+        let command = command("second", CommandBody::QueueResume);
+        let error = request(
+            &command,
+            &projection,
+            &CheckpointScopeId::new("scope").unwrap(),
+            &CheckpointId::new("checkpoint").unwrap(),
+            false,
+            &now(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("already in progress"));
+        assert_eq!(
+            projection
+                .thread
+                .rollback_request_id
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "first"
+        );
+    }
 
     #[test]
     fn rewind_preserves_audit_records_and_hides_only_later_completed_work() {

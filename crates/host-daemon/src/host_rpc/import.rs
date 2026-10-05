@@ -524,7 +524,7 @@ fn events(transcript: &Transcript, project_id: ProjectId) -> Vec<DomainEvent> {
         runtime_mode: RuntimeMode::FullAccess,
         interaction_mode: InteractionMode::Default,
         branch: None,
-        worktree_path: Some(transcript.cwd.to_string_lossy().into_owned()),
+        worktree_path: None,
         active_provider_thread_id: Some(provider_thread_id.clone()),
         lineage: Lineage {
             parent_thread_id: None,
@@ -836,6 +836,7 @@ mod tests {
         store.ingest(events, None, &at()).unwrap();
         let projection = store.projection(&thread_id).unwrap();
         assert!(projection.thread.imported);
+        assert!(projection.thread.worktree_path.is_none());
         assert_eq!(projection.visible_turn_items.len(), 2);
         assert!(projection.runs.is_empty());
         assert_eq!(

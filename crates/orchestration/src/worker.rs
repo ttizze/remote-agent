@@ -4,6 +4,7 @@ use crate::{
     contracts::*,
     store::{ClaimedEffect, Store, StoreError},
 };
+use futures_util::FutureExt;
 use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -61,6 +62,82 @@ async fn execute(
     adapter: Arc<dyn ProviderAdapter>,
     claim: ClaimedEffect,
 ) -> std::result::Result<(), StoreError> {
+    let failure = if claim.attempt > 5 {
+        Some(("effect retry limit exhausted".to_owned(), false))
+    } else {
+        match std::panic::AssertUnwindSafe(execute_inner(store.clone(), adapter, &claim))
+            .catch_unwind()
+            .await
+        {
+            Ok(Ok(())) | Ok(Err(StoreError::LeaseLost)) => None,
+            Ok(Err(error)) => Some((error.to_string(), matches!(error, StoreError::Sql(_)))),
+            Err(_) => Some(("effect job panicked".to_owned(), true)),
+        }
+    };
+    if let Some((message, retryable)) = failure {
+        fail(store.as_ref(), &claim, &message, retryable)?;
+    }
+    Ok(())
+}
+
+fn fail(
+    store: &Store,
+    claim: &ClaimedEffect,
+    message: &str,
+    retryable: bool,
+) -> Result<(), StoreError> {
+    let mut failed_claim = claim.clone();
+    if !retryable {
+        failed_claim.attempt = 5;
+    }
+    let retry = match store.finish_effect(&failed_claim, Some(message), now_ms()) {
+        Ok(retry) => retry,
+        Err(StoreError::LeaseLost) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if retry {
+        return Ok(());
+    }
+    let timestamp = Timestamp::from_millis(now_ms()).expect("current time");
+    let projection = store.projection(&claim.effect.thread_id)?;
+    if let EffectBody::Rollback { request_id, .. } = &claim.effect.body {
+        let mut thread = projection.thread.clone();
+        thread.rollback_request_id = None;
+        thread.rollback_failure = Some(message.to_owned());
+        thread.updated_at = timestamp.clone();
+        store.ingest_rollback(
+            crate::events(
+                &claim.effect.thread_id,
+                &format!("rollback-failed:{request_id}"),
+                vec![EventPayload::ThreadMetadataUpdated(thread)],
+                &timestamp,
+            ),
+            request_id,
+            &timestamp,
+        )?;
+    }
+    if let Some(run) = projection.runs.iter().find(|run| {
+        Some(&run.id) == claim.effect.body.run_id()
+            && run.status.is_blocking()
+            && run.status != RunStatus::Waiting
+    }) {
+        let events =
+            crate::decider::failed_effect(&projection, run, &claim.effect.id, message, &timestamp)
+                .events;
+        store.ingest(
+            events,
+            Some((&run.id, run.active_attempt_id.as_ref())),
+            &timestamp,
+        )?;
+    }
+    Ok(())
+}
+
+async fn execute_inner(
+    store: Arc<Store>,
+    adapter: Arc<dyn ProviderAdapter>,
+    claim: &ClaimedEffect,
+) -> std::result::Result<(), StoreError> {
     let mut commits = store.subscribe_commits();
     let projection = store.projection(&claim.effect.thread_id)?;
     let expected = claim
@@ -72,7 +149,7 @@ async fn execute(
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(10));
     heartbeat.tick().await;
     let start = match &claim.effect.body {
-        EffectBody::Start { run_id } => Some(run_id.clone()),
+        EffectBody::Start { run_id } | EffectBody::Restart { run_id, .. } => Some(run_id.clone()),
         _ => None,
     };
     let stop_requested = start.as_ref().is_some_and(|id| {
@@ -132,14 +209,14 @@ async fn execute(
                     cancelled = true;
                 }
             }
-            _ = heartbeat.tick() => {match store.renew_effect(&claim, now_ms()) { Ok(()) => {}, Err(StoreError::LeaseLost) => return Ok(()), Err(error) => return Err(error) }}
+            _ = heartbeat.tick() => {match store.renew_effect(claim, now_ms()) { Ok(()) => {}, Err(StoreError::LeaseLost) => return Ok(()), Err(error) => return Err(error) }}
         }
     };
     let timestamp =
         Timestamp::from_millis(now_ms()).map_err(|e| StoreError::InvalidEvent(e.to_string()))?;
     match result {
         Ok(events) => {
-            match store.renew_effect(&claim, now_ms()) {
+            match store.renew_effect(claim, now_ms()) {
                 Ok(()) => {}
                 Err(StoreError::LeaseLost) => return Ok(()),
                 Err(error) => return Err(error),
@@ -164,65 +241,22 @@ async fn execute(
                     )?;
                 }
             }
-            match store.finish_effect(&claim, None, now_ms()) {
+            match store.finish_effect(claim, None, now_ms()) {
                 Ok(_) | Err(StoreError::LeaseLost) => {}
                 Err(error) => return Err(error),
             }
         }
         Err(error) => {
             if cancelled {
-                let _ = store.finish_effect(&claim, None, now_ms());
+                let _ = store.finish_effect(claim, None, now_ms());
                 return Ok(());
             }
             if error.turn_completed && matches!(claim.effect.body, EffectBody::Steer { .. }) {
                 store.steer_follow_up(&claim.effect, &timestamp)?;
-                store.finish_effect(&claim, None, now_ms())?;
+                store.finish_effect(claim, None, now_ms())?;
                 return Ok(());
             }
-            let mut failed_claim = claim.clone();
-            if !error.retryable {
-                failed_claim.attempt = 5;
-            }
-            let retry = match store.finish_effect(&failed_claim, Some(&error.message), now_ms()) {
-                Ok(retry) => retry,
-                Err(StoreError::LeaseLost) => return Ok(()),
-                Err(error) => return Err(error),
-            };
-            if !retry && let EffectBody::Rollback { request_id, .. } = &claim.effect.body {
-                let mut thread = store.projection(&claim.effect.thread_id)?.thread;
-                thread.rollback_request_id = None;
-                thread.rollback_failure = Some(error.message.clone());
-                thread.updated_at = timestamp.clone();
-                store.ingest_rollback(
-                    crate::events(
-                        &claim.effect.thread_id,
-                        &format!("rollback-failed:{request_id}"),
-                        vec![EventPayload::ThreadMetadataUpdated(thread)],
-                        &timestamp,
-                    ),
-                    request_id,
-                    &timestamp,
-                )?;
-            }
-            if !retry && let Some((run_id, attempt_id)) = expected {
-                let projection = store.projection(&claim.effect.thread_id)?;
-                if let Some(run) = projection.runs.iter().find(|run| {
-                    run.id == run_id
-                        && run.status.is_blocking()
-                        && run.status != RunStatus::Waiting
-                        && run.active_attempt_id == attempt_id
-                }) {
-                    let events = crate::decider::failed_effect(
-                        &projection,
-                        run,
-                        &claim.effect.id,
-                        &error.message,
-                        &timestamp,
-                    )
-                    .events;
-                    store.ingest(events, Some((&run_id, attempt_id.as_ref())), &timestamp)?;
-                }
-            }
+            fail(store.as_ref(), claim, &error.message, error.retryable)?;
         }
     }
     Ok(())
@@ -250,7 +284,8 @@ mod tests {
             run.status = RunStatus::Completed;
             run.completed_at = Some(now());
             Ok(vec![DomainEvent {
-                id: EventId::new("adapter-done").unwrap(),
+                id: EventId::new(format!("adapter-done:{}:{}", projection.thread.id, run.id))
+                    .unwrap(),
                 thread_id: projection.thread.id,
                 occurred_at: now(),
                 payload: EventPayload::RunUpdated(run),
@@ -321,6 +356,13 @@ mod tests {
     }
     #[tokio::test]
     async fn stopping_an_in_progress_start_cancels_provider_input_and_holds_the_queue() {
+        stopping_start(false).await;
+    }
+    #[tokio::test]
+    async fn stopping_a_restart_cancels_the_replacement_provider_input() {
+        stopping_start(true).await;
+    }
+    async fn stopping_start(restart: bool) {
         let store = setup();
         store
             .dispatch(
@@ -336,7 +378,16 @@ mod tests {
             changed: tokio::sync::Notify::new(),
             inputs: std::sync::atomic::AtomicUsize::new(0),
         });
-        let claim = store.claim_effect("test", now_ms()).unwrap().unwrap();
+        let mut claim = store.claim_effect("test", now_ms()).unwrap().unwrap();
+        if restart {
+            let run = &store.projection(&create().thread_id).unwrap().runs[0];
+            claim.effect.body = EffectBody::Restart {
+                run_id: run.id.clone(),
+                provider_turn_id: ProviderTurnId::new("old-turn").unwrap(),
+                message_id: run.user_message_id.clone(),
+                attempt_id: run.active_attempt_id.clone().unwrap(),
+            };
+        }
         let task = tokio::spawn(execute(store.clone(), adapter.clone(), claim));
         adapter.started.notified().await;
         let run = store.projection(&create().thread_id).unwrap().runs[0]
@@ -409,7 +460,7 @@ mod tests {
             loop {
                 if [create().thread_id, other.thread_id.clone()]
                     .iter()
-                    .any(|id| store.projection(id).unwrap().runs[0].status == RunStatus::Completed)
+                    .all(|id| store.projection(id).unwrap().runs[0].status == RunStatus::Completed)
                 {
                     break;
                 }
@@ -421,6 +472,74 @@ mod tests {
         assert!(!worker.is_finished());
         stop.send(true).unwrap();
         worker.await.unwrap().unwrap();
+    }
+    struct Panics;
+    #[async_trait::async_trait]
+    impl ProviderAdapter for Panics {
+        async fn execute(
+            &self,
+            _: &Effect,
+            _: ThreadProjection,
+        ) -> Result<Vec<DomainEvent>, AdapterError> {
+            panic!("provider panic");
+        }
+    }
+    #[tokio::test]
+    async fn panics_exhaust_retries_and_release_the_same_thread() {
+        let store = setup();
+        for attempt in 1..=5 {
+            let claim = store
+                .claim_effect("worker", now_ms() + 60_000 * attempt)
+                .unwrap()
+                .unwrap();
+            assert_eq!(claim.attempt, attempt as u32);
+            execute(store.clone(), Arc::new(Panics), claim)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.projection(&create().thread_id).unwrap().runs[0].status,
+            RunStatus::Failed
+        );
+        store
+            .dispatch(
+                &send("after-panic", DispatchMode::StartImmediately),
+                &now(),
+                &turns(),
+                Driver::Codex,
+            )
+            .unwrap();
+        let claim = store
+            .claim_effect("worker", now_ms() + 600_000)
+            .unwrap()
+            .unwrap();
+        execute(store.clone(), Arc::new(Completion), claim)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.projection(&create().thread_id).unwrap().runs[1].status,
+            RunStatus::Completed
+        );
+    }
+    #[tokio::test]
+    async fn repeatedly_expired_leases_exhaust_without_repeating_provider_io() {
+        let store = setup();
+        for attempt in 1..=5 {
+            let claim = store
+                .claim_effect("lost-worker", 60_000 * attempt)
+                .unwrap()
+                .unwrap();
+            assert_eq!(claim.attempt, attempt as u32);
+        }
+        let claim = store.claim_effect("worker", 360_000).unwrap().unwrap();
+        execute(store.clone(), Arc::new(Panics), claim)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.projection(&create().thread_id).unwrap().runs[0].status,
+            RunStatus::Failed
+        );
+        assert!(store.claim_effect("worker", 600_000).unwrap().is_none());
     }
     #[tokio::test]
     async fn worker_commits_provider_records_and_completes_the_lease() {

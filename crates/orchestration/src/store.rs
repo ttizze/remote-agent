@@ -307,7 +307,7 @@ impl Store {
     }
     pub fn ingest_rollback(
         &self,
-        events: Vec<DomainEvent>,
+        mut events: Vec<DomainEvent>,
         request_id: &CommandId,
         now: &Timestamp,
     ) -> Result<Commit> {
@@ -325,6 +325,17 @@ impl Store {
                 events: vec![],
                 replayed: false,
             });
+        }
+        // Rollback owns only these fields. Metadata may have changed while
+        // the provider and filesystem operations were running.
+        for event in &mut events {
+            if let EventPayload::ThreadMetadataUpdated(completed) = &mut event.payload {
+                let mut current = projection.thread.clone();
+                current.rollback_request_id = completed.rollback_request_id.clone();
+                current.rollback_failure = completed.rollback_failure.clone();
+                current.updated_at = now.clone();
+                *completed = current;
+            }
         }
         let stored = commit_decision(
             &transaction,
@@ -811,10 +822,11 @@ impl Store {
         let Some((id, json, count)) = candidate else {
             return Ok(None);
         };
+        let effect = serde_json::from_str(&json)?;
         transaction.execute("UPDATE orchestration_v2_effect_outbox SET status='running',attempt_count=attempt_count+1,lease_owner=?2,lease_expires_at=?3 WHERE effect_id=?1", params![id, owner, now_ms.saturating_add(30_000)])?;
         transaction.commit()?;
         Ok(Some(ClaimedEffect {
-            effect: serde_json::from_str(&json)?,
+            effect,
             attempt: count + 1,
             lease_owner: owner.into(),
         }))
@@ -1811,6 +1823,56 @@ mod tests {
         assert!(store.ingest(vec![first, second], None, &now()).is_err());
         assert_eq!(store.sequence().unwrap(), 1);
         assert_eq!(store.projection(&before.thread.id).unwrap(), before);
+    }
+    #[test]
+    fn rollback_completion_preserves_concurrent_thread_metadata() {
+        let store = setup();
+        let request = CommandId::new("rollback").unwrap();
+        let mut thread = store.projection(&create().thread_id).unwrap().thread;
+        thread.rollback_request_id = Some(request.clone());
+        store
+            .ingest(
+                crate::events(
+                    &thread.id,
+                    "rollback-start",
+                    vec![EventPayload::ThreadMetadataUpdated(thread.clone())],
+                    &now(),
+                ),
+                None,
+                &now(),
+            )
+            .unwrap();
+        let mut finished = thread.clone();
+        finished.rollback_request_id = None;
+        thread.title = "Renamed during rollback".into();
+        thread.pinned_at = Some(now());
+        thread.deleted_at = Some(now());
+        store
+            .ingest(
+                crate::events(
+                    &thread.id,
+                    "concurrent",
+                    vec![EventPayload::ThreadMetadataUpdated(thread.clone())],
+                    &now(),
+                ),
+                None,
+                &now(),
+            )
+            .unwrap();
+        store
+            .ingest_rollback(
+                crate::events(
+                    &thread.id,
+                    "rollback-finished",
+                    vec![EventPayload::ThreadMetadataUpdated(finished)],
+                    &now(),
+                ),
+                &request,
+                &now(),
+            )
+            .unwrap();
+        thread.rollback_request_id = None;
+        assert_eq!(store.projection(&thread.id).unwrap().thread, thread);
     }
     #[test]
     fn effects_are_serial_per_thread_and_backoff_blocks_later_effects() {
