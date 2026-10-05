@@ -40,6 +40,7 @@ pub struct Notification {
     pub child_thread: Option<ThreadId>,
     pub outcome: NotificationOutcome,
     pub summary: String,
+    pub detail: Option<String>,
 }
 fn label(label: Option<&str>) -> Option<String> {
     let line = label?.trim().split('\n').next()?.trim();
@@ -161,6 +162,7 @@ pub fn background_notification(reports: &[WorkReport]) -> Option<Notification> {
         }
     };
     Some(Notification {
+        detail: None,
         source: NotificationSource::Native(source),
         child_thread,
         outcome,
@@ -232,6 +234,7 @@ pub fn delegated_notification(
         )
     };
     Notification {
+        detail: None,
         source: NotificationSource::Delegated {
             task_ids: task_ids.to_vec(),
         },
@@ -265,6 +268,7 @@ mod tests {
         assert_eq!(
             background_notification(&[subagent]),
             Some(Notification {
+                detail: None,
                 source: NotificationSource::Native(BackgroundKind::Subagent),
                 child_thread: Some(child.clone()),
                 outcome: NotificationOutcome::Completed,
@@ -306,6 +310,7 @@ mod tests {
             ])
             .unwrap(),
             Notification {
+                detail: None,
                 source: NotificationSource::Native(BackgroundKind::BackgroundTask),
                 child_thread: None,
                 outcome: NotificationOutcome::Cancelled,

@@ -857,6 +857,7 @@ fn restart_continuation_precedes_held_queue_and_carries_notes_across_an_unaccept
                     description: "sleep 20".into(),
                     status: None,
                     summary: None,
+                    exit_code: None,
                 },
             );
         }
@@ -3121,6 +3122,8 @@ fn wire_encodings_round_trip_state_facts_commands_and_effects() {
                     presentation: ToolPresentation {
                         title: Some("Read".into()),
                         source: Some(Json(serde_json::json!({"key":"mcp:x"}))),
+                        surface: Some("browser".into()),
+                        icon: None,
                     },
                     name: "read".into(),
                     input: Json(serde_json::json!({"path":"a"})),
@@ -3744,7 +3747,7 @@ fn fail_with(s: &mut State, attempt: &RunAttemptId, key: &str, class: &str) {
             key: format!("{key}-error"),
             kind: ProviderItem::Error {
                 message: class.into(),
-                retrying: false,
+                retry: None,
                 code: None,
                 class: Some(class.into()),
                 retryable: None,
@@ -5019,7 +5022,7 @@ fn large_text_is_split_across_facts_without_truncation() {
             key: "error".into(),
             kind: ProviderItem::Error {
                 message: "x".repeat(5000),
-                retrying: false,
+                retry: None,
                 code: Some("c".repeat(200)),
                 class: None,
                 retryable: None,
@@ -5070,4 +5073,101 @@ fn wire_encodings_round_trip_imports_titles_rollbacks_and_workspaces() {
     });
     round_trip(&s);
     assert_eq!(STATE_FORMAT, 1);
+}
+// T3 CodexAdapterV2.test.ts:3805: a command outliving its turn reports back and wakes the thread.
+#[test]
+fn a_retained_command_keeps_its_row_and_wakes_the_thread_when_it_finishes() {
+    const COMMAND: &str = "sleep 20 && echo CODEX_BG_WAKE_DONE";
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let command_item = ProviderItem::Command {
+        command: COMMAND.into(),
+        cwd: None,
+        exit_code: None,
+    };
+    provider(
+        &mut s,
+        "started",
+        &a,
+        ProviderEvent::ItemStarted {
+            key: "call-bg".into(),
+            kind: command_item.clone(),
+        },
+    );
+    provider(
+        &mut s,
+        "retained",
+        &a,
+        ProviderEvent::BackgroundTask {
+            key: "call-bg".into(),
+            tool: "call-bg".into(),
+            kind: BackgroundKind::Command,
+            description: COMMAND.into(),
+            status: None,
+            summary: None,
+            exit_code: None,
+        },
+    );
+    finish(&mut s, &a);
+    let row = |s: &State| {
+        s.items
+            .iter()
+            .find(|item| item.native_key == "call-bg")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row(&s).status, ItemStatus::Running);
+    let detail = format!(
+        "Background command completed (exit 0): {COMMAND}\n\nOutput tail:\nCODEX_BG_WAKE_DONE"
+    );
+    for (key, event) in [
+        (
+            "late-output",
+            ProviderEvent::ItemFinished {
+                key: "call-bg".into(),
+                kind: command_item,
+                text: Some("CODEX_BG_WAKE_DONE\n".into()),
+                status: ItemStatus::Completed,
+            },
+        ),
+        (
+            "late-report",
+            ProviderEvent::BackgroundTask {
+                key: "call-bg".into(),
+                tool: "call-bg".into(),
+                kind: BackgroundKind::Command,
+                description: COMMAND.into(),
+                status: Some(ItemStatus::Completed),
+                summary: Some(detail.clone()),
+                exit_code: Some(0),
+            },
+        ),
+        (
+            "wake",
+            ProviderEvent::Wake {
+                text: detail.clone(),
+                detail: Some(COMMAND.into()),
+            },
+        ),
+    ] {
+        provider(&mut s, key, &a, event);
+    }
+    assert_eq!(row(&s).status, ItemStatus::Completed);
+    assert_eq!(row(&s).text, "CODEX_BG_WAKE_DONE\n");
+    assert!(s.background_work.is_empty());
+    let wake = s.runs.last().unwrap();
+    assert_eq!(wake.status, RunStatus::Starting);
+    let message = s.message(&wake.message).unwrap();
+    assert_eq!(message.text, detail);
+    assert_eq!(
+        message.notification,
+        Some(Notification {
+            source: NotificationSource::Native(BackgroundKind::Command),
+            child_thread: None,
+            outcome: NotificationOutcome::Completed,
+            summary: format!("Command \"{COMMAND}\" finished (exit 0)"),
+            detail: Some(COMMAND.into()),
+        })
+    );
+    assert!(s.wake_reports.is_empty());
 }

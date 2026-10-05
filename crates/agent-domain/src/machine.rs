@@ -749,7 +749,7 @@ impl Decision {
                 key,
                 kind: ProviderItem::Error {
                     message: message.into(),
-                    retrying: false,
+                    retry: None,
                     code: None,
                     class: Some("context_handoff".into()),
                     retryable: Some(true),
@@ -896,9 +896,10 @@ impl Decision {
             self.fact(FactBody::QueueHeld { id, held: true });
         }
     }
-    /// Message-capable questions outlive their turn; the user answers them later.
+    /// Message-capable questions outlive their turn; the user answers them
+    /// later. Retained background work keeps its row until it reports.
     fn close_attempt_items(&mut self, attempt: &RunAttemptId, status: ItemStatus) {
-        let items=self.state.items.iter().filter(|i| i.attempt.as_ref()==Some(attempt) && !i.status.terminal() && !matches!(&i.kind,ItemKind::Subagent {task} if self.state.tasks.iter().any(|candidate|&candidate.id==task && !candidate.status.terminal())) && !matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message))).map(|i| i.id.clone()).collect::<Vec<_>>();
+        let items=self.state.items.iter().filter(|i| i.attempt.as_ref()==Some(attempt) && !i.status.terminal() && !self.state.background_work.values().any(|w| &w.attempt==attempt && (w.key==i.native_key || w.tool==i.native_key)) && !matches!(&i.kind,ItemKind::Subagent {task} if self.state.tasks.iter().any(|candidate|&candidate.id==task && !candidate.status.terminal())) && !matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message))).map(|i| i.id.clone()).collect::<Vec<_>>();
         for id in items {
             self.fact(FactBody::ItemCompleted { id, status });
         }
@@ -3372,7 +3373,7 @@ impl Decision {
             String::new(),
             ItemKind::Error {
                 message: bounded_failure_text(message, 4096),
-                retrying: false,
+                retry: None,
                 code: None,
                 class: class.map(str::to_owned),
                 retryable: None,
@@ -3453,13 +3454,13 @@ impl Decision {
             },
             ProviderItem::Error {
                 message,
-                retrying,
+                retry,
                 code,
                 class,
                 retryable,
             } => ItemKind::Error {
                 message: bounded_failure_text(message, 4096),
-                retrying: *retrying,
+                retry: retry.clone(),
                 code: code.as_deref().map(|code| bounded_failure_text(code, 128)),
                 class: class.clone(),
                 retryable: *retryable,
@@ -3548,7 +3549,14 @@ impl Decision {
         if !child && run.is_none() {
             return Reply::Ignored;
         }
+        let retained = |key: &String| {
+            self.state
+                .background_work
+                .values()
+                .any(|work| &work.attempt == attempt && (&work.key == key || &work.tool == key))
+        };
         let background = matches!(event, ProviderEvent::RequestOpened { owner_path, .. } if !owner_path.is_empty())
+            || matches!(event, ProviderEvent::ItemFinished { key, .. } | ProviderEvent::TextDelta { key, .. } if retained(key))
             || matches!(
                 event,
                 ProviderEvent::SubagentStarted { .. }
@@ -3682,7 +3690,7 @@ impl Decision {
                                 key: self.native_key("session-error", attempt, "exit"),
                                 kind: ProviderItem::Error {
                                     message: error.clone(),
-                                    retrying: false,
+                                    retry: None,
                                     code: None,
                                     class: Some("provider_error".into()),
                                     retryable: None,
@@ -4397,9 +4405,17 @@ impl Decision {
                 description,
                 status,
                 summary,
+                exit_code,
             } => {
                 if let Some(status) = status {
-                    if let Some(work) = self.state.background_work.get(key).cloned() {
+                    // Work the user stopped does not report back.
+                    if let Some(work) = self
+                        .state
+                        .background_work
+                        .get(key)
+                        .filter(|work| !self.state.stopping.contains(&work.attempt))
+                        .cloned()
+                    {
                         self.fact(FactBody::NativeWorkReported {
                             key: key.clone(),
                             report: WorkReport {
@@ -4407,7 +4423,7 @@ impl Decision {
                                 label: Some(work.description),
                                 outcome: (*status).into(),
                                 child_thread: None,
-                                exit_code: None,
+                                exit_code: *exit_code,
                             },
                             text: summary.clone().unwrap_or_default(),
                         });
@@ -4423,11 +4439,11 @@ impl Decision {
                     });
                 }
             }
-            Wake { text } => {
+            Wake { text, detail } => {
                 let message = SendMessage {
                     created_by: MessageAuthor::Agent,
                     creation_source: "provider".into(),
-                    id: MessageId::new(self.key("wake", text)).unwrap(),
+                    id: MessageId::new(self.key("wake", &self.facts.len().to_string())).unwrap(),
                     text: text.clone(),
                     attachments: vec![],
                     selection: run.as_ref().map(|r| r.selection.clone()),
@@ -4436,7 +4452,27 @@ impl Decision {
                     source_plan: None,
                     title_seed: None,
                 };
-                self.create_run(&message);
+                let notification = background_notification(
+                    &self
+                        .state
+                        .wake_reports
+                        .iter()
+                        .map(|record| record.report.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .map(|mut notification| {
+                    notification.detail = detail.clone();
+                    notification
+                });
+                if !matches!(self.create_run(&message), Reply::Rejected { .. }) {
+                    if let Some(notification) = notification {
+                        self.fact(FactBody::MessageNotificationAssigned {
+                            id: message.id.clone(),
+                            notification,
+                        });
+                    }
+                    self.fact(FactBody::WakeReportsConsumed);
+                }
             }
         }
         Reply::Accepted

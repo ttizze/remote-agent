@@ -226,7 +226,11 @@ impl ClaudeProtocol {
                             "Claude API {}.",
                             string(frame, "error").replace('_', " ")
                         ),
-                        retrying: true,
+                        retry: Some(RetryProgress {
+                            attempt: 1,
+                            max_attempts: None,
+                            delay_ms: None,
+                        }),
                         code: frame["error_status"]
                             .as_i64()
                             .map(|status| format!("api_error_{status}"))
@@ -312,6 +316,7 @@ impl ClaudeProtocol {
                             description: string(frame, "description"),
                             status: None,
                             summary: None,
+                            exit_code: None,
                         });
                     }
                 }
@@ -352,6 +357,7 @@ impl ClaudeProtocol {
                                     BackgroundKind::Command
                                 },
                                 description: string(frame, "summary"),
+                                exit_code: None,
                                 status: Some(match string(frame, "status").as_str() {
                                     "completed" => ItemStatus::Completed,
                                     "stopped" => ItemStatus::Cancelled,
@@ -607,6 +613,7 @@ impl ClaudeProtocol {
                                             .unwrap_or_else(|| name.clone()),
                                         status: None,
                                         summary: None,
+                                        exit_code: None,
                                     });
                                 }
                                 if name == "Agent" || name == "Task" {
@@ -682,7 +689,7 @@ impl ClaudeProtocol {
                         key: optional(frame, "uuid").unwrap_or_else(|| "result-error".into()),
                         kind: ProviderItem::Error {
                             message,
-                            retrying: false,
+                            retry: None,
                             code: Some(if frame["subtype"] != "success" {
                                 string(frame, "subtype")
                             } else {
@@ -848,6 +855,7 @@ fn claude_tool_presentation(meta: &Value) -> Option<ToolPresentation> {
     Some(ToolPresentation {
         title: Some(title),
         source,
+        ..ToolPresentation::default()
     })
 }
 fn claude_tool(

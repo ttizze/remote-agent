@@ -328,7 +328,20 @@ impl Replay {
                         self.owner = effect.attempt.clone();
                     }
                     match self.codex.command(&command, &self.context, &[]) {
-                        Ok(frames) => self.pending.extend(frames),
+                        Ok(output) => {
+                            self.pending.extend(output.outbound);
+                            if let Some(attempt) = effect.attempt.clone() {
+                                for event in output.events {
+                                    self.apply(
+                                        thread,
+                                        Input::Provider {
+                                            attempt: attempt.clone(),
+                                            event: Box::new(event),
+                                        },
+                                    );
+                                }
+                            }
+                        }
                         Err(ProtocolError::Remote {
                             turn_completed,
                             message,

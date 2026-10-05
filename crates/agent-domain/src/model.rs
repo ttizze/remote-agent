@@ -219,6 +219,9 @@ pub struct TokenUsage {
 pub struct ToolPresentation {
     pub title: Option<String>,
     pub source: Option<Json>,
+    /// `browser` or `computer` for tools that act on those surfaces.
+    pub surface: Option<String>,
+    pub icon: Option<Json>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ItemKind {
@@ -276,7 +279,7 @@ pub enum ItemKind {
     },
     Error {
         message: String,
-        retrying: bool,
+        retry: Option<RetryProgress>,
         code: Option<String>,
         class: Option<String>,
         retryable: Option<bool>,
@@ -287,6 +290,13 @@ pub enum ItemKind {
     Notification {
         notification: Notification,
     },
+}
+/// A provider retry that is still in progress or has resolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryProgress {
+    pub attempt: u64,
+    pub max_attempts: Option<u64>,
+    pub delay_ms: Option<u64>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Item {
@@ -916,7 +926,7 @@ pub enum ProviderItem {
     },
     Error {
         message: String,
-        retrying: bool,
+        retry: Option<RetryProgress>,
         code: Option<String>,
         class: Option<String>,
         retryable: Option<bool>,
@@ -1046,9 +1056,12 @@ pub enum ProviderEvent {
         description: String,
         status: Option<ItemStatus>,
         summary: Option<String>,
+        exit_code: Option<i64>,
     },
+    /// The provider asks for a turn that reports finished background work.
     Wake {
         text: String,
+        detail: Option<String>,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

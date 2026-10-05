@@ -291,7 +291,7 @@ mod tests {
                 key: "error".into(),
                 kind: ProviderItem::Error {
                     message: format!("{class} message"),
-                    retrying: false,
+                    retry: None,
                     code: None,
                     class: Some(class.into()),
                     retryable: None,

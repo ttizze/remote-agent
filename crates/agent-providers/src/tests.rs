@@ -129,7 +129,7 @@ fn wire_context() -> WireContext {
 }
 fn codex_turn_params(command: &ProviderCommand, context: &WireContext) -> Value {
     let mut protocol = CodexProtocol::default();
-    let start = protocol.command(command, context, &[]).unwrap();
+    let start = protocol.command(command, context, &[]).unwrap().outbound;
     protocol
         .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
         .unwrap()
@@ -289,13 +289,13 @@ fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume
     let mut protocol = CodexProtocol::default();
     let expected = json!({"tools.update_plan.enabled":true,"mcp_servers":{"runtime":{"url":"http://127.0.0.1:43123/mcp"}}});
     assert_eq!(
-        protocol.command(&start, &context, &[]).unwrap()[0]["params"]["config"],
+        protocol.command(&start, &context, &[]).unwrap().outbound[0]["params"]["config"],
         expected
     );
     if let ProviderCommand::Start { native_thread, .. } = &mut start {
         *native_thread = Some("resumed".into());
     }
-    let resume = protocol.command(&start, &context, &[]).unwrap();
+    let resume = protocol.command(&start, &context, &[]).unwrap().outbound;
     assert_eq!(resume[0]["method"], "thread/resume");
     assert_eq!(resume[0]["params"]["config"], expected);
     let fork = protocol
@@ -307,7 +307,8 @@ fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume
             &context,
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .outbound;
     assert_eq!(fork[0]["params"]["config"], expected);
     assert_eq!(fork[0]["params"]["model"], "gpt-5.4");
     let revert = protocol
@@ -319,7 +320,8 @@ fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume
             &context,
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .outbound;
     let resume = protocol.receive(&json!({"id":revert[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"notLoaded"}}}})).unwrap();
     assert_eq!(resume.outbound[0]["params"]["config"], expected);
     assert_eq!(resume.outbound[0]["params"]["model"], "gpt-5.4");
@@ -331,7 +333,8 @@ fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start()
     let mut protocol = CodexProtocol::default();
     let start = protocol
         .command(&codex_start(), &wire_context(), &[])
-        .unwrap();
+        .unwrap()
+        .outbound;
     assert_eq!(start[0]["method"], "thread/start");
     assert!(
         protocol
@@ -344,6 +347,7 @@ fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start()
                 &[]
             )
             .unwrap()
+            .outbound
             .is_empty()
     );
     let ready = protocol
@@ -356,7 +360,8 @@ fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start()
     }
     let next = protocol
         .command(&next_command, &wire_context(), &[])
-        .unwrap();
+        .unwrap()
+        .outbound;
     assert_eq!(next[0]["method"], "turn/start");
     assert_eq!(next[0]["params"]["approvalsReviewer"], "auto_review");
     assert_eq!(next[0]["params"]["approvalPolicy"], "on-request");
@@ -371,7 +376,8 @@ fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes(
     let mut protocol = CodexProtocol::default();
     let start = protocol
         .command(&codex_start(), &wire_context(), &[])
-        .unwrap();
+        .unwrap()
+        .outbound;
     let ready = protocol
         .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"root"}}}))
         .unwrap();
@@ -386,6 +392,7 @@ fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes(
                 &[]
             )
             .unwrap()
+            .outbound
             .is_empty()
     );
     let started = protocol.receive(&json!({"method":"turn/started","params":{"threadId":"root","turn":{"id":"turn-root"}}})).unwrap();
@@ -394,7 +401,7 @@ fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes(
         .receive(&json!({"id":ready.outbound[0]["id"],"result":{"turn":{"id":"turn-root"}}}))
         .unwrap();
     assert!(reply.outbound.is_empty());
-    protocol.receive(&json!({"method":"item/started","params":{"threadId":"root","item":{"id":"tool","type":"commandExecution","command":"sleep 30","processId":"123"}}})).unwrap();
+    protocol.receive(&json!({"method":"item/started","params":{"threadId":"root","item":{"id":"tool","type":"commandExecution","command":"sleep 30","processId":"123","status":"inProgress"}}})).unwrap();
     let stop = protocol
         .command(
             &ProviderCommand::Interrupt {
@@ -404,7 +411,8 @@ fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes(
             &wire_context(),
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .outbound;
     assert_eq!(
         stop.iter()
             .map(|f| f["method"].as_str().unwrap())
@@ -415,6 +423,9 @@ fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes(
         stop[1]["params"],
         json!({"threadId":"root","processId":"123"})
     );
+    protocol
+        .receive(&json!({"method":"turn/started","params":{"threadId":"child","turn":{"id":"turn-child"}}}))
+        .unwrap();
     let child = protocol
         .command(
             &ProviderCommand::Interrupt {
@@ -424,7 +435,8 @@ fn codex_stop_before_turn_ready_interrupts_once_and_terminates_native_processes(
             &wire_context(),
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .outbound;
     assert_eq!(child.len(), 1);
     assert_eq!(
         child[0]["params"],
@@ -484,7 +496,10 @@ fn native_history_injection_preserves_roles_and_only_explicit_unsupported_uses_i
         if let ProviderCommand::Start { context, .. } = &mut command {
             *context = Some(history.clone());
         }
-        let start = protocol.command(&command, &wire_context(), &[]).unwrap();
+        let start = protocol
+            .command(&command, &wire_context(), &[])
+            .unwrap()
+            .outbound;
         let ready = protocol
             .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
             .unwrap();
@@ -550,7 +565,10 @@ fn inline_history_and_restart_notes_precede_the_labelled_user_message() {
         )
     );
     let mut codex = CodexProtocol::default();
-    let start = codex.command(&command, &wire_context(), &[]).unwrap();
+    let start = codex
+        .command(&command, &wire_context(), &[])
+        .unwrap()
+        .outbound;
     let ready = codex
         .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
         .unwrap();
@@ -588,7 +606,10 @@ fn codex_start_and_steer_send_prepared_images_after_the_text() {
         *text = "€review this".into();
     }
     let mut codex = CodexProtocol::default();
-    let start = codex.command(&command, &wire_context(), &prepared).unwrap();
+    let start = codex
+        .command(&command, &wire_context(), &prepared)
+        .unwrap()
+        .outbound;
     let ready = codex
         .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
         .unwrap();
@@ -618,7 +639,8 @@ fn codex_start_and_steer_send_prepared_images_after_the_text() {
             &wire_context(),
             &prepared,
         )
-        .unwrap();
+        .unwrap()
+        .outbound;
     assert_eq!(steer[0]["method"], "turn/steer");
     assert_eq!(
         steer[0]["params"]["input"][1],
@@ -658,7 +680,8 @@ fn a_cancelled_codex_question_replies_with_no_answers() {
             &wire_context(),
             &[],
         )
-        .unwrap();
+        .unwrap()
+        .outbound;
     assert_eq!(reply[0], json!({"id":7,"result":{"answers":{}}}));
 }
 fn prepared_attachment() -> Attachment {
@@ -783,6 +806,7 @@ fn rollback_resolves_an_absolute_boundary_across_pages_and_is_safe_to_repeat() {
     let read = protocol
         .command(&command, &wire_context(), &[])
         .unwrap()
+        .outbound
         .remove(0);
     assert_eq!(
         read["params"],
@@ -816,6 +840,7 @@ fn rollback_resolves_an_absolute_boundary_across_pages_and_is_safe_to_repeat() {
     let read = protocol
         .command(&command, &wire_context(), &[])
         .unwrap()
+        .outbound
         .remove(0);
     let page = protocol.receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}})).unwrap().outbound.remove(0);
     assert!(
@@ -841,6 +866,7 @@ fn rollback_rejects_repeated_cursors_and_missing_heads_without_reverting_partial
                 &[],
             )
             .unwrap()
+            .outbound
             .remove(0);
         let page = protocol
             .receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated"}}}))
@@ -936,6 +962,7 @@ fn stop_during_history_injection_suppresses_both_acceptance_and_unsupported_fall
         let create = protocol
             .command(&start, &wire_context(), &[])
             .unwrap()
+            .outbound
             .remove(0);
         let inject = protocol
             .receive(&json!({"id":create["id"],"result":{"thread":{"id":"native"}}}))
@@ -959,4 +986,481 @@ fn stop_during_history_injection_suppresses_both_acceptance_and_unsupported_fall
         };
         assert!(protocol.receive(&reply).unwrap().outbound.is_empty());
     }
+}
+fn codex_ready() -> CodexProtocol {
+    let mut codex = CodexProtocol::default();
+    let start = codex
+        .command(&codex_start(), &wire_context(), &[])
+        .unwrap()
+        .outbound;
+    let ready = codex
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"root"}}}))
+        .unwrap();
+    codex
+        .receive(&json!({"id":ready.outbound[0]["id"],"result":{"turn":{"id":"turn"}}}))
+        .unwrap();
+    codex
+        .receive(
+            &json!({"method":"turn/started","params":{"threadId":"root","turn":{"id":"turn"}}}),
+        )
+        .unwrap();
+    codex
+}
+fn notify(codex: &mut CodexProtocol, method: &str, params: Value) -> Translation {
+    codex
+        .receive(&json!({"method":method,"params":params}))
+        .unwrap()
+}
+#[test]
+fn stop_while_the_thread_is_starting_suppresses_its_prompt_even_after_thread_started() {
+    let mut codex = CodexProtocol::default();
+    let start = codex
+        .command(&codex_start(), &wire_context(), &[])
+        .unwrap()
+        .outbound;
+    notify(
+        &mut codex,
+        "thread/started",
+        json!({"thread":{"id":"root"}}),
+    );
+    let stop = codex
+        .command(
+            &ProviderCommand::Interrupt {
+                native_thread: None,
+                native_turn: None,
+            },
+            &wire_context(),
+            &[],
+        )
+        .unwrap();
+    assert!(stop.outbound.is_empty());
+    let reply = codex
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"root"}}}))
+        .unwrap();
+    assert!(reply.outbound.is_empty());
+}
+// T3 CodexAdapterV2.test.ts:3805 and :4004.
+#[test]
+fn commands_running_at_turn_end_report_later_and_stop_without_a_turn_interrupt() {
+    const COMMAND: &str = "sleep 20 && echo CODEX_BG_WAKE_DONE";
+    let mut codex = codex_ready();
+    notify(
+        &mut codex,
+        "item/started",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"commandExecution","id":"call-bg","command":COMMAND,"processId":"4242","status":"inProgress"}}),
+    );
+    let done = notify(
+        &mut codex,
+        "turn/completed",
+        json!({"threadId":"root","turn":{"id":"turn","status":"completed"}}),
+    );
+    assert!(matches!(
+        &done.events[..],
+        [ProviderEvent::BackgroundTask { key, status: None, description, .. }, ProviderEvent::TurnFinished { .. }]
+            if key == "call-bg" && description == COMMAND
+    ));
+    let late = notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"commandExecution","id":"call-bg","command":COMMAND,"processId":"4242","status":"completed","exitCode":0,"aggregatedOutput":"CODEX_BG_WAKE_DONE\n"}}),
+    );
+    let detail = format!(
+        "Background command completed (exit 0): {COMMAND}\n\nOutput tail:\nCODEX_BG_WAKE_DONE"
+    );
+    assert!(
+        matches!(&late.events[0], ProviderEvent::ItemFinished { key, status: ItemStatus::Completed, .. } if key == "call-bg")
+    );
+    assert_eq!(
+        late.events[1],
+        ProviderEvent::BackgroundTask {
+            key: "call-bg".into(),
+            tool: "call-bg".into(),
+            kind: BackgroundKind::Command,
+            description: COMMAND.into(),
+            status: Some(ItemStatus::Completed),
+            summary: Some(detail.clone()),
+            exit_code: Some(0),
+        }
+    );
+    assert_eq!(
+        late.events[2],
+        ProviderEvent::Wake {
+            text: detail,
+            detail: Some(COMMAND.into()),
+        }
+    );
+
+    let mut codex = codex_ready();
+    notify(
+        &mut codex,
+        "item/started",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"commandExecution","id":"call-bg","command":COMMAND,"processId":"4242","status":"inProgress"}}),
+    );
+    notify(
+        &mut codex,
+        "turn/completed",
+        json!({"threadId":"root","turn":{"id":"turn","status":"completed"}}),
+    );
+    let stop = codex
+        .command(
+            &ProviderCommand::Interrupt {
+                native_thread: Some("root".into()),
+                native_turn: Some("turn".into()),
+            },
+            &wire_context(),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        stop.outbound,
+        [
+            json!({"id":3,"method":"thread/backgroundTerminals/terminate","params":{"threadId":"root","processId":"4242"}})
+        ]
+    );
+    let listed = codex
+        .receive(&json!({"id":3,"result":{"terminated":false}}))
+        .unwrap();
+    assert_eq!(
+        listed.outbound,
+        [json!({"id":4,"method":"thread/backgroundTerminals/list","params":{"threadId":"root"}})]
+    );
+    assert!(matches!(
+        codex.receive(&json!({"id":4,"result":{"data":[{"processId":"4242"}],"nextCursor":null}})),
+        Err(ProtocolError::Remote { message, .. }) if message == "Codex background terminal 4242 remained active after termination."
+    ));
+    let stop = codex
+        .command(
+            &ProviderCommand::Interrupt {
+                native_thread: Some("root".into()),
+                native_turn: Some("turn".into()),
+            },
+            &wire_context(),
+            &[],
+        )
+        .unwrap();
+    let ended = codex
+        .receive(&json!({"id":stop.outbound[0]["id"],"result":{"terminated":true}}))
+        .unwrap();
+    assert!(matches!(
+        &ended.events[0],
+        ProviderEvent::ItemFinished {
+            status: ItemStatus::Interrupted,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &ended.events[1],
+        ProviderEvent::BackgroundTask {
+            status: Some(ItemStatus::Cancelled),
+            ..
+        }
+    ));
+    let late = notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"commandExecution","id":"call-bg","command":COMMAND,"status":"failed","exitCode":143}}),
+    );
+    assert!(
+        !late
+            .events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::Wake { .. }))
+    );
+}
+// T3 CodexAdapterV2.test.ts:2242.
+#[test]
+fn asynchronous_codex_questions_become_message_requests_without_prose() {
+    let mut codex = codex_ready();
+    let started = notify(
+        &mut codex,
+        "item/started",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"agentMessage","id":"async-question-item","text":"","delivery":"async"}}),
+    );
+    assert!(started.events.is_empty());
+    let done = notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"agentMessage","id":"async-question-item","text":"Which branch?","delivery":"async","questions":[{"title":"Which branch?","options":["main","dev"]}]}}),
+    );
+    let [
+        ProviderEvent::RequestOpened {
+            key,
+            body: RequestBody::Questions { questions },
+            capability: ResponseCapability::Message,
+            ..
+        },
+    ] = &done.events[..]
+    else {
+        panic!("{:?}", done.events)
+    };
+    assert_eq!(key, "async:async-question-item");
+    assert_eq!(questions[0].question, "Which branch?");
+    assert_eq!(
+        questions[0]
+            .options
+            .iter()
+            .map(|o| o.label.as_str())
+            .collect::<Vec<_>>(),
+        ["main", "dev"]
+    );
+}
+// T3 CodexAdapterV2.ts codexItemStatus and CodexAdapterV2.test.ts:6670.
+#[test]
+fn codex_item_and_subagent_states_use_the_reference_mapping() {
+    let mut codex = codex_ready();
+    let declined = notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"fileChange","id":"edit","changes":[],"status":"declined"}}),
+    );
+    assert!(matches!(
+        &declined.events[0],
+        ProviderEvent::ItemFinished {
+            status: ItemStatus::Cancelled,
+            ..
+        }
+    ));
+    notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent","receiverThreadIds":["a","b","c","d","e","f"],"agentsStates":{}}}),
+    );
+    let states = notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"collabAgentToolCall","id":"list","tool":"listAgents","receiverThreadIds":["a","b","c","d","e","f","unknown"],"agentsStates":{
+            "a":{"status":"errored","message":null},"b":{"status":"shutdown","message":null},
+            "c":{"status":"notFound","message":null},"d":{"status":"interrupted","message":null},
+            "e":{"status":"completed","message":"done"},"f":{"status":"running","message":null},
+            "unknown":{"status":"completed","message":null}}}}),
+    );
+    let finished = states
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::SubagentFinished { key, status, .. } => Some((key.as_str(), *status)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        finished,
+        [
+            ("a", ItemStatus::Failed),
+            ("b", ItemStatus::Cancelled),
+            ("c", ItemStatus::Failed),
+            ("d", ItemStatus::Interrupted),
+            ("e", ItemStatus::Completed)
+        ]
+    );
+}
+// T3 CodexAdapterV2.ts:2685: only a spawn assigns a child's parent.
+#[test]
+fn collaboration_calls_do_not_reparent_existing_children() {
+    let mut codex = codex_ready();
+    notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"collabAgentToolCall","id":"s1","tool":"spawnAgent","receiverThreadIds":["a"],"agentsStates":{}}}),
+    );
+    notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"a","turnId":"t-a","item":{"type":"collabAgentToolCall","id":"s2","tool":"spawnAgent","receiverThreadIds":["b"],"agentsStates":{}}}),
+    );
+    notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"collabAgentToolCall","id":"w","tool":"wait","receiverThreadIds":["b"],"agentsStates":{}}}),
+    );
+    let output = notify(
+        &mut codex,
+        "item/agentMessage/delta",
+        json!({"threadId":"b","turnId":"t-b","itemId":"m","delta":"hi"}),
+    );
+    let ProviderEvent::Child { key, event } = &output.events[0] else {
+        panic!()
+    };
+    assert_eq!(key, "a");
+    assert!(matches!(event.as_ref(), ProviderEvent::Child { key, .. } if key == "b"));
+}
+// T3 CodexAdapterV2.test.ts:5719 and :2837.
+#[test]
+fn codex_failures_and_retries_keep_their_reference_classification_and_lifecycle() {
+    let mut codex = codex_ready();
+    let failed = notify(
+        &mut codex,
+        "turn/completed",
+        json!({"threadId":"root","turn":{"id":"turn","status":"failed","error":{"message":"quota exhausted","codexErrorInfo":"usageLimitExceeded"}}}),
+    );
+    assert!(matches!(
+        &failed.events[0],
+        ProviderEvent::ItemFinished { key, kind: ProviderItem::Error { message, code: Some(code), class: Some(class), .. }, status: ItemStatus::Failed, .. }
+            if key == "terminal-failure:turn" && message == "quota exhausted" && code == "usageLimitExceeded" && class == "usage_limit"
+    ));
+    let mut codex = codex_ready();
+    let retry = notify(
+        &mut codex,
+        "error",
+        json!({"threadId":"root","turnId":"turn","willRetry":true,"error":{"message":"Reconnecting... 2/5","additionalDetails":"The response stream disconnected.","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":529}}}}),
+    );
+    assert_eq!(
+        retry.events,
+        [ProviderEvent::ItemStarted {
+            key: "terminal-failure:turn".into(),
+            kind: ProviderItem::Error {
+                message: "The response stream disconnected.".into(),
+                retry: Some(RetryProgress {
+                    attempt: 2,
+                    max_attempts: Some(5),
+                    delay_ms: None
+                }),
+                code: Some("responseStreamDisconnected".into()),
+                class: Some("transport_error".into()),
+                retryable: Some(true),
+            },
+        }]
+    );
+    let resumed = notify(
+        &mut codex,
+        "item/started",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"commandExecution","id":"pwd","command":"pwd","status":"inProgress"}}),
+    );
+    assert!(matches!(
+        &resumed.events[0],
+        ProviderEvent::ItemFinished { key, status: ItemStatus::Completed, .. } if key == "terminal-failure:turn"
+    ));
+}
+// T3 CodexAdapterV2.test.ts final-answer cases (3348-3687).
+#[test]
+fn final_answers_drop_repeats_and_late_empty_completions() {
+    let answers = |messages: &[(&str, Option<&str>)]| {
+        let mut codex = codex_ready();
+        let mut texts = vec![];
+        for (index, (text, phase)) in messages.iter().enumerate() {
+            let mut item = json!({"type":"agentMessage","id":format!("m{index}"),"text":""});
+            if let Some(phase) = phase {
+                item["phase"] = json!(phase);
+            }
+            notify(
+                &mut codex,
+                "item/started",
+                json!({"threadId":"root","turnId":"turn","item":item.clone()}),
+            );
+            item["text"] = json!(text);
+            for event in notify(
+                &mut codex,
+                "item/completed",
+                json!({"threadId":"root","turnId":"turn","item":item}),
+            )
+            .events
+            {
+                if let ProviderEvent::ItemFinished {
+                    text: Some(text), ..
+                } = event
+                {
+                    texts.push(text);
+                }
+            }
+        }
+        texts
+    };
+    let fa = Some("final_answer");
+    assert_eq!(answers(&[("OK", fa), ("", fa)]), ["OK"]);
+    assert_eq!(answers(&[("OK", fa), ("OK", fa)]), ["OK"]);
+    assert_eq!(answers(&[("", fa)]), [""]);
+    assert_eq!(answers(&[("", fa), ("", fa)]), [""]);
+    assert_eq!(
+        answers(&[("Working on it.", Some("commentary")), ("", fa)]),
+        ["Working on it.", ""]
+    );
+    assert_eq!(answers(&[("OK", None), ("", None)]), ["OK"]);
+    assert_eq!(answers(&[("", fa), ("OK", fa)]), ["", "OK"]);
+}
+// T3 CodexAdapterV2.test.ts:6455.
+#[test]
+fn rerouted_child_models_update_the_child() {
+    let mut codex = codex_ready();
+    notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"root","turnId":"turn","item":{"type":"collabAgentToolCall","id":"s","tool":"spawnAgent","receiverThreadIds":["child"],"agentsStates":{}}}),
+    );
+    for (method, params) in [
+        (
+            "model/rerouted",
+            json!({"threadId":"child","toModel":"gpt-5.6-sol"}),
+        ),
+        (
+            "thread/settings/updated",
+            json!({"threadId":"child","threadSettings":{"model":"gpt-5.6-sol"}}),
+        ),
+    ] {
+        let output = notify(&mut codex, method, params);
+        assert_eq!(
+            output.events,
+            [ProviderEvent::Child {
+                key: "child".into(),
+                event: Box::new(ProviderEvent::ModelObserved {
+                    model: "gpt-5.6-sol".into()
+                })
+            }]
+        );
+    }
+    assert!(
+        notify(
+            &mut codex,
+            "model/rerouted",
+            json!({"threadId":"root","toModel":"other"})
+        )
+        .events
+        .is_empty()
+    );
+}
+#[test]
+fn native_rollback_and_fork_report_completion() {
+    let mut codex = CodexProtocol::default();
+    let fork = codex
+        .command(
+            &ProviderCommand::Fork {
+                native_thread: "root".into(),
+                through_turn: None,
+            },
+            &wire_context(),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        codex
+            .receive(&json!({"id":fork.outbound[0]["id"],"result":{"thread":{"id":"forked"}}}))
+            .unwrap()
+            .completion,
+        Some(Completion::Forked {
+            native_thread: "forked".into()
+        })
+    );
+    let read = codex
+        .command(
+            &ProviderCommand::Rollback {
+                native_thread: "root".into(),
+                absolute_head: Some("t1".into()),
+            },
+            &wire_context(),
+            &[],
+        )
+        .unwrap();
+    let page = codex
+        .receive(&json!({"id":read.outbound[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}}))
+        .unwrap();
+    let reached = codex
+        .receive(
+            &json!({"id":page.outbound[0]["id"],"result":{"data":[{"id":"t1"}],"nextCursor":null}}),
+        )
+        .unwrap();
+    assert!(reached.outbound.is_empty());
+    assert_eq!(
+        reached.completion,
+        Some(Completion::RolledBack {
+            native_thread: "root".into()
+        })
+    );
 }

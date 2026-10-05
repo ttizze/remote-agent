@@ -137,7 +137,8 @@ impl GraphReplay {
         } else {
             let wire = CodexProtocol::default()
                 .command(provider, &wire_context(), &[])
-                .unwrap();
+                .unwrap()
+                .outbound;
             assert_eq!(wire[0]["method"], "thread/fork");
             if let Some(head) = head {
                 assert_eq!(wire[0]["params"]["lastTurnId"], head);
