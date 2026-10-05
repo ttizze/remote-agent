@@ -5,11 +5,11 @@
 | 段階 | 状況 | 実装範囲 |
 | --- | --- | --- |
 | M1 | 完了 | 新しい orchestration crate、全 M1 コマンド、SQLite/outbox、Codex/Claude adapter、Host RPC、native 履歴取り込み、共通 client runtime、GPUI・SwiftUI・Compose、旧会話管理と旧テスト・fixture・runner・文書の削除 |
-| M2 | 一部実装 | root checkpoint、rollback、fork/merge back、provider handoff、compaction、計画フォローアップ、停止・再起動時の capture、getTurnDiff、3 クライアントのターン差分選択 |
+| M2 | 実装完了 | root/nested checkpoint、rollback、fork/merge back、provider handoff、compaction、native subagent と app-owned 委任、計画フォローアップ、画像・ファイル添付、getTurnDiff、3 クライアントの表示・操作 |
 | M3 | 未着手 | T3 相当の周辺機能の拡張 |
 
 M1 は `af584c44` で完成し、同じ commit の Host・GPUI・iOS・Android
-のビルドを確認済み。新しい会話 RPC の ALPN は `remote-agent/streams/8`。
+のビルドを確認済み。新しい会話 RPC の ALPN は `remote-agent/streams/9`。
 旧形式の互換性・移行は設けない。iroh、QR ペアリング、provider プロセス管理、
 terminal・files・browser・dictation・accounts・既存 worktree 機能は維持する。
 
@@ -31,8 +31,6 @@ workspace・個別ターン・全ターンの差分を表示する。
 
 ## 残り
 
-- M2: app-owned subagent/委任、画像・ファイル添付、nested checkpoint
-  scope、非 cone sparse checkpoint。provider の既存 tool/plan 通知は M1 で表示する。
 - M3: T3 の Git/worktree 操作、GitHub PR 連携、scheduled tasks、usage の拡張、
   全設定、Nightly 配布。既存 Host の peripheral 機能と基本設定だけが利用可能。
 
@@ -114,4 +112,29 @@ workspace/agent-peer clippy・fmt、actionlint が通過（外部・手動5件 s
 Swift unit tests 2件、Android JVM unit tests 3件と各 native lint、
 iOS/Android build も通過。初回全 target 実行に手動 WebKit probe が一度混入した
 点と、その後の ignored 修正は対応表に記録した。Simulator UI/実 provider E2E、
-CI 待ちは実施していない。M2 の残りと M3 は中断し、レビュー後の再開指示を待つ。
+CI 待ちは実施していない。この時点では M2/M3 を中断していたが、以下の追加依頼で M2 のみ再開した。
+
+## 2 回目のレビューと M2 完了
+
+2 回目のレビューでは effect lease/再取得、provider 停止と rewind、scope/queue/下書き/同期、
+import の checkout 所有権、native 表示・保存状態を修正した。各指摘の対応と理由は
+[PR55_REVIEW.md](PR55_REVIEW.md) に記録した。
+
+追加の M2 は app-owned の自己完結した委任、停止・結果通知・acknowledgement・復旧、
+Host の scoped MCP bridge、Codex/Claude の native subagent と runless 子履歴、Agents roster、
+3 クライアントの写真/ファイル添付、検証付き iroh 転送と provider 画像入力を実装した。
+汎用 nested scope の baseline/capture/restore/diff、独立 ordinal、専用 outbox、所有権と
+rollback 境界も実装した。固定 T3 と同じく自動 scope は root のみで、モバイルに
+Implement/Refine や nested scope の新しい画面を足していない。
+
+M3 は未着手。main の取り込み、稼働 Host の更新、他 worktree の変更は行っていない。
+M2 完了後は同じ PR #55 に push し、レビュー後の再開指示を待つ。
+
+### 最終検証
+
+- `CARGO_INCREMENTAL=0 NEXTEST_TEST_THREADS=4 scripts/dev-env.sh just unit-tests`: **391件通過、既存5件 skip**。standalone agent-peer の5テスト群も通過。transport/pairing/management などの現行 integration targets と、新しい回帰/property/Git/provider fixture tests を含む。
+- workspace の全 target/bindings と agent-peer の Clippy `-D warnings`、両 fmt、actionlint、`git diff --check` 通過。
+- Swift: swiftformat/Swiftlint strict、native unit **2件通過**、Rust/Swift bindings と generic iOS Simulator destination のアプリ **build 成功**。Simulator の起動・UI操作なし。
+- Android: ktfmt/detekt、JVM unit **3件通過**、arm64-v8a/x86_64 の **assembleDebug 成功**。
+- macOS: Host/provider supervisor/GPUI の **release build・署名・署名検証成功**。稼働 Host を起動・再起動していない。
+- 最終の実装・全体テストと Host/3クライアントのビルド対象は `665deaa1`。以後の変更は検証記録のみ。CI待ち、cargo-mutants、E2E、実 provider/実機の受入確認は実施していない。

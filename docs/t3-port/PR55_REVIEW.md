@@ -194,3 +194,14 @@ app-owned 委任に続き、Codex の collabAgentToolCall/subAgentActivity と C
 関連36回帰/property/Git fixture tests 通過、変更3 crate の all-targets Clippy と fmt 通過。未完了として記録していた O13 の native subagent/委任/添付/nested scope は今回の M2 再開分で実装した。M3 は引き続き対象外。
 
 M2 最終 cleanup: 親削除後に fork が参照していた asset は、最後の fork の削除でも回収する。削除済み祖先の bounded lineage と live reference を同じ store lock で取得し、live 祖先には cleanup をかけない。所有権と partial claim のテストを維持し、削除済み owner の再訪の回帰テストを追加した。
+
+## M2 最終検証
+
+- `CARGO_INCREMENTAL=0 NEXTEST_TEST_THREADS=4 scripts/dev-env.sh just unit-tests`: **391件通過、既存5件 skip**。standalone agent-peer の5テスト群も通過。transport/pairing/management などの現行 integration targets と、新しい回帰/property/Git/provider fixture tests を含む。
+- workspace の全 target/bindings と agent-peer の Clippy `-D warnings`、両 fmt、actionlint、`git diff --check` 通過。
+- Swift: swiftformat/Swiftlint strict、native unit **2件通過**、Rust/Swift bindings と generic iOS Simulator destination のアプリ **build 成功**。Simulator の起動・UI操作なし。
+- Android: ktfmt/detekt、JVM unit **3件通過**、arm64-v8a/x86_64 の **assembleDebug 成功**。
+- macOS: Host/provider supervisor/GPUI の **release build・署名・署名検証成功**。稼働 Host を起動・再起動していない。
+- 最終の実装・全体テストと Host/3クライアントのビルド対象は `665deaa1`。以後の変更は検証記録のみ。CI待ち、cargo-mutants、E2E、実 provider/実機の受入確認は実施していない。
+
+初回の release build は外付けディスクの容量不足で失敗した。この worktree 専用 target の incremental cache と破損した Lua build-script cache だけを削除し、incremental/cache を無効にした再ビルドで通過した。他 worktree と共有 dev-env cache は変更していない。M2 の完成分を同じ PR #55 に push し、M3 と main の取り込みは行わない。
