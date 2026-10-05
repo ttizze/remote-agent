@@ -101,6 +101,19 @@ pub fn search_changes(state: &State, facts: &[Fact]) -> SearchChanges {
             | FactBody::MessageEdited { id, .. } => {
                 touched.insert(id.clone());
             }
+            // Provider output finishes and rewrites messages through their items.
+            FactBody::ItemCompleted { id, .. } | FactBody::ItemTextReplaced { id, .. } => {
+                if let Some(
+                    ItemKind::AssistantMessage { message } | ItemKind::UserMessage { message },
+                ) = state
+                    .items
+                    .iter()
+                    .find(|item| &item.id == id)
+                    .map(|item| &item.kind)
+                {
+                    touched.insert(message.clone());
+                }
+            }
             _ => {}
         }
     }

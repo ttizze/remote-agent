@@ -203,3 +203,49 @@ fn flags_a_native_child_without_runs_of_its_own() {
     assert!(child.runs.is_empty() && child.captures.is_empty());
     assert_flag_matches_recovery(child, true);
 }
+
+#[test]
+fn indexes_an_assistant_answer_when_its_item_completes() {
+    let mut state = created();
+    let attempt = running(&mut state, "question");
+    let delta = provider(
+        &mut state,
+        "answer",
+        &attempt,
+        ProviderEvent::TextDelta {
+            key: "answer".into(),
+            kind: ProviderItem::Text,
+            text: "the searchable answer".into(),
+        },
+    );
+    let streaming = search_changes(&state, &delta.facts);
+    assert!(
+        !streaming
+            .upserts
+            .iter()
+            .any(|row| row.text == "the searchable answer")
+    );
+
+    let finished = provider(
+        &mut state,
+        "finish",
+        &attempt,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Completed,
+            native_head: None,
+        },
+    );
+    assert!(
+        !finished
+            .facts
+            .iter()
+            .any(|fact| matches!(fact.body, FactBody::MessageFinished { .. }))
+    );
+    let changes = search_changes(&state, &finished.facts);
+    let answer = changes
+        .upserts
+        .iter()
+        .find(|row| row.text == "the searchable answer")
+        .expect("the completed answer is indexed");
+    assert_eq!(answer.role, "assistant");
+}
