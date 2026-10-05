@@ -164,7 +164,7 @@ impl Store {
                 created_by: message.created_by,
                 creation_source: message.creation_source,
                 message_id: message.id.clone(),
-                text: message.text.chars().take(400).collect(),
+                text: message.text.clone(),
                 context: message.context.clone(),
                 attachments: message.attachments.clone(),
                 model_selection: None,
@@ -1484,15 +1484,17 @@ mod tests {
                 &now(),
             )
             .unwrap();
-        let commit = dispatch(
-            &store,
-            &send(
-                "steer",
-                DispatchMode::SteerActive {
-                    target_run_id: running.runs[0].id.clone(),
-                },
-            ),
+        let long_text = "日本語の追加依頼 ".repeat(100);
+        let mut steer = send(
+            "steer",
+            DispatchMode::SteerActive {
+                target_run_id: running.runs[0].id.clone(),
+            },
         );
+        if let CommandBody::MessageDispatch(message) = &mut steer.body {
+            message.text = long_text.clone();
+        }
+        let commit = dispatch(&store, &steer);
         let effect = read_effects(&store.lock().unwrap())
             .unwrap()
             .into_iter()
@@ -1542,6 +1544,14 @@ mod tests {
         assert_eq!(p.runs.len(), 2);
         assert_eq!(p.runs[0].status, RunStatus::Completed);
         assert_eq!(p.runs[1].provider_instance_id.as_str(), "claude");
+        assert_eq!(
+            p.messages
+                .iter()
+                .find(|m| m.id.as_str() == "message:steer")
+                .unwrap()
+                .text,
+            long_text
+        );
     }
     #[test]
     fn delta_ingest_skips_unrelated_history_and_shell_subscribers_share_the_projection() {
