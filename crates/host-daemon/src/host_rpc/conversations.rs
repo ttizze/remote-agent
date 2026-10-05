@@ -16,8 +16,11 @@ use std::{
 #[cfg(test)]
 mod tests;
 
+const DATABASE_FORMAT: u32 = 1;
+
 pub(super) struct Conversations {
     connection: Mutex<Connection>,
+    identity: String,
 }
 
 impl Conversations {
@@ -59,48 +62,89 @@ impl Conversations {
         Self::initialize(Connection::open_in_memory().unwrap()).unwrap()
     }
 
-    fn initialize(connection: Connection) -> Result<Self> {
-        connection.execute_batch(
-            "PRAGMA foreign_keys=ON;
-             CREATE TABLE IF NOT EXISTS conversations (
-                id TEXT PRIMARY KEY, provider TEXT NOT NULL, scope TEXT NOT NULL,
-                native_id TEXT NOT NULL, metadata TEXT NOT NULL, model TEXT NOT NULL,
-                imported INTEGER NOT NULL DEFAULT 0, started INTEGER NOT NULL DEFAULT 0,
-                cursor TEXT, oldest INTEGER NOT NULL DEFAULT 1, branch TEXT, import_issue TEXT,
-                manual_title INTEGER NOT NULL DEFAULT 0, queue_held INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(provider, scope, native_id));
-             CREATE INDEX IF NOT EXISTS unfinished_imports ON conversations(provider, scope, imported);
-             CREATE TABLE IF NOT EXISTS turns (
-                conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-                position INTEGER NOT NULL, native_id TEXT NOT NULL, body TEXT NOT NULL,
-                observed INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(conversation, position));
-             CREATE INDEX IF NOT EXISTS turn_identity ON turns(conversation, native_id, position);
-             CREATE TABLE IF NOT EXISTS items (
-                conversation TEXT NOT NULL, turn_position INTEGER NOT NULL,
-                position INTEGER NOT NULL, native_id TEXT NOT NULL, body TEXT NOT NULL, client_input_id TEXT,
-                summary_role INTEGER NOT NULL,
-                PRIMARY KEY(conversation, turn_position, position),
-                FOREIGN KEY(conversation, turn_position) REFERENCES turns(conversation, position) ON DELETE CASCADE);
-             CREATE INDEX IF NOT EXISTS input_echo ON items(conversation, client_input_id, turn_position);
-             CREATE INDEX IF NOT EXISTS item_summary ON items(conversation, turn_position, summary_role, position);
-             CREATE TABLE IF NOT EXISTS events (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-                body TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS import_cursors (
-                conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-                cursor TEXT NOT NULL, PRIMARY KEY(conversation, cursor));
-             CREATE TABLE IF NOT EXISTS commands (
-                conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-                input_id TEXT NOT NULL, payload TEXT NOT NULL, execution TEXT NOT NULL,
-                delivery TEXT NOT NULL, queue_position INTEGER NOT NULL, queued INTEGER NOT NULL,
-                PRIMARY KEY(conversation, input_id));
-             CREATE INDEX IF NOT EXISTS waiting_commands ON commands(conversation, delivery, queue_position);"
-        )?;
+    fn initialize(mut connection: Connection) -> Result<Self> {
+        connection.execute_batch("PRAGMA foreign_keys=ON;")?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let format: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        match format {
+            0 => {
+                let objects: u32 = tx.query_row(
+                    "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                ensure!(
+                    objects == 0,
+                    "conversation database has an unsupported format"
+                );
+                tx.execute_batch(
+                    "CREATE TABLE storage_identity (
+                        singleton INTEGER PRIMARY KEY CHECK(singleton=1), identity TEXT NOT NULL UNIQUE);
+                     CREATE TABLE conversations (
+                        id TEXT PRIMARY KEY, provider TEXT NOT NULL, scope TEXT NOT NULL,
+                        native_id TEXT NOT NULL, metadata TEXT NOT NULL, model TEXT NOT NULL,
+                        imported INTEGER NOT NULL DEFAULT 0, started INTEGER NOT NULL DEFAULT 0,
+                        cursor TEXT, oldest INTEGER NOT NULL DEFAULT 1, branch TEXT, import_issue TEXT,
+                        manual_title INTEGER NOT NULL DEFAULT 0, queue_held INTEGER NOT NULL DEFAULT 0,
+                        UNIQUE(provider, scope, native_id));
+                     CREATE INDEX unfinished_imports ON conversations(provider, scope, imported);
+                     CREATE TABLE turns (
+                        conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                        position INTEGER NOT NULL, native_id TEXT NOT NULL, body TEXT NOT NULL,
+                        observed INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(conversation, position));
+                     CREATE INDEX turn_identity ON turns(conversation, native_id, position);
+                     CREATE TABLE items (
+                        conversation TEXT NOT NULL, turn_position INTEGER NOT NULL,
+                        position INTEGER NOT NULL, native_id TEXT NOT NULL, body TEXT NOT NULL, client_input_id TEXT,
+                        summary_role INTEGER NOT NULL,
+                        PRIMARY KEY(conversation, turn_position, position),
+                        FOREIGN KEY(conversation, turn_position) REFERENCES turns(conversation, position) ON DELETE CASCADE);
+                     CREATE INDEX input_echo ON items(conversation, client_input_id, turn_position);
+                     CREATE INDEX item_summary ON items(conversation, turn_position, summary_role, position);
+                     CREATE TABLE events (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                        body TEXT NOT NULL);
+                     CREATE TABLE import_cursors (
+                        conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                        cursor TEXT NOT NULL, PRIMARY KEY(conversation, cursor));
+                     CREATE TABLE commands (
+                        conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                        input_id TEXT NOT NULL, payload TEXT NOT NULL, execution TEXT NOT NULL,
+                        delivery TEXT NOT NULL, queue_position INTEGER NOT NULL, queued INTEGER NOT NULL,
+                        PRIMARY KEY(conversation, input_id));
+                     CREATE INDEX waiting_commands ON commands(conversation, delivery, queue_position);"
+                )?;
+                tx.execute(
+                    "INSERT INTO storage_identity(singleton, identity) VALUES(1, ?1)",
+                    [uuid::Uuid::new_v4().to_string()],
+                )?;
+                tx.pragma_update(None, "user_version", DATABASE_FORMAT)?;
+            }
+            DATABASE_FORMAT => {}
+            _ => anyhow::bail!("conversation database has an unsupported format"),
+        }
+        let identity: String = tx
+            .query_row(
+                "SELECT identity FROM storage_identity WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .context("conversation database identity is missing")?;
+        ensure!(
+            uuid::Uuid::parse_str(&identity).is_ok(),
+            "conversation database identity is invalid"
+        );
+        tx.commit()?;
         Ok(Self {
             connection: Mutex::new(connection),
+            identity,
         })
+    }
+
+    pub(super) fn storage_identity(&self) -> &str {
+        &self.identity
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {

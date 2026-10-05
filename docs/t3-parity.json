@@ -2742,10 +2742,11 @@
       "Host-owned input queues and interruption",
       "incremental automatic Codex and Claude catalog discovery",
       "bounded database title projection and incremental source body import",
-      "read-only Codex history import without app-server, including compressed rollouts and indexed revert selection"
+      "read-only Codex history import without app-server, including compressed rollouts and indexed revert selection",
+      "database-owned client storage identity independent of provider configuration"
     ],
     "verification": {
-      "local_unit_tests": "452 passed, 3 existing skips",
+      "local_unit_tests": "489 passed, 3 existing skips; Markdown regressions passed",
       "rust_clippy": "passed",
       "swift_lint_and_format": "passed",
       "kotlin_detekt_and_format": "passed",
@@ -2753,7 +2754,9 @@
       "focused_import_and_title_mutations": "29 caught, 8 unviable; 0 missed or timed out",
       "focused_codex_file_mutations": "26 caught, 2 unviable; 0 missed or timed out",
       "native_acceptance": "pending",
-      "all_client_visual_comparison": "pending"
+      "all_client_visual_comparison": "pending",
+      "host_rpc_and_conversation_units": "97 passed, including database identity across provider configuration, restart and replacement",
+      "focused_database_identity_mutations": "7 caught; 0 missed, unviable or timed out"
     },
     "remaining": [
       "provider instances",

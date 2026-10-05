@@ -5,6 +5,85 @@ use agent_protocol::{
 };
 
 #[test]
+fn database_identity_survives_restart_and_native_source_changes_but_not_replacement() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("history.sqlite");
+    let store = Conversations::open(&path).unwrap();
+    let identity = store.storage_identity().to_owned();
+    let original = store.bind(&native("source"), "first-home").unwrap();
+    let other = store.bind(&native("source"), "second-home").unwrap();
+    assert_ne!(original, other);
+    assert_eq!(store.storage_identity(), identity);
+    drop(store);
+    let reopened = Conversations::open(&path).unwrap();
+    assert_eq!(reopened.storage_identity(), identity);
+    assert_eq!(
+        reopened.bind(&native("source"), "first-home").unwrap(),
+        original
+    );
+    drop(reopened);
+    std::fs::remove_file(&path).unwrap();
+    let replaced = Conversations::open(&path).unwrap();
+    assert_ne!(replaced.storage_identity(), identity);
+    assert_ne!(
+        replaced.bind(&native("source"), "first-home").unwrap(),
+        original
+    );
+}
+
+#[test]
+fn unsupported_or_damaged_database_is_rejected_without_repairing_or_replacing_user_data() {
+    let directory = tempfile::tempdir().unwrap();
+    for format in [0, 2] {
+        let path = directory
+            .path()
+            .join(format!("unsupported-{format}.sqlite"));
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE user_data(text TEXT); INSERT INTO user_data VALUES('keep');",
+        )
+        .unwrap();
+        old.pragma_update(None, "user_version", format).unwrap();
+        drop(old);
+        assert!(Conversations::open(&path).is_err());
+        let untouched = Connection::open(&path).unwrap();
+        assert_eq!(
+            untouched
+                .query_row("SELECT text FROM user_data", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            untouched
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            format
+        );
+    }
+    for identity in [None, Some("invalid")] {
+        let path = directory.path().join(if identity.is_some() {
+            "invalid.sqlite"
+        } else {
+            "missing.sqlite"
+        });
+        drop(Conversations::open(&path).unwrap());
+        let connection = Connection::open(&path).unwrap();
+        if let Some(identity) = identity {
+            connection
+                .execute("UPDATE storage_identity SET identity=?1", [identity])
+                .unwrap();
+        } else {
+            connection
+                .execute("DELETE FROM storage_identity", [])
+                .unwrap();
+        }
+        drop(connection);
+        assert!(Conversations::open(&path).is_err());
+    }
+}
+
+#[test]
 fn selected_queue_claim_preserves_hold_order_receipts_and_restart_uncertainty() {
     use agent_protocol::queue::QueueAction;
     let root = tempfile::tempdir().unwrap();

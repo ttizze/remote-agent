@@ -95,6 +95,12 @@ hydration must not change this default.
   an import that is still progressing; explicit import retries failed histories.
   Keep provider source data. These ownership changes follow
   the October 5, 2026 native rewrite requirement in `T3_NATIVE_REWRITE_PLAN.md`.
+- The Host's conversation database owns the client storage namespace. Adding a
+  provider or changing its native history path does not archive unrelated client
+  drafts. The namespace survives Host restart and changes when the database is
+  replaced. Native source paths still separate import bindings. Database creation
+  records the current format and identity atomically; unsupported or damaged
+  databases fail explicitly without replacing saved data.
 - If Codex app-server cannot start, import its native rollout storage read-only.
   Honor the current index's immutable rollout after revert, compressed files,
   inherited byte/ordinal boundaries and the subagent cutoff. Bound decompressed
