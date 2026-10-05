@@ -192,6 +192,130 @@ use tokio::{process::Command, sync::watch, task::JoinSet};
 const BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(300);
 const SIMULATOR_DEVICE_TYPE: &str = "com.apple.CoreSimulator.SimDeviceType.iPhone-17";
+/// A fresh Simulator starts about 270 processes; on a 7 GiB CI Mac their
+/// first-boot work compresses memory until Host replies take 10-20 seconds.
+/// Bex uses only AVFoundation, Photos and QuickLook, so stop the system
+/// services for widgets, mail, maps, watch, health, Siri, Spotlight and stores.
+const IDLE_SIMULATOR_SERVICES: &[&str] = &[
+    "com.apple.chronod",
+    "com.apple.ScreenTimeAgent",
+    "com.apple.weatherd",
+    "com.apple.mobiletimerd",
+    "com.apple.newsd",
+    "com.apple.email.maild",
+    "com.apple.icloudmailagent",
+    "com.apple.remindd",
+    "com.apple.eventkitsyncd",
+    "com.apple.addressbooksyncd",
+    "com.apple.contacts.postersyncd",
+    "com.apple.dataaccess.dataaccessd",
+    "com.apple.Maps.mapssyncd",
+    "com.apple.navd",
+    "com.apple.nanomapscd",
+    "com.apple.geoanalyticsd",
+    "com.apple.MapKit.SnapshotService",
+    "com.apple.findmy.findmylocated",
+    "com.apple.routined",
+    "com.apple.nanoappregistryd",
+    "com.apple.nanoprefsyncd.2",
+    "com.apple.nanosystemsettingsd",
+    "com.apple.nanotimekitcompaniond",
+    "com.apple.wcd",
+    "com.apple.companionappd",
+    "com.apple.appconduitd",
+    "com.apple.NPKCompanionAgent",
+    "com.apple.brook.brookcompaniond",
+    "com.apple.healthd",
+    "com.apple.healthappd",
+    "com.apple.fitcore",
+    "com.apple.fitnesscoachingd",
+    "com.apple.fitnessintelligenced",
+    "com.apple.activityawardsd",
+    "com.apple.activitysharingd",
+    "com.apple.sleepd",
+    "com.apple.assistantd",
+    "com.apple.assistant_service",
+    "com.apple.assistant_cdmd",
+    "com.apple.siri.context.service",
+    "com.apple.siriactionsd",
+    "com.apple.siriinferenced",
+    "com.apple.siriknowledged",
+    "com.apple.sirittsd",
+    "com.apple.generativeexperiencesd",
+    "com.apple.intelligenceplatformd",
+    "com.apple.modelcatalogd",
+    "com.apple.modelmanagerd",
+    "com.apple.textunderstandingd",
+    "com.apple.translationd",
+    "com.apple.voicebankingd",
+    "com.apple.suggestd",
+    "com.apple.spotlightknowledged.updater",
+    "com.apple.searchd",
+    "com.apple.parsecd",
+    "com.apple.parsec-fbf",
+    "com.apple.photoanalysisd",
+    "com.apple.mediaanalysisd",
+    "com.apple.itunescloudd",
+    "com.apple.itunesstored",
+    "com.apple.appstored",
+    "com.apple.amsengagementd",
+    "com.apple.ap.promotedcontentd",
+    "com.apple.ap.adprivacyd",
+    "com.apple.tvremoted",
+    "com.apple.triald",
+    "com.apple.homed",
+    "com.apple.financed",
+    "com.apple.passd",
+    "com.apple.SafariBookmarksSyncAgent",
+    "com.apple.WebBookmarks.webbookmarksd",
+    "com.apple.GameController.gamecontrollerd",
+    "com.apple.avatarsd",
+    "com.apple.familycircled",
+    "com.apple.askpermissiond",
+];
+/// System apps that the first boot opens in the background.
+const IDLE_SIMULATOR_APPS: &[&str] = &[
+    "com.apple.Spotlight",
+    "com.apple.mobilecal",
+    "com.apple.family",
+];
+
+/// Stop unused system services; services absent from a runtime are skipped.
+async fn quiet_simulator(
+    simulator: &str,
+    cwd: &Path,
+    log: &File,
+    cancel: &watch::Receiver<bool>,
+) -> Result<usize> {
+    let timeout = Duration::from_secs(30);
+    let mut stopped = 0;
+    for service in IDLE_SIMULATOR_SERVICES {
+        let target = format!("system/{service}");
+        let arguments = args![
+            "xcrun",
+            "simctl",
+            "spawn",
+            simulator,
+            "launchctl",
+            "bootout",
+            target
+        ];
+        if supervision::run(&arguments, cwd, Io::Log(log), cancel, timeout)
+            .await
+            .is_ok()
+        {
+            stopped += 1;
+        }
+    }
+    for app in IDLE_SIMULATOR_APPS {
+        let arguments = args!["xcrun", "simctl", "terminate", simulator, app];
+        let _ = supervision::run(&arguments, cwd, Io::Log(log), cancel, timeout).await;
+    }
+    if *cancel.borrow() {
+        return Err(supervision::interrupted());
+    }
+    Ok(stopped)
+}
 
 fn simulator_app_pid(processes: &str, simulator: &str) -> Option<u32> {
     let device = format!("/Devices/{simulator}/");
@@ -525,6 +649,10 @@ async fn worker(
                 println!("{label}: {phase}");
                 supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT).await
                     .map_err(|error| format!("{label}: {phase} failed: {error}"))?;
+                if phase == "bootstatus" {
+                    let stopped = quiet_simulator(simulator, &cwd, &log, &cancel).await?;
+                    println!("{label}: stopped {stopped}/{} unused system services", IDLE_SIMULATOR_SERVICES.len());
+                }
             }
             if tests.iter().any(|test| test == "testSimulatorCanAttachDownloadAndPrepareAIEdit") {
                 let container = supervision::run(&args!["xcrun", "simctl", "get_app_container", simulator, "com.ttizze.b-codex", "data"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
@@ -1066,6 +1194,30 @@ mod tests {
             let mut mixed = conversation.clone();
             mixed.push(test.to_owned());
             assert!(needs_media_fixtures(&mixed));
+        }
+    }
+
+    #[test]
+    fn quiet_simulator_keeps_services_used_by_bex_and_ui_tests() {
+        let services = IDLE_SIMULATOR_SERVICES.iter().collect::<BTreeSet<_>>();
+        assert_eq!(services.len(), IDLE_SIMULATOR_SERVICES.len());
+        for required in [
+            "com.apple.SpringBoard",
+            "com.apple.backboardd",
+            "com.apple.runningboardd",
+            "com.apple.AccessibilityUIServer",
+            "com.apple.assetsd",
+            "com.apple.nsurlsessiond",
+            "com.apple.tccd",
+            "com.apple.pluginkit.pkd",
+            "com.apple.sharingd",
+            "com.apple.mediaremoted",
+            "com.apple.corespeechd",
+        ] {
+            assert!(
+                !services.contains(&required),
+                "{required} must keep running"
+            );
         }
     }
 

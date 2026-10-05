@@ -232,6 +232,11 @@ transfer server just to delete that check would reverse A14.
   `ios-test-rounds` above one repeats every iPhone runner's tests on fresh
   Simulator/Host pairs (`BEX_IOS_TEST_ROUNDS`) and prints per-test failure
   counts, to measure flaky cases without retrying them in normal runs.
+  A fresh Simulator starts about 270 processes; on the 7 GiB CI Mac their
+  first-boot work compressed about 7 GiB of memory and delayed Host replies by
+  10-20 seconds. After boot, each isolated Simulator boots out the system
+  services Bex and its tests do not use (widgets, mail, maps, watch, health,
+  Siri, Spotlight and stores), which halves its processes.
   The Simulator app, package dependencies and UI test runner build only arm64,
   matching the supported Apple Silicon test host rather than also compiling
   unused x86_64 test products.
