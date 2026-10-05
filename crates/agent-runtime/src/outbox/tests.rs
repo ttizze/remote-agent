@@ -1485,6 +1485,44 @@ async fn feeds_the_mapped_failure_after_a_permanent_error_and_fails_the_row() {
 }
 
 #[tokio::test]
+async fn requeues_a_replay_safe_row_whose_mapped_failure_did_not_commit() {
+    let db = db();
+    let id = thread("thread:outbox-mapped-commit-failure");
+    let start = thread_with_start(&db, &id).await;
+    let mut start_handler = handler(
+        Durability::ReplaySafe,
+        run(|_| async { Err(EffectError::Permanent("revert rejected".into())) }),
+    );
+    start_handler.failure = Some(Arc::new(|effect, error| Some(start_failed(effect, error))));
+    let worker = db.worker(only(START, start_handler), options("mapped-worker"));
+    db.store
+        .on_writer(|c| {
+            c.execute_batch(
+                "CREATE TEMP TRIGGER reject_facts BEFORE INSERT ON facts
+                 BEGIN SELECT RAISE(ABORT, 'simulated fact write failure'); END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    assert!(worker.run_once().await.is_err());
+    let row = db.row(&start.effect.id).await;
+    assert_eq!(row.status, EffectStatus::Pending);
+    assert_eq!(run_status(&db, &id).await, RunStatus::Starting);
+
+    db.store
+        .on_writer(|c| Ok(c.execute_batch("DROP TRIGGER reject_facts")?))
+        .await
+        .unwrap();
+    worker.drain(usize::MAX).await.unwrap();
+    assert_eq!(run_status(&db, &id).await, RunStatus::Failed);
+    let row = db.row(&start.effect.id).await;
+    assert_eq!(row.status, EffectStatus::Failed);
+    assert_eq!(row.last_error.as_deref(), Some("revert rejected"));
+}
+
+#[tokio::test]
 async fn cancels_a_process_bound_effect_its_thread_no_longer_wants() {
     let db = db();
     let id = thread("thread:outbox-skip");

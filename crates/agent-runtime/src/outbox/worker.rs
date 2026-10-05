@@ -239,13 +239,19 @@ impl EffectWorker {
         }
         .await;
         if let Err(error) = &outcome {
-            if self.handlers.durability(&row.kind) == Some(Durability::ReplaySafe) {
-                self.requeue(row, error).await;
-            } else {
-                self.terminalize(row, error).await;
-            }
+            self.release_executed(row, error).await;
         }
         outcome
+    }
+
+    /// After execution, an unsettled replay-safe row runs again; a process-bound
+    /// one ends failed and is left to restart recovery, like T3.
+    async fn release_executed(&self, row: &OutboxRow, cause: &OutboxError) {
+        if self.handlers.durability(&row.kind) == Some(Durability::ReplaySafe) {
+            self.requeue(row, cause).await;
+        } else {
+            self.terminalize(row, cause).await;
+        }
     }
 
     async fn reschedule(
@@ -271,20 +277,28 @@ impl EffectWorker {
             }))
             .unwrap_or(None);
             let settlement = Settlement::Failed(message);
-            let settled = match mapped {
-                Some(result) => self.deliver(row, result, settlement).await,
-                None => self
+            match mapped {
+                // The row only ends together with its mapped result, which the
+                // thread may still need (a pending rollback blocks commands).
+                Some(result) => match self.deliver(row, result, settlement).await {
+                    Ok(settled) => settled,
+                    Err(error) => {
+                        self.release_executed(row, &error).await;
+                        return Err(error);
+                    }
+                },
+                None => match self
                     .queue
                     .settle(&row.effect.id, &self.options.worker_id, settlement)
                     .await
-                    .map_err(OutboxError::from),
-            };
-            match settled {
-                Ok(settled) => settled,
-                Err(error) => {
-                    self.terminalize(row, &error).await;
-                    return Err(error);
-                }
+                {
+                    Ok(settled) => settled,
+                    Err(error) => {
+                        let error = OutboxError::from(error);
+                        self.terminalize(row, &error).await;
+                        return Err(error);
+                    }
+                },
             }
         } else {
             match self
