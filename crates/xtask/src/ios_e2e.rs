@@ -299,15 +299,24 @@ async fn quiet_simulator(
         .iter()
         .filter(|path| runtime_root.join(path).is_file())
         .collect::<Vec<_>>();
-    let mut arguments =
-        args![vec; "xcrun", "simctl", "spawn", simulator, "launchctl", "bootout", "system"];
-    arguments.extend(
-        services
-            .iter()
-            .map(|path| runtime_root.join(path).into_os_string()),
-    );
-    // Services that never started make bootout fail; the listing below checks the result.
-    let _ = supervision::run(&arguments, cwd, Io::Log(log), cancel, timeout).await;
+    // Bootout waits for each service to exit, seconds apiece on a loaded CI Mac;
+    // ten concurrent calls stop them within the setup deadline.
+    let mut pending = JoinSet::new();
+    for chunk in services.chunks(services.len().div_ceil(10).max(1)) {
+        let mut arguments =
+            args![vec; "xcrun", "simctl", "spawn", simulator, "launchctl", "bootout", "system"];
+        arguments.extend(
+            chunk
+                .iter()
+                .map(|path| runtime_root.join(path).into_os_string()),
+        );
+        let (cwd, log, cancel) = (cwd.to_owned(), log.try_clone()?, cancel.clone());
+        // Services that never started make bootout fail; the listing below checks the result.
+        pending.spawn(async move {
+            let _ = supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT).await;
+        });
+    }
+    while pending.join_next().await.is_some() {}
     for app in IDLE_SIMULATOR_APPS {
         let arguments = args!["xcrun", "simctl", "terminate", simulator, app];
         let _ = supervision::run(&arguments, cwd, Io::Log(log), cancel, timeout).await;
