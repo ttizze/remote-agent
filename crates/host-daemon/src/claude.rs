@@ -1448,7 +1448,7 @@ async fn input_content(
                     _ => text,
                 });
                 content
-                    .push(json!({"type":"text","text":catalog::prompt_text(&text, prompt_effort)}));
+                    .push(json!({"type":"text","text":agent_protocol::model_prompt::apply_prompt_effort(&text, prompt_effort)}));
             }
             op::Input::Skill { name, path } => {
                 let invocation = skill_invocation(instance_id, name, path);

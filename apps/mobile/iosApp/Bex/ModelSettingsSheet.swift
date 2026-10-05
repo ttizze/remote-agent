@@ -322,11 +322,11 @@ private struct ModelOptionControls: View {
                         }
                         .frame(minHeight: 44).contentShape(Rectangle())
                     }
-                    .disabled(disabled)
+                    .disabled(disabled || control.disabledReason != nil)
                     .accessibilityLabel(control.label)
                     .accessibilityValue(automatic ? "自動" : control.valueLabel ?? "未設定")
                     .accessibilityIdentifier("model.option." + control.id)
-                    if let description = control.description {
+                    if let description = control.disabledReason ?? control.description {
                         Text(description).font(.caption).foregroundStyle(.secondary)
                     }
                 }

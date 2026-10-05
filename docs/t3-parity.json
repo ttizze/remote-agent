@@ -2764,7 +2764,7 @@
       "macos_android_environment": "pinned Nix SDK, JDK, cargo-ndk and Rust Android targets; Cargo/Rustc explicitly selected for Gradle"
     },
     "remaining": [
-      "remaining provider drivers, managed setup, complete model metadata, prompt-controlled traits and handoff",
+      "remaining provider drivers, managed setup, complete model metadata, complete composer traits visibility and handoff",
       "complete T3 feature parity",
       "all native views and interactions matched to T3",
       "signed Nightly artifacts, updates and publication"
@@ -2801,7 +2801,7 @@
       "ci": "deferred by user"
     },
     "remaining": [
-      "T3 prompt-controlled traits, complete model metadata and context token reporting",
+      "complete composer traits visibility, complete model metadata and context token reporting",
       "managed Codex installation and maintenance",
       "other six runtime drivers and portable handoff",
       "all native interaction and visual acceptance"
@@ -2877,7 +2877,7 @@
     },
     "remaining": [
       "manifest remote refresh/cache, complete model metadata and context token reporting",
-      "T3 prompt-controlled traits and complete composer appearance",
+      "complete composer traits visibility and appearance",
       "all native interaction and visual acceptance"
     ]
   },
@@ -2910,7 +2910,67 @@
     "remaining": [
       "manifest remote refresh/cache and upgrade reporting",
       "legacy/badge/shortName metadata and context-token usage",
-      "T3 prompt-controlled traits and all native interaction/visual acceptance"
+      "complete composer traits visibility and all native interaction/visual acceptance"
     ]
+  },
+  "prompt_controlled_traits": {
+    "state": "implemented",
+    "scope": [
+      "T3 primary select is determined by authored descriptor order",
+      "prompt-injected choices edit composer text while retaining native model options",
+      "body ultrathink mentions control the displayed choice and disable only the primary select",
+      "ordinary effort removes only the leading prefix; boolean false, attachments and other options are retained",
+      "shared pure prompt transformations for composer and Claude execution with slash-command preservation",
+      "core-owned typed choices, human labels, disabled reasons and empty quick-control visibility across native clients"
+    ],
+    "owners": [
+      "crates/agent-protocol/src/model_prompt.rs",
+      "crates/agent-core/src/state/model_options.rs",
+      "crates/agent-core/src/presentation/model_settings.rs",
+      "apps/desktop/src/app/view/model_settings.rs",
+      "apps/mobile/iosApp/Bex/ModelControls.swift",
+      "apps/mobile/iosApp/Bex/ModelSettingsSheet.swift",
+      "apps/mobile/src/main/kotlin/dev/remoteagent/mobile/AndroidModelSettings.kt"
+    ],
+    "verification": {
+      "unit_tests": "556 passed, 3 existing skips; Markdown regressions and standalone CLI assertions passed; Rust execution 164.827 seconds",
+      "protocol_mutations": "37 mutants: 36 caught, 1 unviable; no survivors or timeouts",
+      "core_mutations": "38 unique mutants: 32 caught, 6 unviable; no final survivors or timeouts; strengthened Thinking-only Fast visibility assertion detects the initially surviving mutation",
+      "swift_lint_and_format": "passed for both affected files",
+      "native_builds": "Android arm64/x86_64 JNI, debug APK, test Kotlin, detekt and ktfmt passed; iOS core, Swift bindings, app and UI test bundle build-for-testing passed",
+      "native_acceptance_and_visual_comparison": "pending",
+      "ci": "deferred by user",
+      "rust_clippy": "all workspace targets passed with bindings and warnings denied after cleanup",
+      "core_integration": "107 passed: Store 70, state 27, model defaults 6, operations 1 and persistence 3; 136.296 seconds; original 120-second stream deadline retained"
+    },
+    "remaining": [
+      "complete composer traits visibility and appearance",
+      "all native interaction and visual acceptance"
+    ]
+  },
+  "history_read_receipts": {
+    "state": "implemented",
+    "scope": [
+      "one active and one latest pending history read per conversation using the existing scheduler",
+      "successful reads in the same navigation transfer operation receipts until fresh history applies",
+      "failed reads and navigation changes finish their own receipts independently",
+      "explicit expanded history windows survive smaller superseding refreshes until loaded",
+      "unavailable history retains expansion intent; navigation and Host changes clear it; intent is never persisted",
+      "ordinary refresh size, cached history and original native queue assertions retained"
+    ],
+    "owners": [
+      "crates/agent-core/src/store.rs",
+      "crates/agent-core/src/state.rs",
+      "crates/agent-core/src/state/operations.rs",
+      "crates/agent-core/src/state/operations/threads.rs"
+    ],
+    "verification": {
+      "ordered_store_regressions": "4 cases passed: fresh history, failed read, navigation changed, expanded window",
+      "unit_and_core_integration": "556 unit tests and 107 core integration tests passed after cleanup",
+      "receipt_mutations": "5 mutants: 3 caught, 2 unviable; no survivors or timeouts",
+      "window_mutations": "12 mutants: 9 caught, 3 unviable; no survivors or timeouts",
+      "native_provider_execution": "20 passed after final cleanup, 2 existing manual live-test skips; 29.902 seconds; original native queue assertions retained",
+      "ci": "deferred by user"
+    }
   }
 }

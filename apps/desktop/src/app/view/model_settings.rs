@@ -1,6 +1,5 @@
 use super::*;
 use agent_core::presentation::model_settings::ModelOptionControl;
-use agent_protocol::models::ModelOptionValue;
 use agent_protocol::session::ProviderInstanceId;
 use gpui_kit::Rgba;
 
@@ -1027,13 +1026,19 @@ impl Desktop {
         let entity = cx.entity().downgrade();
         Button::new(format!("model-option-{index}"))
             .debug_selector(move || format!("model-option-{index}"))
-            .disabled(!self.snapshot.connected || self.account_busy || self.busy > 0)
+            .disabled(
+                !self.snapshot.connected
+                    || self.account_busy
+                    || self.busy > 0
+                    || control.disabled_reason.is_some(),
+            )
             .label(label.clone())
             .accessibility_label(label)
             .ghost()
-            .when_some(control.description, |button, description| {
-                button.tooltip(description)
-            })
+            .when_some(
+                control.disabled_reason.or(control.description),
+                |button, description| button.tooltip(description),
+            )
             .child(Icon::new(IconName::ChevronDown).size(px(14.)))
             .dropdown_menu(move |mut menu, _, _| {
                 for (label, value) in &choices {
@@ -1162,20 +1167,21 @@ impl Desktop {
         cx: &Context<Self>,
     ) -> AnyElement {
         let controls = self.snapshot.model_quick_controls(self.draft_key().clone());
-        let Some(option_id) = controls.effort_option_id.clone() else {
+        let Some(control) = controls.effort else {
             return div().into_any_element();
         };
-        if controls.efforts.is_empty() {
-            return div().into_any_element();
-        }
-        let label = format!("推論の強度：{}", controls.effort);
+        let label = format!(
+            "{}：{}",
+            control.label,
+            control.value_label.as_deref().unwrap_or("未設定")
+        );
         let mut bars = h_flex().items_end().gap(px(2.));
-        for index in 0..controls.efforts.len() {
+        for index in 0..control.choices.len() {
             bars = bars.child(
                 div()
                     .w(px(3.))
                     .h(px(
-                        6. + 10. * (index + 1) as f32 / controls.efforts.len() as f32
+                        6. + 10. * (index + 1) as f32 / control.choices.len() as f32
                     ))
                     .rounded(px(1.))
                     .bg(if (index as u32) < controls.effort_level {
@@ -1192,33 +1198,39 @@ impl Desktop {
             .when(!expanded, |button| button.w(px(44.)))
             .when(expanded, |button| {
                 button
-                    .label(controls.effort.clone())
+                    .label(control.value_label.clone().unwrap_or_default())
                     .child(Icon::new(IconName::ChevronDown).size(px(14.)))
             })
             .h(px(44.))
             .debug_selector(move || id.into())
-            .tooltip(label.clone())
+            .tooltip(
+                control
+                    .disabled_reason
+                    .clone()
+                    .unwrap_or_else(|| label.clone()),
+            )
             .accessibility_label(label)
             .disabled(
                 !self.snapshot.connected
                     || self.account_busy
                     || self.busy > 0
-                    || self.snapshot.account.login.is_some(),
+                    || self.snapshot.account.login.is_some()
+                    || control.disabled_reason.is_some(),
             )
             .dropdown_menu_with_anchor(Anchor::BottomRight, move |mut menu, _, _| {
-                for effort in &controls.efforts {
-                    let value = effort.clone();
+                for choice in &control.choices {
+                    let value = choice.value.clone();
                     let entity = entity.clone();
-                    let option_id = option_id.clone();
+                    let option_id = control.id.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(effort.clone())
-                            .checked(*effort == controls.effort)
+                        PopupMenuItem::new(choice.label.clone())
+                            .checked(Some(&choice.value) == control.value.as_ref())
                             .on_click(move |_, _, cx| {
                                 let _ = entity.update(cx, |s, cx| {
                                     s.dispatch(Intent::SelectModelOption {
                                         thread_id: s.draft_key().clone(),
                                         id: option_id.clone(),
-                                        value: Some(ModelOptionValue::String(value.clone())),
+                                        value: Some(value.clone()),
                                     });
                                     cx.notify();
                                 });

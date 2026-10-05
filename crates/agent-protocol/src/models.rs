@@ -396,6 +396,12 @@ where
 }
 
 impl ModelCapabilities {
+    pub fn primary_select(&self) -> Option<&ModelOptionDescriptor> {
+        self.option_descriptors
+            .iter()
+            .find(|descriptor| matches!(descriptor.kind, ModelOptionKind::Select { .. }))
+    }
+
     pub fn select(&self, ids: &[&str]) -> Option<&ModelOptionDescriptor> {
         self.option_descriptors.iter().find(|descriptor| {
             ids.contains(&descriptor.id.as_str())
@@ -671,6 +677,24 @@ pub struct ChangedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_select_uses_authored_order_independent_of_known_option_ids() {
+        let mut capabilities: ModelCapabilities = serde_json::from_value(serde_json::json!({
+            "optionDescriptors":[
+                {"id":"thinking","label":"Thinking","type":"boolean"},
+                {"id":"contextWindow","label":"Context","type":"select","options":[]},
+                {"id":"effort","label":"Effort","type":"select","options":[]}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(capabilities.primary_select().unwrap().id, "contextWindow");
+        capabilities.option_descriptors.swap(1, 2);
+        assert_eq!(capabilities.primary_select().unwrap().id, "effort");
+        capabilities.option_descriptors.truncate(1);
+        assert!(capabilities.primary_select().is_none());
+        assert!(ModelCapabilities::default().primary_select().is_none());
+    }
 
     proptest::proptest! {
         #[test]

@@ -526,6 +526,116 @@ fn snapshot() -> Snapshot {
     }
 }
 
+#[rstest::rstest]
+#[case::fresh_history(true, false, false)]
+#[case::failed_read(false, false, false)]
+#[case::navigation_changed(true, true, false)]
+#[case::expanded_window(true, false, true)]
+#[tokio::test]
+async fn queue_control_receipt_waits_for_superseding_history_without_hiding_errors(
+    #[case] old_succeeded: bool,
+    #[case] navigate: bool,
+    #[case] expand: bool,
+) {
+    let session = SessionRef {
+        id: "thread".into(),
+    };
+    let mut initial = snapshot();
+    Arc::make_mut(
+        Arc::make_mut(&mut initial.conversations)
+            .get_mut(&session)
+            .unwrap(),
+    )
+    .history_limit = Some(5);
+    let (store, mut reader, writer) = setup(initial).await;
+    let control = store.dispatch(Intent::QueueControl(agent_protocol::queue::QueueControl {
+        session: session.clone(),
+        action: agent_protocol::queue::QueueAction::Pause,
+    }));
+    let request = read(&mut reader).await;
+    assert_eq!(request["method"], "host/session/queue/control");
+    writer.reply(&request, json!({"result":{}})).await.unwrap();
+    let older = read(&mut reader).await;
+    assert_eq!(older["method"], "host/session/open");
+    if navigate {
+        store
+            .dispatch(Intent::NewChat { cwd: String::new() })
+            .await
+            .unwrap();
+    }
+    let background = if expand {
+        store.dispatch(Intent::ReadOlder {
+            thread_id: session.clone(),
+        })
+    } else {
+        store.dispatch(Intent::ReadThread(op::ReadThread::new(session.clone())))
+    };
+    let refresh =
+        expand.then(|| store.dispatch(Intent::ReadThread(op::ReadThread::new(session.clone()))));
+    // An independent request proves that the superseding refresh was admitted.
+    let barrier = store.dispatch(Intent::LoadModels(op::LoadModels {}));
+    let mut newer = None;
+    loop {
+        let request = read(&mut reader).await;
+        match request["method"].as_str().unwrap() {
+            "host/session/open" => newer = Some(request),
+            "host/model/list" => {
+                writer.reply(&request, json!({"result":{"instances":host_fixture::instances(),"data":[],"nextCursor":null}})).await.unwrap();
+                break;
+            }
+            method => panic!("unexpected barrier request: {method}"),
+        }
+    }
+    barrier.await.unwrap();
+    writer.reply(&older, if old_succeeded {
+        json!({"result":{"thread":thread("stale")}})
+    } else {
+        json!({"error":{"code":"provider_failed","message":"history failed","delivery":"notSent"}})
+    }).await.unwrap();
+    let newer = match newer {
+        Some(request) => request,
+        None => read(&mut reader).await,
+    };
+    assert_eq!(newer["method"], "host/session/open");
+    assert_eq!(newer["params"]["limit"], if expand { 10 } else { 5 });
+    tokio::pin!(control);
+    if old_succeeded && !navigate {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut control)
+                .await
+                .is_err(),
+            "a superseded read must not finish the queue receipt before the fresh snapshot"
+        );
+        assert!(!store.snapshot().conversations[&session].queue_held);
+    } else {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), &mut control)
+                .await
+                .unwrap()
+                .is_ok(),
+            old_succeeded
+        );
+    }
+    let mut current = thread("current");
+    current.queue_held = true;
+    current.history_limit = Some(if expand { 10 } else { 5 });
+    writer
+        .reply(&newer, json!({"result":{"thread":current}}))
+        .await
+        .unwrap();
+    if old_succeeded && !navigate {
+        control.await.unwrap();
+    }
+    background.await.unwrap();
+    if let Some(refresh) = refresh {
+        refresh.await.unwrap();
+    }
+    assert!(store.snapshot().conversations[&session].queue_held);
+    assert!(store.snapshot().error.is_none());
+    assert!(store.snapshot().requested_history_limits.is_empty());
+    store.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn provider_configuration_changes_refresh_open_thread_capabilities_without_discarding_input()
 {

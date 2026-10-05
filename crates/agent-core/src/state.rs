@@ -12,6 +12,7 @@ use std::{
     sync::Arc,
 };
 mod composer_dispatch;
+pub(crate) mod model_options;
 pub use composer_dispatch::{ComposerAction, FollowUpBehavior, composer_action_label};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -239,6 +240,9 @@ pub struct Snapshot {
     #[serde(default)]
     #[serde(with = "crate::persistence::entries")]
     pub conversations: Arc<BTreeMap<crate::session::SessionRef, Arc<Thread>>>,
+    /// Requested windows not yet loaded; background refreshes retain this intent.
+    #[serde(skip)]
+    pub requested_history_limits: Arc<BTreeMap<crate::session::SessionRef, u32>>,
     #[serde(default)]
     pub threads: Option<Arc<ThreadList>>,
     #[serde(default)]
@@ -680,21 +684,32 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
                 .get(thread_id)
                 .map(|draft| draft.as_ref().clone())
                 .unwrap_or_default();
-            let thread_id = match intent {
+            let (thread_id, normalize_options) = match intent {
                 Intent::SelectModel { thread_id, model } => {
                     if draft.model.as_ref() != Some(&model) {
                         draft.options.clear();
                     }
                     draft.model = Some(model);
-                    thread_id
+                    (thread_id, true)
                 }
                 Intent::SelectModelOption { thread_id, id, value } => {
-                    draft.options = crate::models::with_model_option(&draft.options, &id, value);
-                    thread_id
+                    let capabilities = previous.models.iter()
+                        .find(|model| Some(&model.model) == draft.model.as_ref())
+                        .map(|model| &model.capabilities);
+                    let (text, options) = model_options::select_option(
+                        capabilities, &draft.text, &draft.options, &id, value,
+                    );
+                    let normalize_options = options != draft.options;
+                    if text != draft.text {
+                        draft.invocations.retain(|item| item.is_in(&text));
+                        draft.text = text;
+                    }
+                    draft.options = options;
+                    (thread_id, normalize_options)
                 }
                 _ => unreachable!(),
             };
-            if !previous.models.is_empty() {
+            if normalize_options && !previous.models.is_empty() {
                 let (model, options) = supported_settings(draft.model.as_ref(), &draft.options, None, &previous.models, !previous.model_errors.is_empty());
                 let settings = (model.cloned(), options);
                 (draft.model, draft.options) = settings;
@@ -728,17 +743,23 @@ fn set_draft_text(snapshot: &mut Snapshot, thread_id: DraftKey, text: String) {
 }
 
 fn navigate(snapshot: &mut Snapshot, navigation: Navigation) {
-    let previous_id = snapshot.navigation.thread_id.clone();
-    let _ = previous_id
+    if let Some(id) = snapshot
+        .navigation
+        .thread_id
+        .as_ref()
         .filter(|id| navigation.thread_id.as_ref() != Some(id))
-        .filter(|id| {
-            snapshot.activity.active.get(id) != Some(&true)
-                && snapshot
-                    .conversations
-                    .get(id)
-                    .is_none_or(|thread| thread.requests.is_empty())
-        })
-        .and_then(|id| Arc::make_mut(&mut snapshot.subscriptions).remove(&id));
+        .cloned()
+    {
+        Arc::make_mut(&mut snapshot.requested_history_limits).remove(&id);
+        if snapshot.activity.active.get(&id) != Some(&true)
+            && snapshot
+                .conversations
+                .get(&id)
+                .is_none_or(|thread| thread.requests.is_empty())
+        {
+            Arc::make_mut(&mut snapshot.subscriptions).remove(&id);
+        }
+    }
     if snapshot.navigation.cwd != navigation.cwd || navigation.draft_key.is_empty() {
         clear_workspace_location(Arc::make_mut(&mut snapshot.workspace));
     }
@@ -783,6 +804,7 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 return (next, Vec::new());
             }
             next.terminals = Arc::default();
+            next.requested_history_limits = Arc::default();
             if !next.storage_scope.is_empty() {
                 let archived = ScopedData {
                     drafts: std::mem::take(&mut next.drafts),

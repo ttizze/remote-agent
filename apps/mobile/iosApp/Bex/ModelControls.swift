@@ -54,26 +54,29 @@ struct ModelComposerControls: View {
         .accessibilityLabel("モデル設定")
         .accessibilityValue(modelName)
         .accessibilityIdentifier("model.settings")
-        if !controls.efforts.isEmpty, let id = controls.effortOptionId {
+        if let effort = controls.effort {
             Menu {
-                ForEach(controls.efforts, id: \.self) { effort in
-                    Button { select(id, .string(effort)) } label: {
-                        if effort == controls.effort {
-                            Label(effort, systemImage: "checkmark")
-                        } else {
-                            Text(effort)
+                ForEach(Array(effort.choices.enumerated()), id: \.offset) { _, choice in
+                    if case let .string(value) = choice.value {
+                        Button { select(effort.id, choice.value) } label: {
+                            if choice.value == effort.value {
+                                Label(choice.label, systemImage: "checkmark")
+                            } else {
+                                Text(choice.label)
+                            }
                         }
+                        .accessibilityIdentifier("model.effort." + value)
                     }
-                    .accessibilityIdentifier("model.effort." + effort)
                 }
             } label: {
-                ReasoningStrengthIcon(level: controls.effortLevel, count: controls.efforts.count)
+                ReasoningStrengthIcon(level: controls.effortLevel, count: effort.choices.count)
                     .frame(width: 44, height: 44)
             }
-            .accessibilityLabel("推論の強度")
-            .accessibilityValue(controls.effort)
+            .accessibilityLabel(effort.label)
+            .accessibilityValue(effort.valueLabel ?? "未設定")
+            .accessibilityHint(effort.disabledReason ?? "")
             .accessibilityIdentifier("model.effort")
-            .disabled(disabled)
+            .disabled(disabled || effort.disabledReason != nil)
         }
     }
 }

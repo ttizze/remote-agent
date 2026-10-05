@@ -135,12 +135,12 @@ internal fun ModelOptionChoices(
             "${control.label}: ${if (automatic) "自動" else control.valueLabel ?: "未設定"}",
             (if (defaults) listOf("自動" to null) else emptyList()) + choices,
             if (automatic) null else control.value,
-            enabled,
+            enabled && control.disabledReason == null,
             Modifier.testTag("model.option.${control.id}"),
         ) {
             choose(control.id, it)
         }
-        control.description?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        (control.disabledReason ?: control.description)?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
     }
 }
 

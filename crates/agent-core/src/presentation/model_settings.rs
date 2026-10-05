@@ -1,8 +1,8 @@
 //! Model-picker and quick-control decisions shared by native clients.
 use crate::{
     models::{
-        Model, ModelOptionKind, ModelOptionSelection, ModelOptionValue, ModelRef,
-        model_option_value, provider_models,
+        Model, ModelCapabilities, ModelOptionKind, ModelOptionSelection, ModelOptionValue,
+        ModelRef, model_option_value, provider_models,
     },
     session::ProviderInstanceId,
     state::{DraftKey, ModelDefaults, ModelDefaultsScope, Snapshot},
@@ -47,9 +47,7 @@ impl Snapshot {
 #[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ModelQuickControls {
-    pub effort_option_id: Option<String>,
-    pub efforts: Vec<String>,
-    pub effort: String,
+    pub effort: Option<ModelOptionControl>,
     pub effort_level: u32,
     pub fast: bool,
     pub fast_option_id: Option<String>,
@@ -65,6 +63,7 @@ pub struct ModelOptionControl {
     pub value: Option<ModelOptionValue>,
     pub value_label: Option<String>,
     pub is_explicit: bool,
+    pub disabled_reason: Option<String>,
 }
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
@@ -201,7 +200,11 @@ impl Snapshot {
                 )
             })
             .unwrap_or(defaults.options);
-        option_controls(model.as_ref(), &options)
+        option_controls(
+            model.as_ref().map(|model| &model.capabilities),
+            &options,
+            None,
+        )
     }
 
     pub fn model_option_controls(&self, key: DraftKey) -> Vec<ModelOptionControl> {
@@ -211,8 +214,10 @@ impl Snapshot {
         option_controls(
             self.models
                 .iter()
-                .find(|model| Some(&model.model) == draft.model.as_ref()),
+                .find(|model| Some(&model.model) == draft.model.as_ref())
+                .map(|model| &model.capabilities),
             &draft.options,
+            Some(&draft.text),
         )
     }
 
@@ -348,34 +353,37 @@ impl Snapshot {
         quick_controls(
             self.models
                 .iter()
-                .find(|model| Some(&model.model) == draft.model.as_ref()),
+                .find(|model| Some(&model.model) == draft.model.as_ref())
+                .map(|model| &model.capabilities),
             &draft.options,
+            Some(&draft.text),
         )
     }
 }
 
-fn quick_controls(model: Option<&Model>, options: &[ModelOptionSelection]) -> ModelQuickControls {
-    let Some(model) = model else {
+fn quick_controls(
+    capabilities: Option<&ModelCapabilities>,
+    options: &[ModelOptionSelection],
+    prompt: Option<&str>,
+) -> ModelQuickControls {
+    let Some(capabilities) = capabilities else {
         return ModelQuickControls::default();
     };
-    let reasoning = model.capabilities.select(&["reasoningEffort", "effort"]);
-    let efforts: Vec<_> = reasoning
+    let primary = capabilities.primary_select();
+    let effort = option_controls(Some(capabilities), options, prompt)
         .into_iter()
-        .flat_map(|descriptor| descriptor.choices())
-        .map(|choice| choice.id.clone())
-        .collect();
-    let effort = reasoning
-        .and_then(|descriptor| descriptor.value(options))
-        .and_then(|value| match value {
-            ModelOptionValue::String(value) => Some(value),
-            _ => None,
+        .find(|control| primary.is_some_and(|descriptor| descriptor.id == control.id))
+        .filter(|control| !control.choices.is_empty());
+    let effort_level = effort
+        .as_ref()
+        .and_then(|control| {
+            control
+                .choices
+                .iter()
+                .position(|choice| Some(&choice.value) == control.value.as_ref())
         })
-        .unwrap_or_default();
-    let effort_level = efforts
-        .iter()
-        .position(|value| *value == effort)
         .map_or(0, |index| index as u32 + 1);
-    let service = model.capabilities.select(&["serviceTier"]);
+    let service = capabilities.select(&["serviceTier"]);
     let tier = service.and_then(|descriptor| descriptor.value(options));
     let mut fast_tiers = service
         .into_iter()
@@ -385,14 +393,9 @@ fn quick_controls(model: Option<&Model>, options: &[ModelOptionSelection]) -> Mo
                 || matches!(tier.label.as_str(), "Fast" | "Ultrafast")
         });
     let fast_tier = fast_tiers.clone().next();
-    let boolean_fast = model
-        .capabilities
-        .option_descriptors
-        .iter()
-        .find(|descriptor| {
-            descriptor.id == "fastMode"
-                && matches!(descriptor.kind, ModelOptionKind::Boolean { .. })
-        });
+    let boolean_fast = capabilities.option_descriptors.iter().find(|descriptor| {
+        descriptor.id == "fastMode" && matches!(descriptor.kind, ModelOptionKind::Boolean { .. })
+    });
     let fast = if fast_tier.is_some() {
         fast_tiers.any(|fast| tier.as_ref() == Some(&ModelOptionValue::String(fast.id.clone())))
     } else {
@@ -424,8 +427,6 @@ fn quick_controls(model: Option<&Model>, options: &[ModelOptionSelection]) -> Mo
         (None, None)
     };
     ModelQuickControls {
-        effort_option_id: reasoning.map(|descriptor| descriptor.id.clone()),
-        efforts,
         effort,
         effort_level,
         fast,
@@ -435,15 +436,23 @@ fn quick_controls(model: Option<&Model>, options: &[ModelOptionSelection]) -> Mo
 }
 
 fn option_controls(
-    model: Option<&Model>,
+    capabilities: Option<&ModelCapabilities>,
     selections: &[ModelOptionSelection],
+    prompt: Option<&str>,
 ) -> Vec<ModelOptionControl> {
-    model
+    let prompt_primary = capabilities.zip(prompt).and_then(|(capabilities, text)| {
+        crate::state::model_options::prompt_controlled_primary(capabilities, text)
+    });
+    capabilities
         .into_iter()
-        .flat_map(|model| &model.capabilities.option_descriptors)
+        .flat_map(|capabilities| &capabilities.option_descriptors)
         .map(|descriptor| {
             let is_explicit = model_option_value(selections, &descriptor.id).is_some();
-            let value = if descriptor.id == "variant" && !is_explicit {
+            let prompt_controlled =
+                prompt_primary.is_some_and(|primary| primary.id == descriptor.id);
+            let value = if prompt_controlled {
+                Some(ModelOptionValue::String("ultrathink".into()))
+            } else if descriptor.id == "variant" && !is_explicit {
                 None
             } else {
                 descriptor.value(selections)
@@ -486,6 +495,14 @@ fn option_controls(
                 value,
                 value_label,
                 is_explicit,
+                disabled_reason: prompt
+                    .filter(|text| {
+                        prompt_controlled
+                            && agent_protocol::model_prompt::contains_ultrathink(
+                                agent_protocol::model_prompt::strip_ultrathink_prefix(text),
+                            )
+                    })
+                    .map(|_| "本文中の ultrathink を削除すると、この設定を変更できます。".into()),
             }
         })
         .collect()
@@ -538,7 +555,11 @@ mod tests {
             controls[1].choices[0].value,
             ModelOptionValue::String("standard".into())
         );
-        let quick = quick_controls(Some(&model), &snapshot.model_defaults.options);
+        let quick = quick_controls(
+            Some(&model.capabilities),
+            &snapshot.model_defaults.options,
+            None,
+        );
         assert!(!quick.fast);
         assert_eq!(quick.fast_option_id.as_deref(), Some("fastMode"));
         assert_eq!(quick.toggle_fast_to, Some(ModelOptionValue::Boolean(true)));
@@ -593,7 +614,7 @@ mod tests {
                     Arc::make_mut(&mut snapshot.drafts).insert(key.clone(), Arc::new(Draft {model:Some(selected.clone()),..Default::default()}));
                     proptest::prop_assert_eq!(snapshot.model_instance_for_draft(key.clone()), Some(provider.clone()));
                     proptest::prop_assert_eq!(snapshot.model_for_instance(key.clone(), provider.clone()), Some(selected.clone()));
-                    proptest::prop_assert_eq!(snapshot.model_quick_controls(key).effort, effort);
+                    proptest::prop_assert_eq!(snapshot.model_quick_controls(key).effort.unwrap().value, Some(ModelOptionValue::String(effort.into())));
                 }
                 let choices = snapshot.models_matching(Some(provider.clone()), id.clone());
                 proptest::prop_assert_eq!(choices.len(), 1);
@@ -638,7 +659,7 @@ mod tests {
     fn quick_controls_use_capabilities_and_saved_values_without_inventing_quotas() {
         let mut snapshot = Snapshot { models: Arc::new(serde_json::from_value(serde_json::json!([
             {"id":"gpt", "model":{"instanceId": "codex", "id": "gpt"}, "displayName":"GPT", "capabilities":{"optionDescriptors":[{"id":"reasoningEffort","label":"Reasoning","type":"select","options":[{"id":"low","label":"low","isDefault":false},{"id":"medium","label":"medium","isDefault":true},{"id":"high","label":"high","isDefault":false}],"currentValue":"medium"},{"id":"serviceTier","label":"Service Tier","type":"select","options":[{"id":"default","label":"Standard","isDefault":true},{"id":"priority","label":"priority","isDefault":false}],"currentValue":"default"}]}},
-            {"id":"claude:haiku", "model":{"instanceId": "claude", "id": "haiku"}, "displayName":"Haiku", "capabilities":{"optionDescriptors":[]}}
+            {"id":"claude:haiku", "model":{"instanceId": "claude", "id": "haiku"}, "displayName":"Haiku", "capabilities":{"optionDescriptors":[{"id":"thinking","label":"Thinking","type":"boolean","currentValue":true}]}}
         ])).unwrap()), ..Default::default() };
         Arc::make_mut(&mut snapshot.drafts).insert(
             "draft".into(),
@@ -683,7 +704,7 @@ mod tests {
             id: "haiku".into(),
         });
         let controls = snapshot.model_quick_controls("draft".into());
-        assert!(controls.efforts.is_empty());
+        assert!(controls.effort.is_none());
         assert!(controls.toggle_fast_to.is_none());
         assert!(
             snapshot

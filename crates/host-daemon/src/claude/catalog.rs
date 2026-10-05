@@ -313,27 +313,6 @@ fn supported(compatibility: &Compatibility, version: Option<&Version>) -> bool {
             .is_none_or(|max| version.cmp_precedence(max).is_lt())
 }
 
-pub(super) fn prompt_text(text: &str, effort: Option<&str>) -> String {
-    let text = text.trim();
-    let slash_command = text.strip_prefix('/').is_some_and(|rest| {
-        let first = rest.split_whitespace().next().unwrap_or_default();
-        rest.chars()
-            .next()
-            .is_some_and(|character| !character.is_whitespace() && character != '/')
-            && !first.is_empty()
-            && !first.contains('/')
-    });
-    if text.is_empty()
-        || effort != Some("ultrathink")
-        || slash_command
-        || text.starts_with("Ultrathink:")
-    {
-        text.into()
-    } else {
-        format!("Ultrathink:\n{text}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,26 +396,12 @@ mod tests {
         assert_eq!(ordinary.query.effort.as_deref(), Some("medium"));
         assert_eq!(prompt.prompt_effort.as_deref(), Some("ultrathink"));
         assert_eq!(
-            prompt_text("  investigate  ", prompt.prompt_effort.as_deref()),
+            agent_protocol::model_prompt::apply_prompt_effort(
+                "  investigate  ",
+                prompt.prompt_effort.as_deref()
+            ),
             "Ultrathink:\ninvestigate"
         );
-        for command in [
-            "/deploy.prod now",
-            "/plugin:skill now",
-            "/compact",
-            "Ultrathink:\nalready prefixed",
-        ] {
-            assert_eq!(prompt_text(command, Some("ultrathink")), command);
-        }
-        assert_eq!(
-            prompt_text("/home/user/app.rs", Some("ultrathink")),
-            "Ultrathink:\n/home/user/app.rs"
-        );
-        assert_eq!(
-            prompt_text("/ deploy", Some("ultrathink")),
-            "Ultrathink:\n/ deploy"
-        );
-        assert_eq!(prompt_text("   ", Some("ultrathink")), "");
     }
 
     #[test]
@@ -479,12 +444,6 @@ mod tests {
             proptest::prop_assert_eq!(supported(&compatibility, Some(&Version::new(2,1,patch))), (111..280).contains(&patch));
             proptest::prop_assert!(!supported(&compatibility, None));
         }
-        #[test]
-        fn prefix_is_idempotent_and_preserves_command_tokens(name in "[a-z][a-z.:_-]{0,20}", body in "[a-zA-Z0-9 ]{0,40}") {
-            let command = format!("/{name} {body}");
-            proptest::prop_assert_eq!(prompt_text(&command, Some("ultrathink")), command.trim());
-            let prefixed = prompt_text(&body, Some("ultrathink"));
-            proptest::prop_assert_eq!(prompt_text(&prefixed, Some("ultrathink")), prefixed);
-        }
+
     }
 }

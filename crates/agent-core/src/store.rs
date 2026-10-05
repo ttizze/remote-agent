@@ -735,6 +735,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         account,
         terminals,
         conversations,
+        requested_history_limits,
         threads,
         models,
         model_errors,
@@ -773,6 +774,7 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         && Arc::ptr_eq(&current.subscriptions, subscriptions)
         && Arc::ptr_eq(&current.account, account)
         && Arc::ptr_eq(&current.conversations, conversations)
+        && Arc::ptr_eq(&current.requested_history_limits, requested_history_limits)
         && same_threads
         && Arc::ptr_eq(&current.provider_instances, provider_instances)
         && current.provider_settings == *provider_settings
@@ -1066,7 +1068,8 @@ async fn run(
                 op::Scheduling::Control => MAX_RPC_JOBS + CONTROL_RESERVE,
                 op::Scheduling::Concurrent
                 | op::Scheduling::LatestList(_)
-                | op::Scheduling::LatestReview => MAX_RPC_JOBS,
+                | op::Scheduling::LatestReview
+                | op::Scheduling::LatestHistory(_) => MAX_RPC_JOBS,
             };
             if jobs.len() >= limit {
                 effects.extend(finish(&updates, rejected(scheduled, busy_error())));
@@ -1158,7 +1161,16 @@ async fn run(
                 })).boxed()); }
                 if let Some(handle) = result.scheduling.terminal() { terminal_running.remove(handle); }
                 if let Some(key) = result.scheduling.latest_key()
-                    && let Some(Some(scheduled)) = latest_reads.remove(&key) {
+                    && let Some(Some(mut scheduled)) = latest_reads.remove(&key) {
+                    // A newer history request supersedes this snapshot. Keep the
+                    // initiating mutation's receipt until its fresh read applies.
+                    // Failed reads and navigation to another view finish separately.
+                    if matches!(result.scheduling, op::Scheduling::LatestHistory(_))
+                        && result.result.is_ok()
+                        && result.scope.navigation == scheduled.scope.navigation
+                        && let Some(complete) = result.complete.take() {
+                        scheduled.complete.get_or_insert_default().join(complete);
+                    }
                     effects.push(scheduled);
                 }
                 effects.extend(item_reads.finish(&updates, result));
@@ -1540,6 +1552,9 @@ mod tests {
             ("terminals", |snapshot| snapshot.terminals = Arc::default()),
             ("conversations", |snapshot| {
                 snapshot.conversations = Arc::default()
+            }),
+            ("requested_history_limits", |snapshot| {
+                snapshot.requested_history_limits = Arc::default()
             }),
             ("models", |snapshot| snapshot.models = Arc::default()),
             ("provider_instances", |snapshot| {

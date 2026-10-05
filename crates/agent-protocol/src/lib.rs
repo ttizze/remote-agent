@@ -7,6 +7,7 @@ pub mod execution;
 pub mod ids;
 pub mod items;
 pub mod message;
+pub mod model_prompt;
 pub mod models;
 pub mod operations;
 pub mod permissions;

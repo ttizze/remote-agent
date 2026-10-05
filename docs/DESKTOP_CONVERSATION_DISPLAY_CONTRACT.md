@@ -194,6 +194,15 @@ Controls have no persistent border or model chevron. Fast toggles directly;
 effort opens the model's supported choices and its icon indicates the current
 level. Hide unsupported controls, and retain accessible labels and values.
 
+For a model with prompt-injected effort choices, selecting Ultrathink edits the
+composer text and retains its ordinary model options. An empty prompt becomes
+`Ultrathink:\n`; native slash commands remain commands. The primary select shows
+Ultrathink when the prompt contains that word. If it appears in the body beyond
+the leading prefix, disable the primary select and explain how to change it.
+Otherwise, selecting ordinary effort removes the leading prefix and updates
+that option. Other model options and attachments remain editable and retained.
+These decisions belong to the common core for every native client.
+
 The model name opens a searchable catalog. Desktop's account row includes the
 Host-reported weekly quota windows; clicking it opens account switching, then
 account management (add/login/confirmed sign-out). On iPhone, new conversations

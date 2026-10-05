@@ -255,6 +255,7 @@ pub enum Scheduling {
     Control,
     LatestList(crate::models::ListQuery),
     LatestReview,
+    LatestHistory(crate::session::SessionRef),
     Item(ReadItem),
     Terminal { handle: String, starts: bool },
 }
@@ -263,6 +264,9 @@ impl Scheduling {
         match self {
             Self::LatestList(_) => Some(OperationKey::SessionList),
             Self::LatestReview => Some(OperationKey::WorkspaceReview),
+            Self::LatestHistory(session) => Some(OperationKey::History {
+                session: session.clone(),
+            }),
             _ => None,
         }
     }

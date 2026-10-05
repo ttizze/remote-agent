@@ -308,6 +308,9 @@ impl rpc::RpcMethod for ReadThread {
 }
 
 impl Operation for ReadThread {
+    fn scheduling(&self) -> Scheduling {
+        Scheduling::LatestHistory(self.thread_id.clone())
+    }
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::History {
             session: self.thread_id.clone(),
@@ -337,18 +340,46 @@ impl Operation for ReadThread {
                 .unwrap_or_default();
             select_thread(snapshot, self.thread_id.clone(), cwd);
         }
+        let loaded = snapshot
+            .conversations
+            .get(&self.thread_id)
+            .and_then(|thread| thread.history_limit)
+            .map_or(0, |limit| u32::try_from(limit).unwrap_or(u32::MAX));
+        self.limit = self.limit.max(
+            snapshot
+                .requested_history_limits
+                .get(&self.thread_id)
+                .copied()
+                .unwrap_or_default(),
+        );
+        if self.limit > loaded.max(5) {
+            Arc::make_mut(&mut snapshot.requested_history_limits)
+                .insert(self.thread_id.clone(), self.limit);
+        }
         snapshot.error = None;
         Ok(())
     }
     fn apply(self, snapshot: &mut Snapshot, mut output: Self::Output) -> Vec<Effect> {
-        if output
+        let unavailable = output
             .response
             .thread
             .history_read_state
             .as_ref()
-            .is_some_and(|state| state.kind == crate::session::HistoryReadKind::Unavailable)
-            && let Some(cached) = snapshot.conversations.get(&self.thread_id)
+            .is_some_and(|state| state.kind == crate::session::HistoryReadKind::Unavailable);
+        let loaded = output
+            .response
+            .thread
+            .history_limit
+            .unwrap_or(u64::from(self.limit));
+        if !unavailable
+            && snapshot
+                .requested_history_limits
+                .get(&self.thread_id)
+                .is_some_and(|limit| u64::from(*limit) <= loaded)
         {
+            Arc::make_mut(&mut snapshot.requested_history_limits).remove(&self.thread_id);
+        }
+        if unavailable && let Some(cached) = snapshot.conversations.get(&self.thread_id) {
             let live = output.response.thread.turns.get_or_insert_default();
             let mut turns: Vec<_> = cached
                 .turns
@@ -615,6 +646,81 @@ mod tests {
     use crate::session::{ProviderInstanceId, SessionRef};
 
     #[test]
+    fn expanded_history_intent_survives_refreshes_until_the_window_is_available() {
+        let session = SessionRef {
+            id: "conversation".into(),
+        };
+        let mut snapshot = Snapshot::default();
+        ReadThread::new(session.clone())
+            .prepare(&mut snapshot)
+            .unwrap();
+        assert!(snapshot.requested_history_limits.is_empty());
+        let mut expand = ReadThread {
+            limit: 10,
+            ..ReadThread::new(session.clone())
+        };
+        expand.prepare(&mut snapshot).unwrap();
+        assert_eq!(snapshot.requested_history_limits[&session], 10);
+        assert!(
+            !serde_json::to_value(&snapshot)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("requested_history_limits")
+        );
+        for (limit, unavailable, pending) in
+            [(5, false, true), (10, true, true), (10, false, false)]
+        {
+            let mut refresh = ReadThread::new(session.clone());
+            refresh.prepare(&mut snapshot).unwrap();
+            assert_eq!(refresh.limit, 10);
+            refresh.apply(&mut snapshot, serde_json::from_value(serde_json::json!({
+                "session": session,
+                "response": { "thread": {
+                    "id": session, "historyLimit": limit,
+                    "historyReadState": { "type": if unavailable { "unavailable" } else { "complete" } },
+                    "turns": []
+                }}
+            })).unwrap());
+            assert_eq!(
+                snapshot.requested_history_limits.contains_key(&session),
+                pending
+            );
+        }
+        let mut refresh = ReadThread::new(session);
+        refresh.prepare(&mut snapshot).unwrap();
+        assert_eq!(
+            refresh.limit, 5,
+            "ordinary refreshes retain their existing request size"
+        );
+    }
+
+    #[test]
+    fn expanded_history_intent_ends_when_leaving_the_session_or_host() {
+        let session = SessionRef {
+            id: "conversation".into(),
+        };
+        let mut snapshot = Snapshot::default();
+        let mut expand = ReadThread {
+            limit: 10,
+            ..ReadThread::open(session.clone())
+        };
+        expand.prepare(&mut snapshot).unwrap();
+        assert_eq!(snapshot.requested_history_limits[&session], 10);
+        let (navigated, _) = crate::state::reduce(
+            &snapshot,
+            crate::state::Event::Intent(crate::state::Intent::NewChat { cwd: String::new() }),
+        );
+        assert!(navigated.requested_history_limits.is_empty());
+        let (switched, _) = crate::state::reduce(
+            &snapshot,
+            crate::state::Event::StorageScope("other-host".into()),
+        );
+        assert!(switched.requested_history_limits.is_empty());
+        assert_eq!(snapshot.requested_history_limits[&session], 10);
+    }
+
+    #[test]
     fn confirmed_empty_catalog_clears_unsupported_options_but_loading_or_failed_catalog_preserves_them()
      {
         let session = crate::session::SessionRef {
@@ -779,7 +885,10 @@ mod tests {
             agent_protocol::models::model_option_string(&draft.options, "serviceTier"),
             None
         );
-        assert_eq!(snapshot.model_quick_controls(key).effort, effort);
+        assert_eq!(
+            snapshot.model_quick_controls(key).effort.unwrap().value,
+            Some(crate::models::ModelOptionValue::String(effort.into()))
+        );
     }
 }
 
