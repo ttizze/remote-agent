@@ -157,51 +157,47 @@ impl SqliteOutbox {
         &self,
         handlers: &EffectHandlers,
     ) -> Result<Reconciled, StoreError> {
-        let open: Vec<(String, String, String)> = self
-            .store
-            .blocking(|store| {
-                store.read(|c| {
-                    let mut statement = c.prepare(
-                        "SELECT effect_id, kind, status FROM outbox
-                         WHERE status IN ('pending', 'running')",
-                    )?;
-                    let rows = statement
-                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-                    Ok(rows.collect::<Result<Vec<_>, _>>()?)
-                })
-            })
-            .await?;
-        let mut cancel = Vec::new();
-        let mut requeue = Vec::new();
-        for (id, kind, status) in open {
-            match handlers.durability(&kind) {
-                Some(Durability::ReplaySafe) if status == "running" => requeue.push(id),
-                Some(Durability::ReplaySafe) => {}
-                Some(Durability::ProcessBound) | None => cancel.push(id),
-            }
-        }
+        let handlers = handlers.clone();
         let now = self.now();
         let reconciled = self
             .store
             .write(move |tx| {
+                let open = tx
+                    .prepare(
+                        "SELECT effect_id, kind, status FROM outbox
+                         WHERE status IN ('pending', 'running')",
+                    )?
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mut reconciled = Reconciled::default();
-                for id in cancel {
-                    reconciled.cancelled += tx.execute(
-                        "UPDATE outbox SET status = 'cancelled', lease_owner = NULL,
-                             lease_expires_at = NULL, completed_at = ?2, updated_at = ?2,
-                             last_error = 'Cancelled because the server process ended before the effect completed.'
-                         WHERE effect_id = ?1 AND status IN ('pending', 'running')",
-                        params![id, now],
-                    )?;
-                }
-                for id in requeue {
-                    reconciled.requeued += tx.execute(
-                        "UPDATE outbox SET status = 'pending', lease_owner = NULL,
-                             lease_expires_at = NULL, available_at = ?2, updated_at = ?2,
-                             last_error = 'Requeued after the previous server process ended.'
-                         WHERE effect_id = ?1 AND status = 'running'",
-                        params![id, now],
-                    )?;
+                for (id, kind, status) in open {
+                    match handlers.durability(&kind) {
+                        Some(Durability::ReplaySafe) if status == "running" => {
+                            reconciled.requeued += tx.execute(
+                                "UPDATE outbox SET status = 'pending', lease_owner = NULL,
+                                     lease_expires_at = NULL, available_at = ?2, updated_at = ?2,
+                                     last_error = 'Requeued after the previous server process ended.'
+                                 WHERE effect_id = ?1",
+                                params![id, now],
+                            )?;
+                        }
+                        Some(Durability::ReplaySafe) => {}
+                        Some(Durability::ProcessBound) | None => {
+                            reconciled.cancelled += tx.execute(
+                                "UPDATE outbox SET status = 'cancelled', lease_owner = NULL,
+                                     lease_expires_at = NULL, completed_at = ?2, updated_at = ?2,
+                                     last_error = 'Cancelled because the server process ended before the effect completed.'
+                                 WHERE effect_id = ?1",
+                                params![id, now],
+                            )?;
+                        }
+                    }
                 }
                 Ok(reconciled)
             })
