@@ -38,6 +38,27 @@ pub fn terminal_handle(cwd: String) -> String {
         uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, cwd.as_bytes())
     )
 }
+pub async fn pair_remote(
+    local: &crate::transport::Session,
+    ticket: &crate::transport::Ticket,
+    invitation: uuid::Uuid,
+) -> Result<(), crate::peer::PeerError> {
+    let remote = local
+        .connect(ticket)
+        .await
+        .map_err(|e| crate::peer::PeerError::ConnectionClosed(e.to_string()))?;
+    let remote = scopeguard::guard(remote, |session| session.close());
+    let (peer, _events) = remote
+        .open_peer(std::time::Duration::from_secs(20), 8)
+        .await
+        .map_err(|e| crate::peer::PeerError::ConnectionClosed(e.to_string()))?;
+    let result = peer
+        .call(&agent_protocol::operations::Pair { invitation })
+        .await
+        .map(|_| ());
+    peer.close().await;
+    result
+}
 
 pub async fn models(
     peer: &Client,

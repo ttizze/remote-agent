@@ -455,11 +455,7 @@ mod tests {
     fn visualization_archive_survives_file_service_recreation_and_rejects_invalid_sources() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("comparison.html");
-        fs::write(
-            &source,
-            include_str!("visualize/icon-options.html"),
-        )
-        .unwrap();
+        fs::write(&source, include_str!("visualize/icon-options.html")).unwrap();
         let request = || {
             Call::ReadVisualization(agent_protocol::operations::LoadVisualization {
                 path: "comparison.html".into(),

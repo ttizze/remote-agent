@@ -1276,6 +1276,7 @@ pub struct ThreadShell {
     pub latest_visible_message: Option<VisibleMessage>,
     pub latest_user_message_at: Option<Timestamp>,
     pub latest_run_requested_at: Option<Timestamp>,
+    pub latest_run_started_at: Option<Timestamp>,
     pub latest_run_completed_at: Option<Timestamp>,
     pub active_run_started_at: Option<Timestamp>,
     pub has_actionable_proposed_plan: bool,

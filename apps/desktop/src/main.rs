@@ -9,7 +9,7 @@ use gpui_kit::{
     component::{Root, Theme, ThemeMode},
     *,
 };
-const WINDOW_HEADER_HEIGHT: f32 = 44.;
+const WINDOW_HEADER_HEIGHT: f32 = 52.;
 #[derive(Clone)]
 pub(crate) struct Runtime {
     pub(crate) handle: tokio::runtime::Handle,
@@ -135,6 +135,7 @@ fn main() {
                 Some("ChatComposer > Input"),
             )]);
             Theme::change(ThemeMode::Dark, None, cx);
+            app::apply_theme(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     cx.quit();
@@ -157,7 +158,7 @@ fn main() {
                         ..Default::default()
                     },
                     |window, cx| {
-                        let desktop = cx.new(|cx| app::Desktop::new(app::Mode::Main, window, cx));
+                        let desktop = cx.new(|cx| app::Desktop::new(window, cx));
                         cx.new(|cx| Root::new(desktop, window, cx))
                     },
                 )

@@ -1,115 +1,27 @@
 use super::*;
-use agent_core::state::operations as op;
-
-#[derive(Clone, Copy, PartialEq)]
-pub(super) enum Phase {
-    Preparing,
-    #[cfg(target_os = "macos")]
-    Permission,
-    Recording,
-    Transcribing,
-}
 pub(super) struct Dictation {
-    pub(super) id: uuid::Uuid,
-    key: DraftKey,
-    generation: u64,
-    pub(super) phase: Phase,
-    send: bool,
+    id: uuid::Uuid,
+    key: String,
+    pub(super) label: &'static str,
+    pub(super) recording: bool,
     control: Option<platform::Recording>,
     preparation: Option<agent_core::client::DictationPreparation>,
-    pub(super) levels: std::collections::VecDeque<f32>,
+    pub(super) level: f32,
 }
 impl Desktop {
-    pub(super) fn dictation_bar(&self, cx: &Context<Self>) -> AnyElement {
-        let Some(state) = &self.dictation else {
-            return div().into_any_element();
-        };
-        let recording = state.phase == Phase::Recording;
-        h_flex()
-            .h(px(88.))
-            .px_2()
-            .gap_3()
-            .child(
-                Self::icon_button(
-                    "cancel-dictation",
-                    IconName::Close,
-                    "録音を取り消す (Esc)",
-                    cx,
-                    |s, _, _| s.cancel_recording(),
-                )
-                .disabled(state.phase == Phase::Transcribing),
-            )
-            .child(if recording {
-                h_flex()
-                    .id("recording-waveform")
-                    .flex_1()
-                    .min_w_0()
-                    .h(px(48.))
-                    .items_center()
-                    .justify_center()
-                    .gap(px(3.))
-                    .overflow_hidden()
-                    .children(state.levels.iter().map(|level| {
-                        div()
-                            .w(px(3.))
-                            .flex_shrink_0()
-                            .h(px(3. + level.sqrt() * 45.))
-                            .rounded_full()
-                            .bg(rgb(0xececec))
-                    }))
-                    .into_any_element()
-            } else {
-                h_flex()
-                    .flex_1()
-                    .gap_2()
-                    .child(spinner::Spinner::new().small())
-                    .child(match state.phase {
-                        Phase::Preparing => "録音を準備中…",
-                        #[cfg(target_os = "macos")]
-                        Phase::Permission => "マイクの許可を確認中…",
-                        _ => "文字起こし中…",
-                    })
-                    .into_any_element()
-            })
-            .child(
-                Self::icon_button(
-                    "stop-dictation",
-                    Icon::default().path("bex/stop.svg"),
-                    "録音を終了して文字起こし",
-                    cx,
-                    |s, _, _| s.finish_dictation(false),
-                )
-                .disabled(!recording),
-            )
-            .child(
-                Self::icon_button(
-                    "send-dictation",
-                    IconName::ArrowUp,
-                    "文字起こしして送信",
-                    cx,
-                    |s, _, cx| s.send(cx),
-                )
-                .primary()
-                .large()
-                .rounded_full()
-                .w(px(44.))
-                .h(px(44.))
-                .disabled(!recording || !self.snapshot.connected),
-            )
-            .into_any_element()
-    }
     pub(super) fn start_dictation(&mut self) {
-        if self.dictation.is_some() || !self.snapshot.connected || self.busy > 0 {
+        if self.dictation.is_some() || !self.snapshot.connected {
             return;
         }
-        let (events, incoming) = async_channel::unbounded();
-        match platform::start_recording(events) {
+        let (tx, rx) = async_channel::bounded(64);
+        match platform::start_recording(tx) {
+            Err(error) => self.error = error,
             Ok(control) => {
                 let id = uuid::Uuid::new_v4();
                 let updates = self.updates.clone();
                 let epoch = self.epoch;
                 self.runtime.handle.spawn(async move {
-                    while let Ok(event) = incoming.recv().await {
+                    while let Ok(event) = rx.recv().await {
                         if updates
                             .send((epoch, Update::Recording(id, event)))
                             .await
@@ -121,43 +33,31 @@ impl Desktop {
                 });
                 self.dictation = Some(Dictation {
                     id,
-                    key: self.draft_key().clone(),
-                    generation: self.snapshot.epoch,
-                    phase: Phase::Preparing,
-                    send: false,
+                    key: self.snapshot.draft_key(),
+                    label: "Preparing microphone…",
+                    recording: false,
                     control: Some(control),
                     preparation: None,
-                    levels: std::collections::VecDeque::from([0.; 40]),
+                    level: 0.,
                 });
-                self.error.clear();
             }
-            Err(error) => self.set_error(error),
         }
     }
-    pub(super) fn finish_dictation(&mut self, send: bool) {
-        let Some(state) = self
-            .dictation
-            .as_mut()
-            .filter(|state| state.phase == Phase::Recording)
-        else {
-            return;
-        };
-        if let Err(error) = state.control.as_ref().expect("recording control").finish() {
-            self.set_error(error);
-            self.dictation = None;
-            return;
+    pub(super) fn finish_dictation(&mut self) {
+        if let Some(state) = &mut self.dictation
+            && let Some(control) = &state.control
+        {
+            if let Err(error) = control.finish() {
+                self.error = error;
+                self.dictation = None;
+                return;
+            }
+            state.recording = false;
+            state.label = "Transcribing…";
         }
-        state.phase = Phase::Transcribing;
-        state.send = send;
     }
     pub(super) fn cancel_recording(&mut self) {
-        if let Some(state) = self.dictation.as_mut() {
-            if state.phase == Phase::Transcribing {
-                state.send = false;
-            } else {
-                self.dictation = None;
-            }
-        }
+        self.dictation = None;
     }
     pub(super) fn recording_update(&mut self, id: uuid::Uuid, event: platform::RecordingEvent) {
         let Some(state) = self.dictation.as_mut().filter(|state| state.id == id) else {
@@ -165,39 +65,50 @@ impl Desktop {
         };
         match event {
             #[cfg(target_os = "macos")]
-            platform::RecordingEvent::RequestingPermission => state.phase = Phase::Permission,
+            platform::RecordingEvent::RequestingPermission => {
+                state.label = "Allow microphone access…"
+            }
             #[cfg(target_os = "macos")]
-            platform::RecordingEvent::Preparing => state.phase = Phase::Preparing,
+            platform::RecordingEvent::Preparing => state.label = "Preparing microphone…",
             platform::RecordingEvent::Started => {
-                state.phase = Phase::Recording;
+                state.recording = true;
+                state.label = "Recording…";
                 state.preparation = self
                     .session
                     .as_ref()
                     .map(|session| session.store.prepare_dictation());
             }
             platform::RecordingEvent::Level(level) => {
-                if state.phase == Phase::Recording && level.is_finite() {
-                    state.levels.pop_front();
-                    state.levels.push_back(level.clamp(0., 1.));
+                if level.is_finite() {
+                    state.level = level.clamp(0., 1.);
                 }
             }
             platform::RecordingEvent::Finished(Err(error)) => {
+                self.error = error;
                 self.dictation = None;
-                self.set_error(error);
             }
             platform::RecordingEvent::Finished(Ok(audio)) => {
-                state.control = None;
-                let intent = Intent::Transcribe(op::Dictate {
+                let preparation = state.preparation.take();
+                let intent = Intent::Transcribe {
                     draft_key: state.key.clone(),
-                    preparation: state
-                        .preparation
-                        .as_ref()
-                        .map(|preparation| preparation.id()),
+                    preparation: preparation.as_ref().map(|p| p.id()),
                     audio,
-                    send: state.send && state.generation == self.snapshot.epoch,
-                    client_user_message_id: uuid::Uuid::new_v4().to_string().into(),
-                });
-                self.perform(intent, OperationCompletion::Dictation(id));
+                };
+                if let Some(session) = &self.session {
+                    let store = session.store.clone();
+                    let updates = self.updates.clone();
+                    let epoch = self.epoch;
+                    self.runtime.handle.spawn(async move {
+                        let result = store
+                            .dispatch(intent)
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|result| result.map_err(|e| e.to_string()));
+                        drop(preparation);
+                        let _ = updates.send((epoch, Update::Completed(None, result))).await;
+                    });
+                }
+                self.dictation = None;
             }
         }
     }

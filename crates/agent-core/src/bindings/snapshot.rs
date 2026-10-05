@@ -78,6 +78,9 @@ impl Snapshot {
     pub fn models(&self) -> Vec<Model> {
         self.models.clone()
     }
+    pub fn current_draft_key(&self) -> String {
+        self.draft_key()
+    }
     pub fn projects(&self) -> Vec<Project> {
         self.projects.clone()
     }

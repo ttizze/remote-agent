@@ -17,6 +17,8 @@ pub struct ThreadRow {
     pub id: String,
     pub title: String,
     pub project_id: String,
+    pub branch: Option<String>,
+    pub worktree: Option<String>,
     pub provider: String,
     pub preview: String,
     pub status: String,
@@ -208,6 +210,7 @@ pub struct ConversationView {
     pub pinned: bool,
     pub settled: bool,
     pub snoozed: bool,
+    pub auto_settle: bool,
 }
 
 pub fn working(shell: &ThreadShell) -> bool {
@@ -305,19 +308,46 @@ pub fn shelves(snapshot: &Snapshot, now: &Timestamp, settled_limit: usize) -> Ve
             .collect();
         threads.sort_by(|a, b| {
             let custom = match kind {
-                ShelfKind::Pinned => a.thread.pin_order_key.cmp(&b.thread.pin_order_key),
-                ShelfKind::Active => a.thread.active_order_key.cmp(&b.thread.active_order_key),
+                ShelfKind::Pinned => match (&a.thread.pin_order_key, &b.thread.pin_order_key) {
+                    (Some(a), Some(b)) => a.cmp(b),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => b.thread.created_at.cmp(&a.thread.created_at),
+                },
                 _ => std::cmp::Ordering::Equal,
             };
+            if kind == ShelfKind::Pinned {
+                return custom.then_with(|| a.thread.id.cmp(&b.thread.id));
+            }
+            if kind == ShelfKind::Snoozed {
+                return a
+                    .thread
+                    .snoozed_until
+                    .cmp(&b.thread.snoozed_until)
+                    .then_with(|| a.thread.id.cmp(&b.thread.id));
+            }
             let timestamp = |s: &ThreadShell| {
                 match kind {
                     ShelfKind::Working => s
                         .latest_user_message_at
                         .as_ref()
                         .unwrap_or(&s.thread.created_at),
-                    ShelfKind::Settled => {
-                        s.thread.settled_at.as_ref().unwrap_or(&s.thread.updated_at)
-                    }
+                    ShelfKind::Settled => s
+                        .thread
+                        .settled_at
+                        .as_ref()
+                        .or_else(|| {
+                            [
+                                s.latest_user_message_at.as_ref(),
+                                s.latest_run_requested_at.as_ref(),
+                                s.latest_run_started_at.as_ref(),
+                                s.latest_run_completed_at.as_ref(),
+                            ]
+                            .into_iter()
+                            .flatten()
+                            .max()
+                        })
+                        .unwrap_or(&s.thread.updated_at),
                     ShelfKind::Active => [
                         &s.thread.created_at,
                         s.thread
@@ -398,6 +428,8 @@ fn thread_row(
         id: s.thread.id.to_string(),
         title: s.thread.title.clone(),
         project_id: s.thread.project_id.to_string(),
+        branch: s.thread.branch.clone(),
+        worktree: s.thread.worktree_path.clone(),
         provider: s.thread.provider_instance_id.to_string(),
         preview: s
             .latest_visible_message
@@ -853,6 +885,7 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
         pinned: thread.is_some_and(|t| t.pinned_at.is_some()),
         settled: thread.is_some_and(|t| t.settled_override == Some(SettledOverride::Settled)),
         snoozed: thread.is_some_and(|t| t.snoozed_until.is_some()),
+        auto_settle: thread.is_none_or(|t| t.auto_settle_disabled_at.is_none()),
     }
 }
 impl Snapshot {
@@ -919,6 +952,71 @@ mod tests {
         assert_eq!(shelf_kind(&shell, &now()), ShelfKind::Active);
         shell.thread.pinned_at = Some(now());
         assert_eq!(shelf_kind(&shell, &now()), ShelfKind::Pinned);
+    }
+    #[test]
+    fn pinned_keys_outrank_keyless_rows_and_equal_keys_use_identity() {
+        let mut a = projector::shell(&projection());
+        a.thread.id = ThreadId::new("a").unwrap();
+        a.thread.pinned_at = Some(now());
+        let mut b = a.clone();
+        b.thread.id = ThreadId::new("b").unwrap();
+        b.thread.pin_order_key = Some("n".into());
+        let mut c = b.clone();
+        c.thread.id = ThreadId::new("c").unwrap();
+        c.thread.updated_at = Timestamp::parse("2026-10-06T00:00:00Z").unwrap();
+        let snapshot = Snapshot {
+            shell: Some(std::sync::Arc::new(ShellSnapshot {
+                schema_version: 2,
+                snapshot_sequence: 0,
+                threads: vec![a, c, b],
+                archived_threads: vec![],
+            })),
+            ..Snapshot::default()
+        };
+        let rows = shelves(&snapshot, &now(), 10).remove(0).rows;
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["b", "c", "a"]
+        );
+    }
+    #[test]
+    fn snoozed_rows_wake_soonest_first_and_settled_rows_use_completion_time() {
+        let mut a = projector::shell(&projection());
+        a.thread.id = ThreadId::new("a").unwrap();
+        a.thread.snoozed_until = Some(Timestamp::parse("2026-10-06T01:00:00Z").unwrap());
+        let mut b = a.clone();
+        b.thread.id = ThreadId::new("b").unwrap();
+        b.thread.snoozed_until = Some(Timestamp::parse("2026-10-06T00:00:00Z").unwrap());
+        let mut snapshot = Snapshot {
+            shell: Some(std::sync::Arc::new(ShellSnapshot {
+                schema_version: 2,
+                snapshot_sequence: 0,
+                threads: vec![a, b],
+                archived_threads: vec![],
+            })),
+            ..Snapshot::default()
+        };
+        let snoozed = shelves(&snapshot, &now(), 10)
+            .into_iter()
+            .find(|s| s.kind == ShelfKind::Snoozed)
+            .unwrap();
+        assert_eq!(snoozed.rows[0].id, "b");
+        let shell = std::sync::Arc::make_mut(snapshot.shell.as_mut().unwrap());
+        for thread in &mut shell.threads {
+            thread.thread.snoozed_until = None;
+            thread.thread.settled_override = Some(SettledOverride::Settled);
+            thread.thread.settled_at = None;
+        }
+        shell.threads[0].latest_run_completed_at =
+            Some(Timestamp::parse("2026-10-05T02:00:00Z").unwrap());
+        shell.threads[0].thread.updated_at = Timestamp::parse("2026-10-06T12:00:00Z").unwrap();
+        shell.threads[1].latest_run_completed_at =
+            Some(Timestamp::parse("2026-10-05T03:00:00Z").unwrap());
+        let settled = shelves(&snapshot, &now(), 10)
+            .into_iter()
+            .find(|s| s.kind == ShelfKind::Settled)
+            .unwrap();
+        assert_eq!(settled.rows[0].id, "b");
     }
     #[test]
     fn work_logs_group_between_messages_without_hiding_final_text() {

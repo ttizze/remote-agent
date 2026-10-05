@@ -264,6 +264,7 @@ pub enum Intent {
     OpenThread {
         thread_id: String,
     },
+    LeaveThread,
     NewThread {
         project_id: Option<String>,
     },
@@ -272,6 +273,14 @@ pub enum Intent {
     },
     FilterProject {
         project_id: Option<String>,
+    },
+    MovePinned {
+        thread_id: String,
+        up: bool,
+    },
+    ReorderPinned {
+        thread_id: String,
+        before_thread_id: Option<String>,
     },
     EditDraft {
         draft: Draft,
@@ -315,6 +324,11 @@ pub enum Intent {
         item_id: String,
     },
     Refresh,
+    Transcribe {
+        draft_key: String,
+        preparation: Option<String>,
+        audio: Vec<u8>,
+    },
     ListFiles {
         path: String,
     },
@@ -383,6 +397,14 @@ pub enum Intent {
     },
     LoadHostStatus,
     LoadRemoteHosts,
+    LoadHostManagement,
+    PairRemoteHost {
+        invitation: crate::models::Invitation,
+        name: String,
+    },
+    RemoveRemoteHost {
+        id: String,
+    },
     CreateInvitation,
     RevokeDevice {
         id: String,

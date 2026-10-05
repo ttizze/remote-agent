@@ -131,3 +131,6 @@ M1 を完成させてから M2 へ進む。M1 の途中で M2 以降に手を出
 - 2026-10-05: クライアントの mutation RPC は thread ごとに受付順で直列化する。未確認の command／launch は同じ ID のまま保存して再接続時に再送する。既存 thread の通常送信は queue-after-active を使い、実行が無ければ Host が即時開始する。これにより購読更新より先に次の送信が来ても T3 の既定 queue 動作を保つ。
 - 2026-10-05: 棚分け・作業ログ・承認と質問・コンポーザー・provider capability による操作可否は agent-core で判断する。ネイティブ側は共通レコードと固定 T3 の theme palette を描画する。受信キューは64件で backpressure をかける。新しく書いた下書きや別 thread への移動は、遅い送信応答で上書きしない。
 - 2026-10-05: shell に最新 run の requestedAt／completedAt と active run の startedAt を含める。Active の並び順は T3 の return 時刻、Working は最後のユーザー発言時刻を使う。承認待ちなどで Working を離れた観測時刻だけクライアントに保持し、削除時に除去する。snooze の早期解除は rename 等の更新時刻でなく run の終了時刻を見る。
+- 2026-10-05: M1 の棚は計画に指定された5種類を表示し、固定 T3 の Working shelf 有効時の分類と順序を採用する。T3 の設定既定値は無効だが、全設定を扱う M3 で切替を公開する。Pinned の移動は共通層で T3 の base26 fractional key を計算し、未採番の列だけ必要時に採番する。Snoozed は解除予定順、Settled は終了・settle 時刻順で、改名では順序を変えない。
+- 2026-10-05: GPUI の旧会話 UI と補助状態を削除し、共通の ConversationView を描画する。下書きの widget 編集は revision で遅い receipt から保護し、共通 owner は snapshot を publish してから receipt を完了する。履歴追加時は先頭の表示位置を保持し、末尾近くを見ている場合だけ新着へ追従する。
+- 2026-10-05: files のバイナリ転送と音声入力は会話以外の機能として残す。転送は共通 owner の task が既存の hash／size 検証付き iroh transfer を呼ぶ。音声の転記は録音開始時の下書きに追記し、新しい入力を上書きしない。端末の保存先は orchestration 専用にして旧会話形式を読まない。

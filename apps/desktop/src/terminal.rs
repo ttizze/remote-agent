@@ -1,5 +1,5 @@
 use crate::{Runtime, store_session::StoreSession};
-use agent_core::state::{Intent, Snapshot, TerminalPhase, operations as op};
+use agent_core::state::{Intent, Snapshot, TerminalPhase};
 use agent_protocol::operations::TerminalSize;
 use alacritty_terminal::{
     Term,
@@ -141,7 +141,11 @@ impl Terminal {
             let receipt = session.store.dispatch(intent);
             let events = self.events.clone();
             self.runtime.handle.spawn(async move {
-                if let Err(error) = receipt.await {
+                if let Err(error) = receipt
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r.map_err(|e| e.to_string()))
+                {
                     let _ = events.send(Event::Error(error.to_string())).await;
                 }
             });
@@ -153,10 +157,10 @@ impl Terminal {
         }
         self.term.scroll_display(Scroll::Bottom);
         self.term.selection = None;
-        self.dispatch(Intent::WriteTerminal(op::WriteTerminal {
+        self.dispatch(Intent::WriteTerminal {
             handle: self.handle.clone(),
             data,
-        }));
+        });
         cx.notify();
     }
     fn event(&mut self, event: Event, cx: &mut Context<Self>) {
@@ -171,11 +175,12 @@ impl Terminal {
         }
         if self.snapshot.connected && !self.started {
             self.started = true;
-            self.dispatch(Intent::StartTerminal(op::StartTerminal {
+            self.dispatch(Intent::StartTerminal {
                 handle: self.handle.clone(),
                 cwd: self.cwd.clone(),
-                size: self.size,
-            }));
+                cols: self.size.cols,
+                rows: self.size.rows,
+            });
         }
         if let Some(terminal) = self.snapshot.terminals.get(&self.handle) {
             let chunks: Vec<_> = terminal
@@ -195,10 +200,6 @@ impl Terminal {
                 }
                 self.parser.advance(&mut self.term, &chunk.data);
                 self.sequence = chunk.sequence;
-                self.dispatch(Intent::AcknowledgeTerminal {
-                    handle: self.handle.clone(),
-                    sequence: self.sequence,
-                });
             }
             if self.term.columns() != self.size.cols as usize
                 || self.term.screen_lines() != self.size.rows as usize
@@ -217,10 +218,11 @@ impl Terminal {
             .get(&self.handle)
             .is_some_and(|terminal| terminal.phase == TerminalPhase::Running)
         {
-            self.dispatch(Intent::ResizeTerminal(op::ResizeTerminal {
+            self.dispatch(Intent::ResizeTerminal {
                 handle: self.handle.clone(),
-                size,
-            }));
+                cols: size.cols,
+                rows: size.rows,
+            });
         }
     }
     fn paste(&mut self, text: String, cx: &mut Context<Self>) {
@@ -362,10 +364,10 @@ impl Terminal {
                 vec![27, b'[', b'M', code + 32, col as u8 + 32, row as u8 + 32]
             }
         };
-        self.dispatch(Intent::WriteTerminal(op::WriteTerminal {
+        self.dispatch(Intent::WriteTerminal {
             handle: self.handle.clone(),
             data,
-        }));
+        });
     }
     fn position(&self, position: Point<Pixels>) -> CellPoint {
         let row = ((position.y - self.bounds.top()) / px(LINE_HEIGHT))
@@ -389,18 +391,23 @@ impl Render for Terminal {
             self.snapshot
                 .terminals
                 .get(&self.handle)
-                .map_or("接続中…".into(), |terminal| terminal.phase.label())
+                .and_then(|_| {
+                    self.snapshot
+                        .terminal_view(&self.handle, self.sequence)
+                        .status
+                })
+                .unwrap_or_else(|| "接続中…".into())
         });
         v_flex()
             .size_full()
             .min_h_0()
-            .bg(rgb(0x181818))
+            .bg(crate::app::color("terminalBackground"))
             .child(
                 h_flex()
                     .px_3()
                     .py_2()
                     .text_xs()
-                    .text_color(rgb(0xaaaaaa))
+                    .text_color(crate::app::color("textMuted"))
                     .child(div().flex_1().child(self.cwd.clone()))
                     .child(status)
                     .child(
@@ -410,9 +417,9 @@ impl Render for Terminal {
                             .cursor_pointer()
                             .child("終了")
                             .on_click(cx.listener(|s, _, _, _| {
-                                s.dispatch(Intent::KillTerminal(op::KillTerminal {
+                                s.dispatch(Intent::KillTerminal {
                                     handle: s.handle.clone(),
-                                }))
+                                })
                             })),
                     ),
             )
@@ -561,7 +568,7 @@ impl Element for TerminalCanvas {
         let run = TextRun {
             len: 1,
             font: font("Menlo"),
-            color: rgb(0xeeeeee).into(),
+            color: crate::app::color("terminalForeground").into(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -625,7 +632,7 @@ impl Element for TerminalCanvas {
                     .selection
                     .is_some_and(|selection| selection.contains(indexed.point))
                 {
-                    bg = rgb(0x48566c).into();
+                    bg = crate::app::color("terminalSelection").into();
                 }
                 window.paint_quad(fill(
                     Bounds::new(position, size(cell_width, px(LINE_HEIGHT))),
@@ -690,14 +697,14 @@ impl Element for TerminalCanvas {
                 );
                 window.paint_quad(fill(
                     Bounds::new(position, size(px(2.), px(LINE_HEIGHT))),
-                    rgb(0xeeeeee),
+                    crate::app::color("terminalForeground"),
                 ));
                 if !view.composition.is_empty() {
                     let run = TextRun {
                         len: view.composition.len(),
                         font: font("Menlo"),
-                        color: rgb(0xffffff).into(),
-                        background_color: Some(rgb(0x444444).into()),
+                        color: crate::app::color("terminalForeground").into(),
+                        background_color: Some(crate::app::color("terminalSelection").into()),
                         underline: Some(UnderlineStyle {
                             color: None,
                             thickness: px(1.),

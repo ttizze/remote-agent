@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+orchestration = { path = "../../crates/orchestration" }
 agent-protocol = { path = "../../crates/agent-protocol" }
 agent-transport = { path = "../../crates/agent-transport" }
 tracing.workspace = true

@@ -24,6 +24,9 @@ pub enum Outcome {
     StartedThread {
         id: String,
     },
+    RemoteHostPaired {
+        id: String,
+    },
 }
 pub type Receipt = oneshot::Receiver<Result<Outcome, PeerError>>;
 #[derive(Clone)]
@@ -45,6 +48,7 @@ enum OwnerEvent {
     Attach {
         peer: Arc<Client>,
         host_name: String,
+        session: transport::Session,
         events: Updates,
         complete: oneshot::Sender<()>,
     },
@@ -59,7 +63,19 @@ enum OwnerEvent {
         oneshot::Sender<Result<crate::browser::BrowserFrame, PeerError>>,
     ),
     Dictation(String, CancellationToken),
+    Transfer(FileTransfer, oneshot::Sender<Result<String, PeerError>>),
     Performance(crate::diagnostics::ConnectionPerformance),
+}
+enum FileTransfer {
+    Download {
+        source: String,
+        destination: String,
+    },
+    Upload {
+        source: String,
+        directory: String,
+        file_name: String,
+    },
 }
 type PreparedIntent = (Option<Call>, Option<(String, Draft)>, Option<ThreadId>);
 struct JobResult {
@@ -86,11 +102,14 @@ enum Reply {
     Login(op::AccountLogin),
     HostStatus(m::HostStatus),
     Remotes(Vec<m::RemoteHost>),
+    Remote(m::RemoteHost),
     Invitation(m::Invitation),
+    Transcription(String),
     Done,
 }
 struct Network {
     peer: Arc<Client>,
+    session: transport::Session,
     epoch: u64,
     tasks: Vec<AbortOnDropHandle<()>>,
     thread: Option<AbortOnDropHandle<()>>,
@@ -143,6 +162,40 @@ fn command(thread_id: ThreadId, body: CommandBody) -> Command {
 }
 
 impl Store {
+    pub async fn download_file(
+        &self,
+        source: String,
+        destination: String,
+    ) -> Result<(), PeerError> {
+        self.transfer(FileTransfer::Download {
+            source,
+            destination,
+        })
+        .await
+        .map(|_| ())
+    }
+    pub async fn upload_file(
+        &self,
+        source: String,
+        directory: String,
+        file_name: String,
+    ) -> Result<String, PeerError> {
+        self.transfer(FileTransfer::Upload {
+            source,
+            directory,
+            file_name,
+        })
+        .await
+    }
+    async fn transfer(&self, transfer: FileTransfer) -> Result<String, PeerError> {
+        let (sender, receive) = oneshot::channel();
+        self.inner
+            .sender
+            .send(OwnerEvent::Transfer(transfer, sender))
+            .await
+            .map_err(invalid)?;
+        receive.await.map_err(invalid)?
+    }
     pub async fn connect(
         endpoint: &transport::Endpoint,
         ticket: &transport::Ticket,
@@ -182,7 +235,6 @@ impl Store {
                 if owner.handle(event).await {
                     break;
                 }
-                owner.publish();
             }
             if let Some(network) = owner.network.take() {
                 network.peer.close().await;
@@ -239,6 +291,7 @@ impl Store {
             .send(OwnerEvent::Attach {
                 peer: peer.clone(),
                 host_name,
+                session,
                 events,
                 complete,
             })
@@ -430,6 +483,7 @@ impl Owner {
             OwnerEvent::Attach {
                 peer,
                 host_name,
+                session,
                 events,
                 complete,
             } => {
@@ -457,6 +511,7 @@ impl Owner {
                 ];
                 self.network = Some(Network {
                     peer,
+                    session,
                     epoch,
                     tasks,
                     thread: None,
@@ -488,13 +543,17 @@ impl Owner {
                         Some(thread),
                     );
                 }
+                self.publish();
                 let _ = complete.send(());
+                return false;
             }
             OwnerEvent::Dispatch(intent, complete) => {
                 if let Err((error, complete)) = self.intent(intent, complete) {
                     self.state.error = Some(error.to_string());
+                    self.publish();
                     let _ = complete.send(Err(error));
                 }
+                return false;
             }
             OwnerEvent::Shell(epoch, item) if epoch == self.epoch => {
                 crate::sync::shell(&mut self.state, item, &now())
@@ -518,7 +577,10 @@ impl Owner {
                     }
                 }
             }
-            OwnerEvent::Finished(epoch, result) if epoch == self.epoch => self.finished(*result),
+            OwnerEvent::Finished(epoch, result) if epoch == self.epoch => {
+                self.finished(*result);
+                return false;
+            }
             OwnerEvent::Close(complete) => {
                 if let Some(network) = self.network.take() {
                     network.peer.close().await;
@@ -553,6 +615,50 @@ impl Owner {
                     ));
                 }
             }
+            OwnerEvent::Transfer(transfer, complete) => {
+                if let Some(network) = self.network.as_mut() {
+                    let peer = network.peer.clone();
+                    let session = network.session.clone();
+                    network.tasks.retain(|task| !task.is_finished());
+                    network
+                        .tasks
+                        .push(AbortOnDropHandle::new(tokio::spawn(async move {
+                            let open = || async {
+                                session.open_stream().await.map_err(std::io::Error::other)
+                            };
+                            let result = match transfer {
+                                FileTransfer::Download {
+                                    source,
+                                    destination,
+                                } => agent_transport::transfers::download_file(
+                                    &peer,
+                                    open,
+                                    std::path::Path::new(&source),
+                                    std::path::Path::new(&destination),
+                                )
+                                .await
+                                .map(|_| destination),
+                                FileTransfer::Upload {
+                                    source,
+                                    directory,
+                                    file_name,
+                                } => agent_transport::transfers::upload_file(
+                                    &peer,
+                                    open,
+                                    std::path::Path::new(&source),
+                                    std::path::Path::new(&directory),
+                                    &file_name,
+                                )
+                                .await
+                                .map(|file| file.path),
+                            }
+                            .map_err(invalid);
+                            let _ = complete.send(result);
+                        })));
+                } else {
+                    let _ = complete.send(Err(invalid("Connect to the Host")));
+                }
+            }
             OwnerEvent::Performance(performance) => {
                 if let Some(network) = &self.network {
                     let peer = network.peer.clone();
@@ -563,6 +669,7 @@ impl Owner {
             }
             _ => {}
         }
+        self.publish();
         false
     }
     fn intent(
@@ -570,18 +677,64 @@ impl Owner {
         intent: Intent,
         complete: oneshot::Sender<Result<Outcome, PeerError>>,
     ) -> Result<(), (PeerError, oneshot::Sender<Result<Outcome, PeerError>>)> {
-        if self.state.pending_commands.len() + self.state.pending_launches.len() >= 128 {
-            return Err((
-                invalid("Too many pending commands; wait for the Host"),
-                complete,
-            ));
+        if let Intent::PairRemoteHost { invitation, name } = &intent {
+            let Some(network) = self.network.as_mut() else {
+                return Err((invalid("Connect to the Host"), complete));
+            };
+            if now().millis() / 1000 >= invitation.expires_at as i64 {
+                return Err((invalid("Invitation expired"), complete));
+            }
+            let ticket = match invitation.endpoint.parse::<transport::Ticket>() {
+                Ok(ticket) => ticket,
+                Err(error) => return Err((invalid(error), complete)),
+            };
+            let session = network.session.clone();
+            let invitation = invitation.invitation;
+            let peer = network.peer.clone();
+            let epoch = network.epoch;
+            let sender = self.sender.clone();
+            let call = Call::RegisterRemote(op::RegisterRemoteHost {
+                ticket: ticket.to_string(),
+                name: name.clone(),
+            });
+            network
+                .tasks
+                .push(AbortOnDropHandle::new(tokio::spawn(async move {
+                    let result =
+                        match crate::client::pair_remote(&session, &ticket, invitation).await {
+                            Ok(()) => execute(&peer, &call).await,
+                            Err(error) => Err(error),
+                        };
+                    let _ = sender
+                        .send(OwnerEvent::Finished(
+                            epoch,
+                            Box::new(JobResult {
+                                call,
+                                result,
+                                complete: Some(complete),
+                                sent: None,
+                                launched: None,
+                            }),
+                        ))
+                        .await;
+                })));
+            return Ok(());
         }
+
         let prepared = self.prepare(intent);
         let (call, sent, launched) = match prepared {
             Ok(value) => value,
             Err(error) => return Err((error, complete)),
         };
         if let Some(call) = call {
+            if mutation_thread(&call).is_some()
+                && self.state.pending_commands.len() + self.state.pending_launches.len() >= 2048
+            {
+                return Err((
+                    invalid("Too many pending commands; wait for the Host"),
+                    complete,
+                ));
+            }
             // Keep the receipt available if the request cannot be scheduled.
             if self.network.is_none() || !self.state.connected {
                 return Err((invalid("Connect to the Host"), complete));
@@ -589,8 +742,11 @@ impl Owner {
             self.job(call, Some(complete), sent, launched)
                 .expect("connection checked");
         } else {
+            self.publish();
             let _ = complete.send(Ok(Outcome::Applied));
+            return Ok(());
         }
+        self.publish();
         Ok(())
     }
     fn prepare(&mut self, intent: Intent) -> Result<PreparedIntent, PeerError> {
@@ -600,6 +756,109 @@ impl Owner {
         let mut launched = None;
         let timestamp = now();
         let call = match intent {
+            Intent::LeaveThread => {
+                self.state.selected_thread = None;
+                self.state.editing_run = None;
+                self.subscribe_thread();
+                None
+            }
+            Intent::MovePinned { thread_id, up } => {
+                let mut ids = crate::presentation::shelves(&self.state, &timestamp, 10)
+                    .into_iter()
+                    .find(|s| s.kind == crate::presentation::ShelfKind::Pinned)
+                    .map(|s| s.rows.into_iter().map(|row| row.id).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let index = ids
+                    .iter()
+                    .position(|id| id == &thread_id)
+                    .ok_or_else(|| invalid("Pinned thread is unavailable"))?;
+                let other = if up {
+                    index.checked_sub(1)
+                } else {
+                    index.checked_add(1).filter(|i| *i < ids.len())
+                };
+                if let Some(other) = other {
+                    ids.swap(index, other);
+                    return self.prepare(Intent::ReorderPinned {
+                        thread_id,
+                        before_thread_id: ids.get(other + 1).cloned(),
+                    });
+                }
+                None
+            }
+            Intent::ReorderPinned {
+                thread_id,
+                before_thread_id,
+            } => {
+                let mut thread_ids = crate::presentation::shelves(&self.state, &timestamp, 10)
+                    .into_iter()
+                    .find(|s| s.kind == crate::presentation::ShelfKind::Pinned)
+                    .map(|s| s.rows.into_iter().map(|row| row.id).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let from = thread_ids
+                    .iter()
+                    .position(|id| id == &thread_id)
+                    .ok_or_else(|| invalid("Pinned thread is unavailable"))?;
+                if before_thread_id.as_ref() == Some(&thread_id) {
+                    return Ok((None, None, None));
+                }
+                thread_ids.remove(from);
+                let to = match before_thread_id {
+                    Some(id) => thread_ids
+                        .iter()
+                        .position(|current| current == &id)
+                        .ok_or_else(|| invalid("Pinned list changed; try again"))?,
+                    None => thread_ids.len(),
+                };
+                thread_ids.insert(to, thread_id.clone());
+                let keys = self
+                    .state
+                    .shell
+                    .as_ref()
+                    .map(|s| {
+                        s.threads
+                            .iter()
+                            .filter(|s| s.thread.pinned_at.is_some())
+                            .map(|s| (s.thread.id.to_string(), s.thread.pin_order_key.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let assignments = crate::ordering::reorder(&thread_ids, &keys, &thread_id);
+                if assignments.len()
+                    + self.state.pending_commands.len()
+                    + self.state.pending_launches.len()
+                    > 2048
+                {
+                    return Err(invalid("Wait for pending commands"));
+                }
+                for (id, key) in assignments {
+                    self.job(
+                        Call::DispatchCommand(command(
+                            ThreadId::new(id).map_err(invalid)?,
+                            CommandBody::ThreadPinReorder { order_key: key },
+                        )),
+                        None,
+                        None,
+                        None,
+                    )?;
+                }
+                None
+            }
+            Intent::Transcribe {
+                draft_key,
+                preparation,
+                audio,
+            } => {
+                sent = Some((
+                    draft_key.clone(),
+                    self.state
+                        .drafts
+                        .get(&draft_key)
+                        .cloned()
+                        .unwrap_or_else(|| self.state.current_draft()),
+                ));
+                Some(Call::Transcribe(op::Transcribe { preparation, audio }))
+            }
             Intent::OpenThread { thread_id } => {
                 let id = ThreadId::new(thread_id).map_err(invalid)?;
                 self.state.selected_thread = Some(id.clone());
@@ -768,6 +1027,13 @@ impl Owner {
                         self.state.drafts.insert(self.state.draft_key(), draft);
                     }
                     QueueAction::Reorder { run_ids } => {
+                        if run_ids.len()
+                            + self.state.pending_commands.len()
+                            + self.state.pending_launches.len()
+                            > 2048
+                        {
+                            return Err(invalid("Wait for pending commands"));
+                        }
                         let ordered = run_ids
                             .iter()
                             .map(|id| RunId::new(id.clone()).map_err(invalid))
@@ -1006,6 +1272,16 @@ impl Owner {
             }
             Intent::LoadHostStatus => Some(Call::HostStatus(m::Empty {})),
             Intent::LoadRemoteHosts => Some(Call::ListRemotes(m::Empty {})),
+            Intent::LoadHostManagement => {
+                self.job(Call::HostStatus(m::Empty {}), None, None, None)?;
+                Some(Call::ListRemotes(m::Empty {}))
+            }
+            Intent::RemoveRemoteHost { id } => {
+                Some(Call::RemoveRemote(op::RemoveRemoteHost { id }))
+            }
+            Intent::PairRemoteHost { .. } => {
+                unreachable!("pairing is executed by the connection owner")
+            }
             Intent::CreateInvitation => Some(Call::Invite(m::Empty {})),
             Intent::RevokeDevice { id } => Some(Call::Revoke(op::RevokeDevice { id })),
             Intent::RegisterProject { path } => {
@@ -1034,6 +1310,10 @@ impl Owner {
         let should_navigate = sent
             .as_ref()
             .is_some_and(|(key, _)| self.state.draft_key() == *key);
+        let paired = match &result {
+            Ok(Reply::Remote(host)) => Some(host.id.clone()),
+            _ => None,
+        };
         let outcome = match result {
             Err(error) => {
                 self.state.error = Some(error.to_string());
@@ -1194,10 +1474,29 @@ impl Owner {
                     Reply::Login(login) => self.state.account_login = Some(login),
                     Reply::HostStatus(status) => self.state.host_status = Some(status),
                     Reply::Remotes(remotes) => self.state.remote_hosts = remotes,
+                    Reply::Remote(host) => {
+                        self.state.remote_hosts.retain(|old| old.id != host.id);
+                        self.state.remote_hosts.push(host);
+                    }
                     Reply::Invitation(invitation) => self.state.invitation = Some(invitation),
+                    Reply::Transcription(text) => {
+                        if let Some((key, original)) = sent {
+                            let draft = self.state.drafts.entry(key).or_insert(original);
+                            if !draft.text.is_empty() && !text.is_empty() {
+                                draft.text.push('\n');
+                            }
+                            draft.text.push_str(&text);
+                        }
+                    }
                     Reply::Done => {}
                 }
                 match &call {
+                    Call::RemoveRemote(params) => {
+                        self.state.remote_hosts.retain(|host| host.id != params.id)
+                    }
+                    Call::Revoke(_) => {
+                        let _ = self.job(Call::HostStatus(m::Empty {}), None, None, None);
+                    }
                     Call::StartTerminal(params) => {
                         if let Some(t) = self.state.terminals.get_mut(&params.handle)
                             && t.phase == TerminalPhase::Starting
@@ -1221,14 +1520,15 @@ impl Owner {
                     | Call::LogoutAccount(_) => self.refresh(),
                     _ => {}
                 }
-                Ok(launched
-                    .map(|id| Outcome::StartedThread { id: id.to_string() })
-                    .unwrap_or_default())
+                Ok(if let Some(id) = paired {
+                    Outcome::RemoteHostPaired { id }
+                } else {
+                    launched
+                        .map(|id| Outcome::StartedThread { id: id.to_string() })
+                        .unwrap_or_default()
+                })
             }
         };
-        if let Some(complete) = complete {
-            let _ = complete.send(outcome);
-        }
         if let Some(thread) = mutation
             && let Some(network) = self.network.as_mut()
         {
@@ -1247,6 +1547,10 @@ impl Owner {
             if let Some(job) = next {
                 let _ = self.job(job.call, job.complete, job.sent, job.launched);
             }
+        }
+        self.publish();
+        if let Some(complete) = complete {
+            let _ = complete.send(outcome);
         }
     }
     fn notification(&mut self, notification: protocol::Notification) {
@@ -1329,7 +1633,11 @@ async fn execute(peer: &Client, call: &Call) -> Result<Reply, PeerError> {
         Call::StartAccountLogin(_) => Reply::Login(peer.request(call).await?),
         Call::HostStatus(_) => Reply::HostStatus(peer.request(call).await?),
         Call::ListRemotes(_) => Reply::Remotes(peer.request(call).await?),
+        Call::RegisterRemote(_) => Reply::Remote(peer.request(call).await?),
         Call::Invite(_) => Reply::Invitation(peer.request(call).await?),
+        Call::Transcribe(_) => {
+            Reply::Transcription(peer.request::<op::Transcription>(call).await?.text)
+        }
         Call::SelectAccount(_) => {
             let _: op::AccountSelection = peer.request(call).await?;
             Reply::Done
@@ -1565,5 +1873,58 @@ mod tests {
         store.close().await.unwrap();
         while snapshots.changed().await.is_ok() {}
         assert!(!snapshots.borrow().connected);
+    }
+    #[test]
+    fn remote_pairing_receipt_observes_the_registered_host() {
+        let mut owner = owner(Snapshot::default());
+        let (complete, mut receipt) = oneshot::channel();
+        owner.finished(JobResult {
+            call: Call::RegisterRemote(op::RegisterRemoteHost {
+                ticket: "ticket".into(),
+                name: "Host".into(),
+            }),
+            result: Ok(Reply::Remote(m::RemoteHost {
+                id: "remote".into(),
+                ticket: "ticket".into(),
+                name: "Host".into(),
+            })),
+            complete: Some(complete),
+            sent: None,
+            launched: None,
+        });
+        assert_eq!(
+            receipt.try_recv().unwrap().unwrap(),
+            Outcome::RemoteHostPaired {
+                id: "remote".into()
+            }
+        );
+        assert_eq!(owner.snapshots.borrow().remote_hosts[0].id, "remote");
+    }
+    #[test]
+    fn transcription_appends_to_its_original_draft_without_replacing_new_text() {
+        let mut state = Snapshot::default();
+        state.drafts.insert(
+            "thread".into(),
+            Draft {
+                text: "Typed while recording".into(),
+                ..Draft::default()
+            },
+        );
+        let mut owner = owner(state);
+        owner.finished(JobResult {
+            call: Call::Transcribe(op::Transcribe {
+                audio: vec![],
+                preparation: None,
+            }),
+            result: Ok(Reply::Transcription("Dictated words".into())),
+            complete: None,
+            sent: Some(("thread".into(), Draft::default())),
+            launched: None,
+        });
+        assert_eq!(
+            owner.state.drafts["thread"].text,
+            "Typed while recording\nDictated words"
+        );
+        assert!(owner.state.selected_thread.is_none());
     }
 }

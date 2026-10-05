@@ -331,6 +331,27 @@ impl AgentStore {
     pub fn prepare_dictation(&self) -> Arc<crate::client::DictationPreparation> {
         Arc::new(self.store.prepare_dictation())
     }
+    pub async fn download_file(
+        &self,
+        source: String,
+        destination: String,
+    ) -> Result<(), AgentError> {
+        self.store
+            .download_file(source, destination)
+            .await
+            .map_err(error)
+    }
+    pub async fn upload_file(
+        &self,
+        source: String,
+        directory: String,
+        file_name: String,
+    ) -> Result<String, AgentError> {
+        self.store
+            .upload_file(source, directory, file_name)
+            .await
+            .map_err(error)
+    }
 
     /// Enqueue synchronously; native task scheduling cannot reorder UI intents.
     pub fn dispatch(&self, intent: Intent) -> Result<Arc<Receipt>, AgentError> {
