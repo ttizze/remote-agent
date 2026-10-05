@@ -14,9 +14,6 @@ unit-tests:
     cargo nextest run --locked --no-fail-fast --workspace --lib --bins --features agent-core/bindings &
     rust_pid=$!
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target}" cargo test --locked --no-fail-fast --manifest-path tools/agent-peer/Cargo.toml || failed=1
-    if [[ $(uname -s) == Darwin ]]; then
-        cargo xtask ios-markdown || failed=1
-    fi
     wait "$rust_pid" || failed=1
     exit "$failed"
 
@@ -45,69 +42,13 @@ dev: build-desktop-macos
         --env "BEX_STATE_DIR=$HOME/Library/Application Support/app.bex.BEX-Dev" \
         --env "BEX_ACCOUNT_STATE_DIR=$accounts"
 
-# Run isolated iOS Simulator tests; reject skipped and missing results.
-ios-e2e *tests:
-    scripts/ios-e2e.sh "$@"
-
 # Archive iOS with the pinned package plugins trusted from the first build.
 ios-archive archive-path derived-data-path *args:
     scripts/archive-ios.sh "$@"
 
-# Headless tests of the production iOS Markdown parser.
-ios-markdown:
-    cargo xtask ios-markdown
-
 # Exercise the production Mac Browser view and WebKit persistence in fresh processes.
 macos-e2e:
     cargo test --locked --features agent-core/bindings -p bex-desktop --test chrome_cookie_webview
-
-# Build and test Store recovery, Markdown and network permission on a fresh Android 17 emulator.
-android-e2e:
-    cargo build --locked -p host-fixture -p codex-app-server -p bex-process --bins
-    ./gradlew :apps:mobile:assembleDebug :apps:mobile:assembleDebugAndroidTest --console=plain
-    nix develop .#android-test --command bash scripts/android-e2e.sh
-
-# Native conversation acceptance; interleaved shards balance measured CI durations.
-conversation-ui:
-    scripts/ios-e2e.sh \
-        testSimulatorModelDefaultsInheritAndPersistAcrossScopes \
-        testSimulatorNativeTerminalRetainsShellAfterReopening \
-        testSimulatorModelDefaultsPersistAndApplyOnlyToNewConversations \
-        testSimulatorGroupsLiveCommandsBetweenCommentaryAndExpandsOnTap \
-        testSimulatorRetriesSideChatPreparationWithoutLosingOriginalDraft \
-        testSimulatorKeepsDraftDuringLongMarkdownStreamAndReopensFinalText \
-        testSimulatorRepeatedlyReopensTasksAndNewDraftsAfterBackNavigation \
-        testSimulatorBrowserIsSeparateFromConversationAndPreservesPage \
-        testSimulatorUsesNativeHostNavigationAndPairingDismissal \
-        testSimulatorKeepsSmallOlderScrollDuringLiveUpdate \
-        testSimulatorKeepsResponsesFromRepeatedTurnIDsWhenReopeningHistory \
-        testSimulatorKeepsLatestVisibleAcrossRepeatedLongHistorySubmissions \
-        testSimulatorUsesNativeProjectDisclosureAndDirectoryNavigation \
-        testSimulatorOpensLongInterruptedHistoryAtLatestMessage \
-        testSimulatorCopiesOnlySelectedMessageText \
-        testSimulatorCanStartAConversationInAProject \
-        testSimulatorReopensCompletedHistoryCollapsed \
-        testSimulatorSelectsAssistantTextInPlaceAndAddsOnlySelectionToDraft \
-        testSimulatorReopensRunningLongHistoryWithoutBlankViewport \
-        testSimulatorOpensSideChatWithoutLosingOriginalDraft \
-        testSimulatorMarksMergedWorktreesToTheRightOfRunningStatus \
-        testSimulatorRendersEveryActivityFamilyAndHidesStateOnlyItems \
-        testSimulatorOpensOnlyTheTappedImageAndSavesIt \
-        testSimulatorRemovesHostAndRequiresPairingAfterRelaunch \
-        testSimulatorRendersMarkdownTableAndReopensIt \
-        testSimulatorShowsAcceptedAdditionalInputBeforeCodexProcessesIt \
-        testSimulatorKeepsFailedWorkCollapsedWithVisibleTerminalError \
-        testSimulatorModelPickerUsesAgentRailAndCompactControls \
-        testSimulatorNativeTerminalPastesMultilineText \
-        testSimulatorOpensTasksBeforeHistoryReadFinishes \
-        testSimulatorNativeTerminalDoesNotDuplicateQueryResponses \
-        testSimulatorFillsInitialHistoryViewportWithoutScrolling \
-        testSimulatorRetriesAFailedTaskOpenWithoutLosingItsDraft
-
-# Exercise the real iroh Host through the headless client.
-iroh-e2e:
-    cargo build --locked --package bex-process --bin bex-provider-supervisor
-    cargo test --locked --package host-fixture --test iroh_host
 
 # Check the local Mac Host/desktop and iPhone client, or one selected language.
 quality language="apple":

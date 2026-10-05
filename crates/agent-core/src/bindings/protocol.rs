@@ -1,5 +1,5 @@
 //! ABI converters for retained peripheral wire records.
-use crate::{models::*, session::ProviderKind};
+use crate::{models::*, provider::ProviderKind};
 use agent_protocol::{browser::*, diagnostics::*, operations::*};
 #[uniffi::remote(Enum)]
 enum WorktreeStatus {
@@ -248,7 +248,7 @@ enum ConnectionPhase {
 #[uniffi::remote(Record)]
 struct Account {
     pub id: String,
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
     pub email: Option<String>,
     pub plan_type: Option<String>,
     pub usage: Option<AccountUsage>,

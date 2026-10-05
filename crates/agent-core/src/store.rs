@@ -1454,8 +1454,8 @@ impl Owner {
                         {
                             self.state.default_draft = Draft {
                                 instance_id: match model.model.provider {
-                                    crate::session::ProviderKind::Codex => "codex",
-                                    crate::session::ProviderKind::Claude => "claude",
+                                    crate::provider::ProviderKind::Codex => "codex",
+                                    crate::provider::ProviderKind::Claude => "claude",
                                 }
                                 .into(),
                                 model: model.id.clone(),

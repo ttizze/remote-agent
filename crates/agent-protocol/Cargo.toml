@@ -14,7 +14,6 @@ base64.workspace = true
 uuid = { version = "1", features = ["serde"] }
 thiserror.workspace = true
 url.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 proptest = "1.11"

@@ -8,7 +8,7 @@ use agent_core::{
     state::{Intent, QuestionAnswer, QueueAction, SendBehavior, Snapshot, ThreadAction},
     store::Outcome,
 };
-use agent_protocol::{models::RemoteHost, session::ProviderKind};
+use agent_protocol::{models::RemoteHost, provider::ProviderKind};
 use gpui_kit::{
     component::{
         button::{Button, ButtonVariants},
@@ -20,7 +20,7 @@ use gpui_kit::{
     prelude::FluentBuilder,
     *,
 };
-use hosts::{ConnectionLayout, HostEvent, Hosts};
+use hosts::{HostEvent, Hosts};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,

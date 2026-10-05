@@ -1,5 +1,4 @@
 //! Orchestration-v2 RPC and independent native Host resources.
-mod composer;
 pub(crate) mod connections;
 pub(crate) mod identity;
 mod import;

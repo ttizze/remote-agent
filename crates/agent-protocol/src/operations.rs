@@ -1,5 +1,5 @@
 //! Shared request records and their typed RPC contracts.
-use crate::{error::PeerError, models::ThreadResponse};
+use crate::error::PeerError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 
@@ -16,10 +16,6 @@ pub trait RpcMethod: Serialize {
     fn request(&self) -> Result<crate::protocol::Call, PeerError> {
         self.params()
             .map(<Self::Contract as crate::protocol::contracts::Contract>::call)
-    }
-    fn subscription(_output: &mut Self::Output, _id: uuid::Uuid) {}
-    fn validate(&self, _output: &Self::Output) -> Result<(), &'static str> {
-        Ok(())
     }
 }
 #[macro_export]
@@ -58,74 +54,6 @@ rpc_method!(ListRemoteHosts, ListRemotes, |self| crate::models::Empty {});
 #[derive(Debug, Serialize, Clone, Deserialize)]
 pub struct RegisterRemoteHost {
     pub ticket: String,
-    pub name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", rename_all_fields = "camelCase")]
-pub enum Input {
-    Text { text: String },
-    Skill { name: String, path: String },
-    LocalImage { path: String },
-    Mention { path: String, name: String },
-}
-impl Input {
-    pub fn message_parts(input: &[Self]) -> Vec<crate::items::MessagePart> {
-        use crate::items::MessagePart;
-        input
-            .iter()
-            .map(|part| match part {
-                Self::Text { text } => MessagePart::Text { text: text.clone() },
-                Self::LocalImage { path } => MessagePart::Image {
-                    source: path.clone(),
-                },
-                Self::Skill { name, path } => MessagePart::Invocation {
-                    name: name.clone(),
-                    path: path.clone(),
-                },
-                Self::Mention { name, path }
-                    if path.starts_with("plugin://") || path.starts_with("app://") =>
-                {
-                    MessagePart::Invocation {
-                        name: name.clone(),
-                        path: path.clone(),
-                    }
-                }
-                Self::Mention { name, path } => MessagePart::Attachment {
-                    name: name.clone(),
-                    path: path.clone(),
-                },
-            })
-            .collect()
-    }
-}
-
-pub fn validate_thread(
-    output: &ThreadResponse,
-    expected: Option<&crate::session::SessionRef>,
-) -> Result<(), &'static str> {
-    let id = output
-        .thread
-        .id
-        .as_ref()
-        .filter(|id| id.validate().is_ok())
-        .ok_or("thread ID is missing")?;
-    if expected.is_some_and(|expected| id != expected) {
-        Err("thread ID does not match")
-    } else {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ItemResponse {
-    pub item: crate::models::Item,
-    pub transfer: Option<crate::models::TransferGrant>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RenameSession {
-    pub thread_id: crate::session::SessionRef,
     pub name: String,
 }
 
@@ -183,7 +111,7 @@ pub struct WriteFile {
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub id: String,
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
     pub email: Option<String>,
     pub plan_type: Option<String>,
     pub usage: Option<AccountUsage>,
@@ -218,7 +146,7 @@ impl UsageWindow {
 #[serde(rename_all = "camelCase")]
 pub struct Accounts {
     pub accounts: Vec<Account>,
-    pub selected: std::collections::HashMap<crate::session::ProviderKind, String>,
+    pub selected: std::collections::HashMap<crate::provider::ProviderKind, String>,
     pub error: Option<String>,
 }
 
@@ -230,12 +158,12 @@ impl Accounts {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartAccountLogin {
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SubmitAccountLogin {
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
     pub id: String,
     pub code: String,
 }
@@ -250,7 +178,7 @@ impl std::fmt::Debug for SubmitAccountLogin {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSelection {
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
     pub selected_id: String,
     pub persistence_error: Option<String>,
 }
@@ -258,7 +186,7 @@ pub struct AccountSelection {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountLogin {
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
     pub login_id: String,
     pub requires_code_submission: bool,
     pub user_code: String,
@@ -272,8 +200,6 @@ pub struct AccountLoginStatus {
     pub account_id: Option<String>,
 }
 
-use crate::requests::Answer;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSize {
     pub cols: u16,
@@ -284,26 +210,6 @@ pub struct TerminalSize {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddProject {
     pub cwd: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ListSessions {
-    pub query: crate::models::ListQuery,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReadItem {
-    pub thread_id: crate::session::SessionRef,
-    pub turn_id: crate::ids::TurnId,
-    pub item_id: crate::ids::ItemId,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenRequest {
-    pub request_id: crate::ids::RequestId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,28 +232,28 @@ pub struct RemoveWorktree {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelectAccount {
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
     #[serde(rename = "accountId")]
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogoutAccount {
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
     #[serde(rename = "accountId")]
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadAccountLogin {
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
     #[serde(rename = "loginId")]
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelAccountLogin {
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
     #[serde(rename = "loginId")]
     pub id: String,
 }
@@ -378,13 +284,6 @@ pub struct TerminalWrite {
 pub struct TerminalKill {
     pub process_handle: String,
 }
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionAnswer {
-    pub request_id: crate::ids::RequestId,
-    pub answer: Answer,
-}
-
 /// Shared xterm palette, also used for Host-owned terminal-query replies.
 pub fn terminal_color(index: u16) -> u32 {
     const PALETTE: [u32; 16] = [
@@ -406,69 +305,6 @@ pub fn terminal_color(index: u16) -> u32 {
         257 => 0x181818,
         _ => 0xe5e5e5,
     }
-}
-
-pub fn validate_output<O: RpcMethod>(operation: &O, output: &O::Output) -> Result<(), PeerError> {
-    operation
-        .validate(output)
-        .map_err(|reason| PeerError::InvalidResponse {
-            method: operation.method().into(),
-            reason: reason.into(),
-            sequence: None,
-            raw: serde_json::to_string(output).expect("wire output serializes"),
-        })
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ForkSession {
-    pub thread_id: crate::session::SessionRef,
-    pub last_turn_id: crate::ids::TurnId,
-}
-
-impl ForkSession {
-    pub fn new(thread_id: crate::session::SessionRef, last_turn_id: crate::ids::TurnId) -> Self {
-        Self {
-            thread_id,
-            last_turn_id,
-        }
-    }
-    pub(crate) fn validate(
-        &self,
-        output: &crate::models::ThreadResponse,
-    ) -> Result<(), &'static str> {
-        validate_thread(output, None)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateSession {
-    pub provider: crate::session::ProviderKind,
-    pub cwd: Option<String>,
-    pub model: Option<crate::models::ModelRef>,
-}
-
-impl RpcMethod for CreateSession {
-    rpc_contract!(CreateSession);
-    fn params(&self) -> Result<Self, PeerError> {
-        Ok(self.clone())
-    }
-    fn subscription(output: &mut Self::Output, id: uuid::Uuid) {
-        output.subscription_id = id;
-    }
-    fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        if output.session.provider != self.provider {
-            return Err("created session provider does not match");
-        }
-        validate_thread(&output.response, Some(&output.session))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Interrupt {
-    pub thread_id: crate::session::SessionRef,
-    pub turn_id: crate::ids::TurnId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -501,48 +337,8 @@ pub struct RevokeDevice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoadComposerCatalog {
-    pub cwd: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadAccountUsage {
-    pub provider: crate::session::ProviderKind,
+    pub provider: crate::provider::ProviderKind,
     #[serde(rename = "accountId")]
     pub id: String,
-}
-
-impl ListSessions {
-    pub fn new(query: crate::models::ListQuery) -> Self {
-        Self { query }
-    }
-}
-
-impl ReadItem {
-    pub(crate) fn validate(&self, output: &ItemResponse) -> Result<(), &'static str> {
-        if output.item.id == self.item_id {
-            Ok(())
-        } else {
-            Err("item ID does not match")
-        }
-    }
-}
-
-/// Input intent. The Host chooses start, steer or queue from its current execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Submission {
-    pub thread_id: crate::session::SessionRef,
-    pub client_user_message_id: crate::ids::ClientInputId,
-    pub input: Vec<Input>,
-    pub model: Option<crate::models::ModelRef>,
-    pub effort: Option<String>,
-    #[serde(rename = "serviceTierForTurn")]
-    pub service_tier: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubmissionReceipt {
-    pub turn_id: Option<crate::ids::TurnId>,
 }

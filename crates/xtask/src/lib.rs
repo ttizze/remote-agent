@@ -4,10 +4,6 @@ pub mod android_e2e;
 #[cfg(unix)]
 pub mod build_cleanup;
 pub mod connection_diagnostics;
-#[cfg(unix)]
-pub mod ios_e2e;
-#[cfg(unix)]
-pub mod ios_markdown;
 pub mod supervision;
 #[cfg(unix)]
 pub mod terminal_probe;

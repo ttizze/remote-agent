@@ -8,7 +8,7 @@ use crate::ProjectStore;
 use agent_protocol::{
     operations as op,
     protocol::{self, Body, Call, Response},
-    session::ProviderKind,
+    provider::ProviderKind,
 };
 use agent_transport::peer::RpcMessageError;
 use codex_app_server::CodexAppServer;
@@ -47,7 +47,6 @@ pub(crate) struct Failure {
     pub(crate) code: &'static str,
     pub(crate) message: String,
     pub(crate) delivery: agent_protocol::error::Delivery,
-    pub(crate) execution: Option<Box<agent_protocol::execution::ExecutionError>>,
 }
 impl From<Failure> for agent_protocol::error::RpcFailure {
     fn from(error: Failure) -> Self {
@@ -55,7 +54,6 @@ impl From<Failure> for agent_protocol::error::RpcFailure {
             code: error.code.into(),
             message: error.message,
             delivery: error.delivery,
-            execution: error.execution,
         }
     }
 }
@@ -77,7 +75,6 @@ impl Failure {
             code,
             message: format!("{error:#}"),
             delivery: agent_protocol::error::Delivery::NotSent,
-            execution: None,
         }
     }
 }
@@ -510,15 +507,6 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("project_add_failed", error))?
                 .into(),
             Call::ListProjects(_) => self.projects().await?.into(),
-            Call::SessionScope(_) => self
-                .inner
-                .resources
-                .projects
-                .path()
-                .with_file_name("orchestration-v2.sqlite")
-                .to_string_lossy()
-                .into_owned()
-                .into(),
             Call::ListAccounts(_)
             | Call::SelectAccount(_)
             | Call::LogoutAccount(_)
@@ -532,13 +520,6 @@ impl HostRpcService {
                 .await?
                 .into(),
             Call::ListModels(params) => self.models(params).await?.into(),
-            Call::ComposerCatalog(params) => self
-                .inner
-                .resources
-                .codex
-                .composer_catalog(&params.cwd)
-                .await
-                .into(),
             Call::ReadPermissionSettings(params) => {
                 let _guard = self.inner.resources.permission_settings_access.lock().await;
                 match params.provider {

@@ -1,5 +1,5 @@
 //! Client state, workflows, presentation, and optional native bindings.
-use agent_protocol::{browser, models, protocol, session};
+use agent_protocol::{browser, models, protocol, provider};
 use agent_transport::{diagnostics, peer, transport};
 #[cfg(test)]
 extern crate self as agent_core;

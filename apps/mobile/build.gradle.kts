@@ -44,6 +44,7 @@ val generateAgentBindings by
         workingDir(rootProject.projectDir)
         commandLine("scripts/build-agent-bindings.sh")
         inputs.file(rootProject.file("scripts/build-agent-bindings.sh"))
+        inputs.property("buildRevision", providers.environmentVariable("BEX_BUILD_REVISION").orElse("development"))
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
         inputs.dir(rootProject.file("crates/agent-ffi"))
         inputs.dir(rootProject.file("crates/agent-core"))
@@ -69,6 +70,7 @@ val buildAgentAndroid by
             "agent-ffi",
             "--release",
         )
+        inputs.property("buildRevision", providers.environmentVariable("BEX_BUILD_REVISION").orElse("development"))
         inputs.files(rootProject.file("Cargo.toml"), rootProject.file("Cargo.lock"))
         inputs.dir(rootProject.file("crates/agent-ffi"))
         inputs.dir(rootProject.file("crates/agent-core"))
@@ -100,7 +102,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     buildFeatures { compose = true }
-    sourceSets.getByName("androidTest").assets.srcDir(rootProject.file("crates/agent-core/tests/fixtures/markdown"))
     sourceSets.getByName("main") {
         kotlin.srcDir(rootProject.file("target/agent-bindings/dev"))
         res.srcDir("native-res")

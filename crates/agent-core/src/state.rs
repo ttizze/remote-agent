@@ -382,23 +382,23 @@ pub enum Intent {
     },
     LoadAccounts,
     SelectAccount {
-        provider: crate::session::ProviderKind,
+        provider: crate::provider::ProviderKind,
         id: String,
     },
     StartLogin {
-        provider: crate::session::ProviderKind,
+        provider: crate::provider::ProviderKind,
     },
     CompleteLogin {
-        provider: crate::session::ProviderKind,
+        provider: crate::provider::ProviderKind,
         id: String,
         code: String,
     },
     CancelLogin {
-        provider: crate::session::ProviderKind,
+        provider: crate::provider::ProviderKind,
         id: String,
     },
     DeleteAccount {
-        provider: crate::session::ProviderKind,
+        provider: crate::provider::ProviderKind,
         id: String,
     },
     LoadHostStatus,

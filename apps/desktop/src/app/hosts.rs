@@ -21,11 +21,6 @@ pub(super) enum HostEvent {
     Selected(Option<RemoteHost>),
     Removed(String),
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum ConnectionLayout {
-    Onboarding,
-    Settings,
-}
 enum Action {
     None,
     Invite,
@@ -232,22 +227,17 @@ impl Hosts {
 
     pub(super) fn connection_choices(
         &self,
-        layout: ConnectionLayout,
         current: Option<&str>,
         connected: bool,
         agent_controls: Div,
         cx: &Context<Self>,
     ) -> Div {
-        let cards = layout == ConnectionLayout::Onboarding;
         let mut agent_controls = Some(agent_controls);
         let mut choices = v_flex()
-            .when(cards, |view| view.gap_3())
-            .when(!cards, |view| {
-                view.rounded(px(10.))
-                    .border_1()
-                    .border_color(super::color("border"))
-                    .overflow_hidden()
-            });
+            .rounded(px(10.))
+            .border_1()
+            .border_color(super::color("border"))
+            .overflow_hidden();
         for (index, remote) in std::iter::once(None)
             .chain(self.snapshot.remote_hosts.iter().map(Some))
             .enumerate()
@@ -269,19 +259,8 @@ impl Hosts {
             let mut card = v_flex()
                 .gap_3()
                 .p_4()
-                .when(cards, |view| {
-                    view.rounded(px(12.))
-                        .border_1()
-                        .border_color(if selected {
-                            super::color("accent")
-                        } else {
-                            super::color("border")
-                        })
-                        .bg(super::color("surface"))
-                })
-                .when(!cards, |view| {
-                    view.border_b_1().border_color(super::color("border"))
-                })
+                .border_b_1()
+                .border_color(super::color("border"))
                 .child(
                     h_flex()
                         .items_center()
@@ -316,7 +295,7 @@ impl Hosts {
                                 })
                                 .child(label),
                         )
-                        .when_some(remote.filter(|_| !cards), |row, remote| {
+                        .when_some(remote, |row, remote| {
                             let id = remote.id.clone();
                             row.child(
                                 Button::new(format!("remove-{id}"))
@@ -339,17 +318,10 @@ impl Hosts {
             if selected {
                 let details = v_flex()
                     .gap_2()
-                    .when(cards, |view| {
-                        view.pt_3()
-                            .border_t_1()
-                            .border_color(super::color("border"))
-                    })
-                    .when(!cards, |view| {
-                        view.ml_8()
-                            .p_3()
-                            .rounded(px(6.))
-                            .bg(super::color("surface"))
-                    })
+                    .ml_8()
+                    .p_3()
+                    .rounded(px(6.))
+                    .bg(super::color("surface"))
                     .children(agent_controls.take());
                 card = card.child(details);
             }
@@ -357,31 +329,19 @@ impl Hosts {
         }
         choices = choices.child(
             Button::new("onboarding-add-remote")
-                .accessibility_label(if cards {
-                    "クラウドVM・別のPCに接続"
-                } else {
-                    "接続先を追加"
-                })
+                .accessibility_label("接続先を追加")
                 .child(
                     h_flex()
-                        .when(!cards, |row| row.w_full())
+                        .w_full()
                         .gap_2()
-                        .child(Icon::new(if cards {
-                            IconName::Network
-                        } else {
-                            IconName::Plus
-                        }))
-                        .child(if cards {
-                            "クラウドVM・別のPCに接続"
-                        } else {
-                            "接続先を追加"
-                        }),
+                        .child(Icon::new(IconName::Plus))
+                        .child("接続先を追加"),
                 )
                 .ghost()
                 .w_full()
-                .when(!cards, |button| {
-                    button.h(px(48.)).px_4().text_color(super::color("accent"))
-                })
+                .h(px(48.))
+                .px_4()
+                .text_color(super::color("accent"))
                 .disabled(self.busy)
                 .on_click(cx.listener(|view, _, _, cx| {
                     view.adding_remote = !view.adding_remote;
@@ -417,7 +377,8 @@ impl Hosts {
                 .border_1()
                 .border_color(super::color("border"))
                 .bg(super::color("surface"))
-                .when(!cards, |view| view.mx_4().mb_4())
+                .mx_4()
+                .mb_4()
                 .child(methods);
             if self.use_ssh {
                 form =
@@ -475,8 +436,7 @@ impl Hosts {
                 .items_center()
                 .gap_3()
                 .p_4()
-                .when(cards, |view| view.rounded(px(12.)).border_1())
-                .when(!cards, |view| view.border_t_1())
+                .border_t_1()
                 .border_color(super::color("border"))
                 .text_color(super::color("textMuted"))
                 .child(Icon::new(IconName::Network))
@@ -486,7 +446,7 @@ impl Hosts {
         if let Some(error) = self.error.as_ref().or(self.snapshot.error.as_ref()) {
             choices = choices.child(
                 div()
-                    .when(!cards, |view| view.p_4())
+                    .p_4()
                     .text_color(super::color("errorForeground"))
                     .child(agent_core::presentation::error::error_message(error)),
             );

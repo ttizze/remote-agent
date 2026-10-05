@@ -137,7 +137,7 @@ impl Child {
                 // An orphaned zombie group can reject signals on macOS before
                 // launchd reaps it. Ignore EPERM only after verifying that no
                 // live group member remains; genuine permission errors fail.
-                let mut command = Command::new("ps");
+                let mut command = Command::new("/bin/ps");
                 command.args(["-A", "-o", "pgid=,stat="]).kill_on_drop(true);
                 let output =
                     tokio::time::timeout(Duration::from_secs(5), command.output()).await??;

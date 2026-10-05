@@ -1,4 +1,4 @@
-use crate::{session::ProviderKind, state::Snapshot};
+use crate::{provider::ProviderKind, state::Snapshot};
 pub fn validate_ssh_destination(destination: &str) -> Result<&str, &'static str> {
     let destination = destination.trim();
     if destination.is_empty()

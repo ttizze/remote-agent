@@ -323,7 +323,6 @@ impl HostRuntime {
                     code: "management_failed".into(),
                     message: format!("{message:#}"),
                     delivery: agent_protocol::error::Delivery::NotSent,
-                    execution: None,
                 }
             }))
             .into());

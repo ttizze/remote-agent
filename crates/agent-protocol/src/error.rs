@@ -25,7 +25,6 @@ pub struct RpcFailure {
     pub message: String,
     #[serde(default)]
     pub delivery: Delivery,
-    pub execution: Option<Box<crate::execution::ExecutionError>>,
 }
 
 #[cfg(test)]

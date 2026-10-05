@@ -388,7 +388,7 @@ impl Session {
                     .await
                     .map_err(connection)?
                     .ok_or_else(|| connection("request stream ended before its request"))?;
-                if matches!(call, crate::protocol::Call::SessionScope(_)) {
+                if matches!(call, crate::protocol::Call::SubscribeShell(_)) {
                     self._endpoint.1.activate();
                 }
                 Ok(IncomingRequest::Call(HostRequest {

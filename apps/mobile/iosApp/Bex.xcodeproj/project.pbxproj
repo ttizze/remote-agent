@@ -6,7 +6,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		C0DE0000000000000000029A /* BexModelScopeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE0000000000000000039A /* BexModelScopeUITests.swift */; };
 		C0DE00000000000000000401 /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000402; };
         D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */; };
 		E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = E50000000000000000000002 /* PrivacyInfo.xcprivacy */; };
@@ -17,7 +16,6 @@
 		A10000000000000000000002 /* PlatformServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* PlatformServices.swift */; };
 		A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* QRCodeCaptureViewController.swift */; };
 		A10000000000000000000006 /* SwiftUIRoot.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* SwiftUIRoot.swift */; };
-		B20000000000000000000001 /* BexLaunchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000011 /* BexLaunchUITests.swift */; };
 		FD93084AF1873DEF927C9EDC /* AppViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DBDDA3779489C57B929936E /* AppViewModel.swift */; };
 		D08EEED058A8C4FE92AA21E2 /* TaskList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04926FF582DA33DFFF64E6C5 /* TaskList.swift */; };
 		FD938C839188C56CFF5BE7A4 /* ConversationScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 613A5AAB450EC067108110F3 /* ConversationScreen.swift */; };
@@ -26,19 +24,7 @@
 		1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */; };
 		B5EDE65C803E4BD5CE028DE5 /* AppPresentationData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2036041A039EEBAA78D55844 /* AppPresentationData.swift */; };
 		D9577A51AE685A04BA449953 /* ConversationComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8550A6EE10FA45896134CE4D /* ConversationComposer.swift */; };
-		328998D7336CC8BC714813B1 /* BexDictationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3FB9F620E5019535A07535C /* BexDictationUITests.swift */; };
-		50CDAC84E50373218F0D4701 /* BexNavigationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F2E21BFDA246CD79D24E025 /* BexNavigationUITests.swift */; };
-		C0DE00000000000000000299 /* BexAccountUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000399 /* BexAccountUITests.swift */; };
-		7B720FF73022C3D1A61212E7 /* BexSynchronizationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFD5E43A73C7D1330B7555BE /* BexSynchronizationUITests.swift */; };
-		D91C55F205406D05C866CFC1 /* BexPaginationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99DFAD99B6F46C18561C7E66 /* BexPaginationUITests.swift */; };
-		24D2B99DB40046FDBC04C1E4 /* BexActivityUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC9C2558785B2B5B5C9E0ACF /* BexActivityUITests.swift */; };
-		D8E57FFF9C3242A47D764234 /* BexHistoryUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FE6417542ABCCAC5FA2485 /* BexHistoryUITests.swift */; };
-		4C00B3BFF9EA25CF95AA572A /* BexTurnUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03E61F2D2347EE7D2D79661E /* BexTurnUITests.swift */; };
-		AF050050F20B797430311320 /* BexImagesUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38FCD895E48DF5DF2BEBB7BC /* BexImagesUITests.swift */; };
-		EB471364BA1B149D8AFD90B2 /* BexAttachmentsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C4934BC96A7BCD59CF839E6 /* BexAttachmentsUITests.swift */; };
-		B07533A831C4029B21F39F66 /* BexDeviceNavigationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C019CF42F8F9FA5A861FC9 /* BexDeviceNavigationUITests.swift */; };
 		0FF3408BDCB920A7C06397A8 /* WorktreeSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */; };
-		316AE30ED1CAB6B32EF98FFE /* BexWorktreeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04889B95D12DED5A33B271D4 /* BexWorktreeUITests.swift */; };
 		C0DE00000000000000000202 /* AccountViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000203 /* AccountViews.swift */; };
 		C0DE00000000000000000103 /* AppViewActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000003 /* AppViewActions.swift */; };
 		CDA669EB182B4A27B3460556 /* WorkspaceFileEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */; };
@@ -49,7 +35,6 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		C0DE0000000000000000039A /* BexModelScopeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexModelScopeUITests.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000402 /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
         F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreen.swift; sourceTree = "<group>"; };
 		E50000000000000000000002 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
@@ -61,8 +46,6 @@
 		A10000000000000000000013 /* QRCodeCaptureViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeCaptureViewController.swift; sourceTree = "<group>"; };
 		A10000000000000000000016 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000000000000000000017 /* SwiftUIRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftUIRoot.swift; sourceTree = "<group>"; };
-		B20000000000000000000010 /* BexUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BexUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		B20000000000000000000011 /* BexLaunchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexLaunchUITests.swift; sourceTree = "<group>"; };
 		1DBDDA3779489C57B929936E /* AppViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewModel.swift; sourceTree = "<group>"; };
 		04926FF582DA33DFFF64E6C5 /* TaskList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskList.swift; sourceTree = "<group>"; };
 		613A5AAB450EC067108110F3 /* ConversationScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationScreen.swift; sourceTree = "<group>"; };
@@ -71,19 +54,7 @@
 		CBC18567B9147FCC8D6134EF /* WorkspaceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViews.swift; sourceTree = "<group>"; };
 		2036041A039EEBAA78D55844 /* AppPresentationData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPresentationData.swift; sourceTree = "<group>"; };
 		8550A6EE10FA45896134CE4D /* ConversationComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationComposer.swift; sourceTree = "<group>"; };
-		D3FB9F620E5019535A07535C /* BexDictationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexDictationUITests.swift; sourceTree = "<group>"; };
-		2F2E21BFDA246CD79D24E025 /* BexNavigationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexNavigationUITests.swift; sourceTree = "<group>"; };
-		C0DE00000000000000000399 /* BexAccountUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexAccountUITests.swift; sourceTree = "<group>"; };
-		DFD5E43A73C7D1330B7555BE /* BexSynchronizationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexSynchronizationUITests.swift; sourceTree = "<group>"; };
-		99DFAD99B6F46C18561C7E66 /* BexPaginationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexPaginationUITests.swift; sourceTree = "<group>"; };
-		DC9C2558785B2B5B5C9E0ACF /* BexActivityUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexActivityUITests.swift; sourceTree = "<group>"; };
-		A1FE6417542ABCCAC5FA2485 /* BexHistoryUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexHistoryUITests.swift; sourceTree = "<group>"; };
-		03E61F2D2347EE7D2D79661E /* BexTurnUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexTurnUITests.swift; sourceTree = "<group>"; };
-		38FCD895E48DF5DF2BEBB7BC /* BexImagesUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexImagesUITests.swift; sourceTree = "<group>"; };
-		3C4934BC96A7BCD59CF839E6 /* BexAttachmentsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexAttachmentsUITests.swift; sourceTree = "<group>"; };
-		62C019CF42F8F9FA5A861FC9 /* BexDeviceNavigationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexDeviceNavigationUITests.swift; sourceTree = "<group>"; };
 		25A49FEF4CFAB482E889EBDF /* WorktreeSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorktreeSettings.swift; sourceTree = "<group>"; };
-		04889B95D12DED5A33B271D4 /* BexWorktreeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BexWorktreeUITests.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000203 /* AccountViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountViews.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000003 /* AppViewActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppViewActions.swift; sourceTree = "<group>"; };
 		1F3F1E491E3943D59F2A2CB5 /* WorkspaceFileEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFileEditor.swift; sourceTree = "<group>"; };
@@ -100,12 +71,6 @@
 			files = (C30000000000000000000001 /* SwiftTerm in Frameworks */, );
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		B20000000000000000000021 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = ();
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -113,29 +78,9 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000031 /* Bex */,
-				B20000000000000000000031 /* BexUITests */,
 				A10000000000000000000032 /* Frameworks */,
 				A10000000000000000000033 /* Products */,
 			);
-			sourceTree = "<group>";
-		};
-		B20000000000000000000031 /* BexUITests */ = {
-			isa = PBXGroup;
-			children = (B20000000000000000000011 /* BexLaunchUITests.swift */,
-				62C019CF42F8F9FA5A861FC9 /* BexDeviceNavigationUITests.swift */,
-				3C4934BC96A7BCD59CF839E6 /* BexAttachmentsUITests.swift */,
-				38FCD895E48DF5DF2BEBB7BC /* BexImagesUITests.swift */,
-				03E61F2D2347EE7D2D79661E /* BexTurnUITests.swift */,
-				A1FE6417542ABCCAC5FA2485 /* BexHistoryUITests.swift */,
-				DC9C2558785B2B5B5C9E0ACF /* BexActivityUITests.swift */,
-				99DFAD99B6F46C18561C7E66 /* BexPaginationUITests.swift */,
-				DFD5E43A73C7D1330B7555BE /* BexSynchronizationUITests.swift */,
-				2F2E21BFDA246CD79D24E025 /* BexNavigationUITests.swift */,
-				C0DE00000000000000000399 /* BexAccountUITests.swift */,
-				C0DE0000000000000000039A /* BexModelScopeUITests.swift */,
-				04889B95D12DED5A33B271D4 /* BexWorktreeUITests.swift */,
-				D3FB9F620E5019535A07535C /* BexDictationUITests.swift */,);
-			path = BexUITests;
 			sourceTree = "<group>";
 		};
 		A10000000000000000000031 /* Bex */ = {
@@ -176,7 +121,7 @@
 		};
 		A10000000000000000000033 /* Products */ = {
 			isa = PBXGroup;
-			children = (A10000000000000000000010 /* Bex.app */, B20000000000000000000010 /* BexUITests.xctest */,);
+			children = (A10000000000000000000010 /* Bex.app */,);
 			name = Products;
 			sourceTree = "<group>";
 		};
@@ -199,21 +144,6 @@
 			productReference = A10000000000000000000010 /* Bex.app */;
 			productType = "com.apple.product-type.application";
 		};
-		B20000000000000000000040 /* BexUITests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = B20000000000000000000041 /* Build configuration list for PBXNativeTarget "BexUITests" */;
-			buildPhases = (
-				B20000000000000000000020 /* Sources */,
-				B20000000000000000000021 /* Frameworks */,
-				B20000000000000000000022 /* Resources */,
-			);
-			buildRules = ();
-			dependencies = (B20000000000000000000050 /* PBXTargetDependency */,);
-			name = BexUITests;
-			productName = BexUITests;
-			productReference = B20000000000000000000010 /* BexUITests.xctest */;
-			productType = "com.apple.product-type.bundle.ui-testing";
-		};
 /* End PBXNativeTarget section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -230,7 +160,6 @@
 				LastUpgradeCheck = 2600;
 				TargetAttributes = {
 					A10000000000000000000040 = { CreatedOnToolsVersion = 26.0; };
-					B20000000000000000000040 = { CreatedOnToolsVersion = 26.0; TestTargetID = A10000000000000000000040; };
 				};
 			};
 			buildConfigurationList = A10000000000000000000051 /* Build configuration list for PBXProject "Bex" */;
@@ -243,36 +172,18 @@
 			projectDirPath = "";
 			projectRoot = "";
             packageReferences = (C30000000000000000000005, );
-			targets = (A10000000000000000000040 /* Bex */, B20000000000000000000040 /* BexUITests */,);
+			targets = (A10000000000000000000040 /* Bex */,);
 		};
 /* End PBXProject section */
 
 /* Begin PBXContainerItemProxy section */
-		B20000000000000000000051 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = A10000000000000000000050 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = A10000000000000000000040;
-			remoteInfo = Bex;
-		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXTargetDependency section */
-		B20000000000000000000050 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = A10000000000000000000040 /* Bex */;
-			targetProxy = B20000000000000000000051 /* PBXContainerItemProxy */;
-		};
 /* End PBXTargetDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A10000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (F300000000000000000000012 /* dmsans_regular.ttf in Resources */, F300000000000000000000022 /* dmsans_medium.ttf in Resources */, F300000000000000000000032 /* dmsans_bold.ttf in Resources */, A10000000000000000000007 /* Assets.xcassets in Resources */, E50000000000000000000001 /* PrivacyInfo.xcprivacy in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
-		B20000000000000000000022 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = ();
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -301,25 +212,6 @@
 				1AAD56B60A484823F27FC70F /* WorkspaceViews.swift in Sources */,
 				CDA669EB182B4A27B3460556 /* WorkspaceFileEditor.swift in Sources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		B20000000000000000000020 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (B20000000000000000000001 /* BexLaunchUITests.swift in Sources */,
-				B07533A831C4029B21F39F66 /* BexDeviceNavigationUITests.swift in Sources */,
-				EB471364BA1B149D8AFD90B2 /* BexAttachmentsUITests.swift in Sources */,
-				AF050050F20B797430311320 /* BexImagesUITests.swift in Sources */,
-				4C00B3BFF9EA25CF95AA572A /* BexTurnUITests.swift in Sources */,
-				D8E57FFF9C3242A47D764234 /* BexHistoryUITests.swift in Sources */,
-				24D2B99DB40046FDBC04C1E4 /* BexActivityUITests.swift in Sources */,
-				D91C55F205406D05C866CFC1 /* BexPaginationUITests.swift in Sources */,
-				7B720FF73022C3D1A61212E7 /* BexSynchronizationUITests.swift in Sources */,
-				50CDAC84E50373218F0D4701 /* BexNavigationUITests.swift in Sources */,
-				C0DE00000000000000000299 /* BexAccountUITests.swift in Sources */,
-				C0DE0000000000000000029A /* BexModelScopeUITests.swift in Sources */,
-				316AE30ED1CAB6B32EF98FFE /* BexWorktreeUITests.swift in Sources */,
-				328998D7336CC8BC714813B1 /* BexDictationUITests.swift in Sources */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
@@ -403,38 +295,6 @@
 			};
 			name = Release;
 		};
-		B20000000000000000000062 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = K65K9J8686;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex.uitests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = Bex;
-			};
-			name = Debug;
-		};
-		B20000000000000000000063 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = K65K9J8686;
-				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.ttizze.b-codex.uitests;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
-				TEST_TARGET_NAME = Bex;
-			};
-			name = Release;
-		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -447,12 +307,6 @@
 		A10000000000000000000051 /* Build configuration list for PBXProject "Bex" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (A10000000000000000000060 /* Debug */, A10000000000000000000061 /* Release */);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Debug;
-		};
-		B20000000000000000000041 /* Build configuration list for PBXNativeTarget "BexUITests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (B20000000000000000000062 /* Debug */, B20000000000000000000063 /* Release */);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
 		};

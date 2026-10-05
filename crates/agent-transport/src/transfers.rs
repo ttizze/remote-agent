@@ -142,20 +142,6 @@ where
     Ok(())
 }
 
-pub async fn download_bytes<S, F, Fut>(
-    grant: TransferGrant,
-    open_stream: F,
-) -> Result<Vec<u8>, TransferError>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = std::io::Result<S>>,
-{
-    let mut bytes = Vec::new();
-    receive_download(grant, open_stream().await?, &mut bytes).await?;
-    Ok(bytes)
-}
-
 async fn receive_download<S, W>(
     grant: TransferGrant,
     mut stream: S,
@@ -185,29 +171,4 @@ where
         ));
     }
     Ok(())
-}
-
-pub async fn resolve_item(
-    mut response: agent_protocol::operations::ItemResponse,
-    session: Option<&crate::transport::Session>,
-) -> Result<agent_protocol::operations::ItemResponse, PeerError> {
-    if let Some(grant) = response.transfer.take() {
-        let session = session.ok_or_else(|| {
-            PeerError::InvalidMessage("item transfer requires an iroh session".into())
-        })?;
-        let bytes = crate::transfers::download_bytes(grant, || async {
-            session.open_stream().await.map_err(std::io::Error::other)
-        })
-        .await
-        .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-        let item: crate::models::Item = crate::protocol::decode(&bytes)
-            .map_err(|error| PeerError::InvalidMessage(error.to_string()))?;
-        if item.id != response.item.id {
-            return Err(PeerError::InvalidMessage(
-                "transferred item ID does not match".into(),
-            ));
-        }
-        response.item = item;
-    }
-    Ok(response)
 }

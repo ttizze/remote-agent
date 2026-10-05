@@ -5,7 +5,7 @@ use crate::host_rpc::identity::{AccountCommand, AccountReply};
 use agent_protocol::{
     models::Empty,
     operations::{Account, AccountLogin, AccountLoginStatus, AccountSelection},
-    session::ProviderKind,
+    provider::ProviderKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

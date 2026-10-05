@@ -3,7 +3,7 @@ use super::{identity::Identity, service::Failure};
 use agent_protocol::{
     models::{Model, ReasoningEffort},
     operations as op,
-    session::ProviderKind,
+    provider::ProviderKind,
 };
 use codex_app_server::CodexAppServer;
 use serde::Serialize;

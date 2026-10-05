@@ -1458,13 +1458,7 @@ impl Desktop {
         let current = self.remote.as_ref().map(|r| r.id.clone());
         let connected = self.snapshot.connected;
         content = content.child(self.hosts.update(cx, |hosts, cx| {
-            hosts.connection_choices(
-                ConnectionLayout::Settings,
-                current.as_deref(),
-                connected,
-                div(),
-                cx,
-            )
+            hosts.connection_choices(current.as_deref(), connected, div(), cx)
         }));
         content = content.child(self.hosts.clone()).child(section_heading(
             "Provider accounts",

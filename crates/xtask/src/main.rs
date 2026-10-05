@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 use xtask::Result;
 
-const USAGE: &str = "Usage: cargo xtask <command>\n  clean-builds [--dry-run]\n  ios-e2e [--without-codex] TEST...\n  ios-markdown\n  connection-diagnostics [--log PATH] [--platform Ios|Macos] [--trace ID] [--attempt ID]\n  android-console SOCKET\n  android-network-permission SERIAL LOG ADB_PORT\n  terminal-query-probe\nBuilds and manual checks: just --list\n";
+const USAGE: &str = "Usage: cargo xtask <command>\n  clean-builds [--dry-run]\n  connection-diagnostics [--log PATH] [--platform Ios|Macos] [--trace ID] [--attempt ID]\n  android-console SOCKET\n  android-network-permission SERIAL LOG ADB_PORT\n  terminal-query-probe\nBuilds and manual checks: just --list\n";
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -27,20 +27,7 @@ async fn execute(arguments: &[String]) -> Result<()> {
             xtask::build_cleanup::run(!flags.is_empty()).await
         }
         #[cfg(unix)]
-        ("ios-markdown", []) => xtask::ios_markdown::run().await,
-        #[cfg(unix)]
         ("terminal-query-probe", []) => xtask::terminal_probe::run(),
-        #[cfg(unix)]
-        ("ios-e2e", arguments) => {
-            let without_codex = arguments
-                .first()
-                .is_some_and(|argument| argument == "--without-codex");
-            xtask::ios_e2e::run(
-                arguments[usize::from(without_codex)..].to_vec(),
-                without_codex,
-            )
-            .await
-        }
         ("connection-diagnostics", arguments) => xtask::connection_diagnostics::run(arguments),
         #[cfg(unix)]
         ("android-console", [path]) => {
