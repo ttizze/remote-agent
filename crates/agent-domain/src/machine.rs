@@ -3452,6 +3452,9 @@ impl Decision {
             ProviderItem::Notice { message } => ItemKind::SystemNotice {
                 message: message.clone(),
             },
+            ProviderItem::UsageLimit { limit, resets_at } => ItemKind::SystemNotice {
+                message: usage_limit_notice(limit.as_deref(), *resets_at, self.at.millis()),
+            },
             ProviderItem::Error {
                 message,
                 retry,
@@ -3567,6 +3570,7 @@ impl Decision {
                     | ProviderEvent::SubagentFinished { .. }
                     | ProviderEvent::Child { .. }
                     | ProviderEvent::BackgroundTask { .. }
+                    | ProviderEvent::BackgroundRoster { .. }
                     | ProviderEvent::Wake { .. }
                     | ProviderEvent::SessionClosed { .. }
             );
@@ -4408,19 +4412,21 @@ impl Decision {
                 exit_code,
             } => {
                 if let Some(status) = status {
-                    // Work the user stopped does not report back.
-                    if let Some(work) = self
-                        .state
-                        .background_work
-                        .get(key)
-                        .filter(|work| !self.state.stopping.contains(&work.attempt))
-                        .cloned()
-                    {
+                    // Work the user stopped does not report back. A roster
+                    // snapshot may have dropped the work before its report.
+                    let work = self.state.background_work.get(key).cloned();
+                    let owner = work.as_ref().map_or(attempt, |work| &work.attempt);
+                    if !self.state.stopping.contains(owner) {
                         self.fact(FactBody::NativeWorkReported {
                             key: key.clone(),
                             report: WorkReport {
-                                kind: work.kind,
-                                label: Some(work.description),
+                                kind: work.as_ref().map_or(*kind, |work| work.kind),
+                                label: Some(
+                                    work.map_or_else(
+                                        || description.clone(),
+                                        |work| work.description,
+                                    ),
+                                ),
                                 outcome: (*status).into(),
                                 child_thread: None,
                                 exit_code: *exit_code,
@@ -4428,7 +4434,9 @@ impl Decision {
                             text: summary.clone().unwrap_or_default(),
                         });
                     }
-                    self.fact(FactBody::BackgroundTaskFinished { key: key.clone() });
+                    if self.state.background_work.contains_key(key) {
+                        self.fact(FactBody::BackgroundTaskFinished { key: key.clone() });
+                    }
                 } else {
                     self.fact(FactBody::BackgroundTaskStarted {
                         key: key.clone(),
@@ -4437,6 +4445,29 @@ impl Decision {
                         kind: *kind,
                         attempt: attempt.clone(),
                     });
+                }
+            }
+            BackgroundRoster { tasks } => {
+                let removed = self
+                    .state
+                    .background_work
+                    .keys()
+                    .filter(|key| !tasks.iter().any(|task| &task.key == *key))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for key in removed {
+                    self.fact(FactBody::BackgroundTaskFinished { key });
+                }
+                for task in tasks {
+                    if !self.state.background_work.contains_key(&task.key) {
+                        self.fact(FactBody::BackgroundTaskStarted {
+                            key: task.key.clone(),
+                            tool: task.tool.clone(),
+                            description: task.description.clone(),
+                            kind: task.kind,
+                            attempt: attempt.clone(),
+                        });
+                    }
                 }
             }
             Wake { text, detail } => {

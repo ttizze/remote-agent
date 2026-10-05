@@ -33,6 +33,14 @@ pub struct ClaudeProtocol {
     text_seen: BTreeSet<String>,
     authentication_failed: BTreeSet<String>,
     usage_limited: BTreeSet<String>,
+    /// Rejected usage windows of the current turn and their reset times.
+    rejected_limits: BTreeMap<String, Option<i64>>,
+    /// Pending API retry per route: progress, message, code and class.
+    retries: BTreeMap<String, (RetryProgress, String, Option<String>, String)>,
+    /// User-invocable skills the CLI runs as slash commands.
+    skills: Vec<String>,
+    /// Background task descriptions that name later reports.
+    task_descriptions: BTreeMap<String, String>,
 }
 impl ClaudeProtocol {
     /// Restore only native correlation after a process restart. The actor owns
@@ -52,6 +60,10 @@ impl ClaudeProtocol {
             self.background_tasks.insert(task.into());
         }
     }
+    /// Skills discovered for the session's workspace.
+    pub fn set_skills(&mut self, skills: Vec<String>) {
+        self.skills = skills;
+    }
     pub fn command(
         &mut self,
         command: &ProviderCommand,
@@ -68,26 +80,31 @@ impl ClaudeProtocol {
                 context,
                 ..
             } => {
-                self.selected_context_window = Some(claude_context_window(&selection.model));
+                let options = claude_model_options(selection);
+                self.selected_context_window = Some(options.context_window);
                 self.text_seen.remove("");
                 self.authentication_failed.remove("");
                 self.usage_limited.remove("");
+                self.rejected_limits.clear();
+                self.retries.remove("");
                 result.events.push(ProviderEvent::PromptOffered {
                     key: user_uuid.into(),
                 });
                 result
                     .events
                     .push(ProviderEvent::TurnStarted { native_turn: None });
+                let prompt = provider_prompt(
+                    text,
+                    note.as_deref(),
+                    context.as_ref().filter(|_| text.trim() != "/compact"),
+                );
                 result.outbound.push(claude_user_message(
-                    &provider_prompt(
-                        text,
-                        note.as_deref(),
-                        context.as_ref().filter(|_| text.trim() != "/compact"),
-                    ),
+                    &claude_prompt_effort(&prompt, options.prompt_effort.as_deref()),
                     attachments,
                     user_uuid,
                     false,
                     images,
+                    &self.skills,
                 )?);
             }
             ProviderCommand::Steer {
@@ -98,6 +115,7 @@ impl ClaudeProtocol {
                 user_uuid,
                 true,
                 images,
+                &self.skills,
             )?),
             ProviderCommand::Interrupt { .. } => result
                 .outbound
@@ -112,10 +130,10 @@ impl ClaudeProtocol {
                 *decision,
                 answers.as_ref(),
             )?),
-            ProviderCommand::SetModel { selection } => result.outbound.push(
-                self.control
-                    .request("set_model", json!({"model":selection.model})),
-            ),
+            ProviderCommand::SetModel { selection } => result.outbound.push(self.control.request(
+                "set_model",
+                json!({"model":claude_model_options(selection).model}),
+            )),
             ProviderCommand::SetRuntimeMode {
                 runtime_mode,
                 interaction_mode,
@@ -137,6 +155,7 @@ impl ClaudeProtocol {
                     user_uuid,
                     false,
                     images,
+                    &[],
                 )?);
             }
             ProviderCommand::Rollback {
@@ -219,45 +238,91 @@ impl ClaudeProtocol {
                     text: None,
                     status: ItemStatus::Completed,
                 }),
-                "api_retry" => events.push(ProviderEvent::ItemFinished {
-                    key: optional(frame, "uuid").unwrap_or_else(|| "retry".into()),
-                    kind: ProviderItem::Error {
-                        message: format!(
-                            "Claude API {}.",
-                            string(frame, "error").replace('_', " ")
-                        ),
-                        retry: Some(RetryProgress {
-                            attempt: 1,
-                            max_attempts: None,
-                            delay_ms: None,
-                        }),
-                        code: frame["error_status"]
-                            .as_i64()
-                            .map(|status| format!("api_error_{status}"))
-                            .or_else(|| optional(frame, "error")),
-                        class: Some(
-                            if frame["error_status"] == 429 {
-                                "usage_limit"
-                            } else if frame["error_status"].is_null() {
-                                "transport_error"
-                            } else {
-                                "provider_error"
-                            }
-                            .into(),
-                        ),
-                        retryable: Some(true),
-                    },
-                    text: None,
-                    status: ItemStatus::Failed,
-                }),
+                "api_retry" => {
+                    let count = |key: &str| frame[key].as_f64().map(|n| n.max(0.).trunc() as u64);
+                    let retry = RetryProgress {
+                        attempt: count("attempt").unwrap_or(1).max(1),
+                        max_attempts: count("max_retries").map(|n| n.max(1)),
+                        delay_ms: count("retry_delay_ms"),
+                    };
+                    let message =
+                        format!("Claude API {}.", string(frame, "error").replace('_', " "));
+                    let code = frame["error_status"]
+                        .as_f64()
+                        .map(|status| format!("api_error_{}", status.trunc() as i64))
+                        .or_else(|| optional(frame, "error"));
+                    let class = if frame["error_status"] == 429 {
+                        "usage_limit"
+                    } else if frame["error_status"].is_null() {
+                        "transport_error"
+                    } else {
+                        "provider_error"
+                    };
+                    self.retries.insert(
+                        route.clone(),
+                        (retry.clone(), message.clone(), code.clone(), class.into()),
+                    );
+                    events.push(ProviderEvent::ItemStarted {
+                        key: "terminal-failure".into(),
+                        kind: ProviderItem::Error {
+                            message,
+                            retry: Some(retry),
+                            code,
+                            class: Some(class.into()),
+                            retryable: Some(true),
+                        },
+                    });
+                }
                 "model_refusal_fallback" => events.push(ProviderEvent::ItemFinished {
                     key: optional(frame, "uuid").unwrap_or_else(|| "fallback".into()),
                     kind: ProviderItem::Notice {
-                        message: string(frame, "message"),
+                        message: string(frame, "content"),
                     },
                     text: None,
                     status: ItemStatus::Completed,
                 }),
+                "background_tasks_changed" => {
+                    if let Some(tasks) = frame["tasks"].as_array() {
+                        let roster = tasks
+                            .iter()
+                            .filter(|task| task["task_type"] == "local_bash")
+                            .filter_map(|task| {
+                                let id = optional(task, "task_id").filter(|id| !id.is_empty())?;
+                                let tool = self
+                                    .tasks
+                                    .get(&id)
+                                    .map(|(tool, _)| tool.clone())
+                                    .unwrap_or_else(|| id.clone());
+                                let monitor = self
+                                    .tools
+                                    .get(&tool)
+                                    .is_some_and(|(name, _)| name == "Monitor");
+                                Some(BackgroundEntry {
+                                    key: id,
+                                    tool,
+                                    kind: if monitor {
+                                        BackgroundKind::Monitor
+                                    } else {
+                                        BackgroundKind::Command
+                                    },
+                                    description: string(task, "description").trim().to_owned(),
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        for entry in &roster {
+                            self.tasks
+                                .entry(entry.key.clone())
+                                .or_insert_with(|| (entry.tool.clone(), false));
+                            self.background_tasks.insert(entry.key.clone());
+                            if !entry.description.is_empty() {
+                                self.task_descriptions
+                                    .entry(entry.key.clone())
+                                    .or_insert_with(|| entry.description.clone());
+                            }
+                        }
+                        events.push(ProviderEvent::BackgroundRoster { tasks: roster });
+                    }
+                }
                 "task_started" => {
                     let task = required(frame, "task_id")?;
                     let offered_tool =
@@ -298,9 +363,10 @@ impl ClaudeProtocol {
                             key: tool,
                             title: string(frame, "description"),
                         });
-                    } else if frame["owned_by_subagent"] != true || frame["is_backgrounded"] == true
-                    {
+                    } else if frame["is_backgrounded"] != false {
                         self.background_tasks.insert(task.clone());
+                        self.task_descriptions
+                            .insert(task.clone(), string(frame, "description"));
                         events.push(ProviderEvent::BackgroundTask {
                             key: task,
                             tool: tool.clone(),
@@ -344,6 +410,10 @@ impl ClaudeProtocol {
                                 result: string(frame, "summary"),
                             });
                         } else if self.background_tasks.remove(&task) {
+                            let description = self
+                                .task_descriptions
+                                .remove(&task)
+                                .unwrap_or_else(|| string(frame, "summary"));
                             events.push(ProviderEvent::BackgroundTask {
                                 key: task,
                                 tool: tool.clone(),
@@ -356,7 +426,7 @@ impl ClaudeProtocol {
                                 } else {
                                     BackgroundKind::Command
                                 },
-                                description: string(frame, "summary"),
+                                description,
                                 exit_code: None,
                                 status: Some(match string(frame, "status").as_str() {
                                     "completed" => ItemStatus::Completed,
@@ -455,6 +525,9 @@ impl ClaudeProtocol {
                 if let Some(key) = optional(frame, "uuid") {
                     events.push(ProviderEvent::AssistantCursor { key });
                 }
+                if let Some(recovered) = self.resolve_retry(&route, ItemStatus::Completed) {
+                    events.push(recovered);
+                }
                 if frame["error"] == "authentication_failed" {
                     self.authentication_failed.insert(route.clone());
                 }
@@ -476,6 +549,9 @@ impl ClaudeProtocol {
                     });
                 for (index, block) in content.iter().enumerate() {
                     let kind = string(block, "type");
+                    if block["tool_use_id"].is_string() {
+                        continue;
+                    }
                     let block_index = if content.len() > 1 {
                         index as u64
                     } else {
@@ -504,7 +580,10 @@ impl ClaudeProtocol {
                             text: Some(string(block, "thinking")),
                             status: ItemStatus::Completed,
                         }),
-                        "tool_use" => {
+                        _ if block["id"].is_string()
+                            && block["name"].is_string()
+                            && block.get("input").is_some() =>
+                        {
                             let key = required(block, "id")?;
                             let name = required(block, "name")?;
                             let input = block["input"].clone();
@@ -565,6 +644,12 @@ impl ClaudeProtocol {
                         _ => {}
                     }
                 }
+                for block in content
+                    .iter()
+                    .filter(|block| block["tool_use_id"].is_string())
+                {
+                    self.tool_result(block, None, &route, &mut events)?;
+                }
                 if let Some(usage) = message.get("usage") {
                     let window = self
                         .observed_models
@@ -583,83 +668,50 @@ impl ClaudeProtocol {
             }
             "user" => {
                 if let Some(content) = frame["message"]["content"].as_array() {
-                    for block in content {
-                        if block["type"] == "tool_result" {
-                            let key = required(block, "tool_use_id")?;
-                            let text = claude_result_text(&block["content"]);
-                            let status = if block["is_error"].as_bool() == Some(true) {
-                                ItemStatus::Failed
-                            } else {
-                                ItemStatus::Completed
-                            };
-                            if let Some((name, input)) = self.tools.get(&key) {
-                                if let Some(task) =
-                                    optional(&frame["tool_use_result"], "backgroundTaskId")
-                                        .or_else(|| optional(&frame["tool_use_result"], "taskId"))
-                                    && name != "Agent"
-                                    && name != "Task"
-                                {
-                                    self.tasks.insert(task.clone(), (key.clone(), false));
-                                    self.background_tasks.insert(task.clone());
-                                    events.push(ProviderEvent::BackgroundTask {
-                                        key: task,
-                                        tool: key.clone(),
-                                        kind: if name == "Monitor" {
-                                            BackgroundKind::Monitor
-                                        } else {
-                                            BackgroundKind::Command
-                                        },
-                                        description: optional(input, "description")
-                                            .unwrap_or_else(|| name.clone()),
-                                        status: None,
-                                        summary: None,
-                                        exit_code: None,
-                                    });
-                                }
-                                if name == "Agent" || name == "Task" {
-                                    let native = &frame["tool_use_result"];
-                                    if native["isAsync"] == true
-                                        || native["status"] == "async_launched"
-                                        || text.starts_with("Async agent launched successfully.")
-                                    {
-                                        continue;
-                                    }
-                                    events.push(ProviderEvent::SubagentFinished {
-                                        key,
-                                        status,
-                                        result: if native["content"].is_array() {
-                                            claude_result_text(&native["content"])
-                                        } else {
-                                            text
-                                        },
-                                    });
-                                } else {
-                                    events.push(ProviderEvent::ItemFinished {
-                                        kind: claude_tool(
-                                            name,
-                                            input,
-                                            Some(&frame["tool_use_result"]),
-                                            self.presentations.get(&key),
-                                        ),
-                                        key,
-                                        text: Some(text),
-                                        status,
-                                    });
-                                }
-                            }
-                        }
+                    let results = content
+                        .iter()
+                        .filter(|block| block["tool_use_id"].is_string())
+                        .collect::<Vec<_>>();
+                    let structured = (results.len() == 1
+                        && results[0]["type"] == "tool_result"
+                        && !frame["tool_use_result"].is_null())
+                    .then_some(&frame["tool_use_result"]);
+                    for block in results {
+                        self.tool_result(block, structured, &route, &mut events)?;
                     }
                 }
             }
             "result" => {
-                let hint = self.authentication_failed.contains(&route).then_some("Claude could not authenticate. For subscription login, run `claude auth login` on this environment's machine, then start a new thread. For API-key authentication, check this instance's configured credentials.");
+                let authentication = self.authentication_failed.contains(&route);
+                let usage_limited = !authentication
+                    && (!self.rejected_limits.is_empty() || self.usage_limited.contains(&route))
+                    && (frame["subtype"] != "success"
+                        || frame["api_error_status"].is_null()
+                        || frame["api_error_status"] == 429)
+                    && matches!(
+                        frame["terminal_reason"].as_str(),
+                        None | Some("api_error" | "blocking_limit")
+                    );
+                let hint = if authentication {
+                    Some(
+                        "Claude could not authenticate. For subscription login, run `claude auth login` on this environment's machine, then start a new thread. For API-key authentication, check this instance's configured credentials.",
+                    )
+                } else if usage_limited {
+                    Some(
+                        "Claude usage limit reached. Send the message again once the limit resets.",
+                    )
+                } else {
+                    None
+                };
                 let status = claude_terminal_status(frame, hint);
-                let success = status == RunStatus::Completed;
                 let aborted = matches!(
                     string(frame, "terminal_reason").as_str(),
                     "aborted_streaming" | "aborted_tools"
                 );
-                if success
+                // Failed result text belongs on the failure, never in an answer.
+                if frame["subtype"] == "success"
+                    && frame["is_error"] != true
+                    && claude_terminal_status(frame, None) != RunStatus::Failed
                     && !aborted
                     && !self.text_seen.contains(&route)
                     && frame["result"].as_str().is_some_and(|s| !s.is_empty())
@@ -671,25 +723,36 @@ impl ClaudeProtocol {
                         status: ItemStatus::Completed,
                     });
                 }
-                if !aborted
-                    && (frame["subtype"] != "success" || frame["is_error"] == true || !success)
-                {
-                    let message = frame["errors"]
+                if !aborted && status == RunStatus::Failed {
+                    let listed = frame["errors"]
                         .as_array()
                         .into_iter()
                         .flatten()
                         .filter_map(Value::as_str)
                         .find(|error| !error.starts_with("[ede_diagnostic]"))
                         .map(str::to_owned)
-                        .or_else(|| claude_result_error(frame, hint))
-                        .or_else(|| hint.map(str::to_owned))
-                        .or_else(|| optional(frame, "result"))
-                        .unwrap_or_default();
+                        .or_else(|| claude_result_error(frame, hint));
+                    let message = if frame["subtype"] != "success" {
+                        listed.unwrap_or_else(|| {
+                            frame["errors"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                    } else {
+                        listed
+                            .or_else(|| hint.map(str::to_owned))
+                            .or_else(|| optional(frame, "result"))
+                            .unwrap_or_default()
+                    };
                     events.push(ProviderEvent::ItemFinished {
-                        key: optional(frame, "uuid").unwrap_or_else(|| "result-error".into()),
+                        key: "terminal-failure".into(),
                         kind: ProviderItem::Error {
                             message,
-                            retry: None,
+                            retry: self.retries.remove(&route).map(|(retry, ..)| retry),
                             code: Some(if frame["subtype"] != "success" {
                                 string(frame, "subtype")
                             } else {
@@ -703,8 +766,9 @@ impl ClaudeProtocol {
                             }),
                             class: Some(
                                 if frame["terminal_reason"] == "blocking_limit"
-                                    || frame["api_error_status"] == 429
-                                    || self.usage_limited.contains(&route)
+                                    || frame["subtype"] == "success"
+                                        && frame["api_error_status"] == 429
+                                    || usage_limited
                                 {
                                     "usage_limit"
                                 } else {
@@ -712,15 +776,23 @@ impl ClaudeProtocol {
                                 }
                                 .into(),
                             ),
-                            retryable: matches!(
-                                frame["api_error_status"].as_i64(),
-                                Some(429 | 529)
-                            )
+                            retryable: (frame["subtype"] == "success"
+                                && matches!(frame["api_error_status"].as_i64(), Some(429 | 529)))
                             .then_some(true),
                         },
                         text: None,
                         status: ItemStatus::Failed,
                     });
+                }
+                if let Some(settled) = self.resolve_retry(
+                    &route,
+                    match status {
+                        RunStatus::Completed => ItemStatus::Completed,
+                        RunStatus::Cancelled => ItemStatus::Cancelled,
+                        _ => ItemStatus::Interrupted,
+                    },
+                ) {
+                    events.push(settled);
                 }
                 events.push(ProviderEvent::TurnUsage(normalize_claude_turn_usage(
                     &string(frame, "subtype"),
@@ -739,8 +811,34 @@ impl ClaudeProtocol {
                 }
                 self.text_seen.remove(&route);
             }
-            "rate_limit_event" if frame["rate_limit_info"]["status"] == "rejected" => {
-                events.push(ProviderEvent::ItemFinished { key:optional(frame,"uuid").unwrap_or_else(|| "rate-limit".into()),kind:ProviderItem::Notice { message:"Claude usage limit reached. Send the message again once the limit resets.".into() },text:None,status:ItemStatus::Completed });
+            "rate_limit_event" if frame["rate_limit_info"].is_object() => {
+                let info = &frame["rate_limit_info"];
+                let overage = matches!(
+                    info["overageStatus"].as_str(),
+                    Some("allowed" | "allowed_warning")
+                ) || info["isUsingOverage"] == true
+                    || info["overageInUse"] == true;
+                let limit = optional(info, "rateLimitType").unwrap_or_else(|| "unknown".into());
+                let resets_at = info["resetsAt"].as_f64().map(|value| value as i64);
+                if info["status"] == "rejected" && !overage {
+                    self.rejected_limits.insert(limit.clone(), resets_at);
+                    events.push(ProviderEvent::ItemFinished {
+                        key: format!(
+                            "usage-limit:{limit}:{}",
+                            resets_at.map_or("unknown".into(), |at| at.to_string())
+                        ),
+                        kind: ProviderItem::UsageLimit {
+                            limit: Some(limit),
+                            resets_at,
+                        },
+                        text: None,
+                        status: ItemStatus::Completed,
+                    });
+                } else if overage
+                    || matches!(info["status"].as_str(), Some("allowed" | "allowed_warning"))
+                {
+                    self.rejected_limits.remove(&limit);
+                }
             }
             _ => {}
         }
@@ -779,6 +877,155 @@ impl ClaudeProtocol {
         });
         Ok(output)
     }
+}
+impl ClaudeProtocol {
+    fn resolve_retry(&mut self, route: &str, status: ItemStatus) -> Option<ProviderEvent> {
+        let (retry, message, code, class) = self.retries.remove(route)?;
+        Some(ProviderEvent::ItemFinished {
+            key: "terminal-failure".into(),
+            kind: ProviderItem::Error {
+                message,
+                retry: Some(retry),
+                code,
+                class: Some(class),
+                retryable: Some(true),
+            },
+            text: None,
+            status,
+        })
+    }
+    /// A tool result from either an assistant or a user message. A result
+    /// whose tool use was never seen starts a tool named for its result type.
+    fn tool_result(
+        &mut self,
+        block: &Value,
+        structured: Option<&Value>,
+        route: &str,
+        events: &mut Vec<ProviderEvent>,
+    ) -> Result<(), ProtocolError> {
+        let key = required(block, "tool_use_id")?;
+        let content = &block["content"];
+        let text = claude_result_text(content);
+        let status = if claude_result_failed(block) {
+            ItemStatus::Failed
+        } else {
+            ItemStatus::Completed
+        };
+        if !self.tools.contains_key(&key) {
+            let name = claude_result_tool_name(&string(block, "type"));
+            self.tools.insert(key.clone(), (name.clone(), json!({})));
+            self.parents.insert(key.clone(), route.into());
+            events.push(ProviderEvent::ItemStarted {
+                key: key.clone(),
+                kind: claude_tool(&name, &json!({}), None, None),
+            });
+        }
+        let (name, input) = self.tools[&key].clone();
+        let native = structured.unwrap_or(&Value::Null);
+        if let Some(task) =
+            optional(native, "backgroundTaskId").or_else(|| optional(native, "taskId"))
+            && name != "Agent"
+            && name != "Task"
+        {
+            self.tasks.insert(task.clone(), (key.clone(), false));
+            self.background_tasks.insert(task.clone());
+            self.task_descriptions.insert(
+                task.clone(),
+                optional(&input, "description").unwrap_or_else(|| name.clone()),
+            );
+            events.push(ProviderEvent::BackgroundTask {
+                key: task,
+                tool: key.clone(),
+                kind: if name == "Monitor" {
+                    BackgroundKind::Monitor
+                } else {
+                    BackgroundKind::Command
+                },
+                description: optional(&input, "description").unwrap_or_else(|| name.clone()),
+                status: None,
+                summary: None,
+                exit_code: None,
+            });
+        }
+        if name == "Agent" || name == "Task" {
+            if native["isAsync"] == true
+                || native["status"] == "async_launched"
+                || text.starts_with("Async agent launched successfully.")
+            {
+                return Ok(());
+            }
+            events.push(ProviderEvent::SubagentFinished {
+                key,
+                status,
+                result: if native["content"].is_array() {
+                    claude_result_text(&native["content"])
+                } else {
+                    text
+                },
+            });
+            return Ok(());
+        }
+        let output = structured.unwrap_or(content);
+        let kind = claude_tool(&name, &input, Some(output), self.presentations.get(&key));
+        let text = match &kind {
+            ProviderItem::Command { .. } => claude_command_output(output).unwrap_or(text),
+            _ => text,
+        };
+        events.push(ProviderEvent::ItemFinished {
+            kind,
+            key,
+            text: Some(text),
+            status,
+        });
+        Ok(())
+    }
+}
+/// Bash output joins its non-blank stdout and stderr.
+fn claude_command_output(output: &Value) -> Option<String> {
+    if !(output["stdout"].is_string() || output["stderr"].is_string()) {
+        return None;
+    }
+    let text = [&output["stdout"], &output["stderr"]]
+        .into_iter()
+        .filter_map(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+fn claude_result_failed(block: &Value) -> bool {
+    match block["type"].as_str() {
+        Some("tool_result" | "mcp_tool_result") => block["is_error"] == true,
+        _ => {
+            let content = &block["content"];
+            content.is_object()
+                && matches!(
+                    content["type"].as_str(),
+                    Some(
+                        "bash_code_execution_tool_result_error"
+                            | "code_execution_tool_result_error"
+                            | "text_editor_code_execution_tool_result_error"
+                            | "tool_search_tool_result_error"
+                            | "web_fetch_tool_result_error"
+                            | "web_search_tool_result_error"
+                    )
+                )
+        }
+    }
+}
+fn claude_result_tool_name(kind: &str) -> String {
+    match kind {
+        "bash_code_execution_tool_result" => "bash_code_execution",
+        "code_execution_tool_result" => "code_execution",
+        "advisor_tool_result" => "advisor",
+        "mcp_tool_result" => "mcp_tool",
+        "text_editor_code_execution_tool_result" => "text_editor_code_execution",
+        "tool_search_tool_result" => "tool_search",
+        "web_fetch_tool_result" => "web_fetch",
+        "web_search_tool_result" => "web_search",
+        _ => "tool",
+    }
+    .into()
 }
 fn claude_result_error(frame: &Value, hint: Option<&str>) -> Option<String> {
     if frame["api_error_status"] == 529 {
@@ -838,8 +1085,13 @@ fn claude_terminal_status(frame: &Value, hint: Option<&str>) -> RunStatus {
 }
 fn claude_tool_presentation(meta: &Value) -> Option<ToolPresentation> {
     let bounded_text = |key, limit| {
-        let text = meta.get(key)?.as_str()?.trim();
-        (!text.is_empty() && text.encode_utf16().count() <= limit).then(|| text.to_owned())
+        let text = meta
+            .get(key)?
+            .as_str()?
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!text.is_empty() && text.encode_utf16().count() <= limit).then_some(text)
     };
     bounded_text("id", 512)?;
     let title = bounded_text("display_name", 160)?;
@@ -864,17 +1116,24 @@ fn claude_tool(
     output: Option<&Value>,
     presentation: Option<&ToolPresentation>,
 ) -> ProviderItem {
-    match name {
-        "Bash" => ProviderItem::Command {
+    let normalized = name
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '_' && *c != '-')
+        .collect::<String>();
+    match normalized.as_str() {
+        "bash" => ProviderItem::Command {
             command: string(input, "command"),
             cwd: None,
             exit_code: None,
         },
-        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => ProviderItem::FileChange {
+        "edit" | "write" | "multiedit" | "notebookedit" => ProviderItem::FileChange {
             changes: Json(input.clone()),
         },
-        "WebSearch" => ProviderItem::WebSearch {
-            query: string(input, "query"),
+        "websearch" | "webfetch" => ProviderItem::WebSearch {
+            query: optional(input, "query")
+                .or_else(|| optional(input, "url"))
+                .unwrap_or_default(),
             results: output.and_then(|v| v.get("results")).cloned().map(Json),
         },
         _ => ProviderItem::Tool {
@@ -917,16 +1176,35 @@ fn claude_usage(usage: &Value, window: u64) -> TokenUsage {
         max: Some(window),
     }
 }
+/// The prompt, with a known skill run as the trailing slash-command block
+/// after any images, as the CLI expands only that block.
 pub fn claude_user_message(
     text: &str,
     attachments: &[Attachment],
     uuid: &str,
     steer: bool,
     images: &[PreparedImage],
+    skills: &[String],
 ) -> Result<Value, ProtocolError> {
-    let mut content = vec![];
-    for file in attachments {
-        if native_image(file) {
+    let text = attachment_text(text, attachments);
+    let dispatch = claude_skill_dispatch(&text, skills);
+    let content = if attachments.is_empty() && dispatch.is_none() {
+        json!(text)
+    } else {
+        let mut content = vec![];
+        if let Some(leading) = dispatch.as_ref().and_then(|d| d.leading_text.as_ref()) {
+            content.push(json!({"type":"text","text":leading}));
+        }
+        for file in attachments
+            .iter()
+            .filter(|file| file.kind == AttachmentKind::Image)
+        {
+            if !native_image(file) {
+                return Err(ProtocolError::Invalid(format!(
+                    "Unsupported Claude image attachment type '{}'",
+                    file.mime_type
+                )));
+            }
             let image = images
                 .iter()
                 .find(|image| image.attachment_id == file.id)
@@ -935,12 +1213,11 @@ pub fn claude_user_message(
                 })?;
             content.push(json!({"type":"image","source":{"type":"base64","media_type":image.mime_type,"data":image.base64}}));
         }
-    }
-    let text = attachment_text(text, attachments);
-    let content = if content.is_empty() {
-        json!(text)
-    } else {
-        content.push(json!({"type":"text","text":text}));
+        match dispatch {
+            Some(dispatch) => content.push(json!({"type":"text","text":dispatch.command_text})),
+            None if !text.is_empty() => content.push(json!({"type":"text","text":text})),
+            None => {}
+        }
         json!(content)
     };
     let mut message = json!({"type":"user","uuid":uuid,"message":{"role":"user","content":content},"parent_tool_use_id":null});

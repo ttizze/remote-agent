@@ -5171,3 +5171,51 @@ fn a_retained_command_keeps_its_row_and_wakes_the_thread_when_it_finishes() {
     );
     assert!(s.wake_reports.is_empty());
 }
+// T3 ClaudeAdapterV2.ts:5309: a roster snapshot replaces the session's background work.
+#[test]
+fn background_rosters_replace_work_and_usage_limits_render_their_wait() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "first");
+    let entry = |key: &str| BackgroundEntry {
+        key: key.into(),
+        tool: key.into(),
+        kind: BackgroundKind::Command,
+        description: key.into(),
+    };
+    provider(
+        &mut s,
+        "roster",
+        &a,
+        ProviderEvent::BackgroundRoster {
+            tasks: vec![entry("one"), entry("two")],
+        },
+    );
+    assert_eq!(s.background_work.len(), 2);
+    finish(&mut s, &a);
+    provider(
+        &mut s,
+        "replaced",
+        &a,
+        ProviderEvent::BackgroundRoster {
+            tasks: vec![entry("two")],
+        },
+    );
+    assert_eq!(s.background_work.keys().collect::<Vec<_>>(), ["two"]);
+    let (_, b) = running(&mut s, "second");
+    provider(
+        &mut s,
+        "limit",
+        &b,
+        ProviderEvent::ItemFinished {
+            key: "usage-limit:five_hour".into(),
+            kind: ProviderItem::UsageLimit {
+                limit: Some("five_hour".into()),
+                resets_at: Some(at().millis() / 1000 + 7200),
+            },
+            text: None,
+            status: ItemStatus::Completed,
+        },
+    );
+    assert!(s.items.iter().any(|item| matches!(&item.kind, ItemKind::SystemNotice { message }
+        if message == "Claude usage limit reached. This turn is paused until the 5-hour limit resets in 2h.")));
+}

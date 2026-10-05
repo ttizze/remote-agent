@@ -169,6 +169,35 @@ pub fn background_notification(reports: &[WorkReport]) -> Option<Notification> {
         summary,
     })
 }
+/// The notice for a rejected usage window, with the remaining wait when it
+/// is within 30 days.
+pub fn usage_limit_notice(limit: Option<&str>, resets_at: Option<i64>, now_ms: i64) -> String {
+    let label = match limit {
+        Some("five_hour") => Some("5-hour"),
+        Some("seven_day") => Some("7-day"),
+        Some("seven_day_opus") => Some("7-day Opus"),
+        Some("seven_day_sonnet") => Some("7-day Sonnet"),
+        Some("seven_day_overage_included") => Some("7-day model"),
+        Some("overage") => Some("overage"),
+        _ => None,
+    };
+    let wait = resets_at
+        .map(|at| at.saturating_mul(1000) - now_ms)
+        .filter(|ms| *ms > 0 && *ms <= 30 * 24 * 60 * 60 * 1000)
+        .map(|ms| {
+            let minutes = (ms + 59_999) / 60_000;
+            match (minutes / 60, minutes % 60) {
+                (0, minutes) => format!("{minutes}m"),
+                (hours, 0) => format!("{hours}h"),
+                (hours, minutes) => format!("{hours}h {minutes}m"),
+            }
+        });
+    format!(
+        "Claude usage limit reached. This turn is paused until the {}limit resets{}.",
+        label.map_or(String::new(), |label| format!("{label} ")),
+        wait.map_or(String::new(), |wait| format!(" in {wait}"))
+    )
+}
 pub fn delegated_notification(
     task_ids: &[NodeId],
     parent_run: &RunId,

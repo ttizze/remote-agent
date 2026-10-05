@@ -1464,3 +1464,296 @@ fn native_rollback_and_fork_report_completion() {
         })
     );
 }
+fn inner(output: Translation) -> Vec<ProviderEvent> {
+    output
+        .events
+        .into_iter()
+        .flat_map(|event| match event {
+            ProviderEvent::NativeOutput { events, .. } => events,
+            event => vec![event],
+        })
+        .collect()
+}
+fn claude_receive(claude: &mut ClaudeProtocol, frame: Value) -> Vec<ProviderEvent> {
+    inner(claude.receive(&frame).unwrap())
+}
+// T3 ClaudeAdapterV2.test.ts:3326 and :5351.
+#[test]
+fn claude_rosters_replace_background_work_and_foreground_tasks_stay_foreground() {
+    let mut claude = ClaudeProtocol::default();
+    let foreground = claude_receive(
+        &mut claude,
+        json!({"type":"system","subtype":"task_started","task_id":"fg","task_type":"local_bash","is_backgrounded":false,"description":"Foreground"}),
+    );
+    assert!(foreground.is_empty());
+    let started = claude_receive(
+        &mut claude,
+        json!({"type":"system","subtype":"task_started","task_id":"bg","task_type":"local_bash","is_backgrounded":true,"description":"Sleep"}),
+    );
+    assert!(
+        matches!(&started[0], ProviderEvent::BackgroundTask { key, status: None, .. } if key == "bg")
+    );
+    let roster = claude_receive(
+        &mut claude,
+        json!({"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"other","task_type":"local_bash","description":" Monitor 0 "},{"task_id":"agent","task_type":"local_agent","description":"ignored"}]}),
+    );
+    assert_eq!(
+        roster,
+        [ProviderEvent::BackgroundRoster {
+            tasks: vec![BackgroundEntry {
+                key: "other".into(),
+                tool: "other".into(),
+                kind: BackgroundKind::Command,
+                description: "Monitor 0".into(),
+            }]
+        }]
+    );
+    let done = claude_receive(
+        &mut claude,
+        json!({"type":"system","subtype":"task_notification","task_id":"bg","status":"completed","summary":"done"}),
+    );
+    assert!(
+        matches!(&done[0], ProviderEvent::BackgroundTask { description, status: Some(ItemStatus::Completed), .. } if description == "Sleep")
+    );
+}
+// T3 ClaudeAdapterV2.ts:1976 and :2059.
+#[test]
+fn claude_server_tools_and_typed_results_are_tool_activity() {
+    let mut claude = ClaudeProtocol::default();
+    let events = claude_receive(
+        &mut claude,
+        json!({"type":"assistant","message":{"id":"m","content":[
+            {"type":"mcp_tool_use","id":"mcp-1","name":"search","server_name":"docs","input":{"q":"x"}},
+            {"type":"mcp_tool_result","tool_use_id":"mcp-1","is_error":true,"content":[{"type":"text","text":"denied"}]},
+            {"type":"server_tool_use","id":"ws-1","name":"web_search","input":{"query":"rust"}},
+            {"type":"web_search_tool_result","tool_use_id":"ws-1","content":{"type":"web_search_tool_result_error","error_code":"unavailable"}}
+        ]}}),
+    );
+    let finished = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ItemFinished {
+                key, status, kind, ..
+            } => Some((key.as_str(), *status, kind)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.len(), 2);
+    assert_eq!(
+        (finished[0].0, finished[0].1),
+        ("mcp-1", ItemStatus::Failed)
+    );
+    assert_eq!((finished[1].0, finished[1].1), ("ws-1", ItemStatus::Failed));
+    assert!(matches!(finished[1].2, ProviderItem::WebSearch { query, .. } if query == "rust"));
+    let unknown = claude_receive(
+        &mut claude,
+        json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"lost","content":"output"}]}}),
+    );
+    assert!(
+        matches!(&unknown[0], ProviderEvent::ItemStarted { key, kind: ProviderItem::Tool { name, .. } } if key == "lost" && name == "tool")
+    );
+    assert!(
+        matches!(&unknown[1], ProviderEvent::ItemFinished { key, text: Some(text), .. } if key == "lost" && text == "output")
+    );
+}
+// T3 ClaudeAdapterV2.test.ts:4328.
+#[test]
+fn claude_bash_output_joins_stdout_and_stderr() {
+    let mut claude = ClaudeProtocol::default();
+    claude_receive(
+        &mut claude,
+        json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"bash","name":"Bash","input":{"command":"git status"}}]}}),
+    );
+    let events = claude_receive(
+        &mut claude,
+        json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"bash","content":"On branch main"}]},"tool_use_result":{"stdout":"On branch main","stderr":"warning: dirty","interrupted":false,"isImage":false}}),
+    );
+    assert!(
+        matches!(&events[0], ProviderEvent::ItemFinished { text: Some(text), .. } if text == "On branch main\nwarning: dirty")
+    );
+}
+// T3 ClaudeAdapterV2.test.ts:3130 and :3204.
+#[test]
+fn claude_api_retries_update_one_item_until_recovery_or_failure() {
+    let mut claude = ClaudeProtocol::default();
+    let retry = claude_receive(
+        &mut claude,
+        json!({"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":1500,"error_status":529,"error":"overloaded"}),
+    );
+    assert_eq!(
+        retry,
+        [ProviderEvent::ItemStarted {
+            key: "terminal-failure".into(),
+            kind: ProviderItem::Error {
+                message: "Claude API overloaded.".into(),
+                retry: Some(RetryProgress {
+                    attempt: 2,
+                    max_attempts: Some(10),
+                    delay_ms: Some(1500)
+                }),
+                code: Some("api_error_529".into()),
+                class: Some("provider_error".into()),
+                retryable: Some(true),
+            }
+        }]
+    );
+    let recovered = claude_receive(
+        &mut claude,
+        json!({"type":"assistant","message":{"id":"m","content":[{"type":"text","text":"ok"}]}}),
+    );
+    assert!(
+        matches!(&recovered[0], ProviderEvent::ItemFinished { key, status: ItemStatus::Completed, .. } if key == "terminal-failure")
+    );
+    claude_receive(
+        &mut claude,
+        json!({"type":"system","subtype":"api_retry","attempt":10,"max_retries":10,"retry_delay_ms":38010,"error_status":529,"error":"overloaded"}),
+    );
+    let failed = claude_receive(
+        &mut claude,
+        json!({"type":"result","subtype":"success","is_error":true,"api_error_status":529,"result":"overloaded","num_turns":1}),
+    );
+    assert!(failed.iter().any(|event| matches!(event,
+        ProviderEvent::ItemFinished { key, kind: ProviderItem::Error { retry: Some(RetryProgress { attempt: 10, .. }), code: Some(code), .. }, status: ItemStatus::Failed, .. }
+            if key == "terminal-failure" && code == "api_error_529")));
+}
+// T3 ClaudeAdapterV2.ts:6298: a success result marked as an error is neither an answer nor a failure.
+#[test]
+fn claude_success_results_marked_as_errors_add_no_answer_or_failure() {
+    let mut claude = ClaudeProtocol::default();
+    let events = claude_receive(
+        &mut claude,
+        json!({"type":"result","subtype":"success","is_error":true,"result":"Provider failure details.","num_turns":1}),
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, ProviderEvent::ItemFinished { .. }))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Completed,
+            ..
+        }
+    )));
+}
+// T3 ClaudeAdapterV2.test.ts:2691 and ClaudeAdapterV2.ts:2097.
+#[test]
+fn claude_refusal_fallbacks_and_mcp_names_use_the_reference_fields() {
+    let mut claude = ClaudeProtocol::default();
+    let notice = claude_receive(
+        &mut claude,
+        json!({"type":"system","subtype":"model_refusal_fallback","uuid":"u","content":"Safeguards flagged this message. Switched to Opus 4.8.","original_model":"a","fallback_model":"b"}),
+    );
+    assert!(
+        matches!(&notice[0], ProviderEvent::ItemFinished { kind: ProviderItem::Notice { message }, .. } if message == "Safeguards flagged this message. Switched to Opus 4.8.")
+    );
+    let events = claude_receive(
+        &mut claude,
+        json!({"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"mcp","name":"mcp__x__read","input":{}}]},"tool_use_meta":[{"id":"mcp","display_name":"Read\n  issue","server_display_name":" GitHub \t App "}]}),
+    );
+    let ProviderEvent::ItemStarted {
+        kind: ProviderItem::Tool { presentation, .. },
+        ..
+    } = &events[0]
+    else {
+        panic!("{events:?}")
+    };
+    assert_eq!(presentation.title.as_deref(), Some("Read issue"));
+    assert_eq!(
+        presentation.source.as_ref().unwrap().0["name"],
+        "GitHub App"
+    );
+}
+// T3 ClaudeAdapterV2.test.ts:2376 and :2441.
+#[test]
+fn claude_rate_limits_announce_rejected_windows_unless_overage_is_allowed() {
+    let mut claude = ClaudeProtocol::default();
+    for info in [
+        json!({"status":"allowed_warning"}),
+        json!({"status":"rejected","overageStatus":"allowed"}),
+        json!({"status":"rejected","overageStatus":"allowed_warning"}),
+        json!({"status":"rejected","isUsingOverage":true}),
+        json!({"status":"rejected","overageInUse":true}),
+    ] {
+        assert!(
+            claude_receive(
+                &mut claude,
+                json!({"type":"rate_limit_event","rate_limit_info":info})
+            )
+            .is_empty()
+        );
+    }
+    let notice = claude_receive(
+        &mut claude,
+        json!({"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","resetsAt":7200}}),
+    );
+    assert_eq!(
+        notice,
+        [ProviderEvent::ItemFinished {
+            key: "usage-limit:five_hour:7200".into(),
+            kind: ProviderItem::UsageLimit {
+                limit: Some("five_hour".into()),
+                resets_at: Some(7200)
+            },
+            text: None,
+            status: ItemStatus::Completed,
+        }]
+    );
+    assert_eq!(
+        usage_limit_notice(Some("five_hour"), Some(7200), 0),
+        "Claude usage limit reached. This turn is paused until the 5-hour limit resets in 2h."
+    );
+    assert_eq!(
+        usage_limit_notice(Some("seven_day"), Some(5400), 0),
+        "Claude usage limit reached. This turn is paused until the 7-day limit resets in 1h 30m."
+    );
+    assert_eq!(
+        usage_limit_notice(None, None, 0),
+        "Claude usage limit reached. This turn is paused until the limit resets."
+    );
+    let failed = claude_receive(
+        &mut claude,
+        json!({"type":"result","subtype":"error_during_execution","errors":[],"num_turns":1}),
+    );
+    assert!(failed.iter().any(|event| matches!(event,
+        ProviderEvent::ItemFinished { kind: ProviderItem::Error { class: Some(class), .. }, .. } if class == "usage_limit")));
+}
+// T3 ClaudeSkillDispatch.ts and ClaudeAdapterV2.ts:7175.
+#[test]
+fn claude_prompts_run_known_skills_and_request_ultrathink_effort() {
+    let mut claude = ClaudeProtocol::default();
+    claude.set_skills(vec!["review".into()]);
+    let mut start = codex_start();
+    if let ProviderCommand::Start {
+        selection, text, ..
+    } = &mut start
+    {
+        selection.driver = Driver::Claude;
+        selection.model = "claude-sonnet-4-6".into();
+        selection
+            .options
+            .insert("effort".into(), "ultrathink".into());
+        *text = "please $review this patch".into();
+    }
+    let sent = claude.command(&start, "prompt", &[]).unwrap().outbound[0].clone();
+    assert_eq!(
+        sent["message"]["content"],
+        json!([{"type":"text","text":"Ultrathink:\nplease"},{"type":"text","text":"/review this patch"}])
+    );
+    let model = claude
+        .command(
+            &ProviderCommand::SetModel {
+                selection: ModelSelection {
+                    instance: "claude".into(),
+                    driver: Driver::Claude,
+                    model: "claude-fable-5".into(),
+                    options: [("contextWindow".to_string(), "1m".to_string())].into(),
+                },
+            },
+            "",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(model.outbound[0]["request"]["model"], "claude-fable-5[1m]");
+}

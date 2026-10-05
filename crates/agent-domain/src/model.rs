@@ -924,6 +924,11 @@ pub enum ProviderItem {
     Notice {
         message: String,
     },
+    /// A rejected usage window; `resets_at` is in Unix seconds.
+    UsageLimit {
+        limit: Option<String>,
+        resets_at: Option<i64>,
+    },
     Error {
         message: String,
         retry: Option<RetryProgress>,
@@ -1058,11 +1063,22 @@ pub enum ProviderEvent {
         summary: Option<String>,
         exit_code: Option<i64>,
     },
+    /// The complete background roster of the native session.
+    BackgroundRoster {
+        tasks: Vec<BackgroundEntry>,
+    },
     /// The provider asks for a turn that reports finished background work.
     Wake {
         text: String,
         detail: Option<String>,
     },
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundEntry {
+    pub key: String,
+    pub tool: String,
+    pub kind: BackgroundKind,
+    pub description: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeResult {
