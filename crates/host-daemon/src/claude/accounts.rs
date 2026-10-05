@@ -5,7 +5,7 @@ use crate::host_rpc::agent::{AccountCommand, AccountReply};
 use agent_protocol::{
     models::Empty,
     operations::{Account, AccountLogin, AccountLoginStatus, AccountSelection},
-    session::ProviderKind,
+    session::ProviderInstanceId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,6 +38,8 @@ impl Default for Registry {
 }
 
 pub(crate) struct Accounts {
+    instance_id: ProviderInstanceId,
+    environment: Vec<(String, String)>,
     program: PathBuf,
     directory: PathBuf,
     native_home: PathBuf,
@@ -68,9 +70,11 @@ impl Drop for Cli {
 
 impl Accounts {
     pub(super) async fn load(
+        instance_id: ProviderInstanceId,
         program: PathBuf,
         directory: PathBuf,
         native_home: PathBuf,
+        environment: Vec<(String, String)>,
     ) -> anyhow::Result<Self> {
         crate::platform::create_state_directory(&directory)?;
         let registry = match tokio::fs::read(directory.join("accounts.json")).await {
@@ -79,6 +83,8 @@ impl Accounts {
             Err(error) => return Err(error.into()),
         };
         Ok(Self {
+            instance_id,
+            environment,
             program,
             directory,
             native_home,
@@ -131,7 +137,13 @@ impl Accounts {
     }
 
     async fn info(&self, home: &Path, id: String) -> Result<Option<Account>, String> {
-        let mut process = Cli::start(&self.program, home, &["auth", "status", "--json"], None)?;
+        let mut process = Cli::start(
+            &self.environment,
+            &self.program,
+            home,
+            &["auth", "status", "--json"],
+            None,
+        )?;
         let (_, output) = process.finish().await?;
         let value: Value =
             serde_json::from_slice(&output).map_err(|_| "Claude の認証状態を読み取れません。")?;
@@ -140,7 +152,7 @@ impl Accounts {
         }
         Ok(Some(Account {
             id,
-            provider: ProviderKind::Claude,
+            instance_id: self.instance_id.clone(),
             email: value["email"].as_str().map(str::to_owned),
             plan_type: value["subscriptionType"].as_str().map(str::to_owned),
             usage: None,
@@ -199,12 +211,13 @@ impl Accounts {
         let home = self.account_home(id)?;
         let program = self.program.clone();
         let config_home = self.native_home.clone();
+        let environment = self.environment.clone();
         let directory = self.directory.clone();
         let cache = self.usage.entry(id.to_owned()).or_default().clone();
         Ok(async move {
             cache.read(async {
                 let (mut process, _) = super::process::Process::start(
-                    &program, &config_home, &home, &directory, None, None, None,
+                    &environment, &[], &program, &config_home, &home, &directory, None, None, None,
                 ).await?;
                 let result = async {
                     process.write(&serde_json::json!({"type":"control_request","request_id":"usage","request":{"subtype":"get_usage","skip_behaviors":true}})).await?;
@@ -240,7 +253,7 @@ impl Accounts {
                 }
                 self.revision += 1;
                 Ok(AccountSelection {
-                    provider: ProviderKind::Claude,
+                    instance_id: self.instance_id.clone(),
                     selected_id: id,
                     persistence_error: None,
                 }
@@ -260,7 +273,13 @@ impl Accounts {
                     }
                 }
                 self.revision += 1;
-                let mut process = Cli::start(&self.program, &home, &["auth", "logout"], None)?;
+                let mut process = Cli::start(
+                    &self.environment,
+                    &self.program,
+                    &home,
+                    &["auth", "logout"],
+                    None,
+                )?;
                 if !process.finish().await?.0 {
                     return Err("Claude のログアウトに失敗しました。".into());
                 }
@@ -276,6 +295,7 @@ impl Accounts {
                     .map_err(|_| "Claude の保存先を作成できません。")?;
                 let (sender, url) = oneshot::channel();
                 let process = Cli::start(
+                    &self.environment,
                     &self.program,
                     &home,
                     &["auth", "login", "--claudeai"],
@@ -301,7 +321,7 @@ impl Accounts {
                     }
                 };
                 Ok(AccountLogin {
-                    provider: ProviderKind::Claude,
+                    instance_id: self.instance_id.clone(),
                     login_id: id,
                     user_code: String::new(),
                     verification_url,
@@ -411,7 +431,13 @@ impl Accounts {
             login.process.input.take();
             let _ = login.process.child.wait().await;
             // A completion can race cancellation; let the CLI remove its credentials.
-            let mut process = Cli::start(&self.program, &login.home, &["auth", "logout"], None)?;
+            let mut process = Cli::start(
+                &self.environment,
+                &self.program,
+                &login.home,
+                &["auth", "logout"],
+                None,
+            )?;
             if !process.finish().await?.0 {
                 return Err("Claude の認証手続きを破棄できません。".into());
             }
@@ -425,21 +451,16 @@ impl Accounts {
 
 impl Cli {
     fn start(
+        environment: &[(String, String)],
         program: &Path,
         home: &Path,
         args: &[&str],
         url: Option<oneshot::Sender<String>>,
     ) -> Result<Self, String> {
-        let mut command =
-            bex_process::command(program).map_err(|_| "Claude の認証処理を起動できません。")?;
+        let mut command = super::process::command(program, environment, home, home)
+            .map_err(|_| "Claude の認証処理を起動できません。")?;
         command
             .args(args)
-            .env("CLAUDE_CONFIG_DIR", home)
-            .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", home)
-            .env_remove("ANTHROPIC_API_KEY")
-            .env_remove("ANTHROPIC_AUTH_TOKEN")
-            .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
-            .env_remove("CLAUDE_CODE_OAUTH_REFRESH_TOKEN")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -524,15 +545,19 @@ mod tests {
     async fn repeated_listing_reuses_native_identity_but_expiration_rechecks_it() {
         let directory = tempfile::tempdir().unwrap();
         let mut accounts = Accounts::load(
+            "claude".parse().unwrap(),
             directory.path().join("missing-claude"),
             directory.path().join("accounts"),
             directory.path().join("native"),
+            Vec::new(),
         )
         .await
         .unwrap();
         accounts.registry.accounts.push(Account {
             id: "claude:desktop".into(),
-            provider: ProviderKind::Claude,
+            instance_id: "claude"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             email: Some("native@example.invalid".into()),
             plan_type: None,
             usage: None,

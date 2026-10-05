@@ -75,7 +75,7 @@ async fn exercise(command: &[&str], expected: Value) {
                         assert!(!handled);
                         handled = true;
                     }
-                    json!({"data":[{"provider":"codex","id":{"id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
+                    json!({"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
                 }
                 Some("host/session/open") => {
                     reads += 1;
@@ -83,7 +83,7 @@ async fn exercise(command: &[&str], expected: Value) {
                         request["params"],
                         json!({"session":{"id":"fixture-thread"},"limit":5,"includeActivity":false})
                     );
-                    let mut thread = json!({"provider":"codex","id":{"id":"fixture-thread"},"cwd":"/fixture","status":"idle","turns":[]});
+                    let mut thread = json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"fixture-thread"},"cwd":"/fixture","status":"idle","turns":[]});
                     if let Some(id) = &approval {
                         thread["requests"] = json!({id.as_str().unwrap():{"id":id,"target":"session","delivery":"awaiting","body":{"approval":{"kind":"command","description":"fixture","details":"","choices":[{"id":"accept-choice","label":"承認","description":""},{"id":"session-choice","label":"セッション中","description":""},{"id":"decline-choice","label":"拒否","description":""}]}}}});
                     }
@@ -157,7 +157,7 @@ async fn exercise(command: &[&str], expected: Value) {
 }
 #[tokio::test]
 async fn cli_lists_over_iroh() {
-    exercise(&["list", "--project-limit", "9", "--chat-limit", "11", "--search", "CLI search"],json!({"data":[{"provider":"codex","id":{"id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).await;
+    exercise(&["list", "--project-limit", "9", "--chat-limit", "11", "--search", "CLI search"],json!({"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"fixture-thread"},"name":"CLI fixture"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).await;
 }
 #[tokio::test]
 async fn cli_sends_over_iroh() {

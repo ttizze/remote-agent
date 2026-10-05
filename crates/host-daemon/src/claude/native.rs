@@ -1,11 +1,7 @@
 //! Pure translation of Claude native content into the shared conversation model.
 //! Live execution and transcript reading own state updates and use these results.
 use agent_protocol::{
-    execution::ItemStatus,
-    ids::ItemId,
-    items::*,
-    models::Item,
-    session::{ProviderKind, SessionRef},
+    execution::ItemStatus, ids::ItemId, items::*, models::Item, session::SessionRef,
 };
 use serde_json::{Value, json};
 use std::borrow::Cow;
@@ -374,7 +370,7 @@ pub(super) fn content_item(
         _ => {
             status = ItemStatus::Unknown;
             ItemBody::Custom {
-                provider: ProviderKind::Claude,
+                driver: "claudeAgent".parse().expect("valid built-in driver"),
                 kind: text("type"),
                 value: block.clone(),
             }
@@ -756,7 +752,7 @@ mod tests {
         );
         let future = json!({"type":"future_block","nested":{"a":[1,2]}});
         assert!(
-            matches!(content_item(&session,"unknown".into(),&future,None,ItemStatus::Unknown).unwrap().body(),ItemBody::Custom {provider:ProviderKind::Claude,value,..} if value == &future)
+            matches!(content_item(&session,"unknown".into(),&future,None,ItemStatus::Unknown).unwrap().body(),ItemBody::Custom {driver,value,..} if driver.as_str() == "claudeAgent" && value == &future)
         );
         let mcp = content_item(&session, "stream".into(),
             &json!({"type":"tool_use","id":"mcp","name":"mcp__my_server__search","input":{"query":"example"}}),

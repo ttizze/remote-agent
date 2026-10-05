@@ -92,7 +92,7 @@ impl HostFixture {
             .map(Arc::new)
             .map_err(|error| error.to_string());
         tracing::info!(target: "bex", operation = "fixture.start.service");
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             server.clone(),
             ProjectStore::new(directory.join("bex-worktrees.json")),
             Some(
@@ -101,7 +101,10 @@ impl HostFixture {
                     .clone()
                     .unwrap_or_else(|| directory.join("codex-native")),
             ),
-        )?;
+            (accounts && server.is_ok())
+                .then(|| (directory.join("state/accounts"), config.clone())),
+        )
+        .await?;
         #[cfg(unix)]
         service
             .enable_browser(directory.join("browser"))
@@ -117,13 +120,6 @@ impl HostFixture {
                 .await
         {
             eprintln!("Claude fixture adapter unavailable: {error:#}");
-        }
-        tracing::info!(target: "bex", operation = "fixture.start.accounts");
-        if accounts && server.is_ok() {
-            service
-                .enable_accounts(directory.join("state/accounts"), config)
-                .await
-                .map_err(anyhow::Error::msg)?;
         }
         tracing::info!(target: "bex", operation = "fixture.start.runtime");
         service.start();

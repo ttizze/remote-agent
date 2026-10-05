@@ -2,19 +2,6 @@
 use std::fs;
 use std::{borrow::Cow, path::Path};
 
-pub(crate) fn bundled_codex_path() -> Option<&'static Path> {
-    #[cfg(target_os = "macos")]
-    {
-        Some(Path::new(
-            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
-        ))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
-}
-
 pub(crate) fn executable_path(path: &Path) -> Cow<'_, Path> {
     #[cfg(windows)]
     if path.extension().is_none() {

@@ -4,6 +4,7 @@
 pub(crate) mod agent;
 mod codex;
 mod codex_history;
+mod codex_home;
 mod composer;
 mod conversations;
 pub(crate) mod native;

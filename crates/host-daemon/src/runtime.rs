@@ -53,48 +53,25 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
     let endpoint = Endpoint::bind(credentials.host_identity().await, relays)
         .await
         .context("cannot bind Host endpoint")?;
-    let app_server_config = codex_app_server::AppServerConfig {
-        program: config.codex,
-        codex_home: config.codex_home,
-        ..Default::default()
-    };
     let projects = ProjectStore::new(directory.join("bex-worktrees.json"));
-    let app_server = codex_app_server::CodexAppServer::spawn(app_server_config.clone())
-        .await
-        .map(Arc::new)
-        .map_err(|error| error.to_string());
-    if let Err(error) = &app_server {
-        tracing::error!(target: "bex", operation = "host.codex", message = %error);
-    }
     let account_directory = config.account_state_dir.as_deref().unwrap_or(&directory);
-    let service = HostRpcService::new(
-        app_server.clone(),
-        projects,
-        app_server_config.codex_home.clone(),
-    )
-    .context("cannot initialize conversation runtime")?;
+    let service =
+        HostRpcService::new(projects).context("cannot initialize conversation runtime")?;
+    service
+        .configure_providers(
+            account_directory.to_owned(),
+            config.codex,
+            config.codex_home,
+            config.claude,
+            config.claude_home,
+        )
+        .await
+        .context("cannot initialize provider registry")?;
     #[cfg(unix)]
     service
         .enable_browser(directory.join("browser"))
         .await
         .map_err(anyhow::Error::msg)?;
-    if let Err(error) = service
-        .enable_claude(
-            config.claude,
-            account_directory.join("claude"),
-            config.claude_home,
-        )
-        .await
-    {
-        tracing::error!(target:"bex", operation="host.claude", message=%error);
-    }
-    if app_server.is_ok()
-        && let Err(error) = service
-            .enable_accounts(account_directory.join("codex-accounts"), app_server_config)
-            .await
-    {
-        tracing::error!(target:"bex", operation="host.codex.accounts", message=%error);
-    }
     service.start();
     let local_ticket = endpoint.local_ticket();
     let runtime = Arc::new(
@@ -128,12 +105,6 @@ pub(crate) async fn run(config: StartupConfig) -> Result<()> {
         }
     };
     drop(runtime);
-    if let Ok(app_server) = app_server {
-        app_server
-            .shutdown()
-            .await
-            .context("cannot shut down Codex app server")?;
-    }
     drop(lease);
     result
 }

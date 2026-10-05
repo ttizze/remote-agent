@@ -209,7 +209,9 @@ fn route(
                 ticket,
                 identity,
                 &agent_core::state::operations::CreateSession {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    instance_id: "codex"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
                     cwd: Some(root.join("project").to_string_lossy().into_owned()),
                     model: None,
                 },

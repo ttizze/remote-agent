@@ -250,7 +250,7 @@
                 "id": "account-a",
                 "email": "fixture@example.test",
                 "planType": "plus",
-                "provider": "codex"
+                "instanceId": "codex"
               }
             ],
             "error": null,
@@ -267,7 +267,7 @@
           "id": "account-a",
           "email": "fixture@example.test",
           "planType": "plus",
-          "provider": "codex"
+          "instanceId": "codex"
         }
       ],
       "error": null,
@@ -287,13 +287,13 @@
         "method": "host/account/select",
         "params": {
           "accountId": "account-a",
-          "provider": "codex"
+          "instanceId": "codex"
         },
         "response": {
           "result": {
             "selectedId": "account-a",
             "persistenceError": "fixture persistence failure",
-            "provider": "codex"
+            "instanceId": "codex"
           }
         }
       }
@@ -301,7 +301,7 @@
     "result": {
       "selectedId": "account-a",
       "persistenceError": "fixture persistence failure",
-      "provider": "codex"
+      "instanceId": "codex"
     }
   },
   {
@@ -313,7 +313,7 @@
       {
         "method": "host/account/login/start",
         "params": {
-          "provider": "codex"
+          "instanceId": "codex"
         },
         "response": {
           "result": {
@@ -321,7 +321,7 @@
             "userCode": "TEST-ONLY",
             "verificationUrl": "https://example.test/device",
             "requiresCodeSubmission": false,
-            "provider": "codex"
+            "instanceId": "codex"
           }
         }
       }
@@ -331,7 +331,7 @@
       "userCode": "TEST-ONLY",
       "verificationUrl": "https://example.test/device",
       "requiresCodeSubmission": false,
-      "provider": "codex"
+      "instanceId": "codex"
     }
   },
   {
@@ -345,7 +345,7 @@
         "method": "host/account/login/status",
         "params": {
           "loginId": "fixture-login",
-          "provider": "codex"
+          "instanceId": "codex"
         },
         "response": {
           "result": {
@@ -369,7 +369,7 @@
         "method": "host/account/login/status",
         "params": {
           "loginId": "fixture-login",
-          "provider": "codex"
+          "instanceId": "codex"
         },
         "response": {
           "result": {
@@ -395,7 +395,7 @@
         "method": "host/account/login/cancel",
         "params": {
           "loginId": "fixture-login",
-          "provider": "codex"
+          "instanceId": "codex"
         },
         "response": {
           "result": {}
@@ -425,13 +425,16 @@
         "response": {
           "result": {
             "thread": {
-              "provider": "codex",
               "id": {
                 "id": "fork"
               },
               "turns": [],
               "future": {
                 "retained": true
+              },
+              "provider": {
+                "instanceId": "codex",
+                "driver": "codex"
               }
             }
           }
@@ -440,13 +443,16 @@
     ],
     "result": {
       "thread": {
-        "provider": "codex",
         "id": {
           "id": "fork"
         },
         "turns": [],
         "future": {
           "retained": true
+        },
+        "provider": {
+          "instanceId": "codex",
+          "driver": "codex"
         }
       }
     }
@@ -492,7 +498,7 @@
         "method": "host/account/select",
         "params": {
           "accountId": "account-a",
-          "provider": "codex"
+          "instanceId": "codex"
         },
         "response": {
           "error": {

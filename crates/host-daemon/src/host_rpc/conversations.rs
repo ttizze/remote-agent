@@ -3,7 +3,7 @@
 use agent_protocol::{
     models::{Item, ModelRef, Thread, ThreadResponse, Turn},
     session::{
-        HistoryPage, HistoryReadKind, HistoryReadState, ProviderKind, SessionChange, SessionRef,
+        HistoryPage, HistoryReadKind, HistoryReadState, ProviderRef, SessionChange, SessionRef,
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -13,14 +13,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod config;
 #[cfg(test)]
 mod tests;
 
-const DATABASE_FORMAT: u32 = 2;
+const DATABASE_FORMAT: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(super) struct NativeIdentity {
-    pub(super) provider: ProviderKind,
+    pub(super) provider: ProviderRef,
     pub(super) id: String,
 }
 
@@ -115,6 +116,8 @@ impl Conversations {
                      CREATE TABLE import_cursors (
                         conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
                         cursor TEXT NOT NULL, PRIMARY KEY(conversation, cursor));
+                     CREATE TABLE provider_settings (singleton INTEGER PRIMARY KEY CHECK(singleton=1), revision INTEGER NOT NULL, body TEXT NOT NULL);
+                     CREATE TABLE provider_mutations (operation_id TEXT PRIMARY KEY, request TEXT NOT NULL, response TEXT NOT NULL);
                      CREATE TABLE commands (
                         conversation TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
                         input_id TEXT NOT NULL, payload TEXT NOT NULL, execution TEXT NOT NULL,
@@ -243,7 +246,7 @@ impl Conversations {
         Ok(target)
     }
 
-    pub(super) fn provider(&self, target: &SessionRef) -> Result<ProviderKind> {
+    pub(super) fn provider(&self, target: &SessionRef) -> Result<ProviderRef> {
         let value: String = self
             .lock()
             .query_row(
@@ -283,7 +286,7 @@ impl Conversations {
 
     pub(super) fn discover_page(
         &self,
-        provider: ProviderKind,
+        provider: &ProviderRef,
         page: &[super::agent::SessionSummary],
         scope: &str,
     ) -> Result<()> {
@@ -296,13 +299,13 @@ impl Conversations {
             let target = bind(
                 &tx,
                 &NativeIdentity {
-                    provider,
+                    provider: provider.clone(),
                     id: native.id.clone(),
                 },
                 scope,
             )?;
             let mut metadata = summary.thread.clone();
-            metadata.provider = Some(provider);
+            metadata.provider = Some(provider.clone());
             metadata.id = Some(target.clone());
             metadata.turns = None;
             if let Some((name, updated_at)) = manual_title(&tx, &target.id)? {
@@ -335,7 +338,7 @@ impl Conversations {
     /// catalog. A later refresh retries failures; this pass visits each once.
     pub(super) fn pending_imports(
         &self,
-        provider: ProviderKind,
+        provider: &ProviderRef,
         scope: &str,
         after: i64,
     ) -> Result<Vec<(i64, SessionRef)>> {
@@ -427,6 +430,13 @@ impl Conversations {
                 |row| row.get(0),
             )?;
             let previous: Thread = serde_json::from_str(&previous)?;
+            ensure!(
+                response.model.as_ref().is_none_or(|model| previous
+                    .provider
+                    .as_ref()
+                    .is_some_and(|provider| provider.instance_id == model.instance_id)),
+                "imported model belongs to another provider instance"
+            );
             metadata.provider = previous.provider;
             metadata.submissions.extend(previous.submissions);
             metadata.requests.extend(previous.requests);
@@ -900,12 +910,12 @@ impl Conversations {
                     [&target.id],
                     |row| row.get(0),
                 )?;
-                let provider: ProviderKind = serde_json::from_str(&provider)?;
+                let provider: ProviderRef = serde_json::from_str(&provider)?;
                 ensure!(
                     submission
                         .model
                         .as_ref()
-                        .is_none_or(|model| model.provider == provider),
+                        .is_none_or(|model| model.instance_id == provider.instance_id),
                     "queued model belongs to another provider"
                 );
                 ensure!(
@@ -1015,7 +1025,7 @@ fn bind(tx: &Transaction<'_>, native: &NativeIdentity, scope: &str) -> Result<Se
         None => {
             let id = uuid::Uuid::new_v4().to_string();
             let metadata = Thread {
-                provider: Some(native.provider),
+                provider: Some(native.provider.clone()),
                 id: Some(SessionRef { id: id.clone() }),
                 ..Default::default()
             };

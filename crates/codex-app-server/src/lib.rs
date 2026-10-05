@@ -7,11 +7,23 @@ use agent_transport::peer::{PeerError, PeerEvent, RpcMessage, RpcPeer, RpcRespon
 use serde::{Deserialize, Serialize};
 use tokio::{process::Child, sync::broadcast};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppServerConfig {
     pub program: PathBuf,
     pub codex_home: Option<PathBuf>,
     pub config_overrides: Vec<String>,
+    pub environment: Vec<(String, String)>,
+    pub launch_args: Vec<String>,
+}
+
+impl std::fmt::Debug for AppServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AppServerConfig")
+            .field("program", &self.program)
+            .field("codex_home", &self.codex_home)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for AppServerConfig {
@@ -20,6 +32,8 @@ impl Default for AppServerConfig {
             program: PathBuf::from(executable::DEFAULT_CODEX_PROGRAM),
             codex_home: None,
             config_overrides: Vec::new(),
+            environment: Vec::new(),
+            launch_args: Vec::new(),
         }
     }
 }
@@ -62,8 +76,21 @@ pub struct CodexAppServer {
 
 impl CodexAppServer {
     pub async fn spawn(config: AppServerConfig) -> Result<Self, Error> {
-        let executable = executable::resolve(&config.program)?;
+        let inherited_path = env::var_os("PATH");
+        let path = config.environment.iter().rev().find(|(name, _)| {
+            if cfg!(windows) {
+                name.eq_ignore_ascii_case("PATH")
+            } else {
+                name == "PATH"
+            }
+        });
+        let executable = executable::resolve(
+            &config.program,
+            path.map(|(_, value)| std::ffi::OsStr::new(value))
+                .or(inherited_path.as_deref()),
+        )?;
         let mut command = bex_process::command(&executable).map_err(Error::Spawn)?;
+        command.envs(config.environment.iter().map(|(name, value)| (name, value)));
         if let Some(home) = &config.codex_home {
             command.env("CODEX_HOME", home);
         }
@@ -72,6 +99,7 @@ impl CodexAppServer {
         }
         let mut child = command
             .arg("app-server")
+            .args(&config.launch_args)
             .arg("--listen")
             .arg("stdio://")
             .stdin(Stdio::piped())

@@ -23,7 +23,7 @@ struct ModelSettingsScreen: View {
     @State private var scope: ModelDefaultsScope?
     let close: () -> Void
     @State private var search = ""
-    @State private var providerOverride: ProviderKind?
+    @State private var providerOverride: String?
     @State private var loadingModels = false
 
     init(model: BexAppViewModel, scope: ModelDefaultsScope? = nil, close: @escaping () -> Void) {
@@ -40,15 +40,14 @@ struct ModelSettingsScreen: View {
         model.snapshot.modelDefaults(scope: scope ?? .global)
     }
 
-    private var provider: ProviderKind {
-        if defaults || model.isNewThread, let providerOverride {
-            return providerOverride
-        }
+    private var provider: String {
         if defaults {
-            return model.snapshot.defaultModel(scope: scope ?? .global)?.model.provider
-                ?? preferences.model?.provider ?? .codex
+            let preferred = providerOverride ?? model.snapshot.defaultModel(scope: scope ?? .global)?.model.instanceId
+                ?? preferences.model?.instanceId
+            return model.snapshot.providerSelection(key: .local(key: "model-defaults"), preferred: preferred) ?? ""
         }
-        return model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey)
+        return model.snapshot.providerSelection(key: model.coreDraftKey,
+                                                preferred: model.isNewThread ? providerOverride : nil) ?? ""
     }
 
     private var selectedModel: ModelRef? {
@@ -56,20 +55,24 @@ struct ModelSettingsScreen: View {
     }
 
     private var disabled: Bool {
-        defaults ? model.store == nil : !model.isConnected || model.sending
+        provider.isEmpty || (defaults ? model.store == nil : !model.isConnected || model.sending)
     }
 
     private var selectedAccount: Account? {
-        model.accounts.first { $0.provider == provider && model.snapshot.accountIsSelected(
-            provider: $0.provider,
+        model.accounts.first { $0.instanceId == provider && model.snapshot.accountIsSelected(
+            provider: $0.instanceId,
             id: $0.id
         ) }
     }
 
     var body: some View {
         HStack(alignment: .top, spacing: 16) {
-            ModelAgentRail(provider: provider, disabled: disabled || (!defaults && !model.isNewThread),
-                           select: selectProvider)
+            ModelAgentRail(
+                instances: model.snapshot.providerInstances(),
+                provider: provider,
+                disabled: disabled || (!defaults && !model.isNewThread),
+                select: selectProvider
+            )
             Divider().padding(.vertical, 8)
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -92,7 +95,7 @@ struct ModelSettingsScreen: View {
                     .accessibilityIdentifier("model.accounts.manage")
                     if let account = selectedAccount {
                         WeeklyUsageView(windows: model.snapshot.accountWeeklyUsage(
-                            provider: account.provider, id: account.id
+                            provider: account.instanceId, id: account.id
                         ), compact: true)
                             .accessibilityIdentifier("model.account.usage").padding(.horizontal, 12)
                             .padding(.bottom, 12)
@@ -148,8 +151,8 @@ struct ModelSettingsScreen: View {
     private var quickControls: some View {
         let controls = defaults ? model.snapshot.defaultModelControls(scope: scope ?? .global)
             : model.snapshot.modelQuickControls(threadId: model.coreDraftKey)
-        let controlsProvider = defaults ? model.snapshot.defaultModel(scope: scope ?? .global)?.model.provider
-            : selectedModel?.provider
+        let controlsProvider = defaults ? model.snapshot.defaultModel(scope: scope ?? .global)?.model.instanceId
+            : selectedModel?.instanceId
         if controlsProvider == provider, !controls.efforts.isEmpty || controls.toggleFastTo != nil {
             Divider()
             HStack(spacing: 16) {
@@ -223,15 +226,11 @@ struct ModelSettingsScreen: View {
         .padding(.horizontal, 12).frame(minHeight: 44)
         .overlay(alignment: .bottom) { Divider() }
         .padding(.bottom, 8)
-        let choices = model.snapshot.modelsMatching(provider: provider, query: search)
+        let choices = provider.isEmpty ? [] : model.snapshot.modelsMatching(provider: provider, query: search)
         ScrollView {
             LazyVStack(spacing: 0) {
                 if defaults {
-                    Button {
-                        if let scope {
-                            model.perform(.selectDefaultModel(scope: scope, model: nil))
-                        }
-                    } label: {
+                    Button { selectModel(nil) } label: {
                         ModelChoiceRow(label: "自動", selected: selectedModel == nil)
                     }
                     .accessibilityIdentifier("model.choice.automatic")
@@ -243,13 +242,7 @@ struct ModelSettingsScreen: View {
                         .foregroundStyle(.secondary).padding(.horizontal, 12)
                 }
                 ForEach(choices, id: \.model) { choice in
-                    Button {
-                        if let scope {
-                            model.perform(.selectDefaultModel(scope: scope, model: choice.model))
-                        } else {
-                            model.chooseModel(choice.model)
-                        }
-                    } label: {
+                    Button { selectModel(choice.model) } label: {
                         ModelChoiceRow(label: choice.displayName, selected: selectedModel == choice.model)
                     }
                     .accessibilityIdentifier("model.choice." + choice.id)
@@ -261,9 +254,17 @@ struct ModelSettingsScreen: View {
         }
         .frame(height: min(CGFloat(max(choices.count + (defaults ? 1 : 0), 1)) * 44, 264))
         .padding(.bottom, 8)
-        ForEach(model.snapshot.modelErrorMessages(provider: provider), id: \.self) { error in
+        ForEach(provider.isEmpty ? [] : model.snapshot.modelErrorMessages(provider: provider), id: \.self) { error in
             Text(accountErrorMessage(message: error)).font(.caption).foregroundStyle(.red)
                 .accessibilityIdentifier("model.error")
+        }
+    }
+
+    private func selectModel(_ choice: ModelRef?) {
+        if let scope {
+            model.perform(.selectDefaultModel(scope: scope, model: choice))
+        } else if let choice {
+            model.chooseModel(choice)
         }
     }
 
@@ -273,27 +274,27 @@ struct ModelSettingsScreen: View {
         search = ""
     }
 
-    private func selectProvider(_ provider: ProviderKind) {
+    private func selectProvider(_ provider: String) {
         providerOverride = provider
         search = ""
-        if !defaults, let choice = model.snapshot.modelForProvider(threadId: model.coreDraftKey, provider: provider) {
+        if !defaults, let choice = model.snapshot.modelForInstance(threadId: model.coreDraftKey, provider: provider) {
             model.chooseModel(choice)
         }
     }
 }
 
 private struct ModelAgentRail: View {
-    let provider: ProviderKind
+    let instances: [ProviderInstance]
+    let provider: String
     let disabled: Bool
-    let select: (ProviderKind) -> Void
+    let select: (String) -> Void
 
     var body: some View {
         VStack(spacing: 8) {
-            ForEach([ProviderKind.codex, .claude], id: \.self) { value in
+            ForEach(instances, id: \.reference.instanceId) { instance in
+                let value = instance.reference.instanceId
                 Button { select(value) } label: {
-                    Image(value == .codex ? "openai" : "claude")
-                        .resizable().scaledToFit().frame(width: 24, height: 24)
-                        .foregroundStyle(value == .claude ? Color(red: 0.85, green: 0.47, blue: 0.34) : .primary)
+                    ProviderIconView(driver: instance.reference.driver, size: 24)
                         .frame(width: 44, height: 44).contentShape(Rectangle())
                         .background(provider == value ? Color(white: 0.15) : .clear,
                                     in: RoundedRectangle(cornerRadius: 8))
@@ -304,8 +305,8 @@ private struct ModelAgentRail: View {
                         }
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(value == .codex ? "Codex" : "Claude Code")
-                .accessibilityIdentifier("model.provider." + (value == .codex ? "codex" : "claude"))
+                .accessibilityLabel(instance.displayName)
+                .accessibilityIdentifier("model.provider." + value)
                 .accessibilityValue(provider == value ? "選択中" : "")
                 .accessibilityAddTraits(provider == value ? .isSelected : [])
                 .disabled(disabled)

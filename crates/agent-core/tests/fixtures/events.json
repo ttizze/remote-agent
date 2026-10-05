@@ -2,7 +2,6 @@
   {
     "name": "summary retains live items and unknown metadata",
     "previous": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -29,7 +28,11 @@
           ],
           "future": "old"
         }
-      ]
+      ],
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     },
     "events": [
       {
@@ -51,7 +54,6 @@
                     "inline": {
                       "body": {
                         "custom": {
-                          "provider": "codex",
                           "kind": "futureTool",
                           "value": {
                             "id": "b",
@@ -59,7 +61,8 @@
                             "opaque": {
                               "retained": true
                             }
-                          }
+                          },
+                          "driver": "codex"
                         }
                       }
                     }
@@ -74,7 +77,6 @@
       }
     ],
     "expected": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -106,7 +108,6 @@
                 "inline": {
                   "body": {
                     "custom": {
-                      "provider": "codex",
                       "kind": "futureTool",
                       "value": {
                         "id": "b",
@@ -114,7 +115,8 @@
                         "opaque": {
                           "retained": true
                         }
-                      }
+                      },
+                      "driver": "codex"
                     }
                   }
                 }
@@ -124,13 +126,16 @@
           "future": "new"
         }
       ],
-      "status": "idle"
+      "status": "idle",
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     }
   },
   {
     "name": "full lifecycle upserts items while retaining live output",
     "previous": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -156,7 +161,11 @@
             }
           ]
         }
-      ]
+      ],
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     },
     "events": [
       {
@@ -178,7 +187,6 @@
                     "inline": {
                       "body": {
                         "custom": {
-                          "provider": "codex",
                           "kind": "futureTool",
                           "value": {
                             "id": "b",
@@ -186,7 +194,8 @@
                             "opaque": {
                               "retained": true
                             }
-                          }
+                          },
+                          "driver": "codex"
                         }
                       }
                     }
@@ -200,7 +209,6 @@
                     "inline": {
                       "body": {
                         "custom": {
-                          "provider": "codex",
                           "kind": "futureTool",
                           "value": {
                             "id": "b",
@@ -208,7 +216,8 @@
                             "opaque": {
                               "retained": true
                             }
-                          }
+                          },
+                          "driver": "codex"
                         }
                       }
                     }
@@ -222,7 +231,6 @@
       }
     ],
     "expected": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -254,7 +262,6 @@
                 "inline": {
                   "body": {
                     "custom": {
-                      "provider": "codex",
                       "kind": "futureTool",
                       "value": {
                         "id": "b",
@@ -262,7 +269,8 @@
                         "opaque": {
                           "retained": true
                         }
-                      }
+                      },
+                      "driver": "codex"
                     }
                   }
                 }
@@ -271,13 +279,16 @@
           ]
         }
       ],
-      "status": "idle"
+      "status": "idle",
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     }
   },
   {
     "name": "late start preserves completed timing",
     "previous": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -305,7 +316,11 @@
           "startedAt": 1,
           "durationMs": 5000
         }
-      ]
+      ],
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     },
     "events": [
       {
@@ -328,7 +343,6 @@
       }
     ],
     "expected": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -356,13 +370,16 @@
           "startedAt": 1,
           "durationMs": 5000
         }
-      ]
+      ],
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     }
   },
   {
     "name": "completion clears retrying error",
     "previous": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -399,7 +416,11 @@
             "retryAfterSeconds": null
           }
         }
-      ]
+      ],
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     },
     "events": [
       {
@@ -420,7 +441,6 @@
       }
     ],
     "expected": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -447,13 +467,16 @@
           ]
         }
       ],
-      "status": "idle"
+      "status": "idle",
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     }
   },
   {
     "name": "summary resolves deferred identities",
     "previous": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -470,7 +493,6 @@
                 "deferred": {
                   "summary": {
                     "custom": {
-                      "provider": "codex",
                       "kind": "futureTool",
                       "value": {
                         "id": "b",
@@ -478,7 +500,8 @@
                         "opaque": {
                           "retained": true
                         }
-                      }
+                      },
+                      "driver": "codex"
                     }
                   }
                 }
@@ -486,7 +509,11 @@
             }
           ]
         }
-      ]
+      ],
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     },
     "events": [
       {
@@ -508,7 +535,6 @@
                     "inline": {
                       "body": {
                         "custom": {
-                          "provider": "codex",
                           "kind": "futureTool",
                           "value": {
                             "id": "b",
@@ -516,7 +542,8 @@
                             "opaque": {
                               "retained": true
                             }
-                          }
+                          },
+                          "driver": "codex"
                         }
                       }
                     }
@@ -530,7 +557,6 @@
       }
     ],
     "expected": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -547,7 +573,6 @@
                 "inline": {
                   "body": {
                     "custom": {
-                      "provider": "codex",
                       "kind": "futureTool",
                       "value": {
                         "id": "b",
@@ -555,7 +580,8 @@
                         "opaque": {
                           "retained": true
                         }
-                      }
+                      },
+                      "driver": "codex"
                     }
                   }
                 }
@@ -564,13 +590,16 @@
           ]
         }
       ],
-      "status": "idle"
+      "status": "idle",
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     }
   },
   {
     "name": "delta after completion applies to loaded item",
     "previous": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -596,7 +625,11 @@
             }
           ]
         }
-      ]
+      ],
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     },
     "events": [
       {
@@ -631,7 +664,6 @@
       }
     ],
     "expected": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -658,13 +690,16 @@
           ]
         }
       ],
-      "status": "idle"
+      "status": "idle",
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     }
   },
   {
     "name": "repeated turn identity selects final occurrence",
     "previous": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -681,7 +716,6 @@
                 "inline": {
                   "body": {
                     "custom": {
-                      "provider": "codex",
                       "kind": "futureTool",
                       "value": {
                         "id": "b",
@@ -689,7 +723,8 @@
                         "opaque": {
                           "retained": true
                         }
-                      }
+                      },
+                      "driver": "codex"
                     }
                   }
                 }
@@ -718,7 +753,11 @@
             }
           ]
         }
-      ]
+      ],
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     },
     "events": [
       {
@@ -739,7 +778,6 @@
       }
     ],
     "expected": {
-      "provider": "codex",
       "id": {
         "id": "thread"
       },
@@ -756,7 +794,6 @@
                 "inline": {
                   "body": {
                     "custom": {
-                      "provider": "codex",
                       "kind": "futureTool",
                       "value": {
                         "id": "b",
@@ -764,7 +801,8 @@
                         "opaque": {
                           "retained": true
                         }
-                      }
+                      },
+                      "driver": "codex"
                     }
                   }
                 }
@@ -794,7 +832,11 @@
           ]
         }
       ],
-      "status": "idle"
+      "status": "idle",
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
+      }
     }
   }
 ]

@@ -123,10 +123,10 @@ mod tests {
             &mut snapshot,
             serde_json::from_value(json!({
                 "data": [
-                    {"provider":"codex","id":{"id":"named"},"name":"Name","preview":"Preview"},
-                    {"provider":"codex","id":{"id":"preview"},"name":"","preview":"First prompt"},
-                    {"provider":"claude","id":{"id":"empty"},"name":"","preview":""},
-                    {"provider":"claude","id":{"id":"missing"}}
+                    {"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"named"},"name":"Name","preview":"Preview"},
+                    {"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"preview"},"name":"","preview":"First prompt"},
+                    {"provider":{"instanceId":"claude","driver":"claudeAgent"},"id":{"id":"empty"},"name":"","preview":""},
+                    {"provider":{"instanceId":"claude","driver":"claudeAgent"},"id":{"id":"missing"}}
                 ],
                 "projects":[], "moreProjectIds":[], "hasMoreChats":false, "hasMoreProjects":false
             }))
@@ -172,10 +172,10 @@ mod tests {
             &mut snapshot,
             serde_json::from_value(json!({
                 "data": [
-                    {"provider":"codex","id":{"id":"assigned"}, "projectId":"known"},
-                    {"provider":"codex","id":{"id":"missing"}, "projectId":"absent"},
-                    {"provider":"codex","id":{"id":"chat"}, "projectId":null},
-                    {"provider":"codex","id":{"id":"unknown"}}
+                    {"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"assigned"}, "projectId":"known"},
+                    {"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"missing"}, "projectId":"absent"},
+                    {"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"chat"}, "projectId":null},
+                    {"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"unknown"}}
                 ],
                 "projects":[{"id":"known", "name":"Project", "roots":[]}],
                 "moreProjectIds":["known"], "hasMoreChats":true, "hasMoreProjects":true
@@ -211,14 +211,14 @@ mod tests {
         ListSessions::new(Default::default()).apply(
             &mut snapshot,
             page(
-                serde_json::json!([{"provider":"codex","id":{"id":"native"},"name":"Cached"}]),
+                serde_json::json!([{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"native"},"name":"Cached"}]),
                 serde_json::json!({}),
             ),
         );
         ListSessions::new(Default::default()).apply(
             &mut snapshot,
             page(
-                serde_json::json!([{"provider":"claude","id":{"id":"uuid"},"name":"Available"}]),
+                serde_json::json!([{"provider":{"instanceId":"claude","driver":"claudeAgent"},"id":{"id":"uuid"},"name":"Available"}]),
                 serde_json::json!({"codex":{"message":"offline"}}),
             ),
         );
@@ -252,7 +252,7 @@ mod tests {
                 .unread
                 .insert(agent_protocol::session::SessionRef { id: "task".into() });
         }
-        let mut thread = json!({"provider":"codex","id":{"id":"task"},"name":"Worktree task",
+        let mut thread = json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"task"},"name":"Worktree task",
             "status":if active {"running"} else {"idle"}});
         if let Some(status) = status {
             thread["worktreeStatus"] = json!(status);

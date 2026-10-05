@@ -51,27 +51,25 @@ impl Snapshot {
             .as_ref()
             .filter(|c| c.cwd == self.navigation.cwd);
         let filter = filter.to_lowercase();
-        let provider = self.model_provider_for_draft(self.composer_key().clone());
+        let provider = self.provider_selection(self.composer_key().clone(), None);
         let candidates: Vec<_> = catalog
             .into_iter()
             .flat_map(|c| &c.candidates)
             .filter(|c| {
-                c.invocation.provider == provider
+                Some(&c.invocation.instance_id) == provider.as_ref()
                     && c.invocation.kind == kind
                     && (c.invocation.name.to_lowercase().contains(&filter)
                         || c.description.to_lowercase().contains(&filter))
             })
             .cloned()
             .collect();
+        let errors =
+            catalog.and_then(|catalog| provider.as_ref().and_then(|id| catalog.errors.get(id)));
         let status = match catalog {
             None => Some("候補を読み込み中…".into()),
             Some(c) if c.loading && candidates.is_empty() => Some("候補を読み込み中…".into()),
-            Some(c)
-                if c.errors
-                    .get(&provider)
-                    .is_some_and(|errors| !errors.is_empty()) =>
-            {
-                Some(c.errors[&provider].join("\n"))
+            Some(_) if errors.is_some_and(|errors| !errors.is_empty()) => {
+                errors.map(|errors| errors.join("\n"))
             }
             Some(_) if candidates.is_empty() => Some("該当する候補がありません".into()),
             _ => None,
@@ -115,7 +113,9 @@ mod tests {
 
     fn skill() -> Invocation {
         Invocation {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             kind: InvocationKind::Skill,
             name: "review".into(),
             path: "/project/.agents/skills/review/SKILL.md".into(),
@@ -222,11 +222,13 @@ mod tests {
 
     #[test]
     fn catalog_candidates_and_failures_belong_to_the_selected_provider() {
-        use agent_protocol::session::ProviderKind;
         let codex = skill();
         let mut claude = codex.clone();
-        claude.provider = ProviderKind::Claude;
+        claude.instance_id = "claude"
+            .parse::<crate::session::ProviderInstanceId>()
+            .unwrap();
         let mut snapshot = Snapshot {
+            provider_instances: crate::test_support::instances(),
             composer_catalog: Some(std::sync::Arc::new(ComposerCatalog {
                 candidates: [codex.clone(), claude.clone()]
                     .map(|invocation| ComposerCandidate {
@@ -234,7 +236,13 @@ mod tests {
                         description: String::new(),
                     })
                     .into(),
-                errors: [(ProviderKind::Claude, vec!["Claude unavailable".into()])].into(),
+                errors: [(
+                    "claude"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap(),
+                    vec!["Claude unavailable".into()],
+                )]
+                .into(),
                 ..Default::default()
             })),
             ..Default::default()
@@ -249,7 +257,9 @@ mod tests {
                 .or_default(),
         )
         .model = Some(agent_protocol::models::ModelRef {
-            provider: ProviderKind::Claude,
+            instance_id: "claude"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             id: "model".into(),
         });
         let suggestions = snapshot.composer_suggestions("/".into(), 1).unwrap();
@@ -286,7 +296,9 @@ mod tests {
         assert!(effects.is_empty());
         let mut draft = snapshot.drafts[&key].as_ref().clone();
         draft.model = Some(agent_protocol::models::ModelRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             id: "selected-model".into(),
         });
         draft.effort = Some("high".into());
@@ -310,7 +322,9 @@ mod tests {
         assert_eq!(
             snapshot.drafts[&key].model.as_ref(),
             Some(&agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "selected-model".into()
             })
         );
@@ -373,7 +387,9 @@ mod tests {
                 .unwrap(),
         )
         .model = Some(agent_protocol::models::ModelRef {
-            provider: agent_protocol::session::ProviderKind::Claude,
+            instance_id: "claude"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             id: "claude".into(),
         });
         let (claude, _) = reduce(&claude, Event::Connected);
@@ -386,7 +402,8 @@ mod tests {
         fn refresh_keeps_matching_candidates_without_a_loading_message(filter in "[a-z]{0,12}") {
             use crate::state::operations::Operation;
             let mut snapshot = Snapshot {
-                composer_catalog: Some(std::sync::Arc::new(ComposerCatalog {
+                provider_instances: crate::test_support::instances(),
+            composer_catalog: Some(std::sync::Arc::new(ComposerCatalog {
                     candidates: vec![ComposerCandidate { invocation: skill(), description: "Review code".into() }],
                     ..Default::default()
                 })),
@@ -408,7 +425,9 @@ mod tests {
         let mut other = skill();
         other.path = "/other/review/SKILL.md".into();
         let plugin = Invocation {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             kind: InvocationKind::Plugin,
             name: "Example Plugin".into(),
             path: "plugin://example@marketplace".into(),

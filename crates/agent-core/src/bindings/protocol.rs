@@ -2,6 +2,7 @@
 
 use crate::{models::*, session::*};
 use agent_protocol::permissions::*;
+use agent_protocol::providers::*;
 use agent_protocol::queue::{QueueAction, QueueControl, SteerQueued};
 use agent_protocol::{browser::*, composer::*, diagnostics::*, operations::*, requests::*};
 use serde_json::Value;
@@ -84,7 +85,7 @@ struct ProjectRoot {
 }
 #[uniffi::remote(Record)]
 struct ModelRef {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
     pub id: String,
 }
 #[uniffi::remote(Record)]
@@ -156,10 +157,73 @@ struct WorktreeThread {
     pub name: String,
     pub active: bool,
 }
+#[uniffi::remote(Record)]
+struct ProviderRef {
+    pub instance_id: ProviderInstanceId,
+    pub driver: ProviderDriver,
+}
 #[uniffi::remote(Enum)]
-enum ProviderKind {
-    Codex,
-    Claude,
+enum ProviderAvailability {
+    Starting,
+    Ready,
+    Disabled,
+    Unavailable { reason: String },
+}
+#[uniffi::remote(Record)]
+struct ProviderInstance {
+    pub reference: ProviderRef,
+    pub display_name: String,
+    pub availability: ProviderAvailability,
+    pub capabilities: Capabilities,
+    pub requires_account: bool,
+}
+#[uniffi::remote(Record)]
+struct EnvironmentVariable {
+    pub name: String,
+    pub value: String,
+    pub sensitive: bool,
+    pub value_redacted: bool,
+}
+#[uniffi::remote(Record)]
+struct ProviderConfig {
+    pub driver: ProviderDriver,
+    pub display_name: Option<String>,
+    pub accent_color: Option<String>,
+    pub environment: Vec<EnvironmentVariable>,
+    pub enabled: bool,
+    pub config: Value,
+}
+#[uniffi::remote(Record)]
+struct ConfiguredProvider {
+    pub instance_id: ProviderInstanceId,
+    pub config: ProviderConfig,
+}
+#[uniffi::remote(Record)]
+struct ProviderSettings {
+    pub revision: u64,
+    pub instances: Vec<ConfiguredProvider>,
+}
+#[uniffi::remote(Enum)]
+enum ProviderMutation {
+    Create {
+        instance_id: ProviderInstanceId,
+        config: ProviderConfig,
+    },
+    Upsert {
+        instance_id: ProviderInstanceId,
+        config: ProviderConfig,
+    },
+    Remove {
+        instance_id: ProviderInstanceId,
+    },
+}
+#[uniffi::remote(Record)]
+struct ReadProviderSettings {}
+#[uniffi::remote(Record)]
+struct UpdateProviderInstance {
+    pub operation_id: uuid::Uuid,
+    pub revision: u64,
+    pub mutation: ProviderMutation,
 }
 #[uniffi::remote(Record)]
 struct SessionRef {
@@ -246,7 +310,7 @@ enum InvocationKind {
 }
 #[uniffi::remote(Record)]
 struct Invocation {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
     pub kind: InvocationKind,
     pub name: String,
     pub path: String,
@@ -333,7 +397,7 @@ enum ConnectionPhase {
 #[uniffi::remote(Record)]
 struct Account {
     pub id: String,
-    pub provider: crate::session::ProviderKind,
+    pub instance_id: crate::session::ProviderInstanceId,
     pub email: Option<String>,
     pub plan_type: Option<String>,
     pub usage: Option<AccountUsage>,
@@ -353,22 +417,22 @@ struct UsageWindow {
 #[uniffi::remote(Record)]
 struct Accounts {
     pub accounts: Vec<Account>,
-    pub selected: std::collections::HashMap<ProviderKind, String>,
+    pub selected: std::collections::HashMap<ProviderInstanceId, String>,
     pub error: Option<String>,
 }
 #[uniffi::remote(Record)]
 struct StartAccountLogin {
-    pub provider: crate::session::ProviderKind,
+    pub instance_id: crate::session::ProviderInstanceId,
 }
 #[uniffi::remote(Record)]
 struct SubmitAccountLogin {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
     pub id: String,
     pub code: String,
 }
 #[uniffi::remote(Record)]
 struct AccountLogin {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
     pub login_id: String,
     pub requires_code_submission: bool,
     pub user_code: String,
@@ -570,17 +634,17 @@ struct RemoveWorktree {
 }
 #[uniffi::remote(Record)]
 struct SelectAccount {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
     pub id: String,
 }
 #[uniffi::remote(Record)]
 struct LogoutAccount {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
     pub id: String,
 }
 #[uniffi::remote(Record)]
 struct CancelAccountLogin {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
     pub id: String,
 }
 #[uniffi::remote(Record)]
@@ -595,7 +659,7 @@ struct ForkSession {
 }
 #[uniffi::remote(Record)]
 struct CreateSession {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
     pub cwd: Option<String>,
     pub model: Option<crate::models::ModelRef>,
 }
@@ -634,11 +698,19 @@ enum PermissionMode {
 }
 #[uniffi::remote(Record)]
 struct ReadPermissionSettings {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
 }
 #[uniffi::remote(Record)]
 struct UpdatePermissionSettings {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
     pub mode: PermissionMode,
     pub version: String,
+}
+
+#[uniffi::remote(Record)]
+struct Capabilities {
+    active_steering: bool,
+    fork: bool,
+    rename: bool,
+    model_change: bool,
 }

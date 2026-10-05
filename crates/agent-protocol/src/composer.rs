@@ -10,7 +10,8 @@ pub enum InvocationKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Invocation {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
     pub kind: InvocationKind,
     pub name: String,
     pub path: String,
@@ -78,5 +79,5 @@ pub struct ComposerCatalog {
     pub cwd: String,
     pub loading: bool,
     pub candidates: Vec<ComposerCandidate>,
-    pub errors: std::collections::HashMap<crate::session::ProviderKind, Vec<String>>,
+    pub errors: std::collections::HashMap<crate::session::ProviderInstanceId, Vec<String>>,
 }

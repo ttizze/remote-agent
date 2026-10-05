@@ -1,6 +1,6 @@
 use super::*;
 use agent_core::presentation::permissions::PERMISSION_CHOICES;
-use agent_protocol::{permissions::PermissionMode, session::ProviderKind};
+use agent_protocol::permissions::PermissionMode;
 
 impl Desktop {
     pub(super) fn permission_menu(&self, cx: &Context<Self>) -> AnyElement {
@@ -28,10 +28,15 @@ impl Desktop {
             .on_open_change(move |open, _, cx| {
                 if *open {
                     let _ = opening.update(cx, |view, _| {
-                        let provider = view.snapshot.permission_control(view.draft_key()).provider;
-                        view.dispatch(Intent::ReadPermissionSettings(op::ReadPermissionSettings {
-                            provider,
-                        }));
+                        if let Some(instance_id) = view
+                            .snapshot
+                            .permission_control(view.draft_key())
+                            .instance_id
+                        {
+                            view.dispatch(Intent::ReadPermissionSettings(
+                                op::ReadPermissionSettings { instance_id },
+                            ));
+                        }
                     });
                 }
             })
@@ -45,19 +50,18 @@ impl Desktop {
 
     fn permission_menu_content(&self, cx: &Context<Self>) -> AnyElement {
         let control = self.snapshot.permission_control(self.draft_key());
-        let provider = control.provider;
+        let provider = control.instance_id;
         let mut body = v_flex().w(px(430.)).p_3().gap_1().child(
-            div()
-                .text_xs()
-                .text_color(rgb(0x999999))
-                .pb_2()
-                .child(match provider {
-                    ProviderKind::Codex => "Codex の承認方法",
-                    ProviderKind::Claude => "Claude の承認方法",
-                }),
+            div().text_xs().text_color(rgb(0x999999)).pb_2().child(
+                provider
+                    .as_ref()
+                    .map(|id| format!("{} の承認方法", self.snapshot.instance_name(id.clone())))
+                    .unwrap_or_else(|| "接続の承認方法".into()),
+            ),
         );
         for (index, (mode, label, description)) in PERMISSION_CHOICES.into_iter().enumerate() {
             let version = control.version.map(str::to_owned);
+            let provider = provider.clone();
             body = body.child(
                 Button::new(format!("permission-choice-{index}"))
                     .debug_selector(move || format!("permission-choice-{index}"))
@@ -90,10 +94,10 @@ impl Desktop {
                     )
                     .disabled(control.loading || version.is_none() || !self.snapshot.connected)
                     .on_click(cx.listener(move |view, _, _, _| {
-                        if let Some(version) = &version {
+                        if let (Some(version), Some(provider)) = (&version, &provider) {
                             view.dispatch(Intent::UpdatePermissionSettings(
                                 op::UpdatePermissionSettings {
-                                    provider,
+                                    instance_id: provider.clone(),
                                     mode,
                                     version: version.clone(),
                                 },
@@ -113,9 +117,13 @@ impl Desktop {
                     "再読み込み",
                     cx,
                     move |view, _, _| {
-                        view.dispatch(Intent::ReadPermissionSettings(op::ReadPermissionSettings {
-                            provider,
-                        }));
+                        if let Some(provider) = &provider {
+                            view.dispatch(Intent::ReadPermissionSettings(
+                                op::ReadPermissionSettings {
+                                    instance_id: provider.clone(),
+                                },
+                            ));
+                        }
                     },
                 ));
         }

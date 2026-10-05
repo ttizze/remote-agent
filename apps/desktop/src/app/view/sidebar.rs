@@ -456,8 +456,8 @@ mod tests {
         let snapshot = Snapshot {
             threads: Some(Arc::new(
                 serde_json::from_value(serde_json::json!({
-                    "data":[{"provider":"codex","id":{"id":"first"},"name":"First task","worktreeStatus":"unmerged"},
-                            {"provider":"codex","id":{"id":"second"},"name":"Second task","worktreeStatus":"merged"}],
+                    "data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"first"},"name":"First task","worktreeStatus":"unmerged"},
+                            {"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"second"},"name":"Second task","worktreeStatus":"merged"}],
                     "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
                 }))
                 .unwrap(),

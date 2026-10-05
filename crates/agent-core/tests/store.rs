@@ -1,5 +1,5 @@
 use agent_core::state::DraftKey;
-use agent_protocol::session::{ProviderKind, SessionRef};
+use agent_protocol::session::SessionRef;
 #[path = "support/host.rs"]
 mod host_fixture;
 async fn scoped_incoming(
@@ -311,7 +311,7 @@ async fn failed_list_refresh_releases_the_next_request_and_close_releases_its_wa
     writer
         .reply(
             &model_request,
-            json!({"result":{"data":[],"nextCursor":null}}),
+            json!({"result":{"instances":[],"data":[],"nextCursor":null}}),
         )
         .await
         .unwrap();
@@ -507,7 +507,7 @@ async fn wait_for(store: &Store, predicate: impl Fn(&Snapshot) -> bool) {
     .unwrap();
 }
 fn thread(text: &str) -> Thread {
-    serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"cwd":"/fixture","status":"idle","turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}}]}]})).unwrap()
+    serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"cwd":"/fixture","status":"idle","turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}}]}]})).unwrap()
 }
 fn snapshot() -> Snapshot {
     Snapshot {
@@ -542,13 +542,13 @@ async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
     for attachment_first in [false, true] {
         let previous = Snapshot {
             models: Arc::new(serde_json::from_value(json!([{
-                "id":"model", "model":{"provider": "codex", "id": "model"}, "displayName":"Model",
+                "id":"model", "model":{"instanceId": "codex", "id": "model"}, "displayName":"Model",
                 "defaultReasoningEffort":"medium", "defaultServiceTier":"priority",
                 "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"max"}],
                 "serviceTiers":[{"id":"priority"}]
             }])).unwrap()),
             drafts: Arc::new(BTreeMap::from([(SessionRef { id: "thread".into()}.into(), Arc::new(Draft {
-                text: "old".into(), model: Some(agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Codex, id: "model".into() }), effort: Some("medium".into()),
+                text: "old".into(), model: Some(agent_protocol::models::ModelRef { instance_id: "codex".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "model".into() }), effort: Some("medium".into()),
                 service_tier: Some("priority".into()), ..Default::default()
             }))])),
             ..Default::default()
@@ -608,7 +608,9 @@ async fn draft_field_edits_preserve_interleaved_attachments_and_settings() {
         assert_eq!(
             draft.model.as_ref(),
             Some(&agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "model".into()
             })
         );
@@ -971,7 +973,7 @@ async fn new_conversation_moves_draft_to_pending_before_creation_reply() {
         Some("first message")
     );
     assert_eq!(rendered.queued[0].data.title.as_deref(), Some("送信中…"));
-    writer.reply(&request, json!({ "result": {"thread": {"provider":"codex","id":{"id":"created"}, "cwd":"/fixture", "status":"idle", "turns":[]}}})).await.unwrap();
+    writer.reply(&request, json!({ "result": {"thread": {"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"created"}, "cwd":"/fixture", "status":"idle", "turns":[]}}})).await.unwrap();
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "host/session/submit");
     assert_eq!(
@@ -1014,7 +1016,7 @@ async fn successful_submission_does_not_erase_a_newer_draft() {
                 SessionRef { id: "thread".into() },
                 Arc::new(
                     serde_json::from_value(
-                        json!({"provider":"codex","id":{"id":"thread"},"cwd":"/fixture","status":"idle","turns":[]}),
+                        json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"cwd":"/fixture","status":"idle","turns":[]}),
                     )
                     .unwrap(),
                 ),
@@ -1135,7 +1137,7 @@ async fn new_submission_keeps_edits_and_navigation_while_creation_is_pending() {
         if navigate_away {
             new_chat(&store, &mut reader, &mut writer, "/other").await;
         }
-        writer.reply(&create, json!({"result":{"thread":{"provider":"codex","id":{"id":"created"},"cwd":"/fixture","turns":[],"status":"idle"}}})).await.unwrap();
+        writer.reply(&create, json!({"result":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"created"},"cwd":"/fixture","turns":[],"status":"idle"}}})).await.unwrap();
         let submit = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(submit["method"], "host/session/submit");
         assert_eq!(submit["params"]["threadId"]["id"], "created");
@@ -1220,7 +1222,7 @@ async fn failed_new_submission_keeps_retry_at_the_last_successful_step() {
         let failed = if fail_creation {
             create
         } else {
-            writer.reply(&create, json!({"result":{"thread":{"provider":"codex","id":{"id":"created"},"cwd":"/fixture","turns":[],"status":"idle"}}})).await.unwrap();
+            writer.reply(&create, json!({"result":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"created"},"cwd":"/fixture","turns":[],"status":"idle"}}})).await.unwrap();
             let submit = read_after_reviews(&mut reader, &mut writer).await;
             assert_eq!(submit["method"], "host/session/submit");
             submit
@@ -1446,7 +1448,7 @@ async fn new_chat_dictation_preserves_text_and_images_for_draft_and_direct_send(
         let start = read(&mut reader).await;
         assert_eq!(start["method"], "host/session/create");
         assert!(start["params"]["cwd"].is_null());
-        writer.reply(&start, json!({"result":{"thread":{"provider":"codex","id":{"id":"created"},"cwd":"/fixture","projectId":null,"status":"idle","turns":[]}}})).await.unwrap();
+        writer.reply(&start, json!({"result":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"created"},"cwd":"/fixture","projectId":null,"status":"idle","turns":[]}}})).await.unwrap();
         let submit = read_after_reviews(&mut reader, &mut writer).await;
         assert_eq!(submit["method"], "host/session/submit");
         let input =
@@ -1745,7 +1747,7 @@ async fn opening_selects_the_task_before_history_and_list_refresh_finish() {
         };
         initial.threads = Some(Arc::new(
             serde_json::from_value(json!({
-                "data":[{"provider":"codex","id":{"id":"thread"},"cwd":"/listed","name":"Selected task"}],
+                "data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"cwd":"/listed","name":"Selected task"}],
                 "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
             }))
             .unwrap(),
@@ -1944,12 +1946,12 @@ async fn a_stale_catalogue_does_not_queue_a_completed_thread() {
         SessionRef { id: "thread".into() },
         Arc::new(
             serde_json::from_value(
-                json!({"provider":"codex","id":{"id":"thread"},"cwd":"/fixture","status":"idle","turns":[]}),
+                json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"cwd":"/fixture","status":"idle","turns":[]}),
             )
             .unwrap(),
         ),
     );
-    initial.threads = Some(Arc::new(serde_json::from_value(json!({"data":[{"provider":"codex","id":{"id":"thread"},"cwd":"/fixture","status":"running"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).unwrap()));
+    initial.threads = Some(Arc::new(serde_json::from_value(json!({"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"cwd":"/fixture","status":"running"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})).unwrap()));
     let (store, mut reader, mut writer) = setup(initial).await;
     writer.notify(json!({"method":"fixture/session/change","session":{"id":"thread"},"change":{"turn":{"turn":{"id":"completed","status":"completed"},"completed":true}}})).await.unwrap();
     wait_for(&store, |snapshot| {
@@ -2017,7 +2019,7 @@ async fn a_late_list_reply_cannot_replace_a_new_search() {
             ..Default::default()
         })));
         let requested = store.snapshot();
-        let result = |id| json!({"data":[{"provider":"codex","id":{"id":id}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false});
+        let result = |id| json!({"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":id}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false});
         writer
         .reply(&old_request, if failure {
             json!({"error":{"code":"provider_failed","message":"old search failed","delivery":"notSent"}})
@@ -2056,7 +2058,7 @@ async fn gallery_history_reads_do_not_block_conversation_notifications() {
     let server = tokio::spawn(async move {
         let request = read(&mut reader).await;
         assert_eq!(request["method"], "host/session/open");
-        writer.reply(&request, json!({"result":{"thread":{"provider":"codex","id":{"id":"gallery"},"turns":[{"id":"image-turn","items":[{"id":"image","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"imageGeneration":{"savedPath":"/image.png","data":null,"revisedPrompt":null}}}}}],"status":"unknown"}]}}})).await.unwrap();
+        writer.reply(&request, json!({"result":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"gallery"},"turns":[{"id":"image-turn","items":[{"id":"image","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"imageGeneration":{"savedPath":"/image.png","data":null,"revisedPrompt":null}}}}}],"status":"unknown"}]}}})).await.unwrap();
         writer.notify(json!({"method":"fixture/session/change","session":{"id":"thread"},"change":{"text":{"turnId":"turn","itemId":"item","delta":" continued","field":"assistantText"}}})).await.unwrap();
         (reader, writer)
     });
@@ -2210,7 +2212,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
         {
             let result = match request["method"].as_str().unwrap() {
                 "host/session/create" => {
-                    json!({"thread":{"provider":"codex","id":{"id":"created"},"name":"created chat","cwd":"/fixture","turns":[],"status":"idle"}})
+                    json!({"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"created"},"name":"created chat","cwd":"/fixture","turns":[],"status":"idle"}})
                 }
                 "host/session/open" => writer.current(
                     &serde_json::from_value(request["params"]["session"].clone()).unwrap(),
@@ -2218,7 +2220,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
                 "host/session/submit" => json!({"turnId":"turn"}),
                 "host/session/list" => {
                     let data = if request["params"]["searchTerm"] == "created" {
-                        json!([{"provider":"codex","id":{"id":"created"},"name":"created chat"}])
+                        json!([{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"created"},"name":"created chat"}])
                     } else {
                         json!([])
                     };
@@ -2268,7 +2270,7 @@ async fn creating_a_chat_refreshes_the_loaded_thread_list_with_its_query() {
 
 #[tokio::test]
 async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_window() {
-    let initial: Thread = serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"historyLimit":5,"historyHasMore":true,"turns":[{"id":"latest","items":[],"status":"unknown"}]})).unwrap();
+    let initial: Thread = serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"historyLimit":5,"historyHasMore":true,"turns":[{"id":"latest","items":[],"status":"unknown"}]})).unwrap();
     let (store, mut reader, writer) = setup(Snapshot {
         conversations: Arc::new(BTreeMap::from([(
             SessionRef {
@@ -2291,7 +2293,7 @@ async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_wind
             let response = if failed {
                 json!({"error":{"code":"request_failed","message":"temporary history failure"}})
             } else {
-                json!({"result":{"thread":{"provider":"codex","id":{"id":"thread"},"historyLimit":10,"historyHasMore":false,"turns":[{"id":"old","items":[],"status":"unknown"},{"id":"missing","items":[{"id":"question","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[{"text":{"text":"comparison"}}]}}}}}],"status":"unknown"},{"id":"latest","items":[],"status":"unknown"}]}}})
+                json!({"result":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"historyLimit":10,"historyHasMore":false,"turns":[{"id":"old","items":[],"status":"unknown"},{"id":"missing","items":[{"id":"question","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[{"text":{"text":"comparison"}}]}}}}}],"status":"unknown"},{"id":"latest","items":[],"status":"unknown"}]}}})
             };
             writer.reply(&request, response).await.unwrap();
         }
@@ -2342,7 +2344,7 @@ async fn expanded_history_failure_preserves_cache_and_retry_adopts_complete_wind
 
 #[tokio::test]
 async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
-    let initial: Thread = serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"historyLimit":5,"historyHasMore":true,"turns":[{"id":"new","status":"completed","items":[{"id":"new-item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"unknown"}}}}}]}]})).unwrap();
+    let initial: Thread = serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"historyLimit":5,"historyHasMore":true,"turns":[{"id":"new","status":"completed","items":[{"id":"new-item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"unknown"}}}}}]}]})).unwrap();
     let (store, mut reader, writer) = setup(Snapshot {
         conversations: Arc::new(BTreeMap::from([(
             SessionRef {
@@ -2363,7 +2365,7 @@ async fn expanded_history_replaces_the_window_preserving_native_item_ids() {
             } else {
                 json!([{"id":"last-old","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"tail","phase":"unknown"}}}}}])
             };
-            writer.reply(&request, json!({"result":{"thread":{"provider":"codex","id":{"id":"thread"},"historyLimit":limit,"historyHasMore":!complete,"turns":[{"id":"old","items":items,"status":"unknown"},{"id":"new","status":"completed","items":[{"id":"new-item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"unknown"}}}}}]}]}}})).await.unwrap();
+            writer.reply(&request, json!({"result":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"historyLimit":limit,"historyHasMore":!complete,"turns":[{"id":"old","items":items,"status":"unknown"},{"id":"new","status":"completed","items":[{"id":"new-item","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"unknown"}}}}}]}]}}})).await.unwrap();
         }
         (reader, writer)
     });
@@ -2424,7 +2426,7 @@ async fn fork_opens_the_returned_thread_and_keeps_later_deltas() {
         if navigate {
             new_chat(&store, &mut reader, &mut writer, "/new").await;
         }
-        writer.reply(&request, json!({"result":{"thread":{"provider":"codex","id":{"id":"forked"},"cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"copied","phase":"unknown"}}}}}],"status":"unknown"}]}}})).await.unwrap();
+        writer.reply(&request, json!({"result":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"forked"},"cwd":"/fixture","turns":[{"id":"copy","items":[{"id":"reply","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"copied","phase":"unknown"}}}}}],"status":"unknown"}]}}})).await.unwrap();
         if !navigate {
             loop {
                 let opening = read(&mut reader).await;
@@ -2493,7 +2495,7 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
     let request = read(&mut reader).await;
-    writer.reply(&request, json!({"result":{"accounts":[{"provider":"codex","id":"a"},{"provider":"claude","id":"claude:c"}],"selected":{"codex":"a","claude":"claude:c"},"error":null}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"accounts":[{"instanceId":"codex","id":"a"},{"instanceId":"claude","id":"claude:c"}],"selected":{"codex":"a","claude":"claude:c"},"error":null}})).await.unwrap();
     listing.await.unwrap();
     assert_eq!(
         store
@@ -2503,7 +2505,11 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
             .as_ref()
             .unwrap()
             .selected
-            .get(&agent_protocol::session::ProviderKind::Codex)
+            .get(
+                &"codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap()
+            )
             .map(String::as_str),
         Some("a")
     );
@@ -2513,12 +2519,14 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
     assert_eq!(usage_a["method"], "host/account/usage");
     assert_eq!(usage_c["method"], "host/account/usage");
     let selecting = store.dispatch(Intent::SelectAccount(op::SelectAccount {
-        provider: agent_protocol::session::ProviderKind::Codex,
+        instance_id: "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
         id: "b".into(),
     }));
     let request = read(&mut reader).await;
     assert_eq!(request["params"]["accountId"], "b");
-    writer.reply(&request, json!({"result":{"provider":"codex","selectedId":"b","persistenceError":"store unavailable"}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"instanceId":"codex","selectedId":"b","persistenceError":"store unavailable"}})).await.unwrap();
     selecting.await.unwrap();
     for request in [usage_a, usage_c] {
         writer
@@ -2538,7 +2546,11 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
             .as_ref()
             .unwrap()
             .selected
-            .get(&agent_protocol::session::ProviderKind::Codex)
+            .get(
+                &"codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap()
+            )
             .map(String::as_str),
         Some("b")
     );
@@ -2551,7 +2563,11 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
             .as_ref()
             .unwrap()
             .selected
-            .get(&agent_protocol::session::ProviderKind::Claude)
+            .get(
+                &"claude"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap()
+            )
             .map(String::as_str),
         Some("claude:c")
     );
@@ -2561,9 +2577,9 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
             "host/account/list" => {
-                json!({"accounts":[{"provider":"codex","id":"a"},{"provider":"codex","id":"b"},{"provider":"claude","id":"claude:c"}],"selected":{"codex":"b","claude":"claude:c"},"error":null})
+                json!({"accounts":[{"instanceId":"codex","id":"a"},{"instanceId":"codex","id":"b"},{"instanceId":"claude","id":"claude:c"}],"selected":{"codex":"b","claude":"claude:c"},"error":null})
             }
-            "host/model/list" => json!({"data":[]}),
+            "host/model/list" => json!({"instances":[],"data":[]}),
             method => panic!("unexpected account refresh: {method}"),
         };
         writer
@@ -2576,7 +2592,11 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
             accounts.accounts.iter().any(|account| account.id == "b")
                 && accounts
                     .selected
-                    .get(&agent_protocol::session::ProviderKind::Codex)
+                    .get(
+                        &"codex"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
+                    )
                     .map(String::as_str)
                     == Some("b")
         })
@@ -2589,7 +2609,9 @@ async fn account_selection_publishes_the_selected_account_and_persistence_warnin
 async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_late_status() {
     let (store, mut reader, writer) = setup(Snapshot::default()).await;
     let starting = store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin {
-        provider: ProviderKind::Codex,
+        instance_id: "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
     }));
     let request = read(&mut reader).await;
     let listing = store.dispatch(Intent::ListAccounts(op::ListAccounts {}));
@@ -2602,7 +2624,7 @@ async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_lat
         .await
         .unwrap();
     listing.await.unwrap();
-    writer.reply(&request, json!({"result":{"provider":"codex","loginId":"login","userCode":"fixture-only","requiresCodeSubmission":false,"verificationUrl":"https://example.invalid"}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"instanceId":"codex","loginId":"login","userCode":"fixture-only","requiresCodeSubmission":false,"verificationUrl":"https://example.invalid"}})).await.unwrap();
     starting.await.unwrap();
     assert_eq!(
         store.snapshot().account.login.as_ref().unwrap().login_id,
@@ -2610,13 +2632,17 @@ async fn concurrent_account_listing_preserves_login_and_cancellation_ignores_lat
     );
 
     let polling = store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin {
-        provider: agent_protocol::session::ProviderKind::Codex,
+        instance_id: "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
         id: "login".into(),
         thread_id: None,
     }));
     let poll = read(&mut reader).await;
     let cancelling = store.dispatch(Intent::CancelAccountLogin(op::CancelAccountLogin {
-        provider: agent_protocol::session::ProviderKind::Codex,
+        instance_id: "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
         id: "login".into(),
     }));
     let cancel = read(&mut reader).await;
@@ -2715,7 +2741,7 @@ async fn initial_titles_overlap_scope_verification_without_publishing_unverified
             assert_eq!(initial["params"]["chatLimit"], 5);
             assert!(!store.snapshot().connected);
             assert!(store.snapshot().threads.is_none());
-            let titles = |id| json!({"result":{"data":[{"provider":"codex","id":{"id":id},"name":"title"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}});
+            let titles = |id| json!({"result":{"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":id},"name":"title"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}});
             if matches!(mode, "changed-query" | "rejected") {
                 writer.reply(&initial, titles("old")).await.unwrap();
             }
@@ -2745,7 +2771,7 @@ async fn initial_titles_overlap_scope_verification_without_publishing_unverified
                 }
                 let models = read(&mut reader).await;
                 assert_eq!(models["method"], "host/model/list");
-                writer.reply(&models, json!({"result":{"data":[],"nextCursor":null}})).await.unwrap();
+                writer.reply(&models, json!({"result":{"instances":[],"data":[],"nextCursor":null}})).await.unwrap();
                 let accounts = read(&mut reader).await;
                 assert_eq!(accounts["method"], "host/account/list");
                 writer.reply(&accounts, json!({"result":{"accounts":[],"selected":{}}})).await.unwrap();
@@ -2886,9 +2912,9 @@ async fn reconnect_cancels_obsolete_pairing_and_retains_local_state() {
                 for _ in 0..3 {
                     let request = reader.read_request().await.unwrap().unwrap();
                     let result = match request["method"].as_str().unwrap() {
-                        "host/session/list" => json!({"data":[{"provider":"codex","id":{"id":"replacement"},"name":"fresh"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                        "host/session/list" => json!({"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"replacement"},"name":"fresh"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
-                        "host/model/list" => json!({"data":[],"nextCursor":null}),
+                        "host/model/list" => json!({"instances":[],"data":[],"nextCursor":null}),
                         other => panic!("unexpected bootstrap: {other}"),
                     };
                     writer.reply(&request, json!({"result":result})).await.unwrap();
@@ -3264,7 +3290,10 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
         .await
         .unwrap();
     writer
-        .reply(&pending["host/model/list"], json!({"result":{"data":[]}}))
+        .reply(
+            &pending["host/model/list"],
+            json!({"result":{"instances":[],"data":[]}}),
+        )
         .await
         .unwrap();
     writer
@@ -3277,8 +3306,8 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
     for _ in 0..2 {
         let request = read(&mut reader).await;
         let result = match request["method"].as_str().unwrap() {
-            "host/model/list" => json!({"data":[{
-                "id":"fresh","model":{"provider": "codex", "id": "fresh"},"displayName":"Fresh model",
+            "host/model/list" => json!({"instances":[],"data":[{
+                "id":"fresh","model":{"instanceId": "codex", "id": "fresh"},"displayName":"Fresh model",
                 "isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]
             }]}),
             "host/account/list" => json!({"accounts":[],"selected":{}}),
@@ -3292,7 +3321,9 @@ async fn opening_a_draft_during_initial_catalog_reads_retries_and_selects_a_mode
     wait_for(&store, |state| {
         state.drafts[&state.navigation.draft_key].model.as_ref()
             == Some(&agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "fresh".into(),
             })
             && state.account.accounts.is_some()
@@ -3340,11 +3371,11 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
         ("host/account/list", json!({"accounts":[],"selected":{}})),
         (
             "host/model/list",
-            json!({"data":[{"id":"fresh","model":{"provider": "codex", "id": "fresh"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}),
+            json!({"instances":[],"data":[{"id":"fresh","model":{"instanceId": "codex", "id": "fresh"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}),
         ),
         (
             "host/session/list",
-            json!({"data":[{"provider":"codex","id":{"id":"listed"}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+            json!({"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"listed"}}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
         ),
     ] {
         writer
@@ -3368,7 +3399,9 @@ async fn connection_loads_workspace_and_lists_in_one_epoch() {
     assert_eq!(
         snapshot.models[0].model,
         agent_protocol::models::ModelRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             id: "fresh".into()
         }
     );
@@ -3410,10 +3443,10 @@ async fn item_transfer_releases_wire_order_and_preserves_newer_items() {
                     let result = match request["method"].as_str().unwrap() {
                         "host/session/list" => json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
-                        "host/model/list" => json!({"data":[],"nextCursor":null}),
+                        "host/model/list" => json!({"instances":[],"data":[],"nextCursor":null}),
                         "host/session/open" => {
                             let a = request["params"]["session"]["id"] == "A";
-                            json!({"session":request["params"]["session"],"subscriptionId":if a {subscription_a} else {subscription_b},"response":{"thread":{"provider":"codex","id":{"id":if a {"A"} else {"B"}},"turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":if a {json!({"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null}}}})} else {json!({"inline":{"body":{"assistantText":{"text":"B prefix","phase":"unknown"}}}})}}]}]}}})
+                            json!({"session":request["params"]["session"],"subscriptionId":if a {subscription_a} else {subscription_b},"response":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":if a {"A"} else {"B"}},"turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":if a {json!({"deferred":{"summary":{"commandExecution":{"command":"pwd","cwd":null,"output":"","exitCode":null}}}})} else {json!({"inline":{"body":{"assistantText":{"text":"B prefix","phase":"unknown"}}}})}}]}]}}})
                         }
                         _ => { send.send(request).await.unwrap(); continue; }
                     };
@@ -3631,14 +3664,14 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
             };
             let (store, mut reader, writer) = setup(Snapshot::default()).await;
             let polling = store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin {
-                provider: serde_json::from_value(json!(provider)).unwrap(),
+                instance_id: serde_json::from_value(json!(provider)).unwrap(),
                 id: "login".into(),
                 thread_id: thread_id.map(DraftKey::from),
             }));
             let request = read(&mut reader).await;
             assert_eq!(
                 request["params"],
-                json!({"provider":provider,"loginId":"login"})
+                json!({"instanceId":provider,"loginId":"login"})
             );
             writer
                 .reply(
@@ -3652,12 +3685,12 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
             assert_eq!(select["method"], "host/account/select");
             assert_eq!(
                 select["params"],
-                json!({"provider":provider,"accountId":id})
+                json!({"instanceId":provider,"accountId":id})
             );
             writer
                 .reply(
                     &select,
-                    json!({"result":{"provider":provider,"selectedId":id}}),
+                    json!({"result":{"instanceId":provider,"selectedId":id}}),
                 )
                 .await
                 .unwrap();
@@ -3665,10 +3698,10 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
                 let request = read(&mut reader).await;
                 let result = match request["method"].as_str().unwrap() {
                     "host/account/list" => {
-                        json!({"accounts":[{"provider":provider,"id":id}],"selected":{(provider):id},"error":null})
+                        json!({"accounts":[{"instanceId":provider,"id":id}],"selected":{(provider):id},"error":null})
                     }
                     "host/model/list" => {
-                        json!({"data":[{"id":model_id,"model":{"provider":provider,"id":model_id},"displayName":model_id,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}]})
+                        json!({"instances":[],"data":[{"id":model_id,"model":{"instanceId":provider,"id":model_id},"displayName":model_id,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}]})
                     }
                     method => panic!("unexpected login effect: {method}"),
                 };
@@ -3684,11 +3717,15 @@ async fn completed_login_selects_its_account_before_refreshing_without_client_lo
                         .get(&DraftKey::from(key))
                         .is_some_and(|draft| {
                             draft.model.as_ref().is_some_and(|model| {
-                                model.provider
+                                model.instance_id
                                     == if provider == "claude" {
-                                        ProviderKind::Claude
+                                        "claude"
+                                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                                            .unwrap()
                                     } else {
-                                        ProviderKind::Codex
+                                        "codex"
+                                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                                            .unwrap()
                                     }
                                     && model.id == model_id
                             })
@@ -3819,7 +3856,7 @@ async fn composer_catalog_prefetch_and_refresh_keep_candidates_available() {
         "opening the picker must share the pending prefetch"
     );
     let catalog = json!({"cwd":"/project","loading":false,"candidates":[{
-        "invocation":{"provider":"codex","kind":"Skill","name":"review","path":"/project/review/SKILL.md"},
+        "invocation":{"instanceId":"codex","kind":"Skill","name":"review","path":"/project/review/SKILL.md"},
         "description":"Review changes"
     }],"errors":{}});
     writer
@@ -3954,7 +3991,9 @@ async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts
     assert!(store.snapshot().composer_catalog.as_ref().unwrap().loading);
 
     let selection = store.dispatch(Intent::SelectAccount(op::SelectAccount {
-        provider: agent_protocol::session::ProviderKind::Codex,
+        instance_id: "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
         id: "new".into(),
     }));
     let request = read(&mut reader).await;
@@ -3962,7 +4001,7 @@ async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts
     writer
         .reply(
             &request,
-            json!({"result":{"provider":"codex","selectedId":"new","persistenceError":null}}),
+            json!({"result":{"instanceId":"codex","selectedId":"new","persistenceError":null}}),
         )
         .await
         .unwrap();
@@ -3976,7 +4015,7 @@ async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts
                 .await
                 .unwrap(),
             "host/model/list" => writer
-                .reply(&request, json!({"result":{"data":[]}}))
+                .reply(&request, json!({"result":{"instances":[],"data":[]}}))
                 .await
                 .unwrap(),
             "host/composer/catalog" => refreshed = Some(request),
@@ -3984,10 +4023,10 @@ async fn composer_catalog_ignores_replies_from_previous_directories_and_accounts
         }
     }
     writer.reply(&pending[1], json!({"result":{"cwd":"/second","loading":false,"candidates":[{
-        "invocation":{"provider":"codex","kind":"Skill","name":"old-account","path":"/old/SKILL.md"},"description":"Old"
+        "invocation":{"instanceId":"codex","kind":"Skill","name":"old-account","path":"/old/SKILL.md"},"description":"Old"
     }],"errors":{}}})).await.unwrap();
     let catalog = json!({"cwd":"/second","loading":false,"candidates":[{
-        "invocation":{"provider":"codex","kind":"Skill","name":"new-account","path":"/new/SKILL.md"},"description":"New"
+        "invocation":{"instanceId":"codex","kind":"Skill","name":"new-account","path":"/new/SKILL.md"},"description":"New"
     }],"errors":{}});
     writer
         .reply(&refreshed.unwrap(), json!({"result":catalog}))
@@ -4022,7 +4061,9 @@ async fn selected_invocations_reach_submission_and_return_after_failure() {
     new_chat(&store, &mut reader, &mut writer, "/fixture").await;
     let key = store.snapshot().navigation.draft_key.clone();
     let invocation = Invocation {
-        provider: agent_protocol::session::ProviderKind::Codex,
+        instance_id: "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
         kind: InvocationKind::Skill,
         name: "review".into(),
         path: "/fixture/review/SKILL.md".into(),
@@ -4056,7 +4097,7 @@ async fn selected_invocations_reach_submission_and_return_after_failure() {
             .invocations,
         vec![invocation.clone()]
     );
-    writer.reply(&request, json!({"result":{"thread":{"provider":"codex","id":{"id":"created"},"cwd":"/fixture","status":"idle","turns":[]}}})).await.unwrap();
+    writer.reply(&request, json!({"result":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"created"},"cwd":"/fixture","status":"idle","turns":[]}}})).await.unwrap();
     let request = read_after_reviews(&mut reader, &mut writer).await;
     assert_eq!(request["method"], "host/session/submit");
     assert_eq!(
@@ -4133,7 +4174,7 @@ async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries()
         )
         .await
         .unwrap();
-    let model = |provider: &str, id: &str, title: &str| json!({"id":id,"model":{"provider":provider,"id":"same-native-model"},"displayName":title,"defaultReasoningEffort":"","supportedReasoningEfforts":[],"isDefault":false});
+    let model = |provider: &str, id: &str, title: &str| json!({"id":id,"model":{"instanceId":provider,"id":"same-native-model"},"displayName":title,"defaultReasoningEffort":"","supportedReasoningEfforts":[],"isDefault":false});
     writer.reply(&pending["host/model/list"],json!({"result":{"data":[model("codex","shared-entry","Original Codex"),model("claude","shared-entry","Claude")],"nextCursor":"next"}})).await.unwrap();
     let next = read(&mut reader).await;
     assert_eq!(next["method"], "host/model/list");
@@ -4153,15 +4194,33 @@ async fn model_catalog_pages_keep_provider_identity_and_distinct_alias_entries()
             .models
             .iter()
             .map(|model| (
-                model.model.provider,
+                model.model.instance_id.clone(),
                 model.id.as_str(),
                 model.display_name.as_str()
             ))
             .collect::<Vec<_>>(),
         vec![
-            (ProviderKind::Codex, "shared-entry", "Updated Codex"),
-            (ProviderKind::Claude, "shared-entry", "Claude"),
-            (ProviderKind::Codex, "alias-entry", "Codex alias"),
+            (
+                "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
+                "shared-entry",
+                "Updated Codex"
+            ),
+            (
+                "claude"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
+                "shared-entry",
+                "Claude"
+            ),
+            (
+                "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
+                "alias-entry",
+                "Codex alias"
+            ),
         ]
     );
     store.close().await.unwrap();

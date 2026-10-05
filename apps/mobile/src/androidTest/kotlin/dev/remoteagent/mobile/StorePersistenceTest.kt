@@ -52,7 +52,7 @@ class StorePersistenceTest {
                                 .put(identity)
                                 .put(
                                     JSONObject(
-                                        """{"provider":"codex","id":{"id":"thread"},"turns":[
+                                        """{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[
                 {"id":"repeated","items":[${messageItem("first", "first answer")}]},
                 {"id":"repeated","items":[${messageItem("second", "second answer")}]}
             ]}"""

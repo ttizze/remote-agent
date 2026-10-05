@@ -11,6 +11,8 @@ pub mod presentation;
 pub mod privacy;
 pub mod state;
 pub mod store;
+#[cfg(test)]
+mod test_support;
 
 #[cfg(feature = "bindings")]
 pub mod bindings;

@@ -148,7 +148,7 @@ impl Operation for Respond {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartSubmission {
-    pub provider: crate::session::ProviderKind,
+    pub instance_id: crate::session::ProviderInstanceId,
     pub draft_key: DraftKey,
     pub cwd: Option<String>,
     pub client_user_message_id: agent_protocol::ids::ClientInputId,
@@ -181,7 +181,7 @@ impl Operation for StartSubmission {
     ) -> Result<Self::Output, PeerError> {
         context
             .call(&CreateSession {
-                provider: self.provider,
+                instance_id: self.instance_id.clone(),
                 cwd: self.cwd.clone(),
                 model: self.draft.model.clone(),
             })
@@ -266,7 +266,7 @@ impl Operation for SendSubmission {
             draft_key: self.thread_id.clone().into(),
         })
     }
-    type Input = (bool, Option<crate::session::ProviderKind>);
+    type Input = (bool, Option<crate::session::ProviderInstanceId>);
     fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
         Ok((
             !snapshot.subscriptions.contains_key(&self.thread_id),
@@ -362,7 +362,7 @@ impl Operation for SaveQueuedInput {
             draft_key: self.draft_key.clone(),
         })
     }
-    type Input = (Arc<Draft>, crate::session::ProviderKind);
+    type Input = (Arc<Draft>, crate::session::ProviderInstanceId);
     fn capture(&self, snapshot: &Snapshot) -> Result<Self::Input, PeerError> {
         let original = snapshot
             .queue_edits
@@ -506,7 +506,7 @@ impl Operation for UploadAttachment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_protocol::session::{ProviderKind, SubmissionDelivery};
+    use agent_protocol::session::SubmissionDelivery;
 
     #[test]
     fn queued_receipt_preserves_later_host_progress_and_keeps_the_input_editable_until_claimed() {
@@ -527,7 +527,10 @@ mod tests {
         ] {
             let mut thread = Thread {
                 id: Some(session.clone()),
-                provider: Some(ProviderKind::Codex),
+                provider: Some(agent_protocol::providers::ProviderRef {
+                    instance_id: "codex".parse().unwrap(),
+                    driver: "codex".parse().unwrap(),
+                }),
                 ..Default::default()
             };
             thread
@@ -535,7 +538,9 @@ mod tests {
                 .push(agent_protocol::queue::QueueEntry {
                     submission: draft.submission(
                         session.clone(),
-                        ProviderKind::Codex,
+                        "codex"
+                            .parse::<crate::session::ProviderInstanceId>()
+                            .unwrap(),
                         "message".into(),
                     ),
                     delivery: SubmissionDelivery::Queued,

@@ -1,12 +1,13 @@
 use super::*;
-use agent_protocol::session::ProviderKind;
+use agent_protocol::session::ProviderInstanceId;
 use gpui_kit::Rgba;
 
-fn provider_icon(provider: ProviderKind) -> Icon {
-    Icon::default().path(match provider {
-        ProviderKind::Codex => "bex/openai.svg",
-        ProviderKind::Claude => "bex/anthropic.svg",
-    })
+fn provider_icon(driver: Option<&str>) -> Icon {
+    match driver {
+        Some("codex") => Icon::default().path("bex/openai.svg"),
+        Some("claudeAgent") => Icon::default().path("bex/anthropic.svg"),
+        _ => Icon::new(IconName::Bot),
+    }
 }
 
 fn fast_icon(fast: bool) -> Icon {
@@ -17,12 +18,12 @@ fn fast_icon(fast: bool) -> Icon {
     })
 }
 
-fn account_identity(provider: Option<ProviderKind>, identity: &str) -> Div {
+fn account_identity(provider: Option<&str>, identity: &str) -> Div {
     h_flex()
         .min_w_0()
         .gap_1()
         .when_some(provider, |row, provider| {
-            row.child(provider_icon(provider).size(px(12.)))
+            row.child(provider_icon(Some(provider)).size(px(12.)))
         })
         .child(div().min_w_0().text_ellipsis().child(identity.to_owned()))
 }
@@ -43,7 +44,18 @@ impl Desktop {
             .or_else(|| defaults.model.as_ref().map(|model| model.id.clone()))
             .unwrap_or_else(|| "自動".into());
         let selected = defaults.model.clone();
-        let models = self.snapshot.models.clone();
+        let models: Vec<_> = self
+            .snapshot
+            .models
+            .iter()
+            .map(|model| {
+                (
+                    model.model.clone(),
+                    model.display_name.clone(),
+                    self.snapshot.instance_name(model.model.instance_id.clone()),
+                )
+            })
+            .collect();
         let entity = cx.entity().downgrade();
         let scope = self.settings_model_scope.clone();
         let model_picker = Button::new("default-model")
@@ -53,7 +65,12 @@ impl Desktop {
             .debug_selector(|| "default-model".into())
             .ghost()
             .when_some(model.as_ref(), |button, model| {
-                button.icon(provider_icon(model.model.provider))
+                button.icon(provider_icon(
+                    self.snapshot
+                        .instance_driver(model.model.instance_id.clone())
+                        .as_ref()
+                        .map(|driver| driver.as_str()),
+                ))
             })
             .child(Icon::new(IconName::ChevronDown).size(px(14.)))
             .dropdown_menu(move |mut menu, _, _| {
@@ -72,17 +89,13 @@ impl Desktop {
                             });
                         }),
                 );
-                for model in models.iter() {
-                    let value = model.model.clone();
+                for (value, name, provider) in &models {
                     let scope = scope.clone();
                     let entity = entity.clone();
-                    let provider = match model.model.provider {
-                        ProviderKind::Codex => "Codex",
-                        ProviderKind::Claude => "Claude",
-                    };
+                    let value = value.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(format!("{provider} · {}", model.display_name))
-                            .checked(selected.as_ref() == Some(&model.model))
+                        PopupMenuItem::new(format!("{provider} · {name}"))
+                            .checked(selected.as_ref() == Some(&value))
                             .on_click(move |_, _, cx| {
                                 let _ = entity.update(cx, |s, cx| {
                                     s.dispatch(Intent::SelectDefaultModel {
@@ -224,7 +237,12 @@ impl Desktop {
             )
             .children(
                 self.snapshot
-                    .model_error_messages(defaults.model.as_ref().map(|model| model.provider))
+                    .model_error_messages(
+                        defaults
+                            .model
+                            .as_ref()
+                            .map(|model| model.instance_id.clone()),
+                    )
                     .into_iter()
                     .map(|error| {
                         div()
@@ -299,7 +317,9 @@ impl Desktop {
     pub(super) fn account_controls(&self, manage: bool, cx: &Context<Self>) -> AnyElement {
         let in_settings = self.tab == Tab::Settings;
         let accounts = self.snapshot.account.accounts.as_ref();
-        let provider = self.account_provider();
+        let Some(provider) = self.account_provider() else {
+            return div().child("接続が設定されていません").into_any_element();
+        };
         let disabled = self.account_busy
             || self.busy > 0
             || self.snapshot.account.login.is_some()
@@ -307,25 +327,21 @@ impl Desktop {
         let mut services = h_flex()
             .gap_1()
             .when(in_settings, |row| row.max_w(px(320.)));
-        for (value, label) in [
-            (ProviderKind::Codex, "Codex"),
-            (ProviderKind::Claude, "Claude"),
-        ] {
+        for instance in self.snapshot.provider_instances.iter() {
+            let value = instance.reference.instance_id.clone();
+            let label = instance.display_name.clone();
+            let key = format!("model-provider-{value}");
+            let debug_key = key.clone();
+            let selected = provider == value;
+            let icon = provider_icon(Some(instance.reference.driver.as_str()));
             services = services.child(
-                self.button(
-                    format!("model-provider-{label}"),
-                    label,
-                    cx,
-                    move |s, _, _| {
-                        s.model_provider = Some(value);
-                        s.account_sign_out = None;
-                    },
-                )
-                .debug_selector(move || format!("model-provider-{label}"))
-                .selected(provider == value)
-                .when(in_settings, |button| {
-                    button.small().ghost().icon(provider_icon(value))
+                self.button(key, &label, cx, move |s, _, _| {
+                    s.model_provider = Some(value.clone());
+                    s.account_sign_out = None;
                 })
+                .debug_selector(move || debug_key.clone())
+                .selected(selected)
+                .when(in_settings, |button| button.small().ghost().icon(icon))
                 .disabled(disabled)
                 .flex_1(),
             );
@@ -344,12 +360,13 @@ impl Desktop {
                     .accounts
                     .iter()
                     .enumerate()
-                    .filter(|(_, account)| account.provider == provider)
+                    .filter(|(_, account)| account.instance_id == provider)
                 {
                     found = true;
                     let id = account.id.clone();
-                    let provider = account.provider;
+                    let provider = account.instance_id.clone();
                     let logout_id = id.clone();
+                    let select_provider = provider.clone();
                     let identity = account.email.as_deref().unwrap_or(&account.id);
                     let mut row = v_flex()
                         .gap_2()
@@ -364,11 +381,20 @@ impl Desktop {
                                 .accessibility_label(identity.to_owned())
                                 .small()
                                 .ghost()
-                                .child(account_identity(Some(account.provider), identity).flex_1())
+                                .child(
+                                    account_identity(
+                                        self.snapshot
+                                            .instance_driver(account.instance_id.clone())
+                                            .as_ref()
+                                            .map(|driver| driver.as_str()),
+                                        identity,
+                                    )
+                                    .flex_1(),
+                                )
                                 .on_click(cx.listener(move |s, _, _, cx| {
                                     s.account_operation(Intent::SelectAccountForDraft(
                                         op::SelectAccountForDraft {
-                                            provider,
+                                            instance_id: select_provider.clone(),
                                             id: id.clone(),
                                             thread_id: s.draft_key().clone(),
                                         },
@@ -393,10 +419,10 @@ impl Desktop {
                         .child(if manage {
                             account_usage_view(account.usage.as_ref())
                         } else {
-                            weekly_usage_view(
-                                self.snapshot
-                                    .account_weekly_usage(account.provider, account.id.clone()),
-                            )
+                            weekly_usage_view(self.snapshot.account_weekly_usage(
+                                account.instance_id.clone(),
+                                account.id.clone(),
+                            ))
                         });
                     if manage && self.account_sign_out.as_deref() == Some(account.id.as_str()) {
                         row =
@@ -415,7 +441,7 @@ impl Desktop {
                                                 s.account_sign_out = None;
                                                 s.account_operation(Intent::LogoutAccount(
                                                     op::LogoutAccount {
-                                                        provider,
+                                                        instance_id: provider.clone(),
                                                         id: logout_id.clone(),
                                                     },
                                                 ));
@@ -460,6 +486,7 @@ impl Desktop {
                 body = body.child("アカウントを読み込み中…");
             }
             if manage {
+                let login_provider = provider.clone();
                 body = body.child(
                     h_flex()
                         .justify_between()
@@ -471,7 +498,9 @@ impl Desktop {
                                 cx,
                                 move |s, _, _| {
                                     s.account_operation(Intent::StartAccountLogin(
-                                        op::StartAccountLogin { provider },
+                                        op::StartAccountLogin {
+                                            instance_id: login_provider.clone(),
+                                        },
                                     ));
                                 },
                             )
@@ -525,7 +554,7 @@ impl Desktop {
             )
             .children(
                 self.snapshot
-                    .model_error_messages(Some(provider))
+                    .model_error_messages(Some(provider.clone()))
                     .into_iter()
                     .map(|error| {
                         div()
@@ -547,11 +576,9 @@ impl Desktop {
 }
 
 impl Desktop {
-    pub(super) fn account_provider(&self) -> ProviderKind {
-        self.model_provider.unwrap_or_else(|| {
-            self.snapshot
-                .model_provider_for_draft(self.draft_key().clone())
-        })
+    pub(super) fn account_provider(&self) -> Option<ProviderInstanceId> {
+        self.snapshot
+            .provider_selection(self.draft_key().clone(), self.model_provider.clone())
     }
 
     pub(in crate::app) fn account_operation(&mut self, intent: Intent) {
@@ -559,7 +586,7 @@ impl Desktop {
             return;
         }
         if let Intent::StartAccountLogin(start) = &intent {
-            self.model_provider = Some(start.provider);
+            self.model_provider = Some(start.instance_id.clone());
             self.account_login_draft = Some(self.draft_key().clone());
         }
         self.account_busy = true;
@@ -577,7 +604,8 @@ impl Desktop {
         let disabled = !self.snapshot.connected || self.account_busy || self.busy > 0;
         let url = login.verification_url.clone();
         let cancel_id = login.login_id.clone();
-        let provider = login.provider;
+        let provider = login.instance_id.clone();
+        let cancel_provider = provider.clone();
         let cancel = self
             .button(
                 "account-cancel-login",
@@ -585,7 +613,7 @@ impl Desktop {
                 cx,
                 move |s, _, _| {
                     s.account_operation(Intent::CancelAccountLogin(op::CancelAccountLogin {
-                        provider,
+                        instance_id: cancel_provider.clone(),
                         id: cancel_id.clone(),
                     }));
                 },
@@ -633,7 +661,7 @@ impl Desktop {
                             }
                             s.account_operation(Intent::SubmitAccountLogin(
                                 op::SubmitAccountLogin {
-                                    provider,
+                                    instance_id: provider.clone(),
                                     id: submit_id.clone(),
                                     code,
                                 },
@@ -798,7 +826,9 @@ impl Desktop {
                 )
                 .into_any_element();
         }
-        let provider = self.account_provider();
+        let Some(provider) = self.account_provider() else {
+            return div().child("接続が設定されていません").into_any_element();
+        };
         let disabled = self.account_busy
             || self.busy > 0
             || !self.snapshot.connected
@@ -810,38 +840,39 @@ impl Desktop {
             .pr_2()
             .border_r_1()
             .border_color(rgb(0x282828));
-        for (value, label) in [
-            (ProviderKind::Codex, "Codex"),
-            (ProviderKind::Claude, "Claude"),
-        ] {
+        for instance in self.snapshot.provider_instances.iter() {
+            let value = instance.reference.instance_id.clone();
+            let label = instance.display_name.clone();
+            let key = format!("model-agent-{value}");
+            let debug_key = key.clone();
+            let selected = provider == value;
+            let icon = if instance.reference.driver.as_str() == "claudeAgent" {
+                Icon::default()
+                    .path("bex/claude.svg")
+                    .text_color(rgb(0xd97757))
+            } else {
+                provider_icon(Some(instance.reference.driver.as_str()))
+            };
             agents = agents.child(
-                Button::new(format!("model-agent-{label}"))
-                    .icon(
-                        if value == ProviderKind::Claude {
-                            Icon::default()
-                                .path("bex/claude.svg")
-                                .text_color(rgb(0xd97757))
-                        } else {
-                            provider_icon(value)
-                        }
-                        .size(px(24.)),
-                    )
+                Button::new(key)
+                    .icon(icon.size(px(24.)))
                     .ghost()
                     .w(px(44.))
                     .h(px(44.))
                     .rounded(px(8.))
-                    .selected(provider == value)
-                    .when(provider == value, |button| button.bg(rgb(0x262626)))
-                    .accessibility_label(label)
+                    .selected(selected)
+                    .when(selected, |button| button.bg(rgb(0x262626)))
+                    .accessibility_label(label.clone())
                     .tooltip(label)
-                    .debug_selector(move || format!("model-agent-{label}"))
+                    .debug_selector(move || debug_key.clone())
                     .disabled(disabled || self.selected().is_some())
                     .on_click(cx.listener(move |s, _, window, cx| {
-                        s.model_provider = Some(value);
+                        s.model_provider = Some(value.clone());
                         s.model_search
                             .update(cx, |input, cx| input.set_value("", window, cx));
-                        if let Some(model) =
-                            s.snapshot.model_for_provider(s.draft_key().clone(), value)
+                        if let Some(model) = s
+                            .snapshot
+                            .model_for_instance(s.draft_key().clone(), value.clone())
                         {
                             s.dispatch(Intent::SelectModel {
                                 thread_id: s.draft_key().clone(),
@@ -852,16 +883,16 @@ impl Desktop {
                     })),
             );
         }
-        let account =
-            self.snapshot
-                .account
-                .accounts
-                .as_ref()
-                .and_then(|accounts| {
-                    accounts.accounts.iter().find(|account| {
-                        account.provider == provider && accounts.is_selected(account)
-                    })
-                });
+        let account = self
+            .snapshot
+            .account
+            .accounts
+            .as_ref()
+            .and_then(|accounts| {
+                accounts.accounts.iter().find(|account| {
+                    account.instance_id == provider && accounts.is_selected(account)
+                })
+            });
         body = body.child(
             Button::new("model-account-summary")
                 .accessibility_label("アカウントと週間残量")
@@ -903,7 +934,8 @@ impl Desktop {
                         .child(weekly_usage_view(
                             account
                                 .map(|a| {
-                                    self.snapshot.account_weekly_usage(a.provider, a.id.clone())
+                                    self.snapshot
+                                        .account_weekly_usage(a.instance_id.clone(), a.id.clone())
                                 })
                                 .unwrap_or_default(),
                         )),
@@ -919,7 +951,7 @@ impl Desktop {
                     .aria_label("モデルを検索"),
             );
         let models = self.snapshot.models_matching(
-            Some(provider),
+            Some(provider.clone()),
             self.model_search.read(cx).value().to_string(),
         );
         let mut list = v_flex()
@@ -978,7 +1010,7 @@ impl Desktop {
             .child(list)
             .children(
                 self.snapshot
-                    .model_error_messages(Some(provider))
+                    .model_error_messages(Some(provider.clone()))
                     .into_iter()
                     .map(|error| {
                         div()
@@ -996,7 +1028,11 @@ impl Desktop {
                 )
             })
             .when(
-                self.draft().model.as_ref().map(|model| model.provider) == Some(provider),
+                self.draft()
+                    .model
+                    .as_ref()
+                    .map(|model| model.instance_id.clone())
+                    == Some(provider.clone()),
                 |body| {
                     body.child(
                         h_flex()
@@ -1273,15 +1309,16 @@ mod tests {
                 let key = view.draft_key().to_owned();
                 let snapshot = Arc::make_mut(&mut view.snapshot);
                 snapshot.connected = true;
+                snapshot.provider_instances = crate::app::fixture_instances();
                 Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(serde_json::json!({
-                    "accounts":[{"provider":"codex","id":"first","email":"first@example.invalid","usage":{"windows":[{"label":"週間枠","remainingPercent":42}],"fetchedAt":1}},
-                    {"provider":"claude","id":"claude:second"}],"selected":{"codex":"first","claude":"claude:second"}
+                    "accounts":[{"instanceId":"codex","id":"first","email":"first@example.invalid","usage":{"windows":[{"label":"週間枠","remainingPercent":42}],"fetchedAt":1}},
+                    {"instanceId":"claude","id":"claude:second"}],"selected":{"codex":"first","claude":"claude:second"}
                 })).unwrap()));
                 snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
-                    {"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"priority"}]},
-                    {"id":"claude:sonnet","model":{"provider": "claude", "id": "sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+                    {"id":"gpt","model":{"instanceId": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"priority"}]},
+                    {"id":"claude:sonnet","model":{"instanceId": "claude", "id": "sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
                 ])).unwrap());
-                Arc::make_mut(&mut snapshot.drafts).insert(key, Arc::new(Draft { model: Some(agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Codex, id: "gpt".into() }), ..Default::default() }));
+                Arc::make_mut(&mut snapshot.drafts).insert(key, Arc::new(Draft { model: Some(agent_protocol::models::ModelRef { instance_id: "codex".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "gpt".into() }), ..Default::default() }));
             });
             cx.observe(&desktop, |_, _, cx| cx.notify()).detach();
             PickerView(desktop)
@@ -1305,8 +1342,8 @@ mod tests {
         assert!(window.debug_bounds("model-choice-claude:sonnet").is_none());
         assert!(window.debug_bounds("account-logout-0").is_none());
         let summary = window.debug_bounds("model-account-summary").unwrap();
-        let codex = window.debug_bounds("model-agent-Codex").unwrap();
-        let claude = window.debug_bounds("model-agent-Claude").unwrap();
+        let codex = window.debug_bounds("model-agent-codex").unwrap();
+        let claude = window.debug_bounds("model-agent-claude").unwrap();
         assert!(codex.right() <= summary.left());
         assert!(codex.bottom() <= claude.top());
         assert!(window.debug_bounds("model-agent-label").is_none());
@@ -1370,7 +1407,7 @@ mod tests {
             })
         });
         window.run_until_parked();
-        let claude = window.debug_bounds("model-agent-Claude").unwrap();
+        let claude = window.debug_bounds("model-agent-claude").unwrap();
         window.simulate_click(claude.center(), Modifiers::default());
         window.update(|_, cx| assert!(view.read(cx).0.read(cx).model_provider.is_none()));
         assert!(window.debug_bounds("model-choice-gpt").is_some());
@@ -1382,7 +1419,7 @@ mod tests {
             })
         });
         window.run_until_parked();
-        let claude = window.debug_bounds("model-provider-Claude").unwrap();
+        let claude = window.debug_bounds("model-provider-claude").unwrap();
         window.simulate_click(claude.center(), Modifiers::default());
         window.update(|_, cx| assert!(view.read(cx).0.read(cx).model_provider.is_none()));
     }
@@ -1426,7 +1463,7 @@ mod tests {
                 view.settings_page = super::SettingsPage::Models;
                 let snapshot = Arc::make_mut(&mut view.snapshot);
                 snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
-                    {"id":"gpt","model":{"provider":"codex","id":"gpt"},"displayName":"GPT-6-Astra",
+                    {"id":"gpt","model":{"instanceId":"codex","id":"gpt"},"displayName":"GPT-6-Astra",
                      "isDefault":true,"defaultReasoningEffort":"medium",
                      "supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
                      "serviceTiers":[{"id":"priority"}]}

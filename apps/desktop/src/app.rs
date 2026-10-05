@@ -202,7 +202,7 @@ pub(crate) struct Desktop {
     path: Entity<InputState>,
     model_panel: ModelPanel,
     model_search: Entity<InputState>,
-    model_provider: Option<agent_protocol::session::ProviderKind>,
+    model_provider: Option<agent_protocol::session::ProviderInstanceId>,
     settings_model_scope: ModelDefaultsScope,
     account_sign_out: Option<String>,
     account_login_draft: Option<DraftKey>,
@@ -280,11 +280,11 @@ impl Desktop {
                             && let Some(login) = &view.snapshot.account.login
                         {
                             let id = login.login_id.clone();
-                            let provider = login.provider;
+                            let provider = login.instance_id.clone();
                             view.account_busy = true;
                             view.perform(
                                 Intent::ReadAccountLogin(op::ReadAccountLogin {
-                                    provider,
+                                    instance_id: provider.clone(),
                                     id,
                                     thread_id: view.account_login_draft.clone(),
                                 }),
@@ -1361,16 +1361,21 @@ impl Desktop {
             return;
         };
         let cwd = self.snapshot.selected_directory();
-        let provider = self
+        let Some(provider) = self
             .snapshot
-            .model_provider_for_draft(self.draft_key().clone());
+            .provider_selection(self.draft_key().clone(), None)
+        else {
+            self.error = "利用する接続を選択してください".into();
+            cx.notify();
+            return;
+        };
         let prompt = format!("次の選択範囲について詳しく説明してください。\n\n{text}");
         self.busy += 1;
         self.effect(
             async move {
                 let Outcome::StartedThread { id } = store
                     .dispatch(Intent::CreateSession(op::CreateSession {
-                        provider,
+                        instance_id: provider.clone(),
                         cwd: Some(cwd),
                         model: None,
                     }))
@@ -1811,6 +1816,30 @@ fn composer_should_submit(
 }
 
 #[cfg(test)]
+fn fixture_instances() -> Arc<Vec<agent_protocol::providers::ProviderInstance>> {
+    Arc::new(
+        [
+            ("codex", "codex", "Codex"),
+            ("claude", "claudeAgent", "Claude"),
+        ]
+        .into_iter()
+        .map(
+            |(id, driver, name)| agent_protocol::providers::ProviderInstance {
+                reference: agent_protocol::providers::ProviderRef {
+                    instance_id: id.parse().unwrap(),
+                    driver: driver.parse().unwrap(),
+                },
+                display_name: name.into(),
+                availability: agent_protocol::providers::ProviderAvailability::Ready,
+                capabilities: Default::default(),
+                requires_account: true,
+            },
+        )
+        .collect(),
+    )
+}
+
+#[cfg(test)]
 mod composer_tests {
     use super::{TextareaState, composer_should_submit};
     use gpui_kit as gpui;
@@ -1997,7 +2026,7 @@ mod completion_tests {
 
     #[test]
     fn row_projection_keeps_repeated_turns_and_scopes_requests_without_changing_input() {
-        let mut source: Arc<Thread> = Arc::new(serde_json::from_value(serde_json::json!({"provider":"codex","id":{"id":"selected"},"turns":[{"id":"repeated","items":[{"id":"first","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"first answer","phase":"unknown"}}}}}],"status":"unknown"},{"id":"repeated","items":[{"id":"second","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"second answer","phase":"unknown"}}}}}],"status":"unknown"}]})).unwrap());
+        let mut source: Arc<Thread> = Arc::new(serde_json::from_value(serde_json::json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"selected"},"turns":[{"id":"repeated","items":[{"id":"first","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"first answer","phase":"unknown"}}}}}],"status":"unknown"},{"id":"repeated","items":[{"id":"second","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"second answer","phase":"unknown"}}}}}],"status":"unknown"}]})).unwrap());
         let mut snapshot = Snapshot::default();
         Arc::make_mut(&mut snapshot.navigation).thread_id =
             Some(agent_protocol::session::SessionRef {

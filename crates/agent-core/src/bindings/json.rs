@@ -89,3 +89,7 @@ domain_identifier!(TurnId);
 domain_identifier!(ItemId);
 domain_identifier!(RequestId);
 domain_identifier!(ClientInputId);
+
+use agent_protocol::providers::{ProviderDriver, ProviderInstanceId};
+uniffi::custom_type!(ProviderDriver, String, { remote, lower: |value| value.into(), try_lift: |value| Ok(value.parse()?) });
+uniffi::custom_type!(ProviderInstanceId, String, { remote, lower: |value| value.into(), try_lift: |value| Ok(value.parse()?) });

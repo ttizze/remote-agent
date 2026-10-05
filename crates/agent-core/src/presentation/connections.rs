@@ -1,5 +1,5 @@
 //! Availability is derived from the connected Host's catalog and authentication.
-use crate::{models::Model, session::ProviderKind, state::Snapshot};
+use crate::{models::Model, session::ProviderInstanceId, state::Snapshot};
 use agent_protocol::operations::Accounts;
 use serde_json::{Map, Value};
 
@@ -15,7 +15,7 @@ pub enum AgentAvailability {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ConnectionAgent {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
     pub name: String,
     pub availability: AgentAvailability,
     pub label: String,
@@ -30,29 +30,34 @@ pub struct ConnectionSetup {
 
 fn availability(
     connected: bool,
-    provider: ProviderKind,
+    instance_id: &ProviderInstanceId,
+    configured: &agent_protocol::providers::ProviderAvailability,
+    requires_account: bool,
     models: &[Model],
     accounts: Option<&Accounts>,
     errors: &Map<String, Value>,
 ) -> AgentAvailability {
-    if !connected {
+    if !connected || *configured == agent_protocol::providers::ProviderAvailability::Starting {
         return AgentAvailability::Checking;
     }
-    let key = match provider {
-        ProviderKind::Codex => "codex",
-        ProviderKind::Claude => "claude",
-    };
-    if errors.contains_key(key) {
+    if *configured != agent_protocol::providers::ProviderAvailability::Ready
+        || errors.contains_key(instance_id.as_str())
+    {
         return AgentAvailability::Unavailable;
     }
-    let Some(accounts) = accounts else {
+    if requires_account && accounts.is_none() {
         return AgentAvailability::Checking;
-    };
-    let has_model = models.iter().any(|model| model.model.provider == provider);
-    let authenticated = accounts
-        .accounts
+    }
+    let has_model = models
         .iter()
-        .any(|account| account.provider == provider && accounts.is_selected(account));
+        .any(|model| &model.model.instance_id == instance_id);
+    let authenticated = !requires_account
+        || accounts.is_some_and(|accounts| {
+            accounts
+                .accounts
+                .iter()
+                .any(|account| &account.instance_id == instance_id && accounts.is_selected(account))
+        });
     match (has_model, authenticated) {
         (true, true) => AgentAvailability::Ready,
         (true, false) => AgentAvailability::LoginRequired,
@@ -64,33 +69,33 @@ fn availability(
 #[cfg_attr(feature = "bindings", uniffi::export)]
 impl Snapshot {
     pub fn connection_setup(&self) -> ConnectionSetup {
-        let agents: Vec<_> = [
-            (ProviderKind::Codex, "Codex"),
-            (ProviderKind::Claude, "Claude Code"),
-        ]
-        .into_iter()
-        .map(|(provider, name)| {
-            let availability = availability(
-                self.connected,
-                provider,
-                &self.models,
-                self.account.accounts.as_deref(),
-                &self.model_errors,
-            );
-            ConnectionAgent {
-                provider,
-                name: name.into(),
-                availability,
-                label: match availability {
-                    AgentAvailability::Checking => "確認中…",
-                    AgentAvailability::Ready => "利用可能",
-                    AgentAvailability::LoginRequired => "未ログイン",
-                    AgentAvailability::Unavailable => "設定が必要",
+        let agents: Vec<_> = self
+            .provider_instances
+            .iter()
+            .map(|instance| {
+                let availability = availability(
+                    self.connected,
+                    &instance.reference.instance_id,
+                    &instance.availability,
+                    instance.requires_account,
+                    &self.models,
+                    self.account.accounts.as_deref(),
+                    &self.model_errors,
+                );
+                ConnectionAgent {
+                    instance_id: instance.reference.instance_id.clone(),
+                    name: instance.display_name.clone(),
+                    availability,
+                    label: match availability {
+                        AgentAvailability::Checking => "確認中…",
+                        AgentAvailability::Ready => "利用可能",
+                        AgentAvailability::LoginRequired => "未ログイン",
+                        AgentAvailability::Unavailable => "設定が必要",
+                    }
+                    .into(),
                 }
-                .into(),
-            }
-        })
-        .collect();
+            })
+            .collect();
         ConnectionSetup {
             can_start: agents
                 .iter()
@@ -125,22 +130,22 @@ mod tests {
             authenticated in proptest::bool::ANY,
             catalog in proptest::bool::ANY,
             failed in proptest::bool::ANY,
-            provider in proptest::sample::select(vec![ProviderKind::Codex, ProviderKind::Claude]),
+            provider in proptest::sample::select(vec!["codex".parse::<crate::session::ProviderInstanceId>().unwrap(), "claude".parse::<crate::session::ProviderInstanceId>().unwrap()]),
         ) {
-            let key = if provider == ProviderKind::Codex { "codex" } else { "claude" };
+            let key = if provider == "codex".parse::<crate::session::ProviderInstanceId>().unwrap() { "codex" } else { "claude" };
             let models: Vec<Model> = if catalog {
                 serde_json::from_value(serde_json::json!([{
-                    "id":"same-native-id", "model":{"provider":key,"id":"same-native-id"},
+                    "id":"same-native-id", "model":{"instanceId":key,"id":"same-native-id"},
                     "displayName":"Agent", "defaultReasoningEffort":"", "supportedReasoningEfforts":[]
                 }])).unwrap()
             } else { Vec::new() };
             let accounts: Accounts = serde_json::from_value(serde_json::json!({
-                "accounts": if authenticated { vec![serde_json::json!({"id":"selected","provider":key})] } else { Vec::new() },
+                "accounts": if authenticated { vec![serde_json::json!({"id":"selected","instanceId":key})] } else { Vec::new() },
                 "selected":{(key):"selected"},
                 "error":null
             })).unwrap();
             let errors = if failed { Map::from_iter([(key.into(), Value::Null)]) } else { Map::new() };
-            let actual = availability(connected, provider, &models, Some(&accounts), &errors);
+            let actual = availability(connected, &provider, &agent_protocol::providers::ProviderAvailability::Ready, true, &models, Some(&accounts), &errors);
             proptest::prop_assert_eq!(actual == AgentAvailability::Ready, connected && authenticated && catalog && !failed);
         }
 
@@ -158,15 +163,16 @@ mod tests {
     fn one_ready_provider_can_start_without_configuring_the_other() {
         let mut snapshot = Snapshot {
             connected: true,
+            provider_instances: crate::test_support::instances(),
             models: std::sync::Arc::new(serde_json::from_value(serde_json::json!([
-                {"id":"gpt", "model":{"provider":"codex","id":"gpt"}, "displayName":"GPT", "defaultReasoningEffort":"", "supportedReasoningEfforts":[]},
-                {"id":"sonnet", "model":{"provider":"claude","id":"sonnet"}, "displayName":"Sonnet", "defaultReasoningEffort":"", "supportedReasoningEfforts":[]}
+                {"id":"gpt", "model":{"instanceId":"codex","id":"gpt"}, "displayName":"GPT", "defaultReasoningEffort":"", "supportedReasoningEfforts":[]},
+                {"id":"sonnet", "model":{"instanceId":"claude","id":"sonnet"}, "displayName":"Sonnet", "defaultReasoningEffort":"", "supportedReasoningEfforts":[]}
             ])).unwrap()),
             ..Default::default()
         };
         std::sync::Arc::make_mut(&mut snapshot.account).accounts = Some(std::sync::Arc::new(
             serde_json::from_value(serde_json::json!({
-                "accounts":[{"id":"native", "provider":"codex"}, {"id":"native", "provider":"claude"}],
+                "accounts":[{"id":"native", "instanceId":"codex"}, {"id":"native", "instanceId":"claude"}],
                 "selected":{"codex":"native"}
             })).unwrap()
         ));
@@ -193,7 +199,7 @@ mod tests {
     #[test]
     fn incomplete_checks_and_authentication_remain_distinct() {
         let model: Model = serde_json::from_value(serde_json::json!({
-            "id":"gpt", "model":{"provider":"codex","id":"gpt"},
+            "id":"gpt", "model":{"instanceId":"codex","id":"gpt"},
             "displayName":"GPT", "defaultReasoningEffort":"", "supportedReasoningEfforts":[]
         }))
         .unwrap();
@@ -205,7 +211,11 @@ mod tests {
         assert_eq!(
             availability(
                 true,
-                ProviderKind::Codex,
+                &"codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
+                &agent_protocol::providers::ProviderAvailability::Ready,
+                true,
                 std::slice::from_ref(&model),
                 None,
                 &Map::new()
@@ -215,7 +225,11 @@ mod tests {
         assert_eq!(
             availability(
                 true,
-                ProviderKind::Codex,
+                &"codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
+                &agent_protocol::providers::ProviderAvailability::Ready,
+                true,
                 &[model],
                 Some(&accounts),
                 &Map::new()
@@ -223,17 +237,31 @@ mod tests {
             AgentAvailability::LoginRequired
         );
         assert_eq!(
-            availability(true, ProviderKind::Codex, &[], Some(&accounts), &Map::new()),
+            availability(
+                true,
+                &"codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
+                &agent_protocol::providers::ProviderAvailability::Ready,
+                true,
+                &[],
+                Some(&accounts),
+                &Map::new()
+            ),
             AgentAvailability::Unavailable
         );
         let authenticated = serde_json::from_value(serde_json::json!({
-            "accounts":[{"id":"native", "provider":"codex"}], "selected":{"codex":"native"}
+            "accounts":[{"id":"native", "instanceId":"codex"}], "selected":{"codex":"native"}
         }))
         .unwrap();
         assert_eq!(
             availability(
                 true,
-                ProviderKind::Codex,
+                &"codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
+                &agent_protocol::providers::ProviderAvailability::Ready,
+                true,
                 &[],
                 Some(&authenticated),
                 &Map::new()

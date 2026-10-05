@@ -5,12 +5,7 @@ use crate::models::{Item, ItemBody, SessionStatus, Thread, Turn, TurnStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ProviderKind {
-    Codex,
-    Claude,
-}
+pub use crate::providers::{ProviderDriver, ProviderInstanceId, ProviderRef};
 
 /// An opaque conversation reference. Host/client RPCs use Host-owned IDs;
 /// provider adapters use native IDs only inside the Host boundary.

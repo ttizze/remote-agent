@@ -2,7 +2,7 @@
 use crate::state::Snapshot;
 use agent_protocol::{
     permissions::{PermissionMode, ReadPermissionSettings},
-    session::ProviderKind,
+    session::ProviderInstanceId,
 };
 
 pub const PERMISSION_CHOICES: [(PermissionMode, &str, &str); 3] = [
@@ -24,7 +24,7 @@ pub const PERMISSION_CHOICES: [(PermissionMode, &str, &str); 3] = [
 ];
 
 pub struct PermissionControl<'a> {
-    pub provider: ProviderKind,
+    pub instance_id: Option<ProviderInstanceId>,
     pub load_request: Option<ReadPermissionSettings>,
     pub label: &'static str,
     pub mode: Option<PermissionMode>,
@@ -34,18 +34,19 @@ pub struct PermissionControl<'a> {
 }
 impl Snapshot {
     pub fn permission_control(&self, draft_key: &crate::state::DraftKey) -> PermissionControl<'_> {
-        let provider = self.model_provider_for_draft(draft_key.clone());
+        let provider = self.provider_selection(draft_key.clone(), None);
         let state = self
             .permission_settings
             .as_ref()
-            .filter(|state| state.provider == provider);
+            .filter(|state| Some(&state.instance_id) == provider.as_ref());
         let result = state.and_then(|state| state.result.as_ref());
         let settings = result.and_then(|result| result.as_ref().ok());
         let mode = settings.and_then(|settings| settings.mode);
         PermissionControl {
-            provider,
-            load_request: (self.connected && state.is_none())
-                .then_some(ReadPermissionSettings { provider }),
+            instance_id: provider.clone(),
+            load_request: provider
+                .filter(|_| self.connected && state.is_none())
+                .map(|instance_id| ReadPermissionSettings { instance_id }),
             label: match mode {
                 Some(mode) => {
                     PERMISSION_CHOICES
@@ -75,7 +76,10 @@ mod tests {
 
     #[test]
     fn permissions_load_on_connection_and_provider_change_without_retry_loops() {
-        let mut snapshot = Snapshot::default();
+        let mut snapshot = Snapshot {
+            provider_instances: crate::test_support::instances(),
+            ..Default::default()
+        };
         assert!(
             snapshot
                 .permission_control(&crate::state::DraftKey::from("draft"))
@@ -88,11 +92,15 @@ mod tests {
                 .permission_control(&crate::state::DraftKey::from("draft"))
                 .load_request
                 .unwrap()
-                .provider,
-            ProviderKind::Codex
+                .instance_id,
+            "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap()
         );
         snapshot.permission_settings = Some(Arc::new(PermissionSettingsState {
-            provider: ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             result: None,
         }));
         assert!(
@@ -119,7 +127,9 @@ mod tests {
             "draft".into(),
             Arc::new(Draft {
                 model: Some(agent_protocol::models::ModelRef {
-                    provider: agent_protocol::session::ProviderKind::Claude,
+                    instance_id: "claude"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "sonnet".into(),
                 }),
                 ..Default::default()
@@ -130,16 +140,21 @@ mod tests {
                 .permission_control(&crate::state::DraftKey::from("draft"))
                 .load_request
                 .unwrap()
-                .provider,
-            ProviderKind::Claude
+                .instance_id,
+            "claude"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap()
         );
     }
 
     #[test]
     fn permission_cache_is_provider_specific_and_never_persisted() {
         let mut snapshot = Snapshot {
+            provider_instances: crate::test_support::instances(),
             permission_settings: Some(Arc::new(PermissionSettingsState {
-                provider: ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
                 result: Some(Ok(PermissionSettings {
                     mode: Some(PermissionMode::FullAccess),
                     version: "native-version".into(),
@@ -157,14 +172,23 @@ mod tests {
             "draft".into(),
             Arc::new(Draft {
                 model: Some(agent_protocol::models::ModelRef {
-                    provider: agent_protocol::session::ProviderKind::Claude,
+                    instance_id: "claude"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "sonnet".into(),
                 }),
                 ..Default::default()
             }),
         );
         let control = snapshot.permission_control(&crate::state::DraftKey::from("draft"));
-        assert_eq!(control.provider, ProviderKind::Claude);
+        assert_eq!(
+            control.instance_id,
+            Some(
+                "claude"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap()
+            )
+        );
         assert_eq!(control.label, "読み込み中…");
         assert_eq!(control.version, None);
         let session = crate::session::SessionRef {
@@ -174,28 +198,41 @@ mod tests {
             session.clone(),
             Arc::new(crate::models::Thread {
                 id: Some(session.clone()),
-                provider: Some(ProviderKind::Claude),
+                provider: Some(agent_protocol::providers::ProviderRef {
+                    instance_id: "claude".parse().unwrap(),
+                    driver: "claudeAgent".parse().unwrap(),
+                }),
                 ..Default::default()
             }),
         );
         let key = crate::state::DraftKey::from(session);
         assert_eq!(
-            snapshot.permission_control(&key).provider,
-            ProviderKind::Claude
+            snapshot.permission_control(&key).instance_id,
+            Some(
+                "claude"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap()
+            )
         );
         Arc::make_mut(&mut snapshot.drafts).insert(
             key.clone(),
             Arc::new(Draft {
                 model: Some(agent_protocol::models::ModelRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    instance_id: "codex"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "codex-model".into(),
                 }),
                 ..Default::default()
             }),
         );
         assert_eq!(
-            snapshot.permission_control(&key).provider,
-            ProviderKind::Claude
+            snapshot.permission_control(&key).instance_id,
+            Some(
+                "claude"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap()
+            )
         );
         let bytes = crate::persistence::encode(&snapshot).unwrap();
         assert!(!String::from_utf8_lossy(&bytes).contains("native-version"));

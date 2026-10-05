@@ -5,7 +5,7 @@ use agent_core::state::{
 use agent_protocol::models::{
     AssistantPhase, Item, ItemBody, ItemStatus, Thread, ThreadResponse, Turn, TurnStatus,
 };
-use agent_protocol::session::{ProviderKind, SessionRef};
+use agent_protocol::session::SessionRef;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -81,7 +81,7 @@ fn reply(thread: Thread) -> agent_protocol::session::OpenedSession {
 fn snapshot_preserves_history_drafts_and_navigation() {
     let mut snapshot = initial(
         serde_json::from_value(json!({
-            "provider":"codex","id":{"id":"thread"}, "historyCursor":null,
+            "provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"}, "historyCursor":null,
             "turns":[{"id":"oldest"},{"id":"latest"}]
         }))
         .unwrap(),
@@ -139,7 +139,7 @@ fn selected_folder_preserves_explicit_scope_without_losing_the_execution_directo
         (Some(Value::Null), ""),
         (Some(json!("project")), "/workspace"),
     ] {
-        let mut thread = json!({"provider":"codex","id":{"id":"thread"},"cwd":"/workspace"});
+        let mut thread = json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"cwd":"/workspace"});
         if let Some(project_id) = project_id {
             thread["projectId"] = project_id;
         }
@@ -180,7 +180,7 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
     for echo_first in [false, true] {
         let previous = initial(
             serde_json::from_value(
-                json!({"provider":"codex","id":{"id":"thread"},"turns":[{"id":"turn","items":[],"status":"unknown"}]}),
+                json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[{"id":"turn","items":[],"status":"unknown"}]}),
             )
             .unwrap(),
         );
@@ -229,7 +229,7 @@ fn pending_submission_reconciles_both_reply_and_echo_orders() {
 fn submission_acknowledgement_moves_to_the_returned_turn() {
     use agent_core::state::Intent;
     let previous = initial(
-        serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"turns":[{"id":"old","status":"completed","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"unknown"}}}}}]}]}))
+        serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[{"id":"old","status":"completed","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"","phase":"unknown"}}}}}]}]}))
         .unwrap(),
     );
     let (mut pending, _) = reduce(
@@ -312,7 +312,7 @@ fn model_settings_corpus() {
                 &previous,
                 op::LoadModels {},
                 serde_json::from_value::<agent_protocol::operations::ModelPage>(
-                    json!({"data":models}),
+                    json!({"instances":[],"data":models}),
                 )
                 .unwrap(),
             )
@@ -367,7 +367,10 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
         ))
     };
     let thread = Thread {
-        provider: Some(ProviderKind::Codex),
+        provider: Some(agent_protocol::providers::ProviderRef {
+            instance_id: "codex".parse().unwrap(),
+            driver: "codex".parse().unwrap(),
+        }),
         id: Some(SessionRef {
             id: "thread".into(),
         }),
@@ -390,7 +393,10 @@ fn delta_copies_only_the_changed_path_and_snapshot_round_trips() {
     Arc::make_mut(&mut state.conversations).insert(
         SessionRef { id: "other".into() },
         Arc::new(Thread {
-            provider: Some(ProviderKind::Codex),
+            provider: Some(agent_protocol::providers::ProviderRef {
+                instance_id: "codex".parse().unwrap(),
+                driver: "codex".parse().unwrap(),
+            }),
             id: Some(SessionRef { id: "other".into() }),
             ..Default::default()
         }),
@@ -466,7 +472,7 @@ fn activity_corpus_applies_even_without_a_loaded_conversation() {
 fn new_chat_selects_catalog_defaults_in_either_load_order() {
     use agent_core::state::Intent;
     let models = serde_json::from_value::<Vec<agent_protocol::models::Model>>(json!([{
-        "id":"model", "model":{"provider": "codex", "id": "model"}, "displayName":"Model",
+        "id":"model", "model":{"instanceId": "codex", "id": "model"}, "displayName":"Model",
         "defaultReasoningEffort":"high", "supportedReasoningEfforts":[{"reasoningEffort":"high"}],
         "defaultServiceTier":"priority", "serviceTiers":[{"id":"priority"}], "isDefault":true
     }]))
@@ -477,7 +483,7 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
             if load_catalog {
                 op::LoadModels {}.apply(
                     &mut current,
-                    serde_json::from_value(json!({"data":models})).unwrap(),
+                    serde_json::from_value(json!({"instances":[],"data":models})).unwrap(),
                 );
             } else {
                 current = reduce(
@@ -496,7 +502,9 @@ fn new_chat_selects_catalog_defaults_in_either_load_order() {
         assert_eq!(
             draft.model.as_ref(),
             Some(&agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "model".into()
             })
         );
@@ -574,7 +582,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
                     &mut next,
                     reply(
                         serde_json::from_value(
-                            json!({"provider":"codex","id":{"id":"thread"}, "cwd":cwd}),
+                            json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"}, "cwd":cwd}),
                         )
                         .unwrap(),
                     ),
@@ -604,7 +612,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
     }
     let mut unassigned = previous.clone();
     let chat: ThreadResponse = serde_json::from_value(
-        json!({"thread":{"provider":"codex","id":{"id":"chat"},"cwd":"/old","projectId":null}}),
+        json!({"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"chat"},"cwd":"/old","projectId":null}}),
     )
     .unwrap();
     Arc::make_mut(&mut unassigned.navigation).thread_id = Some(SessionRef { id: "chat".into() });
@@ -624,7 +632,7 @@ fn changing_workspace_clears_content_and_preserves_file_drafts() {
 #[test]
 fn file_change_delta_appends_to_output_without_inventing_a_diff() {
     for output in ["", "prefix"] {
-        let previous = initial(serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"turns":[{"id":"turn","items":[{"id":"file","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[],"output":output}}}}}],"status":"unknown"}]})).unwrap());
+        let previous = initial(serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[{"id":"turn","items":[{"id":"file","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[],"output":output}}}}}],"status":"unknown"}]})).unwrap());
         let (next, _) = fixture_change(
             &previous,
             json!({"session":{"id":"thread"},"change":{"text":{"turnId":"turn","itemId":"file","delta":"tail","field":"fileOutput"}}}),
@@ -784,15 +792,15 @@ fn durable_upload_and_pairing_results_survive_navigation() {
 fn disconnected_catalog_reads_do_not_apply_or_retry_stale_responses() {
     let mut state = Snapshot::default();
     let before = state.clone();
-    assert!(op::LoadModels {}.stale(&mut state, serde_json::from_value(json!({
-        "data":[{"id":"old","model":{"provider": "codex", "id": "old"},"displayName":"Old", "defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}]
+    assert!(op::LoadModels {}.stale(&mut state, serde_json::from_value(json!({"instances":[],
+        "data":[{"id":"old","model":{"instanceId": "codex", "id": "old"},"displayName":"Old", "defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}]
     })).unwrap()).is_empty());
     assert!(
         op::ListAccounts {}
             .stale(
                 &mut state,
                 serde_json::from_value(json!({
-                    "accounts":[{"provider":"codex","id":"old"}],"selected":{"codex":"old"}
+                    "accounts":[{"instanceId":"codex","id":"old"}],"selected":{"codex":"old"}
                 }))
                 .unwrap()
             )
@@ -807,7 +815,9 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
     for (restored, failed) in [(false, false), (true, false), (false, true), (true, true)] {
         let draft = Draft {
             model: Some(agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "codex-model".into(),
             }),
             effort: Some("high".into()),
@@ -829,8 +839,8 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         };
         op::LoadModels {}.apply(
             &mut state,
-            serde_json::from_value(json!({"data":[{
-            "id":"claude:default","model":{"provider": "claude", "id": "default"},"displayName":"Claude",
+            serde_json::from_value(json!({"instances":[],"data":[{
+            "id":"claude:default","model":{"instanceId": "claude", "id": "default"},"displayName":"Claude",
             "defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"}]
         }],"providerErrors":errors}))
             .unwrap(),
@@ -854,7 +864,9 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         assert_eq!(
             state.drafts[&state.navigation.draft_key].model.as_ref(),
             Some(&agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Claude,
+                instance_id: "claude"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "default".into()
             })
         );
@@ -867,8 +879,8 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
         )
         .0;
         assert_eq!(*state.drafts[&DraftKey::from("saved")], draft);
-        let catalog = serde_json::from_value(json!({"data":[{
-            "id":"codex-model","model":{"provider": "codex", "id": "codex-model"},"displayName":"Codex",
+        let catalog = serde_json::from_value(json!({"instances":[],"data":[{
+            "id":"codex-model","model":{"instanceId": "codex", "id": "codex-model"},"displayName":"Codex",
             "defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}],
             "serviceTiers":[{"id":"priority"}]
         }]})).unwrap();
@@ -882,7 +894,7 @@ fn incomplete_model_catalog_preserves_restored_choices_and_defaults_only_new_dra
 fn completed_commands_refresh_session_metadata_without_waiting_for_the_turn() {
     for connected in [false, true] {
         let mut snapshot = initial(
-            serde_json::from_value(json!({"provider":"codex","id":{"id":"task"},"status":"running","turns":[{"id":"turn","status":"running","items":[]}]}))
+            serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"task"},"status":"running","turns":[{"id":"turn","status":"running","items":[]}]}))
             .unwrap(),
         );
         snapshot.connected = connected;
@@ -1069,7 +1081,9 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
             text: "next".into(),
             attachments: vec![attachment("/next")],
             model: Some(agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "new-model".into(),
             }),
             ..Default::default()
@@ -1088,7 +1102,9 @@ fn failed_submission_restores_text_and_attachments_without_losing_new_input() {
     assert_eq!(
         restored.model.as_ref(),
         Some(&agent_protocol::models::ModelRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             id: "new-model".into()
         })
     );
@@ -1305,7 +1321,7 @@ fn host_delivery_replay_resolves_unknown_input_without_overwriting_new_draft() {
         SubmissionDelivery::Rejected,
     ] {
         let mut original = initial(
-            serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"turns":[]}))
+            serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[]}))
                 .unwrap(),
         );
         Arc::make_mut(&mut original.drafts).insert(

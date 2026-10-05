@@ -1,4 +1,3 @@
-use agent_protocol::session::ProviderKind;
 use agent_protocol::{models, operations as rpc};
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -162,11 +161,15 @@ async fn model_refresh_observes_catalog_changes_without_restarting_host() {
         std::fs::create_dir_all(root.path().join("claude-native")).unwrap();
         let fixture = host(root.path(), Arc::new(Memory::default()), fixture_program()).await;
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
-        assert!(store.snapshot().models.iter().any(|model| model.model
-            == agent_protocol::models::ModelRef {
-                provider: ProviderKind::Claude,
-                id: "default".into()
-            }));
+        assert!(store.snapshot().models.iter().any(|model| {
+            model.model
+                == agent_protocol::models::ModelRef {
+                    instance_id: "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
+                    id: "default".into(),
+                }
+        }));
         let catalog = root.path().join("claude-native/fixture-models.json");
         std::fs::write(
             &catalog,
@@ -185,14 +188,21 @@ async fn model_refresh_observes_catalog_changes_without_restarting_host() {
         let claude = snapshot
             .models
             .iter()
-            .filter(|model| model.model.provider == ProviderKind::Claude)
+            .filter(|model| {
+                model.model.instance_id
+                    == "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap()
+            })
             .collect::<Vec<_>>();
         assert_eq!(claude.len(), 2, "removed models must disappear");
         assert_eq!(claude[0].display_name, "Claude · Updated default");
         assert_eq!(
             claude[1].model,
             agent_protocol::models::ModelRef {
-                provider: ProviderKind::Claude,
+                instance_id: "claude"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "new-model".into()
             }
         );
@@ -229,10 +239,14 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
             let response = local
                 .peer
                 .call(&op::CreateSession {
-                    provider: agent_protocol::session::ProviderKind::Claude,
+                    instance_id: "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
                     cwd: Some(root.path().to_string_lossy().into()),
                     model: Some(agent_protocol::models::ModelRef {
-                        provider: ProviderKind::Claude,
+                        instance_id: "claude"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
                         id: model.into(),
                     }),
                 })
@@ -252,7 +266,9 @@ async fn claude_execution_delegates_model_and_effort_to_cli_without_catalog_read
                         text: "delegate settings".into(),
                     }],
                     model: Some(agent_protocol::models::ModelRef {
-                        provider: ProviderKind::Claude,
+                        instance_id: "claude"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
                         id: model.into(),
                     }),
                     effort: Some(effort.into()),
@@ -300,7 +316,7 @@ async fn claude_submission_preserves_inputs_settings_workspaces_and_history_acro
                     let (mut store, mut endpoint) = connect(&fixture, Snapshot::default()).await;
                     store.dispatch(Intent::NewChat { cwd: if selected { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
                     let key = store.snapshot().navigation.draft_key.clone();
-                    store.dispatch(Intent::SelectModel { thread_id: key.clone(), model: agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Claude, id: "default".into() } }).await.unwrap();
+                    store.dispatch(Intent::SelectModel { thread_id: key.clone(), model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "default".into() } }).await.unwrap();
                     store.dispatch(Intent::SelectEffort { thread_id: key, effort: "low".into() }).await.unwrap();
                     let mut previous_id = None;
                     let mut previous_cwd = None;
@@ -385,7 +401,9 @@ async fn unsupported_controls_and_session_elicitation_keep_claude_running() {
             .dispatch(Intent::SelectModel {
                 thread_id: store.snapshot().navigation.draft_key.clone(),
                 model: agent_protocol::models::ModelRef {
-                    provider: agent_protocol::session::ProviderKind::Claude,
+                    instance_id: "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "default".into(),
                 },
             })
@@ -442,7 +460,9 @@ async fn claude_approval_snapshot_after_disconnect_denial_is_effective_and_inter
             .dispatch(Intent::SelectModel {
                 thread_id: key,
                 model: agent_protocol::models::ModelRef {
-                    provider: agent_protocol::session::ProviderKind::Claude,
+                    instance_id: "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "default".into(),
                 },
             })
@@ -646,7 +666,11 @@ async fn provider_selection_cannot_redirect_an_existing_conversation() {
                 .models
                 .iter()
                 .find(|entry| {
-                    entry.model.provider == ProviderKind::Claude && entry.model.id == model
+                    entry.model.instance_id
+                        == "claude"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap()
+                        && entry.model.id == model
                 })
                 .unwrap();
             assert_eq!(entry.display_name, format!("Claude · {display}"));
@@ -655,12 +679,19 @@ async fn provider_selection_cannot_redirect_an_existing_conversation() {
             .snapshot()
             .models
             .iter()
-            .find(|model| model.model.provider == ProviderKind::Codex)
+            .find(|model| {
+                model.model.instance_id
+                    == "codex"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap()
+            })
             .unwrap()
             .model
             .clone();
         let claude_model = agent_protocol::models::ModelRef {
-            provider: agent_protocol::session::ProviderKind::Claude,
+            instance_id: "claude"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             id: "default".into(),
         };
         for (original, other) in [
@@ -765,7 +796,9 @@ async fn unconfigured_claude_keeps_codex_usable_without_model_errors() {
             let fixture = host(root.path(), Arc::new(Memory::default()), &program).await;
             let saved = agent_core::state::Draft {
                 model: Some(agent_protocol::models::ModelRef {
-                    provider: ProviderKind::Claude,
+                    instance_id: "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "sonnet".into(),
                 }),
                 effort: Some("high".into()),
@@ -787,13 +820,12 @@ async fn unconfigured_claude_keeps_codex_usable_without_model_errors() {
                 "installed={installed}: {:?}",
                 store.snapshot().model_errors
             );
-            assert!(
-                store
-                    .snapshot()
-                    .models
-                    .iter()
-                    .all(|model| model.model.provider == ProviderKind::Codex)
-            );
+            assert!(store.snapshot().models.iter().all(|model| {
+                model.model.instance_id
+                    == "codex"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap()
+            }));
 
             store
                 .dispatch(Intent::NewChat { cwd: String::new() })
@@ -843,13 +875,13 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                     let (store, endpoint) = connect(&fixture, saved).await;
                     assert!(store.snapshot().connected);
                     assert!(store.snapshot().model_errors.contains_key("codex"));
-                    assert!(store.snapshot().models.iter().all(|model| model.model.provider == ProviderKind::Claude));
+                    assert!(store.snapshot().models.iter().all(|model| model.model.instance_id == "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap()));
                     if let Some(id) = &thread_id {
                         store.dispatch(Intent::ReadThread(op::ReadThread::open(id.clone()))).await.unwrap();
                     } else {
                         store.dispatch(Intent::NewChat { cwd: if selected { workspace.to_str().unwrap().into() } else { String::new() } }).await.unwrap();
                         let key = store.snapshot().navigation.draft_key.clone();
-                        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Claude, id: "default".into() } }).await.unwrap();
+                        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "default".into() } }).await.unwrap();
                     }
                     let id = send(&store, &format!("independent {index}"), &format!("independent-{index}")).await;
                     let snapshot = until(&store, |snapshot| snapshot.conversations.get(&id)
@@ -895,7 +927,7 @@ async fn missing_codex_keeps_claude_inputs_workspaces_and_resumed_history_usable
                     assert!(management.peer.call(&op::ReadWorktreeSettings {}).await.is_ok());
                     let count_worktrees = || std::fs::read_dir(root.join("worktrees")).map(|entries| entries.count()).unwrap_or_default();
                     let before = count_worktrees();
-                    assert!(management.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","model":{"provider":"codex","id":"fixture-model"},"cwd":current})).unwrap()).await.is_err());
+                    assert!(management.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"instanceId":"codex","model":{"instanceId":"codex","id":"fixture-model"},"cwd":current})).unwrap()).await.is_err());
                     assert_eq!(count_worktrees(), before, "an unavailable backend must not create a worktree");
                     assert!(management.peer.call(&rpc::ReadHostStatus {}).await.is_ok());
                     management.close().await;
@@ -932,7 +964,9 @@ async fn codex_exit_preserves_claude_approval_and_completes_after_reconnect() {
             .dispatch(Intent::SelectModel {
                 thread_id: key,
                 model: agent_protocol::models::ModelRef {
-                    provider: agent_protocol::session::ProviderKind::Claude,
+                    instance_id: "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "default".into(),
                 },
             })
@@ -1076,7 +1110,9 @@ async fn claude_authentication_and_inference_failures_are_visible_and_retry_pres
             .dispatch(Intent::SelectModel {
                 thread_id: key,
                 model: agent_protocol::models::ModelRef {
-                    provider: agent_protocol::session::ProviderKind::Claude,
+                    instance_id: "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "default".into(),
                 },
             })
@@ -1182,7 +1218,7 @@ async fn live_claude_subscription_completes_and_resumes_through_store_and_host()
         let (store, endpoint) = connect(&fixture, Snapshot::default()).await;
         store.dispatch(Intent::NewChat { cwd: String::new() }).await.unwrap();
         let key = store.snapshot().navigation.draft_key.clone();
-        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Claude, id: "haiku".into() } }).await.unwrap();
+        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "haiku".into() } }).await.unwrap();
         let id = send(&store, "Remember marker BEX_CLAUDE_STORE_OK. Reply with exactly that marker. Do not use tools.", "live-1").await;
         let snapshot = completed(&store, &id, 1, "completed").await;
         assert!(snapshot.error.is_none());
@@ -1239,7 +1275,9 @@ async fn consecutive_claude_inputs_reuse_one_native_process() {
         .dispatch(Intent::SelectModel {
             thread_id: store.snapshot().navigation.draft_key.clone(),
             model: agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Claude,
+                instance_id: "claude"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "default".into(),
             },
         })
@@ -1310,7 +1348,9 @@ async fn deleted_claude_worktree_restarts_the_retained_process_and_continues_the
             .dispatch(Intent::SelectModel {
                 thread_id: store.snapshot().navigation.draft_key.clone(),
                 model: agent_protocol::models::ModelRef {
-                    provider: agent_protocol::session::ProviderKind::Claude,
+                    instance_id: "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "default".into(),
                 },
             })
@@ -1466,7 +1506,7 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let key = store.snapshot().navigation.draft_key.clone();
-        tokio::time::timeout(Duration::from_secs(2), store.dispatch(Intent::SelectAccountForDraft(op::SelectAccountForDraft { provider: agent_protocol::session::ProviderKind::Claude,
+        tokio::time::timeout(Duration::from_secs(2), store.dispatch(Intent::SelectAccountForDraft(op::SelectAccountForDraft { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(),
             id: "claude:desktop".into(), thread_id: key,
         }))).await.expect("selection and model loading must not wait for usage").unwrap();
         assert!(store.snapshot().account.accounts.as_ref().unwrap().accounts[0].usage.is_none());
@@ -1476,25 +1516,25 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         assert_eq!(usage.windows[0].remaining_percent, 28);
         assert_eq!(usage.windows[1].remaining_percent, 61);
 
-        assert_eq!(store.snapshot().account.accounts.as_ref().unwrap().selected.get(&agent_protocol::session::ProviderKind::Claude).map(String::as_str), Some("claude:desktop"));
+        assert_eq!(store.snapshot().account.accounts.as_ref().unwrap().selected.get(&"claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap()).map(String::as_str), Some("claude:desktop"));
         store.dispatch(Intent::NewChat { cwd: root.to_string_lossy().into() }).await.unwrap();
         let key = store.snapshot().navigation.draft_key.clone();
-        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { provider: agent_protocol::session::ProviderKind::Claude, id: "default".into() } }).await.unwrap();
+        store.dispatch(Intent::SelectModel { thread_id: key, model: agent_protocol::models::ModelRef { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "default".into() } }).await.unwrap();
         let thread = send(&store, "first account", "account-first").await;
         completed(&store, &thread, 1, "completed").await;
 
-        store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin { provider: agent_protocol::session::ProviderKind::Claude })).await.unwrap();
+        store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap() })).await.unwrap();
         let login = store.snapshot().account.login.clone().unwrap();
         assert!(login.requires_code_submission);
         assert!(login.verification_url.starts_with("https://claude.com/"));
-        assert!(store.dispatch(Intent::SubmitAccountLogin(op::SubmitAccountLogin { provider: agent_protocol::session::ProviderKind::Claude, id: "claude:wrong".into(), code: "fixture-code".into() })).await.is_err());
-        store.dispatch(Intent::SubmitAccountLogin(op::SubmitAccountLogin { provider: agent_protocol::session::ProviderKind::Claude, id: login.login_id.clone(), code: "fixture-code".into() })).await.unwrap();
+        assert!(store.dispatch(Intent::SubmitAccountLogin(op::SubmitAccountLogin { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "claude:wrong".into(), code: "fixture-code".into() })).await.is_err());
+        store.dispatch(Intent::SubmitAccountLogin(op::SubmitAccountLogin { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: login.login_id.clone(), code: "fixture-code".into() })).await.unwrap();
         loop {
-            store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin { provider: agent_protocol::session::ProviderKind::Claude, id: login.login_id.clone(), thread_id: None })).await.unwrap();
+            store.dispatch(Intent::ReadAccountLogin(op::ReadAccountLogin { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: login.login_id.clone(), thread_id: None })).await.unwrap();
             if store.snapshot().account.login.is_none() { break; }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        until(&store, |snapshot| snapshot.account.accounts.as_ref().is_some_and(|accounts| accounts.selected.get(&agent_protocol::session::ProviderKind::Claude) == Some(&login.login_id))).await;
+        until(&store, |snapshot| snapshot.account.accounts.as_ref().is_some_and(|accounts| accounts.selected.get(&"claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap()) == Some(&login.login_id))).await;
         send(&store, "second account, same history", "account-second").await;
         completed(&store, &thread, 2, "completed").await;
         let profile = root.join("claude").join("accounts").join(login.login_id.strip_prefix("claude:").unwrap());
@@ -1504,18 +1544,18 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         let fixture = start().await.unwrap();
         let (store, endpoint) = connect(&fixture, snapshot).await;
         store.dispatch(Intent::ListAccounts(op::ListAccounts {})).await.unwrap();
-        assert_eq!(store.snapshot().account.accounts.as_ref().unwrap().selected.get(&agent_protocol::session::ProviderKind::Claude), Some(&login.login_id));
+        assert_eq!(store.snapshot().account.accounts.as_ref().unwrap().selected.get(&"claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap()), Some(&login.login_id));
         send(&store, "resumed after restart", "account-third").await;
         completed(&store, &thread, 3, "completed").await;
 
-        store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin { provider: agent_protocol::session::ProviderKind::Claude })).await.unwrap();
+        store.dispatch(Intent::StartAccountLogin(op::StartAccountLogin { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap() })).await.unwrap();
         let canceled = store.snapshot().account.login.clone().unwrap();
-        store.dispatch(Intent::CancelAccountLogin(op::CancelAccountLogin { provider: agent_protocol::session::ProviderKind::Claude, id: canceled.login_id.clone() })).await.unwrap();
+        store.dispatch(Intent::CancelAccountLogin(op::CancelAccountLogin { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: canceled.login_id.clone() })).await.unwrap();
         assert!(!root.join("claude").join("accounts").join(canceled.login_id.strip_prefix("claude:").unwrap()).exists());
         assert!(native.join("projects").exists(), "cancel must preserve shared history");
-        store.dispatch(Intent::LogoutAccount(op::LogoutAccount { provider: agent_protocol::session::ProviderKind::Claude, id: login.login_id.clone() })).await.unwrap();
+        store.dispatch(Intent::LogoutAccount(op::LogoutAccount { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: login.login_id.clone() })).await.unwrap();
         store.dispatch(Intent::ListAccounts(op::ListAccounts {})).await.unwrap();
-        assert!(!store.snapshot().account.accounts.as_ref().unwrap().selected.contains_key(&agent_protocol::session::ProviderKind::Claude));
+        assert!(!store.snapshot().account.accounts.as_ref().unwrap().selected.contains_key(&"claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap()));
         let snapshot = (*store.snapshot()).clone();
         drop(store); endpoint.close().await; fixture.close().await.unwrap();
         let fixture = start().await.unwrap();
@@ -1523,9 +1563,9 @@ async fn claude_accounts_login_switch_resume_cancel_and_logout_without_codex() {
         let store = Store::connect(&endpoint, &fixture.ticket, snapshot, None).await.unwrap();
         assert!(store.dispatch(Intent::LoadModels(op::LoadModels {})).await.is_err(), "logged-out Claude and unavailable Codex must not expose models");
         store.dispatch(Intent::ListAccounts(op::ListAccounts {})).await.unwrap();
-        assert!(!store.snapshot().account.accounts.as_ref().unwrap().selected.contains_key(&agent_protocol::session::ProviderKind::Claude), "restart must preserve logout without selecting the native account");
-        store.dispatch(Intent::SelectAccount(op::SelectAccount { provider: agent_protocol::session::ProviderKind::Claude, id: "claude:desktop".into() })).await.unwrap();
-        until(&store, |snapshot| snapshot.models.iter().any(|model| model.model == agent_protocol::models::ModelRef {provider:ProviderKind::Claude,id:"default".into()})).await;
+        assert!(!store.snapshot().account.accounts.as_ref().unwrap().selected.contains_key(&"claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap()), "restart must preserve logout without selecting the native account");
+        store.dispatch(Intent::SelectAccount(op::SelectAccount { instance_id: "claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), id: "claude:desktop".into() })).await.unwrap();
+        until(&store, |snapshot| snapshot.models.iter().any(|model| model.model == agent_protocol::models::ModelRef {instance_id:"claude".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(),id:"default".into()})).await;
         send(&store, "back to native account", "account-fourth").await;
         completed(&store, &thread, 4, "completed").await;
         let homes = std::fs::read_to_string(root.join("claude-auth-homes.jsonl")).unwrap();
@@ -1566,7 +1606,9 @@ async fn live_claude_account_login_url_and_cancellation() {
         .unwrap();
     store
         .dispatch(Intent::StartAccountLogin(op::StartAccountLogin {
-            provider: agent_protocol::session::ProviderKind::Claude,
+            instance_id: "claude"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
         }))
         .await
         .unwrap();
@@ -1575,7 +1617,9 @@ async fn live_claude_account_login_url_and_cancellation() {
     assert!(login.verification_url.starts_with("https://claude.com/"));
     store
         .dispatch(Intent::CancelAccountLogin(op::CancelAccountLogin {
-            provider: agent_protocol::session::ProviderKind::Claude,
+            instance_id: "claude"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             id: login.login_id.clone(),
         }))
         .await
@@ -1620,7 +1664,9 @@ async fn claude_keeps_loading_through_background_results_and_follow_up_after_rec
             .dispatch(Intent::SelectModel {
                 thread_id: store.snapshot().navigation.draft_key.clone(),
                 model: models::ModelRef {
-                    provider: ProviderKind::Claude,
+                    instance_id: "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "default".into(),
                 },
             })
@@ -1801,7 +1847,9 @@ async fn claude_host_queue_preserves_edits_order_and_hold_across_restart() {
         .dispatch(Intent::SelectModel {
             thread_id: store.snapshot().navigation.draft_key.clone(),
             model: models::ModelRef {
-                provider: ProviderKind::Claude,
+                instance_id: "claude"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "default".into(),
             },
         })
@@ -2020,13 +2068,15 @@ async fn claude_host_queue_preserves_edits_order_and_hold_across_restart() {
 
 #[tokio::test]
 async fn permission_settings_edit_native_claude_defaults_without_own_storage() {
-    use agent_protocol::{permissions::*, session::ProviderKind};
+    use agent_protocol::permissions::*;
     let root = tempfile::tempdir().unwrap();
     let memory = Arc::new(Memory::default());
     let fixture = host(root.path(), memory.clone(), fixture_program()).await;
     let local = fixture.local().await.unwrap();
     let read = ReadPermissionSettings {
-        provider: ProviderKind::Claude,
+        instance_id: "claude"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
     };
     let mut settings = local.peer.call(&read).await.unwrap();
     assert_eq!(settings.mode, None);
@@ -2039,7 +2089,7 @@ async fn permission_settings_edit_native_claude_defaults_without_own_storage() {
         settings = local
             .peer
             .call(&UpdatePermissionSettings {
-                provider: read.provider,
+                instance_id: read.instance_id.clone(),
                 mode,
                 version: settings.version,
             })
@@ -2081,7 +2131,9 @@ async fn creating_default_claude_chat_does_not_launch_the_cli_or_read_models() {
     let response = local
         .peer
         .call(&op::CreateSession {
-            provider: ProviderKind::Claude,
+            instance_id: "claude"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             cwd: Some(root.path().to_string_lossy().into()),
             model: None,
         })
@@ -2090,13 +2142,18 @@ async fn creating_default_claude_chat_does_not_launch_the_cli_or_read_models() {
     assert_eq!(
         response.response.model.unwrap(),
         models::ModelRef {
-            provider: ProviderKind::Claude,
+            instance_id: "claude"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             id: "default".into()
         }
     );
     assert_eq!(
         response.response.thread.provider,
-        Some(ProviderKind::Claude)
+        Some(agent_protocol::providers::ProviderRef {
+            instance_id: "claude".parse().unwrap(),
+            driver: "claudeAgent".parse().unwrap()
+        })
     );
     local.close().await;
     fixture.close().await.unwrap();

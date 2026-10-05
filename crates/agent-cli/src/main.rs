@@ -159,10 +159,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
                                     .snapshot()
                                     .conversations
                                     .get(&thread_id)
-                                    .and_then(|thread| thread.provider)
+                                    .and_then(|thread| thread.provider.as_ref())
+                                    .cloned()
                                     .context("conversation provider is missing")?;
                                 Ok::<_, anyhow::Error>(agent_protocol::models::ModelRef {
-                                    provider,
+                                    instance_id: provider.instance_id.clone(),
                                     id,
                                 })
                             })

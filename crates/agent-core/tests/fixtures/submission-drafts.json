@@ -28,8 +28,8 @@
         }
       ],
       "model": {
-        "provider": "codex",
-        "id": "new-model"
+        "id": "new-model",
+        "instanceId": "codex"
       },
       "effort": null
     },
@@ -48,8 +48,8 @@
         }
       ],
       "model": {
-        "provider": "codex",
-        "id": "new-model"
+        "id": "new-model",
+        "instanceId": "codex"
       },
       "effort": null
     }

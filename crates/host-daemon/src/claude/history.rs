@@ -5,7 +5,7 @@ use agent_protocol::{
     execution::*,
     ids::ItemId,
     models::{Thread, ThreadResponse, Turn},
-    session::{ProviderKind, SessionRef},
+    session::{ProviderInstanceId, SessionRef},
 };
 use anyhow::{Context as _, Result, anyhow};
 use serde_json::Value;
@@ -101,7 +101,7 @@ pub(super) fn summary(path: &Path) -> Result<crate::host_rpc::agent::SessionSumm
         .and_then(|id| id.to_str())
         .context("invalid native transcript filename")?;
     let mut thread = Thread {
-        provider: Some(ProviderKind::Claude),
+        provider: None,
         id: Some(SessionRef { id: id.into() }),
         updated_at: metadata
             .modified()
@@ -167,15 +167,21 @@ pub(super) struct NativeHistory {
     pub response: ThreadResponse,
     pub output_paths: BTreeMap<ItemId, String>,
 }
-pub(super) fn read_details(path: &Path) -> Result<NativeHistory> {
-    read_with_summary(path, summary(path)?.thread, usize::MAX)
+pub(super) fn read_details(instance_id: &ProviderInstanceId, path: &Path) -> Result<NativeHistory> {
+    read_with_summary(instance_id, path, summary(path)?.thread, usize::MAX)
 }
 
-pub(super) fn read(path: &Path, limit: usize) -> Result<ThreadResponse> {
-    read_with_summary(path, summary(path)?.thread, limit).map(|history| history.response)
+pub(super) fn read(
+    instance_id: &ProviderInstanceId,
+    path: &Path,
+    limit: usize,
+) -> Result<ThreadResponse> {
+    read_with_summary(instance_id, path, summary(path)?.thread, limit)
+        .map(|history| history.response)
 }
 
 pub(super) fn read_related(
+    instance_id: &ProviderInstanceId,
     home: &Path,
     session_id: Uuid,
     agent_id: &str,
@@ -199,17 +205,22 @@ pub(super) fn read_related(
         return Err(anyhow!("native subagent path escapes its session"));
     }
     let mut thread = Thread {
-        provider: Some(ProviderKind::Claude),
+        provider: None,
         id: Some(SessionRef {
             id: session_id.to_string(),
         }),
         ..Default::default()
     };
     thread.agent_id = Some(agent_id.into());
-    read_with_summary(&path, thread, usize::MAX).map(|history| history.response)
+    read_with_summary(instance_id, &path, thread, usize::MAX).map(|history| history.response)
 }
 
-fn read_with_summary(path: &Path, thread: Thread, limit: usize) -> Result<NativeHistory> {
+fn read_with_summary(
+    instance_id: &ProviderInstanceId,
+    path: &Path,
+    thread: Thread,
+    limit: usize,
+) -> Result<NativeHistory> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(path)?;
     let offset = file.metadata()?.len().saturating_sub(MAX_FILE_BYTES);
@@ -252,10 +263,11 @@ fn read_with_summary(path: &Path, thread: Thread, limit: usize) -> Result<Native
             Err(_) => warnings.push("transcript contains a corrupt complete row"),
         }
     }
-    convert(thread, nodes, limit, warnings)
+    convert(instance_id, thread, nodes, limit, warnings)
 }
 
 fn convert(
+    instance_id: &ProviderInstanceId,
     mut thread: Thread,
     nodes: Vec<Value>,
     limit: usize,
@@ -388,7 +400,7 @@ fn convert(
         };
         if let Some(name) = node["message"]["model"].as_str() {
             model = Some(agent_protocol::models::ModelRef {
-                provider: ProviderKind::Claude,
+                instance_id: instance_id.clone(),
                 id: name.into(),
             });
         }
@@ -568,7 +580,7 @@ mod tests {
             .join("\n")
             + "\n";
         let (_root, path) = fixture(&source);
-        let response = read(&path, 100).unwrap();
+        let response = read(&"claude".parse().unwrap(), &path, 100).unwrap();
         assert_eq!(
             response.thread.history_read_state.unwrap().kind,
             agent_protocol::session::HistoryReadKind::Complete
@@ -587,8 +599,7 @@ mod tests {
             assert!(
                 matches!(item.body(), ItemBody::Attachment {kind, content} if kind == &expected_kind && content == attachment)
             );
-            let presentation =
-                agent_core::presentation::item_presentation(item, Some(ProviderKind::Claude));
+            let presentation = agent_core::presentation::item_presentation(item, Some("Claude"));
             assert!(presentation.collapsible);
             assert!(matches!(
                 agent_core::presentation::ItemMetadata::from(item.as_ref()).kind,
@@ -609,7 +620,7 @@ mod tests {
             matches!(image.body(), ItemBody::UserMessage {content, ..} if content.get(1) == Some(&MessagePart::Image {source: "data:image/png;base64,aW1hZ2U=".into()}))
         );
         assert_eq!(item_text(&(items[7])), Some("queued answer"));
-        let page = read(&path, 1).unwrap();
+        let page = read(&"claude".parse().unwrap(), &path, 1).unwrap();
         assert_eq!(page.thread.history_has_more, Some(true));
         assert_eq!(page.thread.turns.unwrap()[0].id, "next-turn".into());
         assert_eq!(fs::read_to_string(path).unwrap(), source);
@@ -639,6 +650,7 @@ mod tests {
             json!({"type":"user","uuid":"notice","parentUuid":"second","origin":{"kind":"task-notification"},"promptSource":"system","turnOrigin":"task_notification","queueSkipAttachments":true,"message":{"content":"<task-notification><tool-use-id>work</tool-use-id><output-file>/work/result.output</output-file><status>failed</status><summary>work failed</summary></task-notification>"}}),
         ];
         let history = convert(
+            &"claude".parse().unwrap(),
             Thread {
                 id: Some(SessionRef::new(ID.into()).unwrap()),
                 ..Default::default()
@@ -697,7 +709,7 @@ mod tests {
                 .join("\n")
                 + "\n";
             let (_root, path) = fixture(&source);
-            let response = read(&path, 100).unwrap();
+            let response = read(&"claude".parse().unwrap(), &path, 100).unwrap();
             assert_eq!(
                 response.thread.history_read_state.unwrap().kind,
                 agent_protocol::session::HistoryReadKind::Complete
@@ -733,7 +745,7 @@ mod tests {
         let source = [notice, json!({"type":"user","uuid":"human","parentUuid":"notice","message":{"content":"real question"}})]
             .iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
         let (_root, path) = fixture(&source);
-        let response = read(&path, 100).unwrap();
+        let response = read(&"claude".parse().unwrap(), &path, 100).unwrap();
         assert_eq!(response.thread.preview.as_deref(), Some("real question"));
         let turns = response.thread.turns.unwrap();
         assert_eq!(turns.len(), 2);
@@ -752,7 +764,7 @@ mod tests {
             resolve(root.path(), Uuid::parse_str(ID).unwrap()).unwrap(),
             path
         );
-        let response = read(&path, 1000).unwrap();
+        let response = read(&"claude".parse().unwrap(), &path, 1000).unwrap();
         assert_eq!(
             response
                 .thread
@@ -786,7 +798,7 @@ mod tests {
             let source = format!("{NATIVE}{tail}");
             // Keep the owning directory alive throughout the read.
             let (root, path) = fixture(&source);
-            let response = read(&path, 5).unwrap();
+            let response = read(&"claude".parse().unwrap(), &path, 5).unwrap();
             assert_eq!(
                 response.thread.history_read_state.as_ref().unwrap().kind,
                 agent_protocol::session::HistoryReadKind::Incomplete
@@ -824,7 +836,13 @@ mod tests {
             + "\n";
         let path = directory.join("agent-agent-fixture.jsonl");
         fs::write(&path, &source).unwrap();
-        let related = read_related(root.path(), session, "agent-fixture").unwrap();
+        let related = read_related(
+            &"claude".parse().unwrap(),
+            root.path(),
+            session,
+            "agent-fixture",
+        )
+        .unwrap();
         assert_eq!(related.thread.agent_id.as_deref(), Some("agent-fixture"));
         assert!(
             related
@@ -835,8 +853,16 @@ mod tests {
                 .any(|turn| turn.items.as_ref().is_some_and(|items| !items.is_empty()))
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), source);
-        assert!(read_related(root.path(), session, "../elsewhere").is_err());
-        assert!(read_related(root.path(), session, "missing").is_err());
+        assert!(
+            read_related(
+                &"claude".parse().unwrap(),
+                root.path(),
+                session,
+                "../elsewhere"
+            )
+            .is_err()
+        );
+        assert!(read_related(&"claude".parse().unwrap(), root.path(), session, "missing").is_err());
         assert_eq!(fs::read_to_string(parent).unwrap(), NATIVE);
     }
     #[test]
@@ -863,8 +889,9 @@ mod tests {
             json!({"type":"assistant","uuid":"answer","parentUuid":"result","apiBlockIndex":1,"message":{"id":"m","content":[{"type":"text","text":"selected answer"}]}}),
         ];
         let response = convert(
+            &"claude".parse().unwrap(),
             Thread {
-                provider: Some(ProviderKind::Claude),
+                provider: None,
                 id: Some(SessionRef { id: ID.into() }),
                 ..Default::default()
             },

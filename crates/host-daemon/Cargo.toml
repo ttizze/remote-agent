@@ -32,6 +32,7 @@ tokio-util.workspace = true
 zeroize.workspace = true
 tempfile = "3"
 scopeguard = "1.2"
+shell-words = "1.1.1"
 atomicwrites = "0.4.4"
 anyhow.workspace = true
 dunce.workspace = true

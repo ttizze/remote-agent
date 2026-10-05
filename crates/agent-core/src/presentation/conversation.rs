@@ -33,6 +33,7 @@ impl Snapshot {
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct RenderedConversation {
     pub source: Arc<models::Thread>,
+    provider_name: Option<String>,
     pending: PendingItems,
     pub turns: Vec<Arc<RenderedTurn>>,
     pub queued: Vec<Arc<RenderedItem>>,
@@ -285,7 +286,7 @@ impl RenderedItem {
     }
     fn native(
         item: &Arc<models::Item>,
-        provider: Option<crate::session::ProviderKind>,
+        provider: Option<&str>,
         deferred: bool,
         previous: Option<&Arc<Self>>,
     ) -> Arc<Self> {
@@ -350,6 +351,17 @@ pub fn project_conversation(
     source: Arc<models::Thread>,
     previous: &Option<Arc<RenderedConversation>>,
 ) -> Arc<RenderedConversation> {
+    let provider_name = source.provider.as_ref().map(|provider| {
+        snapshot
+            .provider_instances
+            .iter()
+            .find(|instance| instance.reference == *provider)
+            .map_or_else(
+                || provider.driver.as_str(),
+                |instance| instance.display_name.as_str(),
+            )
+            .to_owned()
+    });
     let draft_key = source
         .id
         .as_ref()
@@ -365,6 +377,7 @@ pub fn project_conversation(
     let requests = &source.requests;
     if let Some(previous) = previous
         && Arc::ptr_eq(&source, &previous.source)
+        && provider_name == previous.provider_name
         && pending
             .iter()
             .map(|(id, pending)| (id, Arc::as_ptr(pending)))
@@ -378,7 +391,7 @@ pub fn project_conversation(
     let previous = previous.as_ref().filter(|old| source.id == old.source.id);
     let cached: HashMap<_, _> = previous
         .filter(|old| {
-            source.provider == old.source.provider && source.capabilities == old.source.capabilities
+            provider_name == old.provider_name && source.capabilities == old.source.capabilities
         })
         .into_iter()
         .flat_map(|old| &old.turns)
@@ -416,7 +429,7 @@ pub fn project_conversation(
             }
             render_turn(
                 source.id.as_ref(),
-                source.provider,
+                provider_name.as_deref(),
                 source.capabilities.unwrap_or_default().fork,
                 turn.clone(),
                 pending.cloned().collect(),
@@ -460,6 +473,7 @@ pub fn project_conversation(
         .collect();
     Arc::new(RenderedConversation {
         source,
+        provider_name,
         pending,
         turns,
         queued,
@@ -469,7 +483,7 @@ pub fn project_conversation(
 
 fn render_turn(
     session: Option<&crate::session::SessionRef>,
-    provider: Option<crate::session::ProviderKind>,
+    provider: Option<&str>,
     supports_fork: bool,
     source: Arc<models::Turn>,
     pending: PendingItems,
@@ -957,7 +971,7 @@ mod tests {
     }
 
     fn fixture() -> Snapshot {
-        let thread = serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"turns":[{"id":"done","status":"completed","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"earlier","phase":"unknown"}}}}}]},{"id":"live","status":"running","items":[{"id":"user","status":"unknown","clientInputId":"accepted","body":{"inline":{"body":{"userMessage":{"text":"question","content":[]}}}}},{"id":"command","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":"/fixture","exitCode":null}}}}},{"id":"stream","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"hello","phase":"unknown"}}}}}]}]})).unwrap();
+        let thread = serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[{"id":"done","status":"completed","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"earlier","phase":"unknown"}}}}}]},{"id":"live","status":"running","items":[{"id":"user","status":"unknown","clientInputId":"accepted","body":{"inline":{"body":{"userMessage":{"text":"question","content":[]}}}}},{"id":"command","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"pwd","cwd":null,"output":"/fixture","exitCode":null}}}}},{"id":"stream","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"hello","phase":"unknown"}}}}}]}]})).unwrap();
         Snapshot {
             conversations: Arc::new(
                 [(
@@ -1081,7 +1095,7 @@ mod tests {
             );
             let projected = render_turn(
                 Some(&crate::session::SessionRef::new("session".into()).unwrap()),
-                Some(crate::session::ProviderKind::Codex),
+                Some("Codex"),
                 false,
                 Arc::new(models::Turn {
                     id: "turn".into(),
@@ -1106,25 +1120,43 @@ mod tests {
     #[test]
     fn conversation_metadata_changes_refresh_labels_and_actions_on_unchanged_turns() {
         let source: models::Thread = serde_json::from_value(json!({
-            "id":{"id":"conversation"}, "provider":"codex", "capabilities":{"activeSteering":false,"fork":false,"rename":false,"modelChange":false},
+            "id":{"id":"conversation"}, "provider":{"instanceId":"codex","driver":"codex"}, "capabilities":{"activeSteering":false,"fork":false,"rename":false,"modelChange":false},
             "turns":[{"id":"done","status":"completed","items":[{"id":"answer","body":{"inline":{"body":{"assistantText":{"text":"saved","phase":"final"}}}}}]}]
         })).unwrap();
-        let before = project_conversation(&Snapshot::default(), Arc::new(source.clone()), &None);
+        let snapshot = Snapshot {
+            provider_instances: crate::test_support::instances(),
+            ..Default::default()
+        };
+        let before = project_conversation(&snapshot, Arc::new(source.clone()), &None);
         for provider in [
-            crate::session::ProviderKind::Codex,
-            crate::session::ProviderKind::Claude,
+            "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
+            "claude"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
         ] {
             for supports_fork in [false, true] {
                 let mut source = source.clone();
-                source.provider = Some(provider);
+                source.provider = Some(agent_protocol::providers::ProviderRef {
+                    driver: if provider.as_str() == "codex" {
+                        "codex"
+                    } else {
+                        "claudeAgent"
+                    }
+                    .parse()
+                    .unwrap(),
+                    instance_id: provider.clone(),
+                });
                 source.capabilities.as_mut().unwrap().fork = supports_fork;
-                let after = project_conversation(
-                    &Snapshot::default(),
-                    Arc::new(source),
-                    &Some(before.clone()),
-                );
+                let after =
+                    project_conversation(&snapshot, Arc::new(source), &Some(before.clone()));
                 assert!(Arc::ptr_eq(&before.turns[0].source, &after.turns[0].source));
-                let title = if provider == crate::session::ProviderKind::Codex {
+                let title = if provider
+                    == "codex"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap()
+                {
                     "Codex"
                 } else {
                     "Claude"
@@ -1233,7 +1265,7 @@ mod tests {
     #[test]
     fn flat_row_ids_distinguish_repeated_items_and_turns() {
         let source = Arc::new(
-            serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"turns":[{"id":"first","status":"completed","items":[{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"old","phase":"unknown"}}}}},{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"final"}}}}}]},{"id":"second","status":"completed","items":[{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"another turn","phase":"unknown"}}}}}]}]}))
+            serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[{"id":"first","status":"completed","items":[{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"old","phase":"unknown"}}}}},{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"new","phase":"final"}}}}}]},{"id":"second","status":"completed","items":[{"id":"same","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"another turn","phase":"unknown"}}}}}]}]}))
             .unwrap(),
         );
         let rendered = project_conversation(&Snapshot::default(), source, &None);
@@ -1281,7 +1313,7 @@ mod tests {
     #[test]
     fn summaries_show_input_and_answer_with_activity_loaded_on_expansion() {
         let source = Arc::new(serde_json::from_value(json!({
-            "provider":"codex","id":{"id":"thread"},"turns":[{
+            "provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[{
                 "id":"turn","status":"completed","itemsSummary":true,"items":[
                     {"id":"user","body":{"inline":{"body":{"userMessage":{"text":"question","content":[]}}}}},
                     {"id":"answer","body":{"inline":{"body":{"assistantText":{"text":"answer","phase":"final"}}}}}
@@ -1319,7 +1351,7 @@ mod tests {
                     [(
                         agent_protocol::session::SessionRef { id: "thread".into() },
                         Arc::new(
-                            serde_json::from_value(json!({"provider":"codex","id":{"id":"thread"},"capabilities":{"activeSteering":true,"fork":false,"rename":false,"modelChange":false},"turns":[{"id":"before","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"before","phase":"unknown"}}}}}]}]}))
+                            serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"capabilities":{"activeSteering":true,"fork":false,"rename":false,"modelChange":false},"turns":[{"id":"before","status":status,"items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"before","phase":"unknown"}}}}}]}]}))
                             .unwrap(),
                         ),
                     )]
@@ -1399,7 +1431,10 @@ mod tests {
                         id: "thread".into(),
                     },
                     Arc::new(models::Thread {
-                        provider: Some(agent_protocol::session::ProviderKind::Codex),
+                        provider: Some(agent_protocol::providers::ProviderRef {
+                            instance_id: "codex".parse().unwrap(),
+                            driver: "codex".parse().unwrap(),
+                        }),
                         id: Some(agent_protocol::session::SessionRef {
                             id: "thread".into(),
                         }),

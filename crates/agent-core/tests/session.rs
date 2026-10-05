@@ -9,7 +9,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 fn conversation() -> Thread {
-    serde_json::from_value(json!({"provider":"codex","id":{"id":"native"},"turns":[{"id":"run","status":"running","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"partial","phase":"unknown"}}}}}]}]})).unwrap()
+    serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"native"},"turns":[{"id":"run","status":"running","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"partial","phase":"unknown"}}}}}]}]})).unwrap()
 }
 
 #[rstest::rstest]
@@ -87,7 +87,7 @@ fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
     use agent_core::state::operations::ReadThread;
     use agent_core::state::reduce;
     use agent_protocol::session::OpenedSession;
-    let cached: Thread = serde_json::from_value(json!({"provider":"codex","id":{"id":"native"},"turns":[{"id":"A","status":"completed","items":[{"id":"past","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"cached history","phase":"unknown"}}}}}]},{"id":"stale","status":"running"}]})).unwrap();
+    let cached: Thread = serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"native"},"turns":[{"id":"A","status":"completed","items":[{"id":"past","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"cached history","phase":"unknown"}}}}}]},{"id":"stale","status":"running"}]})).unwrap();
     let mut snapshot = Snapshot::default();
     Arc::make_mut(&mut snapshot.conversations).insert(
         agent_protocol::session::SessionRef {
@@ -96,7 +96,7 @@ fn unavailable_history_preserves_live_turn_requests_and_subsequent_text() {
         Arc::new(cached),
     );
     let subscription = uuid::Uuid::new_v4();
-    let response = serde_json::from_value(json!({"thread":{"provider":"codex","id":{"id":"native"},"status":"running","historyReadState":{"type":"unavailable"},"turns":[{"id":"B","status":"running","items":[{"id":"latest","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"live","phase":"unknown"}}}}}]}],"requests":{"approval":{"id":"approval","target":{"turn":{"turnId":"B","itemId":null}},"delivery":"awaiting","body":{"approval":{"kind":"command","description":"run","details":"","choices":[]}}}}}})).unwrap();
+    let response = serde_json::from_value(json!({"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"native"},"status":"running","historyReadState":{"type":"unavailable"},"turns":[{"id":"B","status":"running","items":[{"id":"latest","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"live","phase":"unknown"}}}}}]}],"requests":{"approval":{"id":"approval","target":{"turn":{"turnId":"B","itemId":null}},"delivery":"awaiting","body":{"approval":{"kind":"command","description":"run","details":"","choices":[]}}}}}})).unwrap();
     ReadThread::new(agent_protocol::session::SessionRef {
         id: "native".into(),
     })
@@ -384,7 +384,9 @@ fn local_storage_keeps_user_work_without_host_caches() {
             is_image: true,
         }],
         model: Some(agent_protocol::models::ModelRef {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             id: "chosen-model".into(),
         }),
         ..Default::default()

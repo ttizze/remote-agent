@@ -11,7 +11,7 @@ impl Draft {
     pub(super) fn submission(
         &self,
         thread_id: crate::session::SessionRef,
-        provider: crate::session::ProviderKind,
+        provider: crate::session::ProviderInstanceId,
         client_user_message_id: agent_protocol::ids::ClientInputId,
     ) -> Submission {
         let mut input = Vec::new();
@@ -23,7 +23,7 @@ impl Draft {
         input.extend(
             self.invocations
                 .iter()
-                .filter(|item| item.provider == provider && item.is_in(&self.text))
+                .filter(|item| item.instance_id == provider && item.is_in(&self.text))
                 .map(Invocation::input),
         );
         input.extend(self.attachments.iter().map(|attachment| {
@@ -49,7 +49,10 @@ impl Draft {
     }
 }
 
-fn draft_from_submission(input: &Submission, provider: crate::session::ProviderKind) -> Draft {
+fn draft_from_submission(
+    input: &Submission,
+    provider: crate::session::ProviderInstanceId,
+) -> Draft {
     let mut draft = Draft {
         model: input.model.clone(),
         effort: input.effort.clone(),
@@ -61,7 +64,7 @@ fn draft_from_submission(input: &Submission, provider: crate::session::ProviderK
         match part {
             Input::Text { text } => texts.push(text.as_str()),
             Input::Skill { name, path } => draft.invocations.push(Invocation {
-                provider,
+                instance_id: provider.clone(),
                 kind: InvocationKind::Skill,
                 name: name.clone(),
                 path: path.clone(),
@@ -70,7 +73,7 @@ fn draft_from_submission(input: &Submission, provider: crate::session::ProviderK
                 if path.starts_with("plugin://") || path.starts_with("app://") =>
             {
                 draft.invocations.push(Invocation {
-                    provider,
+                    instance_id: provider.clone(),
                     kind: InvocationKind::Plugin,
                     name: name.clone(),
                     path: path.clone(),
@@ -295,10 +298,7 @@ pub(super) fn reconcile(snapshot: &mut Snapshot) {
 mod tests {
     use super::*;
     use crate::state::operations::{Operation, SaveQueuedInput};
-    use agent_protocol::{
-        queue::QueueEntry,
-        session::{ProviderKind, SessionRef},
-    };
+    use agent_protocol::{queue::QueueEntry, session::SessionRef};
 
     fn state(text: &str) -> (Snapshot, SessionRef) {
         let session = SessionRef {
@@ -320,20 +320,26 @@ mod tests {
             ],
             invocations: vec![
                 Invocation {
-                    provider: ProviderKind::Codex,
+                    instance_id: "codex"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap(),
                     kind: InvocationKind::Skill,
                     name: "review".into(),
                     path: "/isolated/review/SKILL.md".into(),
                 },
                 Invocation {
-                    provider: ProviderKind::Codex,
+                    instance_id: "codex"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap(),
                     kind: InvocationKind::Plugin,
                     name: "repo".into(),
                     path: "app://repo".into(),
                 },
             ],
             model: Some(crate::models::ModelRef {
-                provider: ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "queue-model".into(),
             }),
             effort: Some("high".into()),
@@ -351,11 +357,16 @@ mod tests {
             session.clone(),
             Arc::new(crate::models::Thread {
                 id: Some(session.clone()),
-                provider: Some(ProviderKind::Codex),
+                provider: Some(agent_protocol::providers::ProviderRef {
+                    instance_id: "codex".parse().unwrap(),
+                    driver: "codex".parse().unwrap(),
+                }),
                 queued_inputs: vec![QueueEntry {
                     submission: original.submission(
                         session.clone(),
-                        ProviderKind::Codex,
+                        "codex"
+                            .parse::<crate::session::ProviderInstanceId>()
+                            .unwrap(),
                         "waiting".into(),
                     ),
                     delivery: SubmissionDelivery::Queued,
@@ -432,7 +443,13 @@ mod tests {
         assert_eq!(draft.effort.as_deref(), Some("high"));
         assert_eq!(draft.service_tier.as_deref(), Some("fast"));
         assert_eq!(
-            draft.submission(session.clone(), ProviderKind::Codex, "waiting".into()),
+            draft.submission(
+                session.clone(),
+                "codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
+                "waiting".into()
+            ),
             queued[0].submission
         );
         set_draft_text(&mut snapshot, key.clone(), "edited".into());
@@ -466,7 +483,13 @@ mod tests {
             is_image: true,
         }];
         draft.effort = Some("low".into());
-        let input = draft.submission(session.clone(), ProviderKind::Codex, "waiting".into());
+        let input = draft.submission(
+            session.clone(),
+            "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
+            "waiting".into(),
+        );
         assert_eq!(input.input.len(), 3);
         assert_eq!(
             input.input[1],
@@ -616,7 +639,9 @@ mod tests {
         let mut save = SaveQueuedInput {
             submission: snapshot.drafts[&key].submission(
                 session,
-                ProviderKind::Codex,
+                "codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
                 "waiting".into(),
             ),
             draft_key: key.clone(),
@@ -676,7 +701,9 @@ mod tests {
         let save = SaveQueuedInput {
             submission: snapshot.drafts[&key].submission(
                 session.clone(),
-                ProviderKind::Codex,
+                "codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
                 "waiting".into(),
             ),
             draft_key: key.clone(),
@@ -700,7 +727,9 @@ mod tests {
         let save = SaveQueuedInput {
             submission: snapshot.drafts[&key].submission(
                 session,
-                ProviderKind::Codex,
+                "codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
                 "waiting".into(),
             ),
             draft_key: key.clone(),
@@ -719,7 +748,9 @@ mod tests {
         let (snapshot, session) = state("");
         let original = draft_from_submission(
             &snapshot.conversations[&session].queued_inputs[0].submission,
-            ProviderKind::Codex,
+            "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
         );
         let ordinary = Draft {
             effort: Some("ordinary-effort".into()),

@@ -116,14 +116,14 @@ impl Fixture {
                             json!({"data":[],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false})
                         }
                         "host/account/list" => json!({"accounts":[],"selected":{}}),
-                        "host/model/list" => json!({"data":[],"nextCursor":null}),
+                        "host/model/list" => json!({"data":[],"instances":[],"nextCursor":null}),
                         "host/session/open" => {
                             let items = if automatic_reads {
                                 (0..count).map(|i| item(i, false)).collect::<Vec<_>>()
                             } else {
                                 vec![deferred_command("")]
                             };
-                            json!({"session":request["params"]["session"],"subscriptionId":subscription,"response":{"thread":{"provider":"codex","id":{"id":"A"},"turns":[{"id":"turn","status":"running","items":items}]}}})
+                            json!({"session":request["params"]["session"],"subscriptionId":subscription,"response":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"A"},"turns":[{"id":"turn","status":"running","items":items}]}}})
                         }
                         "host/session/item/read" if automatic_reads => {
                             let id: usize = request["params"]["itemId"]

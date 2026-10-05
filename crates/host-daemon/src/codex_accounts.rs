@@ -62,6 +62,7 @@ impl Helper {
 // Only these helpers have separate credential stores. All thread RPCs continue
 // through the original App Server and its original CODEX_HOME.
 pub(crate) struct Accounts {
+    instance_id: agent_protocol::session::ProviderInstanceId,
     directory: PathBuf,
     default_home: PathBuf,
     config: AppServerConfig,
@@ -75,6 +76,7 @@ pub(crate) struct Accounts {
 
 impl Accounts {
     pub(crate) async fn load(
+        instance_id: agent_protocol::session::ProviderInstanceId,
         directory: PathBuf,
         config: AppServerConfig,
         primary: &CodexAppServer,
@@ -96,6 +98,7 @@ impl Accounts {
         .await
         .map_err(|error| error.to_string())??;
         let mut accounts = Self {
+            instance_id,
             directory,
             default_home: primary.initialize_response().codex_home.clone(),
             config,
@@ -233,14 +236,14 @@ impl Accounts {
                 .iter()
                 .map(|account| op::Account {
                     id: account.id.clone(),
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    instance_id: self.instance_id.clone(),
                     email: account.email.clone(),
                     plan_type: Some(account.plan_type.clone()),
                     usage: None,
                 })
                 .collect(),
             selected: selected
-                .map(|id| (agent_protocol::session::ProviderKind::Codex, id.to_owned()))
+                .map(|id| (self.instance_id.clone(), id.to_owned()))
                 .into_iter()
                 .collect(),
             error: self.restoration_error.borrow().clone(),
@@ -256,7 +259,7 @@ impl Accounts {
             AccountCommand::Select { id } => {
                 self.select(primary, &id).await?;
                 Ok(op::AccountSelection {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    instance_id: self.instance_id.clone(),
                     selected_id: id,
                     persistence_error: self.save().await.err(),
                 }
@@ -341,7 +344,7 @@ impl Accounts {
                     .to_owned();
                 let mut result = result;
                 result["requiresCodeSubmission"] = false.into();
-                result["provider"] = json!(agent_protocol::session::ProviderKind::Codex);
+                result["instanceId"] = json!(self.instance_id.clone());
                 let response: AccountLogin = serde_json::from_value(result)
                     .map_err(|_| "ログインを開始できませんでした。")?;
                 self.login = Some(Login {

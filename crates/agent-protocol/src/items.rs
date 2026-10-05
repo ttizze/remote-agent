@@ -1,10 +1,5 @@
 //! Item identity and delivery size are independent of its typed body.
-use crate::{
-    execution::*,
-    ids::*,
-    requests::ToolContent,
-    session::{ProviderKind, SessionRef},
-};
+use crate::{execution::*, ids::*, requests::ToolContent, session::SessionRef};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -145,7 +140,7 @@ pub enum ItemBody {
     },
     Sleep {},
     Custom {
-        provider: ProviderKind,
+        driver: crate::providers::ProviderDriver,
         kind: String,
         #[serde(with = "crate::protocol::json")]
         value: Value,

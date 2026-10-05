@@ -7,7 +7,6 @@
       "historyReadState": {
         "type": "complete"
       },
-      "provider": "codex",
       "id": {
         "id": "fixture-thread-1"
       },
@@ -316,6 +315,10 @@
       },
       "session": {
         "id": "fixture-thread-1"
+      },
+      "provider": {
+        "instanceId": "codex",
+        "driver": "codex"
       }
     }
   },
@@ -323,7 +326,6 @@
     "data": [
       {
         "cwd": "/fixture/workspace",
-        "provider": "codex",
         "id": {
           "id": "fixture-thread-1"
         },
@@ -340,6 +342,10 @@
           "fork": true,
           "rename": true,
           "modelChange": true
+        },
+        "provider": {
+          "instanceId": "codex",
+          "driver": "codex"
         }
       }
     ],

@@ -22,7 +22,7 @@ async fn call(
     mut params: Value,
 ) -> Value {
     if method.starts_with("host/account/") && method != "host/account/list" {
-        params["provider"] = json!("codex");
+        params["instanceId"] = json!("codex");
     }
     let reply = service
         .dispatch(
@@ -99,9 +99,10 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         std::fs::write(home.join("account-fixture.json"), r#"{"type":"chatgpt","email":"desktop@example.invalid","planType":"plus","accountId":"desktop"}"#).unwrap();
         let config = AppServerConfig { codex_home: Some(home.clone()), ..codex_fixture::config(&home) };
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native"))).unwrap();
+
         let accounts_dir = directory.path().join("accounts");
-        service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
+        let service = HostRpcService::with_codex(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native")), Some((accounts_dir.clone(), config.clone()))).await.unwrap();
+
         let mut session = service.open_session();
         let list = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(list["result"]["accounts"][0]["email"], "desktop@example.invalid");
@@ -129,19 +130,19 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         let usage = usage.await.unwrap();
         assert_eq!(usage["result"]["windows"][0]["remainingPercent"], 72);
         assert_eq!(usage["result"]["windows"][1]["remainingPercent"], 86);
-        let started = call(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":home})).await;
+        let started = call(&service, &mut session, "host/session/create", json!({"instanceId":"codex","cwd":home})).await;
         let thread = started["result"]["thread"]["id"]["id"].as_str().unwrap();
         completed_turn(&service, &mut session, thread, "before switch").await;
         let before = call(&service, &mut session, "host/session/open", json!({"session":{"id":thread},"limit":5})).await;
         assert!(before.get("error").is_none(), "{before}");
         assert_eq!(before["result"]["thread"]["turns"].as_array().unwrap().len(), 1);
-        let canceled = call(&service, &mut session, "host/account/login/start", json!({"provider":"codex"})).await;
+        let canceled = call(&service, &mut session, "host/account/login/start", json!({"instanceId":"codex"})).await;
         assert!(call(&service, &mut session, "host/account/login/cancel", json!({"loginId":canceled["result"]["loginId"]})).await.get("error").is_none());
         // Dismissing an already discarded login must still allow another attempt.
         assert!(call(&service, &mut session, "host/account/login/cancel", json!({"loginId":canceled["result"]["loginId"]})).await.get("error").is_none());
         let list = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(list["result"]["accounts"].as_array().unwrap().len(), 1);
-        let login = call(&service, &mut session, "host/account/login/start", json!({"provider":"codex"})).await;
+        let login = call(&service, &mut session, "host/account/login/start", json!({"instanceId":"codex"})).await;
         assert_eq!(login["result"]["userCode"], "TEST-CODE");
         let status = loop {
             let status = call(&service, &mut session, "host/account/login/status", json!({"loginId":login["result"]["loginId"]})).await;
@@ -178,8 +179,9 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         drop(session); drop(service);
         server.shutdown().await.unwrap();
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native"))).unwrap();
-        service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
+        let service = HostRpcService::with_codex(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native")),
+            Some((accounts_dir.clone(), config.clone()))).await.unwrap();
+
         let mut session = service.open_session();
         assert_eq!(rpc(&server, "fixture/account/current", json!({})).await["accountId"], "second");
         assert_eq!(server.initialize_response().codex_home, dunce::canonicalize(&home).unwrap(), "account selection must retain the conversation configuration home");
@@ -194,8 +196,9 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         server.shutdown().await.unwrap();
         std::fs::remove_file(home.join("account-fixture.json")).unwrap();
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native"))).unwrap();
-        service.enable_accounts(accounts_dir, config).await.unwrap();
+        let service = HostRpcService::with_codex(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native")),
+            Some((accounts_dir, config))).await.unwrap();
+
         let mut session = service.open_session();
         let accounts = call(&service, &mut session, "host/account/list", json!({})).await;
         assert!(accounts["result"]["selected"]["codex"].is_null());
@@ -203,7 +206,7 @@ async fn account_switch_keeps_shared_history_and_restores_selection_without_expo
         assert!(call(&service, &mut session, "host/session/list", json!({})).await.get("error").is_none());
         assert_eq!(call(&service, &mut session, "host/session/submit", json!({"threadId":{"id":thread},"clientUserMessageId":"unavailable-account","input":[{"text":{"text":"must not use a different account"}}]})).await["error"]["code"], "account_unavailable");
         assert_eq!(call(&service, &mut session, "host/account/select", json!({"accountId":second})).await["result"]["selectedId"], second);
-        let started = call(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":home})).await;
+        let started = call(&service, &mut session, "host/session/create", json!({"instanceId":"codex","cwd":home})).await;
         assert!(started.get("error").is_none(), "{started}");
         completed_turn(&service, &mut session, started["result"]["thread"]["id"]["id"].as_str().unwrap(), "recovered account").await;
         let logged_out = call(&service, &mut session, "host/account/logout", json!({"accountId":second})).await;
@@ -226,22 +229,21 @@ async fn helper_initialization_does_not_block_completed_turns() {
         let home = directory.path();
         let config = codex_fixture::config(home);
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Ok(server.clone()),
             ProjectStore::new(home.join("bex-worktrees.json")),
             Some(home.join("codex-native")),
+            Some((home.join("accounts"), config)),
         )
+        .await
         .unwrap();
-        service
-            .enable_accounts(home.join("accounts"), config)
-            .await
-            .unwrap();
+
         let mut session = service.open_session();
         let started = call(
             &service,
             &mut session,
             "host/session/create",
-            json!({"provider":"codex","cwd":home}),
+            json!({"instanceId":"codex","cwd":home}),
         )
         .await;
         let thread = started["result"]["thread"]["id"]["id"].as_str().unwrap();
@@ -263,7 +265,7 @@ async fn helper_initialization_does_not_block_completed_turns() {
                 &login_service,
                 &mut login_session,
                 "host/account/login/start",
-                json!({"provider":"codex"}),
+                json!({"instanceId":"codex"}),
             )
             .await
         });
@@ -313,8 +315,9 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         let config = AppServerConfig { codex_home: Some(home.clone()), ..codex_fixture::config(&home) };
         let accounts_dir = directory.path().join("accounts");
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native"))).unwrap();
-        service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
+        let service = HostRpcService::with_codex(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native")),
+            Some((accounts_dir.clone(), config.clone()))).await.unwrap();
+
         let mut session = service.open_session();
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(listed["result"]["selected"]["codex"], "desktop");
@@ -331,8 +334,9 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         drop(session); drop(service);
         server.shutdown().await.unwrap();
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native"))).unwrap();
-        service.enable_accounts(accounts_dir.clone(), config.clone()).await.unwrap();
+        let service = HostRpcService::with_codex(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native")),
+            Some((accounts_dir.clone(), config.clone()))).await.unwrap();
+
         let mut session = service.open_session();
         assert_eq!(call(&service, &mut session, "host/account/list", json!({})).await["result"]["selected"]["codex"], "desktop");
         let invalid = call(&service, &mut session, "host/account/logout", json!({"accountId":"missing"})).await;
@@ -358,13 +362,14 @@ async fn native_accounts_restore_selection_and_remain_signed_out_after_logout() 
         drop(session); drop(service);
         server.shutdown().await.unwrap();
         let server = Arc::new(CodexAppServer::spawn(config.clone()).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native"))).unwrap();
-        service.enable_accounts(accounts_dir.clone(), config).await.unwrap();
+        let service = HostRpcService::with_codex(Ok(server.clone()), ProjectStore::new(home.join("bex-worktrees.json")),Some(home.join("codex-native")),
+            Some((accounts_dir.clone(), config))).await.unwrap();
+
         let mut session = service.open_session();
         let listed = call(&service, &mut session, "host/account/list", json!({})).await;
         assert_eq!(listed["result"]["accounts"], json!([]));
         assert!(listed["result"]["selected"]["codex"].is_null());
-        let login = call(&service, &mut session, "host/account/login/start", json!({"provider":"codex"})).await;
+        let login = call(&service, &mut session, "host/account/login/start", json!({"instanceId":"codex"})).await;
         let status = loop {
             let status = call(&service, &mut session, "host/account/login/status", json!({"loginId":login["result"]["loginId"]})).await;
             assert!(status.get("error").is_none(), "{status}");

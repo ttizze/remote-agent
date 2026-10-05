@@ -1,11 +1,11 @@
 use super::*;
 pub use agent_protocol::permissions::{ReadPermissionSettings, UpdatePermissionSettings};
-use agent_protocol::{permissions::PermissionSettings, session::ProviderKind};
+use agent_protocol::{permissions::PermissionSettings, session::ProviderInstanceId};
 
 /// A connection-local read cache. The provider's file is the only saved setting.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PermissionSettingsState {
-    pub provider: ProviderKind,
+    pub instance_id: ProviderInstanceId,
     /// None while fetching; an error never masquerades as saved settings.
     pub result: Option<Result<PermissionSettings, String>>,
 }
@@ -15,14 +15,14 @@ macro_rules! permission_operation {
         impl Operation for $ty {
             fn key(&self) -> Option<OperationKey> {
                 Some(OperationKey::Permissions {
-                    provider: self.provider,
+                    provider: self.instance_id.clone(),
                 })
             }
             no_input!();
             type Output = Result<PermissionSettings, String>;
             fn prepare(&mut self, snapshot: &mut Snapshot) -> Result<(), String> {
                 snapshot.permission_settings = Some(Arc::new(PermissionSettingsState {
-                    provider: self.provider,
+                    instance_id: self.instance_id.clone(),
                     result: None,
                 }));
                 Ok(())
@@ -38,10 +38,10 @@ macro_rules! permission_operation {
                 if snapshot
                     .permission_settings
                     .as_ref()
-                    .is_some_and(|state| state.provider == self.provider)
+                    .is_some_and(|state| state.instance_id == self.instance_id)
                 {
                     snapshot.permission_settings = Some(Arc::new(PermissionSettingsState {
-                        provider: self.provider,
+                        instance_id: self.instance_id,
                         result: Some(output),
                     }));
                 }

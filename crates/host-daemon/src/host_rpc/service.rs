@@ -1,4 +1,4 @@
-use agent_protocol::session::ProviderKind;
+use agent_protocol::session::{ProviderInstanceId, ProviderRef};
 use std::sync::{Arc, OnceLock};
 
 use agent_protocol::operations as op;
@@ -15,7 +15,9 @@ use serde::Serialize;
 use super::agent::{Agent, Identity, session_pages};
 use super::conversations::{Conversations, NativeIdentity};
 use futures_util::{StreamExt, TryStreamExt};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+mod providers;
+use providers::Registered;
 
 use super::routing::{HostReply, HostSession, SessionId, SessionRouter};
 use crate::ProjectStore;
@@ -78,19 +80,27 @@ pub struct HostRpcService {
     inner: Arc<ServiceInner>,
 }
 
+// A route and its native resource are resolved together. Reconfiguration must
+// never send the resulting native ID through a newly installed resource.
+struct PreparedInput {
+    native: NativeIdentity,
+    agent: Arc<dyn Agent>,
+    route: super::submission::SubmissionTarget,
+    reload: bool,
+}
+
 struct ServiceInner {
     browser: OnceLock<Arc<crate::browser::Browser>>,
-    agents: std::sync::RwLock<HashMap<ProviderKind, Arc<dyn Agent>>>,
-    startup_errors: std::sync::RwLock<HashMap<ProviderKind, Failure>>,
-    codex: Arc<super::codex::Codex>,
+    instances: std::sync::RwLock<BTreeMap<ProviderInstanceId, Registered>>,
+    provider_access: tokio::sync::Mutex<()>,
+    account_directory: OnceLock<std::path::PathBuf>,
     projects: ProjectStore,
     router: SessionRouter,
     conversations: Arc<Conversations>,
     initial_import: OnceLock<()>,
     catalog_import: Arc<tokio::sync::Mutex<()>>,
-    catalog_errors: std::sync::RwLock<HashMap<ProviderKind, Failure>>,
-    body_imports: std::sync::Mutex<HashMap<ProviderKind, bool>>,
-    event_pumps: std::sync::Mutex<std::collections::HashSet<ProviderKind>>,
+    catalog_errors: std::sync::RwLock<HashMap<ProviderInstanceId, Failure>>,
+    body_imports: std::sync::Mutex<HashMap<ProviderInstanceId, bool>>,
     files: crate::workspace_files::WorkspaceFiles,
     worktrees: crate::worktrees::Worktrees,
     worktree_access: tokio::sync::RwLock<()>,
@@ -100,26 +110,22 @@ struct ServiceInner {
 }
 
 impl HostRpcService {
-    pub fn new(
-        codex: Result<Arc<CodexAppServer>, String>,
-        projects: ProjectStore,
-        codex_home: Option<std::path::PathBuf>,
-    ) -> anyhow::Result<Self> {
+    pub fn new(projects: ProjectStore) -> anyhow::Result<Self> {
         let conversations = Arc::new(Conversations::open(
             &projects.path().with_file_name("bex-conversations.sqlite"),
         )?);
         let files = crate::workspace_files::WorkspaceFiles::new(
             projects.path().with_file_name("bex-attachments"),
         );
-        let adapter = Arc::new(super::codex::Codex::new(codex.clone(), codex_home));
-        let agents = HashMap::from([(ProviderKind::Codex, adapter.clone() as Arc<dyn Agent>)]);
         Ok(Self {
             inner: Arc::new(ServiceInner {
                 browser: OnceLock::new(),
-                agents: std::sync::RwLock::new(agents),
-                startup_errors: Default::default(),
-                dictation: crate::dictation::Dictation::new(codex),
-                codex: adapter,
+                instances: Default::default(),
+                provider_access: Default::default(),
+                account_directory: Default::default(),
+                dictation: crate::dictation::Dictation::new(Err(
+                    "no Codex instance is configured".into()
+                )),
                 worktrees: crate::worktrees::Worktrees::new(projects.path()),
                 worktree_access: tokio::sync::RwLock::new(()),
                 permission_settings_access: Default::default(),
@@ -131,37 +137,100 @@ impl HostRpcService {
                 catalog_import: Default::default(),
                 catalog_errors: Default::default(),
                 body_imports: Default::default(),
-                event_pumps: Default::default(),
                 files,
             }),
         })
     }
 
-    fn storage_scope(&self, provider: ProviderKind) -> Result<String, Failure> {
-        native_storage_scope(&canonical_storage_path(
-            self.agent(provider)?.storage_directory(),
-        ))
-        .map_err(|error| Failure::new("provider_storage_unavailable", error))
+    /// Inject a native peer for fixtures that test execution independently of process startup.
+    pub async fn with_codex(
+        process: Result<Arc<CodexAppServer>, String>,
+        projects: ProjectStore,
+        home: Option<std::path::PathBuf>,
+        accounts: Option<(std::path::PathBuf, codex_app_server::AppServerConfig)>,
+    ) -> anyhow::Result<Self> {
+        let service = Self::new(projects)?;
+        let reference = ProviderRef {
+            instance_id: "codex".parse()?,
+            driver: "codex".parse()?,
+        };
+        let home = process
+            .as_ref()
+            .ok()
+            .map(|server| server.initialize_response().codex_home.clone())
+            .or(home);
+        let adapter = Arc::new(super::codex::Codex::new(
+            reference.clone(),
+            process.clone(),
+            home,
+        ));
+        if let Some((directory, config)) = accounts {
+            adapter
+                .enable_accounts(directory, config)
+                .await
+                .map_err(anyhow::Error::msg)?;
+        }
+        let config = providers::default_config("codex", None, None)?;
+        service.inner.instances.write().unwrap().insert(
+            reference.instance_id,
+            Registered {
+                generation: uuid::Uuid::new_v4(),
+                config,
+                backend: Ok(adapter),
+            },
+        );
+        service.inner.dictation.replace_backend(process);
+        Ok(service)
+    }
+
+    #[cfg(test)]
+    fn storage_scope(&self, provider: &ProviderInstanceId) -> Result<String, Failure> {
+        native_storage_scope(self.agent(provider)?.storage_directory())
+            .map_err(|error| Failure::new("provider_storage_unavailable", error))
     }
 
     fn native_session(
         &self,
         target: &agent_protocol::session::SessionRef,
-    ) -> Result<NativeIdentity, Failure> {
+    ) -> Result<(NativeIdentity, Arc<dyn Agent>), Failure> {
         let provider = self
             .inner
             .conversations
             .provider(target)
             .map_err(|error| Failure::new("invalid_session", error))?;
-        self.inner
+        let agent = self.agent(&provider.instance_id)?;
+        if agent.reference() != &provider {
+            return Err(Failure::new(
+                "provider_instance_changed",
+                "conversation belongs to another driver configuration",
+            ));
+        }
+        let scope = native_storage_scope(agent.storage_directory())
+            .map_err(|error| Failure::new("provider_storage_unavailable", error))?;
+        let native = self
+            .inner
             .conversations
-            .native(target, &self.storage_scope(provider)?)
-            .map_err(|error| Failure::new("invalid_session", error))
+            .native(target, &scope)
+            .map_err(|error| Failure::new("invalid_session", error))?;
+        Ok((native, agent))
+    }
+
+    fn conversation_capabilities(
+        &self,
+        target: &agent_protocol::session::SessionRef,
+    ) -> agent_protocol::session::Capabilities {
+        let native = self
+            .native_session(target)
+            .ok()
+            .map(|(_, agent)| agent.capabilities())
+            .unwrap_or_default();
+        host_capabilities(native)
     }
 
     fn normalize_item(
         &self,
-        provider: ProviderKind,
+        reference: &ProviderRef,
+        scope: &str,
         item: &mut agent_protocol::models::Item,
     ) -> Result<(), Failure> {
         if let agent_protocol::models::ItemBody::Subagent {
@@ -181,10 +250,10 @@ impl HostRpcService {
                     .conversations
                     .bind(
                         &NativeIdentity {
-                            provider,
+                            provider: reference.clone(),
                             id: native.id.clone(),
                         },
-                        &self.storage_scope(provider)?,
+                        scope,
                     )
                     .map_err(|error| Failure::new("invalid_session", error))?;
             }
@@ -198,6 +267,8 @@ impl HostRpcService {
         native: &NativeIdentity,
         mut turns: Vec<Arc<agent_protocol::models::Turn>>,
     ) -> Result<Vec<Arc<agent_protocol::models::Turn>>, Failure> {
+        let scope = native_storage_scope(agent.storage_directory())
+            .map_err(|error| Failure::new("provider_storage_unavailable", error))?;
         for turn in &mut turns {
             let turn = Arc::make_mut(turn);
             if turn.items_summary || turn.items.is_none() {
@@ -208,7 +279,7 @@ impl HostRpcService {
                 if item.is_deferred() {
                     *item = Arc::new(agent.read_item(&native.id, &turn.id, &item.id).await?.item);
                 }
-                self.normalize_item(native.provider, Arc::make_mut(item))?;
+                self.normalize_item(&native.provider, &scope, Arc::make_mut(item))?;
             }
         }
         Ok(turns)
@@ -236,8 +307,7 @@ impl HostRpcService {
         _lease: super::routing::SessionLease,
         _importing: tokio::sync::OwnedMutexGuard<()>,
     ) -> Result<(), Failure> {
-        let native = self.native_session(target)?;
-        let agent = self.agent(native.provider)?;
+        let (native, agent) = self.native_session(target)?;
         for _ in 0..max_pages {
             let _serial = self.inner.router.submission_lock(target).lock_owned().await;
             let (complete, started, cursor) = self
@@ -332,15 +402,20 @@ impl HostRpcService {
         self.history_changed(target);
     }
 
-    async fn import_provider(&self, provider: ProviderKind, agent: &dyn Agent) -> Option<Failure> {
+    async fn import_provider(
+        &self,
+        provider: &ProviderInstanceId,
+        agent: &dyn Agent,
+    ) -> Option<Failure> {
         let result = async {
-            let scope = self.storage_scope(provider)?;
+            let scope = native_storage_scope(agent.storage_directory())
+                .map_err(|error| Failure::new("provider_storage_unavailable", error))?;
             let pages = session_pages(agent, "");
             futures_util::pin_mut!(pages);
             while let Some(page) = pages.try_next().await? {
                 self.inner
                     .conversations
-                    .discover_page(provider, &page, &scope)
+                    .discover_page(agent.reference(), &page, &scope)
                     .map_err(|error| Failure::new("history_import_failed", error))?;
                 self.inner
                     .router
@@ -356,16 +431,16 @@ impl HostRpcService {
             .unwrap_or_else(|error| error.into_inner());
         match &result {
             Ok(()) => {
-                errors.remove(&provider);
+                errors.remove(provider);
             }
             Err(error) => {
-                errors.insert(provider, error.clone());
+                errors.insert(provider.clone(), error.clone());
             }
         }
         self.inner
             .router
             .broadcast(agent_protocol::protocol::Notification::CatalogChanged {});
-        self.import_bodies(provider);
+        self.import_bodies(provider.clone());
         result.err()
     }
 
@@ -404,13 +479,13 @@ impl HostRpcService {
         let failures = futures_util::future::join_all(
             providers
                 .iter()
-                .map(|(provider, agent)| self.import_provider(*provider, agent.as_ref())),
+                .map(|(provider, agent)| self.import_provider(provider, agent.as_ref())),
         )
         .await;
         failures.into_iter().flatten().next().map_or(Ok(()), Err)
     }
 
-    fn import_bodies(&self, provider: ProviderKind) {
+    fn import_bodies(&self, provider: ProviderInstanceId) {
         {
             let mut workers = self
                 .inner
@@ -421,7 +496,7 @@ impl HostRpcService {
                 *refresh = true;
                 return;
             }
-            workers.insert(provider, false);
+            workers.insert(provider.clone(), false);
         }
         let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
@@ -431,11 +506,13 @@ impl HostRpcService {
                     return;
                 };
                 let service = Self { inner: current };
-                let pending = service.storage_scope(provider).and_then(|scope| {
+                let pending = service.agent(&provider).and_then(|agent| {
+                    let scope = native_storage_scope(agent.storage_directory())
+                        .map_err(|error| Failure::new("provider_storage_unavailable", error))?;
                     service
                         .inner
                         .conversations
-                        .pending_imports(provider, &scope, after)
+                        .pending_imports(agent.reference(), &scope, after)
                         .map_err(|error| Failure::new("history_import_failed", error))
                 });
                 let pending = match pending {
@@ -481,41 +558,53 @@ impl HostRpcService {
         });
     }
 
-    fn agent(&self, provider: ProviderKind) -> Result<Arc<dyn Agent>, Failure> {
+    fn agent(&self, instance_id: &ProviderInstanceId) -> Result<Arc<dyn Agent>, Failure> {
         self.inner
-            .agents
+            .instances
             .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&provider)
-            .cloned()
-            .ok_or_else(|| {
-                self.inner
-                    .startup_errors
-                    .read()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .get(&provider)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        Failure::new(
-                            "provider_unavailable",
-                            format!("{provider:?} is unavailable"),
-                        )
-                    })
+            .unwrap_or_else(|error| error.into_inner())
+            .get(instance_id)
+            .map(|instance| instance.backend.clone())
+            .unwrap_or_else(|| {
+                Err(Failure::new(
+                    "provider_unavailable",
+                    "provider instance is not configured",
+                ))
             })
     }
 
-    fn agents(&self) -> Vec<(ProviderKind, Arc<dyn Agent>)> {
-        let mut agents: Vec<_> = self
-            .inner
-            .agents
+    fn agents(&self) -> Vec<(ProviderInstanceId, Arc<dyn Agent>)> {
+        self.inner
+            .instances
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|error| error.into_inner())
             .iter()
-            .map(|(p, a)| (*p, a.clone()))
-            .collect();
-        agents.sort_by_key(|(p, _)| *p);
-        agents
+            .filter_map(|(id, instance)| {
+                instance
+                    .backend
+                    .as_ref()
+                    .ok()
+                    .map(|agent| (id.clone(), agent.clone()))
+            })
+            .collect()
     }
+
+    fn instance_errors(&self) -> BTreeMap<ProviderInstanceId, Failure> {
+        self.inner
+            .instances
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter_map(|(id, instance)| {
+                instance
+                    .backend
+                    .as_ref()
+                    .err()
+                    .map(|error| (id.clone(), error.clone()))
+            })
+            .collect()
+    }
+
     async fn account_request(&self, request: Call) -> Result<Body, Failure> {
         if matches!(request, Call::ListAccounts(_)) {
             let mut combined = op::Accounts {
@@ -524,10 +613,7 @@ impl HostRpcService {
                 error: None,
             };
             let mut errors = self
-                .inner
-                .startup_errors
-                .read()
-                .unwrap_or_else(|error| error.into_inner())
+                .instance_errors()
                 .values()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>();
@@ -544,15 +630,17 @@ impl HostRpcService {
             combined.error = (!errors.is_empty()).then(|| errors.join("\n"));
             return Ok(combined.into());
         }
+        // Credential changes and resource replacement share the registry owner.
+        let _access = self.inner.provider_access.lock().await;
         use super::agent::{AccountCommand as Command, AccountReply};
         let (provider, command) = match request {
-            Call::StartAccountLogin(p) => (p.provider, Command::StartLogin),
-            Call::SelectAccount(p) => (p.provider, Command::Select { id: p.id }),
-            Call::LogoutAccount(p) => (p.provider, Command::Logout { id: p.id }),
-            Call::ReadAccountLogin(p) => (p.provider, Command::ReadLogin { id: p.id }),
-            Call::CancelAccountLogin(p) => (p.provider, Command::CancelLogin { id: p.id }),
+            Call::StartAccountLogin(p) => (p.instance_id, Command::StartLogin),
+            Call::SelectAccount(p) => (p.instance_id, Command::Select { id: p.id }),
+            Call::LogoutAccount(p) => (p.instance_id, Command::Logout { id: p.id }),
+            Call::ReadAccountLogin(p) => (p.instance_id, Command::ReadLogin { id: p.id }),
+            Call::CancelAccountLogin(p) => (p.instance_id, Command::CancelLogin { id: p.id }),
             Call::SubmitAccountLogin(p) => (
-                p.provider,
+                p.instance_id,
                 Command::SubmitLogin {
                     id: p.id,
                     code: p.code,
@@ -560,7 +648,26 @@ impl HostRpcService {
             ),
             _ => return Err(Failure::new("invalid_params", "not an account request")),
         };
-        Ok(match self.agent(provider)?.account(command).await? {
+        let changes_catalog = matches!(
+            command,
+            Command::Select { .. } | Command::Logout { .. } | Command::SubmitLogin { .. }
+        );
+        let reply = self.agent(&provider)?.account(command).await?;
+        if changes_catalog || matches!(&reply, AccountReply::Status(status) if status.completed) {
+            if let Some(instance) = self.inner.instances.write().unwrap().get_mut(&provider) {
+                instance.generation = uuid::Uuid::new_v4();
+            }
+            let revision = self
+                .inner
+                .conversations
+                .provider_settings()
+                .map_err(|error| Failure::new("provider_settings_unavailable", error))?
+                .revision;
+            self.inner.router.broadcast(
+                agent_protocol::protocol::Notification::ProviderSettingsChanged { revision },
+            );
+        }
+        Ok(match reply {
             AccountReply::Selection(value) => value.into(),
             AccountReply::Login(value) => value.into(),
             AccountReply::Status(value) => value.into(),
@@ -588,47 +695,44 @@ impl HostRpcService {
             .transpose()
     }
 
-    pub async fn enable_accounts(
-        &self,
-        directory: std::path::PathBuf,
-        config: codex_app_server::AppServerConfig,
-    ) -> Result<(), String> {
-        self.inner.codex.enable_accounts(directory, config).await
-    }
-
+    /// Inject Claude's program and private directories for isolated fixtures.
     pub async fn enable_claude(
         &self,
         program: std::path::PathBuf,
         directory: std::path::PathBuf,
         native_home: Option<std::path::PathBuf>,
     ) -> anyhow::Result<()> {
-        let claude = crate::claude::Claude::load(program, directory, native_home)
-            .await
-            .inspect_err(|error| {
-                self.inner
-                    .startup_errors
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(
-                        ProviderKind::Claude,
-                        Failure::new("provider_unavailable", error),
-                    );
-            })?;
-        {
-            let mut agents = self.inner.agents.write().unwrap_or_else(|e| e.into_inner());
-            anyhow::ensure!(
-                !agents.contains_key(&ProviderKind::Claude),
-                "Claude Code is already configured"
-            );
-            agents.insert(ProviderKind::Claude, Arc::new(claude));
-            self.inner
-                .startup_errors
-                .write()
-                .unwrap_or_else(|error| error.into_inner())
-                .remove(&ProviderKind::Claude);
-        }
+        let reference = ProviderRef {
+            instance_id: "claude".parse()?,
+            driver: "claudeAgent".parse()?,
+        };
+        let config =
+            providers::default_config("claudeAgent", Some(&program), native_home.as_deref())?;
+        let result = crate::claude::Claude::load(
+            reference.clone(),
+            program,
+            directory,
+            native_home,
+            Vec::new(),
+            Vec::new(),
+        )
+        .await;
+        let error = result
+            .as_ref()
+            .err()
+            .map(|error| anyhow::anyhow!("{error:#}"));
+        self.inner.instances.write().unwrap().insert(
+            reference.instance_id,
+            Registered {
+                generation: uuid::Uuid::new_v4(),
+                config,
+                backend: result
+                    .map(|agent| Arc::new(agent) as Arc<dyn Agent>)
+                    .map_err(|error| Failure::new("provider_unavailable", error)),
+            },
+        );
         self.start_event_pumps();
-        Ok(())
+        error.map_or(Ok(()), Err)
     }
 
     pub(crate) async fn shutdown_owned_processes(&self) {
@@ -668,16 +772,17 @@ impl HostRpcService {
             .agents()
             .into_iter()
             .filter(|(_, a)| a.availability().is_ok())
-            .map(|(p, _)| match p {
-                ProviderKind::Codex => "OpenAI".into(),
-                ProviderKind::Claude => "Anthropic".into(),
+            .map(|(_, agent)| match agent.reference().driver.as_str() {
+                "codex" => "OpenAI".into(),
+                "claudeAgent" => "Anthropic".into(),
+                driver => driver.to_owned(),
             })
             .collect();
         (
             ai,
-            self.agent(ProviderKind::Codex)
-                .ok()
-                .filter(|a| a.availability().is_ok())
+            self.agents()
+                .into_iter()
+                .find_map(|(_, agent)| agent.dictation_backend())
                 .map(|_| "OpenAI".into()),
         )
     }
@@ -690,7 +795,7 @@ impl HostRpcService {
             .iter()
             .map(|(provider, error)| {
                 (
-                    provider_key(*provider),
+                    provider.to_string(),
                     serde_json::to_value(error).expect("failure serializes"),
                 )
             })
@@ -698,24 +803,17 @@ impl HostRpcService {
         errors.extend(self.agents().into_iter().filter_map(|(p, a)| {
             a.availability().err().map(|e| {
                 (
-                    provider_key(p),
+                    p.to_string(),
                     serde_json::to_value(e).expect("failure serializes"),
                 )
             })
         }));
-        errors.extend(
-            self.inner
-                .startup_errors
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .map(|(provider, error)| {
-                    (
-                        provider_key(*provider),
-                        serde_json::to_value(error).expect("failure serializes"),
-                    )
-                }),
-        );
+        errors.extend(self.instance_errors().iter().map(|(provider, error)| {
+            (
+                provider.to_string(),
+                serde_json::to_value(error).expect("failure serializes"),
+            )
+        }));
         serde_json::Value::Object(errors)
     }
 
@@ -833,12 +931,10 @@ impl HostRpcService {
         {
             return replay_submission(delivery);
         }
-        let native = self.native_session(target)?;
-        if input
-            .model
-            .as_ref()
-            .is_some_and(|model| model.provider != native.provider || model.id.trim().is_empty())
-        {
+        let (_, agent) = self.native_session(target)?;
+        if input.model.as_ref().is_some_and(|model| {
+            model.instance_id != agent.reference().instance_id || model.id.trim().is_empty()
+        }) {
             return Err(Failure::new(
                 "provider_mismatch",
                 "別のプロバイダーのモデルを使う場合は新しい会話を作成してください。",
@@ -866,7 +962,7 @@ impl HostRpcService {
         let prepared = if force_queue || held {
             None
         } else {
-            self.agent(native.provider)?.availability()?;
+            agent.availability()?;
             // Complete the source snapshot before native execution can move its
             // cursors. Admission to a held queue requires no provider process.
             drop(_serial_guard);
@@ -880,9 +976,9 @@ impl HostRpcService {
             .queue_held(target)
             .map_err(|error| Failure::new("conversation_unavailable", error))?;
         let queued = held
-            || prepared
-                .as_ref()
-                .is_none_or(|(route, _)| *route == super::submission::SubmissionTarget::Queue);
+            || prepared.as_ref().is_none_or(|prepared| {
+                prepared.route == super::submission::SubmissionTarget::Queue
+            });
         if let Some(delivery) = self
             .inner
             .conversations
@@ -911,16 +1007,15 @@ impl HostRpcService {
             self.wake_queue(target.clone());
             return Ok(op::SubmissionReceipt { turn_id: None });
         }
-        let (route, reload) = prepared.expect("immediate input has an execution route");
-        self.deliver_input(target, input, route, reload).await
+        let prepared = prepared.expect("immediate input has an execution route");
+        self.deliver_input(target, input, prepared).await
     }
 
     async fn deliver_input(
         &self,
         target: &agent_protocol::session::SessionRef,
         input: &op::Submission,
-        route: super::submission::SubmissionTarget,
-        reload: bool,
+        prepared: PreparedInput,
     ) -> Result<op::SubmissionReceipt, Failure> {
         self.history_changed(target);
         let result = match self.inner.router.publish_submission(
@@ -928,7 +1023,7 @@ impl HostRpcService {
             input.client_user_message_id.clone(),
             agent_protocol::session::SubmissionDelivery::Sending,
         ) {
-            Ok(()) => self.submit_input(target, input, route, reload).await,
+            Ok(()) => self.submit_input(target, input, prepared).await,
             Err(error) => Err(Failure::unknown("submission_outcome_unknown", error)),
         };
         self.finish_input(target, input.client_user_message_id.as_str(), &result)?;
@@ -975,8 +1070,8 @@ impl HostRpcService {
                 ));
             }
         }
-        let (route, reload) = self.prepare_input(target).await?;
-        if !matches!(&route, super::submission::SubmissionTarget::Steer(turn) if turn == params.turn_id.as_str())
+        let prepared = self.prepare_input(target).await?;
+        if !matches!(&prepared.route, super::submission::SubmissionTarget::Steer(turn) if turn == params.turn_id.as_str())
         {
             return Err(Failure::new(
                 "steer_unavailable",
@@ -989,7 +1084,7 @@ impl HostRpcService {
             .claim_queued(target, Some(&params.id))
             .map_err(|error| Failure::new("queue_claim_failed", error))?
             .ok_or_else(|| Failure::new("invalid_queue", "queued input is no longer available"))?;
-        self.deliver_input(target, &input, route, reload).await?;
+        self.deliver_input(target, &input, prepared).await?;
         Ok(agent_protocol::models::Empty {})
     }
 
@@ -1019,9 +1114,8 @@ impl HostRpcService {
     async fn prepare_input(
         &self,
         target: &agent_protocol::session::SessionRef,
-    ) -> Result<(super::submission::SubmissionTarget, bool), Failure> {
-        let native = self.native_session(target)?;
-        let agent = self.agent(native.provider)?;
+    ) -> Result<PreparedInput, Failure> {
+        let (native, agent) = self.native_session(target)?;
         agent.availability()?;
         let state = agent.state(&native.id).await?;
         let mut response = state.response;
@@ -1050,16 +1144,26 @@ impl HostRpcService {
             response.thread.cwd.as_deref(),
         )
         .map_err(|e| Failure::new("submission_unavailable", e))?;
-        Ok((route, state.needs_reload))
+        Ok(PreparedInput {
+            native,
+            agent,
+            route,
+            reload: state.needs_reload,
+        })
     }
 
     async fn submit_input(
         &self,
         target: &agent_protocol::session::SessionRef,
         input: &op::Submission,
-        route: super::submission::SubmissionTarget,
-        mut reload: bool,
+        prepared: PreparedInput,
     ) -> Result<op::SubmissionReceipt, Failure> {
+        let PreparedInput {
+            native,
+            agent,
+            route,
+            mut reload,
+        } = prepared;
         if let super::submission::SubmissionTarget::Start { cwd } = &route
             && let Some(directory) = self
                 .inner
@@ -1073,8 +1177,7 @@ impl HostRpcService {
             }
             reload = true;
         }
-        let native = self.native_session(target)?;
-        self.agent(native.provider)?
+        agent
             .submit(
                 input,
                 &native.id,
@@ -1104,11 +1207,8 @@ impl HostRpcService {
             .retain_execution(target.clone())
             .map_err(|error| Failure::new("invalid_session", error))?;
         let _serial = self.inner.router.submission_lock(target).lock_owned().await;
-        let native = self.native_session(target)?;
-        let response = self
-            .agent(native.provider)?
-            .interrupt(&native.id, &params.turn_id)
-            .await?;
+        let (native, agent) = self.native_session(target)?;
+        let response = agent.interrupt(&native.id, &params.turn_id).await?;
         // Completion wakes a queue worker, but the serial guard keeps it from
         // claiming another input before this hold is committed.
         if self
@@ -1184,8 +1284,11 @@ impl HostRpcService {
         {
             return Ok(());
         }
-        let (route, reload) = self.prepare_input(target).await?;
-        if !matches!(route, super::submission::SubmissionTarget::Start { .. }) {
+        let prepared = self.prepare_input(target).await?;
+        if !matches!(
+            prepared.route,
+            super::submission::SubmissionTarget::Start { .. }
+        ) {
             return Ok(());
         }
         let Some(input) = self
@@ -1196,7 +1299,7 @@ impl HostRpcService {
         else {
             return Ok(());
         };
-        self.deliver_input(target, &input, route, reload)
+        self.deliver_input(target, &input, prepared)
             .await
             .map(|_| ())
     }
@@ -1243,8 +1346,7 @@ impl HostRpcService {
                 anyhow::bail!("invalid session reference or zero history limit");
             }
             let target = params.session.clone();
-            let provider = self.inner.conversations.provider(&target)?;
-            let capabilities = self.agent(provider).map(|agent| host_capabilities(agent.capabilities())).unwrap_or_default();
+            let capabilities = self.conversation_capabilities(&target);
             let limit = params.limit;
             let read = self
                 .inner
@@ -1338,12 +1440,13 @@ impl HostRpcService {
         };
         if response.item.is_deferred() {
             let previous = response.item.clone();
-            let native = self.native_session(target)?;
-            let mut hydrated = self
-                .agent(native.provider)?
+            let (native, agent) = self.native_session(target)?;
+            let mut hydrated = agent
                 .read_item(&native.id, &params.turn_id, &params.item_id)
                 .await?;
-            self.normalize_item(native.provider, &mut hydrated.item)?;
+            let scope = native_storage_scope(agent.storage_directory())
+                .map_err(|error| Failure::new("provider_storage_unavailable", error))?;
+            self.normalize_item(&native.provider, &scope, &mut hydrated.item)?;
             if !self
                 .inner
                 .router
@@ -1403,8 +1506,8 @@ impl HostRpcService {
         if let Some(target) = target_session
             && matches!(request, Call::ForkSession(_))
         {
-            let native = self.native_session(target)?;
-            let capabilities = self.agent(native.provider)?.capabilities();
+            let (_, agent) = self.native_session(target)?;
+            let capabilities = agent.capabilities();
             if !capabilities.fork {
                 return Err(Failure::new(
                     "unsupported_operation",
@@ -1465,16 +1568,26 @@ impl HostRpcService {
                 }
                 page.into()
             }
+            Call::ReadProviderSettings(_) => self
+                .inner
+                .conversations
+                .provider_settings()
+                .map_err(|error| Failure::new("provider_settings_unavailable", error))?
+                .redacted()
+                .into(),
+            Call::UpdateProviderInstance(params) => {
+                self.update_provider_instance(params).await?.into()
+            }
             Call::ReadPermissionSettings(params) => {
                 let _guard = self.inner.permission_settings_access.lock().await;
-                self.agent(params.provider)?
+                self.agent(&params.instance_id)?
                     .read_permissions()
                     .await?
                     .into()
             }
             Call::UpdatePermissionSettings(params) => {
                 let _guard = self.inner.permission_settings_access.lock().await;
-                self.agent(params.provider)?
+                self.agent(&params.instance_id)?
                     .update_permissions(params.mode, &params.version)
                     .await?
                     .into()
@@ -1491,8 +1604,10 @@ impl HostRpcService {
                     cwd: params.cwd.clone(),
                     ..Default::default()
                 };
-                for (provider, error) in self.inner.startup_errors.read().unwrap().iter() {
-                    catalog.errors.insert(*provider, vec![error.to_string()]);
+                for (provider, error) in self.instance_errors().iter() {
+                    catalog
+                        .errors
+                        .insert(provider.clone(), vec![error.to_string()]);
                 }
                 for result in results {
                     catalog.candidates.extend(result.candidates);
@@ -1504,16 +1619,18 @@ impl HostRpcService {
                         .to_lowercase()
                         .cmp(&b.invocation.name.to_lowercase())
                         .then(a.invocation.path.cmp(&b.invocation.path))
-                        .then(a.invocation.provider.cmp(&b.invocation.provider))
+                        .then(a.invocation.instance_id.cmp(&b.invocation.instance_id))
                 });
                 catalog
                     .candidates
                     .dedup_by(|a, b| a.invocation == b.invocation);
                 catalog.into()
             }
-            Call::ReadAccountUsage(params) => {
-                self.agent(params.provider)?.usage(&params.id).await?.into()
-            }
+            Call::ReadAccountUsage(params) => self
+                .agent(&params.instance_id)?
+                .usage(&params.id)
+                .await?
+                .into(),
             Call::ListAccounts(_)
             | Call::SelectAccount(_)
             | Call::LogoutAccount(_)
@@ -1522,64 +1639,7 @@ impl HostRpcService {
             | Call::SubmitAccountLogin(_)
             | Call::CancelAccountLogin(_) => self.account_request(request.clone()).await?,
 
-            Call::ListModels(params) => {
-                let cursors: std::collections::BTreeMap<ProviderKind, Option<String>> = params
-                    .cursor
-                    .as_deref()
-                    .map(serde_json::from_str)
-                    .transpose()?
-                    .unwrap_or_else(|| {
-                        self.agents()
-                            .into_iter()
-                            .map(|(provider, _)| provider)
-                            .chain(self.inner.startup_errors.read().unwrap().keys().copied())
-                            .map(|provider| (provider, None))
-                            .collect()
-                    });
-                let mut page = op::ModelPage {
-                    data: Vec::new(),
-                    next_cursor: None,
-                    provider_errors: None,
-                };
-                let mut next = std::collections::BTreeMap::new();
-                for (provider, cursor) in cursors {
-                    let result = match self.agent(provider) {
-                        Ok(agent) => {
-                            agent
-                                .models(&op::ListModels {
-                                    cursor,
-                                    ..params.clone()
-                                })
-                                .await
-                        }
-                        Err(error) => Err(error),
-                    };
-                    match result {
-                        Ok(result) => {
-                            page.data.extend(result.data);
-                            if let Some(cursor) = result.next_cursor {
-                                next.insert(provider, Some(cursor));
-                            }
-                        }
-                        Err(error) => {
-                            page.provider_errors
-                                .get_or_insert_default()
-                                .insert(provider_key(provider), serde_json::to_value(error)?);
-                        }
-                    }
-                }
-                if !next.is_empty() {
-                    page.next_cursor = Some(serde_json::to_string(&next)?);
-                }
-                if params.cursor.is_none() && page.data.is_empty() && page.provider_errors.is_some()
-                {
-                    return Err(Failure::new(
-                        "models_unavailable",
-                        serde_json::to_value(&page.provider_errors)?,
-                    ));
-                }
-                page.into()
-            }
+            Call::ListModels(params) => self.model_page(params).await?.into(),
 
             Call::RequestSession(params) => (self
                 .inner
@@ -1723,9 +1783,8 @@ impl HostRpcService {
                 .map_err(|error| Failure::new("file_operation_failed", error))?,
             Call::ForkSession(params) => {
                 let target = target_session.expect("session-scoped fork");
-                let native = self.native_session(target)?;
-                let agent = self.agent(native.provider)?;
-                self.start_thread(native.provider, agent.as_ref(), |browser| {
+                let (native, agent) = self.native_session(target)?;
+                self.start_thread(agent.as_ref(), |browser| {
                     agent.fork(&native.id, &params.last_turn_id, browser)
                 })
                 .await?
@@ -1768,13 +1827,7 @@ impl HostRpcService {
         if worktrees.is_empty() {
             return Ok(worktrees);
         }
-        for error in self
-            .inner
-            .startup_errors
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .values()
-        {
+        for error in self.instance_errors().values() {
             for worktree in &mut worktrees {
                 worktree.blocked_reason =
                     Some(format!("稼働状況を確認できないため削除できません: {error}"));
@@ -1782,7 +1835,7 @@ impl HostRpcService {
         }
         let mut threads = Vec::new();
         let agents = self.agents();
-        for (provider, agent) in &agents {
+        for (_, agent) in &agents {
             let pages = session_pages(agent.as_ref(), "");
             futures_util::pin_mut!(pages);
             while let Some(result) = pages.next().await {
@@ -1796,10 +1849,16 @@ impl HostRpcService {
                                         .conversations
                                         .bind(
                                             &NativeIdentity {
-                                                provider: *provider,
+                                                provider: agent.reference().clone(),
                                                 id: native.id.clone(),
                                             },
-                                            &self.storage_scope(*provider)?,
+                                            &native_storage_scope(agent.storage_directory())
+                                                .map_err(|error| {
+                                                    Failure::new(
+                                                        "provider_storage_unavailable",
+                                                        error,
+                                                    )
+                                                })?,
                                         )
                                         .map_err(|error| Failure::new("invalid_thread", error))?,
                                 );
@@ -1822,7 +1881,7 @@ impl HostRpcService {
         for worktree in &mut worktrees {
             let directory = std::path::Path::new(&worktree.path);
             let mut active = std::collections::HashSet::new();
-            for (provider, agent) in &agents {
+            for (_, agent) in &agents {
                 match agent.active_sessions_in(directory).await {
                     Ok(sessions) => {
                         for native in sessions {
@@ -1831,10 +1890,14 @@ impl HostRpcService {
                                     .conversations
                                     .bind(
                                         &NativeIdentity {
-                                            provider: *provider,
+                                            provider: agent.reference().clone(),
                                             id: native.id.clone(),
                                         },
-                                        &self.storage_scope(*provider)?,
+                                        &native_storage_scope(agent.storage_directory()).map_err(
+                                            |error| {
+                                                Failure::new("provider_storage_unavailable", error)
+                                            },
+                                        )?,
                                     )
                                     .map_err(|error| Failure::new("invalid_thread", error))?,
                             );
@@ -1863,12 +1926,8 @@ impl HostRpcService {
             {
                 continue;
             }
-            let native = self.native_session(&target)?;
-            let mut response = self
-                .agent(native.provider)?
-                .state(&native.id)
-                .await?
-                .response;
+            let (native, agent) = self.native_session(&target)?;
+            let mut response = agent.state(&native.id).await?.response;
             if response.thread.id.as_ref().map(|id| id.id.as_str()) != Some(native.id.as_str()) {
                 return Err(Failure::new(
                     "invalid_thread",
@@ -2011,18 +2070,16 @@ impl HostRpcService {
     ) -> Result<agent_protocol::models::ThreadList, Failure> {
         self.initial_import();
         let snapshot = self.project_snapshot().await?;
-        let providers = self.agents();
         let (mut page, mut branches) = self
             .inner
             .conversations
             .title_list(&snapshot, &query)
             .map_err(|error| Failure::new("sessions_unavailable", error))?;
         for thread in &mut page.data {
-            if let Some(kind) = thread.provider
-                && let Some((_, agent)) = providers.iter().find(|(provider, _)| *provider == kind)
-            {
-                thread.capabilities = Some(host_capabilities(agent.capabilities()));
-            }
+            thread.capabilities = thread
+                .id
+                .as_ref()
+                .map(|target| self.conversation_capabilities(target));
         }
         let provider_errors = self
             .provider_errors()
@@ -2064,18 +2121,18 @@ impl HostRpcService {
         &self,
         mut params: agent_protocol::operations::CreateSession,
     ) -> Result<ThreadResponse, Failure> {
-        let provider = params.provider;
+        let provider = params.instance_id;
         if params
             .model
             .as_ref()
-            .is_some_and(|model| model.provider != provider || model.id.trim().is_empty())
+            .is_some_and(|model| model.instance_id != provider || model.id.trim().is_empty())
         {
             return Err(Failure::new(
                 "provider_mismatch",
                 "model must name a model of the requested provider",
             ));
         }
-        let agent = self.agent(provider)?;
+        let agent = self.agent(&provider)?;
         agent.validate_create()?;
         // A missing selection must not inherit the App Server's checkout.
         // Keep the real cwd on the thread; project enrichment identifies
@@ -2107,7 +2164,7 @@ impl HostRpcService {
                 Err(error) => return Err(Failure::new("worktree_creation_failed", error)),
             }
         }
-        self.start_thread(provider, agent.as_ref(), |browser| {
+        self.start_thread(agent.as_ref(), |browser| {
             agent.create(
                 params.cwd.as_deref().unwrap_or_default(),
                 params.model.as_ref().map(|m| m.id.as_str()),
@@ -2120,7 +2177,6 @@ impl HostRpcService {
     /// New threads browse under a provisional scope until their native ID exists.
     async fn start_thread<F>(
         &self,
-        provider: ProviderKind,
         agent: &dyn Agent,
         start: impl FnOnce(Option<serde_json::Value>) -> F,
     ) -> Result<ThreadResponse, Failure>
@@ -2130,7 +2186,7 @@ impl HostRpcService {
         let scope = uuid::Uuid::new_v4().to_string();
         let mut response = start(self.browser_config(&scope)?).await?;
         let native = NativeIdentity {
-            provider,
+            provider: agent.reference().clone(),
             id: response
                 .thread
                 .id
@@ -2144,7 +2200,11 @@ impl HostRpcService {
         let target = self
             .inner
             .conversations
-            .bind(&native, &self.storage_scope(provider)?)
+            .bind(
+                &native,
+                &native_storage_scope(agent.storage_directory())
+                    .map_err(|error| Failure::new("provider_storage_unavailable", error))?,
+            )
             .map_err(|error| Failure::new("session_create_failed", error))?;
         let page = agent_protocol::session::HistoryPage {
             turns: self
@@ -2181,115 +2241,117 @@ impl HostRpcService {
         Ok(response)
     }
 
-    fn start_event_pumps(&self) {
-        let mut started = self
+    // Hold the registry resource through event normalization and its commit.
+    fn apply_agent_change(
+        &self,
+        agent: &Arc<dyn Agent>,
+        mut change: super::agent::AgentChange,
+    ) -> Result<(), String> {
+        let instances = self
             .inner
-            .event_pumps
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for (provider, agent) in self.agents() {
-            if !started.insert(provider) {
-                continue;
+            .instances
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let provider = &agent.reference().instance_id;
+        let router = &self.inner.router;
+        let current = instances
+            .get(provider)
+            .and_then(|instance| instance.backend.as_ref().ok())
+            .ok_or_else(|| "event belongs to an unavailable provider instance".to_owned())?;
+        if !Arc::ptr_eq(current, agent) {
+            return Err("event belongs to a replaced provider instance".into());
+        }
+        let native_scope =
+            native_storage_scope(agent.storage_directory()).map_err(|error| error.to_string())?;
+        if let super::agent::AgentChange::Stopped { reason } = &change {
+            return router.fail_provider(provider, reason);
+        }
+        let renamed = match &change {
+            super::agent::AgentChange::Renamed { name, .. } => Some(name.clone()),
+            _ => None,
+        };
+        let native = match &mut change {
+            super::agent::AgentChange::Session { session, .. }
+            | super::agent::AgentChange::Request { session, .. }
+            | super::agent::AgentChange::Renamed { session, .. } => Some(session),
+            _ => None,
+        };
+        if let Some(native) = native {
+            let target = self
+                .inner
+                .conversations
+                .bind(
+                    &NativeIdentity {
+                        provider: agent.reference().clone(),
+                        id: native.id.clone(),
+                    },
+                    &native_scope,
+                )
+                .map_err(|error| error.to_string())?;
+            if let Some(name) = renamed {
+                self.inner
+                    .conversations
+                    .rename(&target, &name, false)
+                    .map_err(|error| error.to_string())?;
             }
+            *native = target;
+        }
+        if let super::agent::AgentChange::Session { change, .. } = &mut change {
+            let items = match change {
+                agent_protocol::session::SessionChange::Turn { turn, .. } => {
+                    turn.items.as_deref_mut()
+                }
+                agent_protocol::session::SessionChange::TurnItems { items, .. } => {
+                    Some(items.as_mut_slice())
+                }
+                agent_protocol::session::SessionChange::Item { item, .. } => {
+                    Some(std::slice::from_mut(item))
+                }
+                _ => None,
+            };
+            for item in items.into_iter().flatten() {
+                self.normalize_item(agent.reference(), &native_scope, Arc::make_mut(item))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        let finished = match &change {
+            super::agent::AgentChange::Session {
+                session,
+                change:
+                    agent_protocol::session::SessionChange::Turn {
+                        completed: true, ..
+                    }
+                    | agent_protocol::session::SessionChange::Status {
+                        status: agent_protocol::execution::SessionStatus::Idle,
+                    },
+            } => Some(session.clone()),
+            _ => None,
+        };
+        match change {
+            super::agent::AgentChange::Request {
+                session,
+                origin,
+                request,
+            } => {
+                router.request(agent.reference(), session, origin, request)?;
+            }
+            change => change.apply(router)?,
+        }
+        if let Some(target) = finished {
+            self.wake_queue(target);
+        }
+        Ok(())
+    }
+
+    fn start_event_pumps(&self) {
+        for (_, agent) in self.agents() {
             if let Some(mut events) = agent.event_stream() {
                 let inner = Arc::downgrade(&self.inner);
-                let router = self.inner.router.clone();
                 tokio::spawn(async move {
                     while let Some(event) = events.recv().await {
                         let Some(inner) = inner.upgrade() else { break };
                         let service = Self { inner };
-                        let mut change = event.change;
-                        let result = async {
-                            if let super::agent::AgentChange::Request { origin, .. } = &change
-                                && origin.provider != provider
-                            {
-                                return Err("request source provider does not match adapter".into());
-                            }
-                            if let super::agent::AgentChange::Stopped {
-                                provider: stopped, ..
-                            } = &change
-                                && *stopped != provider
-                            {
-                                return Err("stopped provider does not match adapter".into());
-                            }
-                            let renamed = match &change {
-                                super::agent::AgentChange::Renamed { name, .. } => {
-                                    Some(name.clone())
-                                }
-                                _ => None,
-                            };
-                            let native = match &mut change {
-                                super::agent::AgentChange::Session { session, .. }
-                                | super::agent::AgentChange::Request { session, .. }
-                                | super::agent::AgentChange::Renamed { session, .. } => {
-                                    Some(session)
-                                }
-                                _ => None,
-                            };
-                            if let Some(native) = native {
-                                let target = service
-                                    .inner
-                                    .conversations
-                                    .bind(
-                                        &NativeIdentity {
-                                            provider,
-                                            id: native.id.clone(),
-                                        },
-                                        &service
-                                            .storage_scope(provider)
-                                            .map_err(|error| error.to_string())?,
-                                    )
-                                    .map_err(|error| error.to_string())?;
-                                if let Some(name) = renamed {
-                                    service
-                                        .inner
-                                        .conversations
-                                        .rename(&target, &name, false)
-                                        .map_err(|error| error.to_string())?;
-                                }
-                                *native = target;
-                            }
-                            if let super::agent::AgentChange::Session { change, .. } = &mut change {
-                                let items = match change {
-                                    agent_protocol::session::SessionChange::Turn {
-                                        turn, ..
-                                    } => turn.items.as_deref_mut(),
-                                    agent_protocol::session::SessionChange::TurnItems {
-                                        items,
-                                        ..
-                                    } => Some(items.as_mut_slice()),
-                                    agent_protocol::session::SessionChange::Item {
-                                        item, ..
-                                    } => Some(std::slice::from_mut(item)),
-                                    _ => None,
-                                };
-                                for item in items.into_iter().flatten() {
-                                    service
-                                        .normalize_item(provider, Arc::make_mut(item))
-                                        .map_err(|error| error.to_string())?;
-                                }
-                            }
-                            let finished = match &change {
-                                super::agent::AgentChange::Session {
-                                    session,
-                                    change:
-                                        agent_protocol::session::SessionChange::Turn {
-                                            completed: true,
-                                            ..
-                                        }
-                                        | agent_protocol::session::SessionChange::Status {
-                                            status: agent_protocol::execution::SessionStatus::Idle,
-                                        },
-                                } => Some(session.clone()),
-                                _ => None,
-                            };
-                            change.apply(&router)?;
-                            if let Some(target) = finished {
-                                service.wake_queue(target);
-                            }
-                            Ok(())
-                        }
-                        .await;
+                        let result = service.apply_agent_change(&agent, event.change);
                         if let Err(error) = &result {
                             tracing::error!(target: "bex", operation = "history.event_commit", message = %error);
                         }
@@ -2357,7 +2419,7 @@ fn invalid_message(error: impl std::fmt::Display) -> String {
 // Native source identity is separate from the Host database's identity.
 // Provider/instance selection belongs to the binding, not this path hash.
 fn native_storage_scope(directory: &std::path::Path) -> Result<String, serde_json::Error> {
-    let bytes = serde_json::to_vec(directory)?;
+    let bytes = serde_json::to_vec(&canonical_storage_path(directory))?;
     let digest = ring::digest::digest(&ring::digest::SHA256, &bytes);
     Ok(digest
         .as_ref()
@@ -2396,14 +2458,6 @@ fn session_target(request: &Call) -> (Option<&agent_protocol::session::SessionRe
         Call::RenameSession(p) => (Some(&p.thread_id), None),
         _ => (None, None),
     }
-}
-
-fn provider_key(provider: ProviderKind) -> String {
-    serde_json::to_value(provider)
-        .expect("provider serializes")
-        .as_str()
-        .unwrap()
-        .to_owned()
 }
 
 fn host_capabilities(
@@ -2500,11 +2554,13 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         let projects = root.path().join("worktrees.json");
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("unavailable".into()),
             ProjectStore::new(projects.clone()),
             Some(root.path().join("codex-home")),
+            None,
         )
+        .await
         .unwrap();
         let original = scope(&service).await;
         service
@@ -2517,20 +2573,24 @@ mod tests {
             .unwrap();
         assert_eq!(scope(&service).await, original);
         drop(service);
-        let restarted = HostRpcService::new(
+        let restarted = HostRpcService::with_codex(
             Err("unavailable".into()),
             ProjectStore::new(projects.clone()),
             Some(root.path().join("different-codex-home")),
+            None,
         )
+        .await
         .unwrap();
         assert_eq!(scope(&restarted).await, original);
         drop(restarted);
         std::fs::remove_file(projects.with_file_name("bex-conversations.sqlite")).unwrap();
-        let replaced = HostRpcService::new(
+        let replaced = HostRpcService::with_codex(
             Err("unavailable".into()),
             ProjectStore::new(projects),
             Some(root.path().join("different-codex-home")),
+            None,
         )
+        .await
         .unwrap();
         assert_ne!(scope(&replaced).await, original);
     }
@@ -2545,11 +2605,13 @@ mod tests {
         std::fs::write(&registry, "invalid registry").unwrap();
         let program = root.path().join("native-cli.exe");
         std::fs::write(&program, []).unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("unavailable".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
             Some(root.path().join("codex-native")),
+            None,
         )
+        .await
         .unwrap();
         let configure = || {
             service.enable_claude(
@@ -2571,7 +2633,9 @@ mod tests {
             .dispatch(
                 session.id(),
                 &Call::CreateSession(op::CreateSession {
-                    provider: ProviderKind::Claude,
+                    instance_id: "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
                     cwd: Some(root.path().to_string_lossy().into_owned()),
                     model: None,
                 }),
@@ -2586,7 +2650,10 @@ mod tests {
         };
         assert_eq!(
             response.response.thread.provider,
-            Some(ProviderKind::Claude)
+            Some(ProviderRef {
+                instance_id: "claude".parse().unwrap(),
+                driver: "claudeAgent".parse().unwrap()
+            })
         );
     }
 
@@ -2599,11 +2666,13 @@ mod tests {
         };
         use futures_util::FutureExt;
         let root = tempfile::tempdir().unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("not used".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
             Some(root.path().join("codex-native")),
+            None,
         )
+        .await
         .unwrap();
         service
             .enable_claude(
@@ -2616,13 +2685,19 @@ mod tests {
         let connection = service.open_session();
         let router = &service.inner.router;
         let target = NativeIdentity {
-            provider: ProviderKind::Claude,
+            provider: ProviderRef {
+                instance_id: "claude".parse().unwrap(),
+                driver: "claudeAgent".parse().unwrap(),
+            },
             id: "native".into(),
         };
         let target = service
             .inner
             .conversations
-            .bind(&target, &service.storage_scope(target.provider).unwrap())
+            .bind(
+                &target,
+                &service.storage_scope(&target.provider.instance_id).unwrap(),
+            )
             .unwrap();
         let (input, mut receiver) = tokio::sync::mpsc::channel(1);
         let instance = uuid::Uuid::new_v4();
@@ -2640,6 +2715,10 @@ mod tests {
             let id = adapted.request.id.clone();
             router
                 .request(
+                    &agent_protocol::providers::ProviderRef {
+                        instance_id: "claude".parse().unwrap(),
+                        driver: "claudeAgent".parse().unwrap(),
+                    },
                     target.clone(),
                     crate::claude::request_origin(
                         instance,
@@ -2724,18 +2803,24 @@ mod tests {
             "stoppedCodex",
         ] {
             let root = tempfile::tempdir().unwrap();
-            let service = HostRpcService::new(
+            let service = HostRpcService::with_codex(
                 Err("unavailable".into()),
                 ProjectStore::new(root.path().join("worktrees.json")),
                 Some(root.path().join("codex-native")),
+                None,
             )
+            .await
             .unwrap();
             let connection = service.open_session();
             let claude = case.ends_with("Claude") || case == "invalidClaudeId";
             let provider = if claude {
-                ProviderKind::Claude
+                "claude"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap()
             } else {
-                ProviderKind::Codex
+                "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap()
             };
             if claude {
                 service
@@ -2748,13 +2833,16 @@ mod tests {
                     .unwrap();
             }
             let target = NativeIdentity {
-                provider,
+                provider: service.agent(&provider).unwrap().reference().clone(),
                 id: "native".into(),
             };
             let target = service
                 .inner
                 .conversations
-                .bind(&target, &service.storage_scope(target.provider).unwrap())
+                .bind(
+                    &target,
+                    &service.storage_scope(&target.provider.instance_id).unwrap(),
+                )
                 .unwrap();
             let (input, mut receiver) = tokio::sync::mpsc::channel(1);
             let stopped = tokio_util::sync::CancellationToken::new();
@@ -2782,7 +2870,12 @@ mod tests {
             service
                 .inner
                 .router
-                .request(target.clone(), origin, adapted.request)
+                .request(
+                    &service.inner.conversations.provider(&target).unwrap(),
+                    target.clone(),
+                    origin,
+                    adapted.request,
+                )
                 .unwrap();
             if case == "closedClaude" {
                 receiver.close();
@@ -2854,11 +2947,13 @@ mod tests {
     async fn provider_capabilities_are_checked_before_provider_availability() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("not available".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
             Some(root.path().join("codex-native")),
+            None,
         )
+        .await
         .unwrap();
         service
             .enable_claude(
@@ -2873,10 +2968,19 @@ mod tests {
             .conversations
             .bind(
                 &NativeIdentity {
-                    provider: ProviderKind::Claude,
+                    provider: ProviderRef {
+                        instance_id: "claude".parse().unwrap(),
+                        driver: "claudeAgent".parse().unwrap(),
+                    },
                     id: "native".into(),
                 },
-                &service.storage_scope(ProviderKind::Claude).unwrap(),
+                &service
+                    .storage_scope(
+                        &"claude"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
             )
             .unwrap();
         let session = service.open_session();
@@ -2919,11 +3023,13 @@ mod tests {
         use super::*;
         use agent_protocol::session::SubmissionDelivery;
         let root = tempfile::tempdir().unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("not available".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
             Some(root.path().join("codex-native")),
+            None,
         )
+        .await
         .unwrap();
         service
             .enable_claude(
@@ -2938,10 +3044,19 @@ mod tests {
             .conversations
             .bind(
                 &NativeIdentity {
-                    provider: ProviderKind::Claude,
+                    provider: ProviderRef {
+                        instance_id: "claude".parse().unwrap(),
+                        driver: "claudeAgent".parse().unwrap(),
+                    },
                     id: "source".into(),
                 },
-                &service.storage_scope(ProviderKind::Claude).unwrap(),
+                &service
+                    .storage_scope(
+                        &"claude"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
             )
             .unwrap();
         let input = op::Submission {
@@ -2986,21 +3101,32 @@ mod tests {
         use agent_protocol::session::SubmissionDelivery;
         use futures_util::FutureExt;
         let root = tempfile::tempdir().unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("unavailable".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
             Some(root.path().join("codex-native")),
+            None,
         )
+        .await
         .unwrap();
         let target = service
             .inner
             .conversations
             .bind(
                 &NativeIdentity {
-                    provider: ProviderKind::Codex,
+                    provider: ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap(),
+                    },
                     id: "source".into(),
                 },
-                &service.storage_scope(ProviderKind::Codex).unwrap(),
+                &service
+                    .storage_scope(
+                        &"codex"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
             )
             .unwrap();
         let input = op::Submission {
@@ -3058,21 +3184,32 @@ mod tests {
             session::SubmissionDelivery,
         };
         let root = tempfile::tempdir().unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("not available".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
             Some(root.path().join("native")),
+            None,
         )
+        .await
         .unwrap();
         let target = service
             .inner
             .conversations
             .bind(
                 &NativeIdentity {
-                    provider: ProviderKind::Codex,
+                    provider: ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap(),
+                    },
                     id: "source".into(),
                 },
-                &service.storage_scope(ProviderKind::Codex).unwrap(),
+                &service
+                    .storage_scope(
+                        &"codex"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
             )
             .unwrap();
         let _execution = service
@@ -3154,21 +3291,32 @@ mod tests {
         use super::*;
         use agent_protocol::{queue::QueueAction, session::SubmissionDelivery};
         let root = tempfile::tempdir().unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("not available".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
             Some(root.path().join("codex-native")),
+            None,
         )
+        .await
         .unwrap();
         let target = service
             .inner
             .conversations
             .bind(
                 &NativeIdentity {
-                    provider: ProviderKind::Codex,
+                    provider: ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap(),
+                    },
                     id: "source".into(),
                 },
-                &service.storage_scope(ProviderKind::Codex).unwrap(),
+                &service
+                    .storage_scope(
+                        &"codex"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
             )
             .unwrap();
         service
@@ -3210,7 +3358,9 @@ mod tests {
         let mut mismatched = input;
         mismatched.client_user_message_id = "mismatched".into();
         mismatched.model = Some(agent_protocol::models::ModelRef {
-            provider: ProviderKind::Claude,
+            instance_id: "claude"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             id: "default".into(),
         });
         assert_eq!(
@@ -3227,21 +3377,32 @@ mod tests {
     async fn unavailable_provider_does_not_retain_a_submission_as_in_flight() {
         use super::*;
         let root = tempfile::tempdir().unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("unavailable".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
             Some(root.path().join("codex-native")),
+            None,
         )
+        .await
         .unwrap();
         let target = service
             .inner
             .conversations
             .bind(
                 &NativeIdentity {
-                    provider: ProviderKind::Codex,
+                    provider: ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap(),
+                    },
                     id: "native".into(),
                 },
-                &service.storage_scope(ProviderKind::Codex).unwrap(),
+                &service
+                    .storage_scope(
+                        &"codex"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
             )
             .unwrap();
         let session = service.open_session();
@@ -3268,11 +3429,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let program = root.path().join("not-executable.test");
         std::fs::write(&program, []).unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("not used".into()),
             ProjectStore::new(root.path().join("worktrees.json")),
             Some(root.path().join("codex-native")),
+            None,
         )
+        .await
         .unwrap();
         service
             .enable_claude(
@@ -3284,7 +3447,9 @@ mod tests {
             .unwrap();
         let created = service
             .create_session(op::CreateSession {
-                provider: ProviderKind::Claude,
+                instance_id: "claude"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 cwd: Some(root.path().to_string_lossy().into_owned()),
                 model: None,
             })
@@ -3363,21 +3528,32 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         let projects = ProjectStore::new(root.path().join("worktrees.json"));
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("unavailable".into()),
             projects.clone(),
             Some(root.path().join("first-home")),
+            None,
         )
+        .await
         .unwrap();
         let target = service
             .inner
             .conversations
             .bind(
                 &NativeIdentity {
-                    provider: ProviderKind::Codex,
+                    provider: ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap(),
+                    },
                     id: "native".into(),
                 },
-                &service.storage_scope(ProviderKind::Codex).unwrap(),
+                &service
+                    .storage_scope(
+                        &"codex"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
             )
             .unwrap();
         service
@@ -3390,7 +3566,10 @@ mod tests {
                         id: Some(agent_protocol::session::SessionRef {
                             id: "native".into(),
                         }),
-                        provider: Some(ProviderKind::Claude),
+                        provider: Some(agent_protocol::providers::ProviderRef {
+                            instance_id: "claude".parse().unwrap(),
+                            driver: "claudeAgent".parse().unwrap(),
+                        }),
                         ..Default::default()
                     },
                     model: None,
@@ -3440,11 +3619,13 @@ mod tests {
             .admit(&waiting, SubmissionDelivery::Queued)
             .unwrap();
         drop(service);
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("unavailable".into()),
             projects,
             Some(root.path().join("different-home")),
+            None,
         )
+        .await
         .unwrap();
         assert!(service.native_session(&target).is_err());
         let connection = service.open_session();
@@ -3455,7 +3636,13 @@ mod tests {
         )
         .await;
         assert_eq!(list.data[0].id.as_ref(), Some(&target));
-        assert_eq!(list.data[0].provider, Some(ProviderKind::Codex));
+        assert_eq!(
+            list.data[0].provider,
+            Some(ProviderRef {
+                instance_id: "codex".parse().unwrap(),
+                driver: "codex".parse().unwrap()
+            })
+        );
         let opened: agent_protocol::session::OpenedSession = call(
             &service,
             &connection,
@@ -3518,18 +3705,23 @@ mod tests {
         use super::*;
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("codex-native"), "not a storage directory").unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("unavailable".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
             Some(root.path().join("codex-native")),
+            None,
         )
+        .await
         .unwrap();
         let source = agent_protocol::session::SessionRef { id: "saved".into() };
         service
             .inner
             .conversations
             .discover_page(
-                ProviderKind::Codex,
+                &ProviderRef {
+                    instance_id: "codex".parse().unwrap(),
+                    driver: "codex".parse().unwrap(),
+                },
                 &[super::super::agent::SessionSummary {
                     thread: Thread {
                         id: Some(source),
@@ -3538,7 +3730,13 @@ mod tests {
                     },
                     branch: None,
                 }],
-                &service.storage_scope(ProviderKind::Codex).unwrap(),
+                &service
+                    .storage_scope(
+                        &"codex"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
             )
             .unwrap();
         let catalog = service.inner.catalog_import.lock().await;
@@ -3580,21 +3778,32 @@ mod tests {
             json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"native-turn"}}),
         ].into_iter().map(|record| format!("{record}\n")).collect::<String>();
         std::fs::write(&source, &bytes).unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("missing app-server".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
             Some(native),
+            None,
         )
+        .await
         .unwrap();
         let target = service
             .inner
             .conversations
             .bind(
                 &NativeIdentity {
-                    provider: ProviderKind::Codex,
+                    provider: ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap(),
+                    },
                     id: native_id.into(),
                 },
-                &service.storage_scope(ProviderKind::Codex).unwrap(),
+                &service
+                    .storage_scope(
+                        &"codex"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
             )
             .unwrap();
         let serial = service
@@ -3670,11 +3879,13 @@ mod tests {
             include_str!("../../tests/fixtures/claude-2.1.266.jsonl"),
         )
         .unwrap();
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Err("unavailable".into()),
             ProjectStore::new(root.path().join("bex-worktrees.json")),
             Some(root.path().join("codex-native")),
+            None,
         )
+        .await
         .unwrap();
         service
             .enable_claude(
@@ -3689,10 +3900,19 @@ mod tests {
             .conversations
             .bind(
                 &NativeIdentity {
-                    provider: ProviderKind::Claude,
+                    provider: ProviderRef {
+                        instance_id: "claude".parse().unwrap(),
+                        driver: "claudeAgent".parse().unwrap(),
+                    },
                     id: id.into(),
                 },
-                &service.storage_scope(ProviderKind::Claude).unwrap(),
+                &service
+                    .storage_scope(
+                        &"claude"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
+                    )
+                    .unwrap(),
             )
             .unwrap();
         let serial = service

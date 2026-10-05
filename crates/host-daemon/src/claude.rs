@@ -30,7 +30,7 @@ use agent_protocol::models::SessionStatus;
 
 use agent_protocol::models::Turn;
 
-use agent_protocol::session::ProviderKind;
+use agent_protocol::session::{ProviderInstanceId, ProviderRef};
 
 use agent_protocol::session::SessionChange;
 
@@ -90,7 +90,10 @@ impl From<&str> for OperationError {
 }
 
 pub(crate) struct Claude {
+    reference: ProviderRef,
     program: PathBuf,
+    environment: Vec<(String, String)>,
+    launch_args: Vec<String>,
     directory: PathBuf,
     native_home: PathBuf,
     accounts: AsyncMutex<accounts::Accounts>,
@@ -139,22 +142,30 @@ impl Drop for Claude {
 
 impl Claude {
     pub(crate) async fn load(
+        reference: ProviderRef,
         program: PathBuf,
         directory: PathBuf,
         native_home: Option<PathBuf>,
+        environment: Vec<(String, String)>,
+        launch_args: Vec<String>,
     ) -> anyhow::Result<Self> {
         crate::platform::create_state_directory(&directory)?;
         let native_home = native_home.map(Ok).unwrap_or_else(history::home)?;
         let accounts = accounts::Accounts::load(
+            reference.instance_id.clone(),
             program.clone(),
             directory.join("accounts"),
             native_home.clone(),
+            environment.clone(),
         )
         .await?;
         let (events, event_receiver) = mpsc::channel(256);
         Ok(Self {
+            reference,
             accounts: AsyncMutex::new(accounts),
             program,
+            environment,
+            launch_args,
             directory,
             native_home,
             records: AsyncMutex::new(HashMap::new()),
@@ -175,6 +186,8 @@ impl Claude {
         };
         let cwd = tempfile::tempdir_in(&self.directory).map_err(|error| error.to_string())?;
         let (process, initialized) = Process::start(
+            &self.environment,
+            &self.launch_args,
             &self.program,
             &self.native_home,
             &auth_home,
@@ -236,7 +249,7 @@ impl Claude {
                     .map(|effort| effort.reasoning_effort.clone())
                     .unwrap_or_default();
                 let model = agent_protocol::models::ModelRef {
-                    provider: ProviderKind::Claude,
+                    instance_id: self.reference.instance_id.clone(),
                     id: name.into(),
                 };
                 Ok(Model {
@@ -261,7 +274,7 @@ impl Claude {
         let session_id = Uuid::new_v4();
         let response = ThreadResponse {
             thread: Thread {
-                provider: Some(ProviderKind::Claude),
+                provider: None,
                 id: Some(SessionRef {
                     id: session_id.to_string(),
                 }),
@@ -272,7 +285,7 @@ impl Claude {
                 ..Default::default()
             },
             model: Some(agent_protocol::models::ModelRef {
-                provider: ProviderKind::Claude,
+                instance_id: self.reference.instance_id.clone(),
                 id: model.into(),
             }),
         };
@@ -385,7 +398,7 @@ impl Claude {
                 } else {
                     threads.push(SessionSummary {
                         thread: Thread {
-                            provider: Some(ProviderKind::Claude),
+                            provider: None,
                             id: Some(SessionRef {
                                 id: record.session_id.to_string(),
                             }),
@@ -427,9 +440,10 @@ impl Claude {
     async fn read(&self, id: &str, requested: usize) -> anyhow::Result<ThreadResponse> {
         let native = Uuid::parse_str(id)?;
         let home = self.native_home.clone();
+        let instance_id = self.reference.instance_id.clone();
         let history: anyhow::Result<ThreadResponse> = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native)?;
-            match history::read(&path, requested) {
+            match history::read(&instance_id, &path, requested) {
                 Ok(response) => Ok(response),
                 Err(error) => {
                     let mut thread = history::summary(&path)?.thread;
@@ -457,7 +471,7 @@ impl Claude {
                     None => return Err(error),
                 };
                 let mut thread = Thread {
-                    provider: Some(ProviderKind::Claude),
+                    provider: None,
                     id: Some(SessionRef { id: id.into() }),
                     cwd: Some(record.cwd.clone()),
                     ..Default::default()
@@ -474,7 +488,7 @@ impl Claude {
                 Ok(ThreadResponse {
                     thread,
                     model: Some(agent_protocol::models::ModelRef {
-                        provider: ProviderKind::Claude,
+                        instance_id: self.reference.instance_id.clone(),
                         id: record.model.clone(),
                     }),
                 })
@@ -490,9 +504,10 @@ impl Claude {
     ) -> Result<op::ItemResponse, OperationError> {
         let native = Uuid::parse_str(native_id).map_err(|_| "invalid Claude ID")?;
         let home = self.native_home.clone();
+        let instance_id = self.reference.instance_id.clone();
         let native_history = tokio::task::spawn_blocking(move || {
             let path = history::resolve(&home, native)?;
-            history::read_details(&path)
+            history::read_details(&instance_id, &path)
         })
         .await
         .map_err(|error| error.to_string())?
@@ -540,8 +555,9 @@ impl Claude {
         {
             let home = self.native_home.clone();
             let agent_id = agent_id.to_owned();
+            let instance_id = self.reference.instance_id.clone();
             let related = tokio::task::spawn_blocking(move || {
-                history::read_related(&home, native, &agent_id)
+                history::read_related(&instance_id, &home, native, &agent_id)
             })
             .await
             .map_err(|error| error.to_string())?;
@@ -626,7 +642,7 @@ impl Claude {
         if self.stop.is_cancelled() {
             return Err("Host is shutting down".into());
         }
-        let content = input_content(&params.input).await?;
+        let content = input_content(&self.reference.instance_id, &params.input).await?;
         let mut state = record.lock().await;
         if state.running.is_some() {
             return Err("Claudeはすでに実行中です。".into());
@@ -675,6 +691,8 @@ impl Claude {
             let permit = self.processes.clone().try_acquire_owned()
                 .map_err(|_| "Claude process capacity reached (8); wait for an active or retained session to finish")?;
             let (mut process, initialized) = Process::start(
+                &self.environment,
+                &self.launch_args,
                 &self.program,
                 &self.native_home,
                 &auth_home,
@@ -755,7 +773,7 @@ impl Claude {
         params: &op::Submission,
         turn_id: &str,
     ) -> Result<agent_protocol::ids::TurnId, Failure> {
-        let content = input_content(&params.input)
+        let content = input_content(&self.reference.instance_id, &params.input)
             .await
             .map_err(|error| Failure::new("invalid_input", error))?;
         let record = self
@@ -1476,16 +1494,23 @@ fn execution_error(message: &Value, retrying: bool) -> ExecutionError {
     }
 }
 
-fn skill_invocation(name: &str, path: &str) -> agent_protocol::composer::Invocation {
+fn skill_invocation(
+    instance_id: &ProviderInstanceId,
+    name: &str,
+    path: &str,
+) -> agent_protocol::composer::Invocation {
     agent_protocol::composer::Invocation {
-        provider: ProviderKind::Claude,
+        instance_id: instance_id.clone(),
         kind: agent_protocol::composer::InvocationKind::Skill,
         name: name.into(),
         path: path.into(),
     }
 }
 
-async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
+async fn input_content(
+    instance_id: &ProviderInstanceId,
+    input: &[op::Input],
+) -> Result<Vec<Value>, String> {
     if input.is_empty() {
         return Err("メッセージを入力してください。".into());
     }
@@ -1495,7 +1520,7 @@ async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
             op::Input::Text { text, .. } => {
                 let text = input.iter().fold(text.clone(), |text, part| match part {
                     op::Input::Skill { name, path } => {
-                        let invocation = skill_invocation(name, path);
+                        let invocation = skill_invocation(instance_id, name, path);
                         invocation.replace_in(&text, &format!("/{name}"))
                     }
                     _ => text,
@@ -1503,7 +1528,7 @@ async fn input_content(input: &[op::Input]) -> Result<Vec<Value>, String> {
                 content.push(json!({"type":"text","text":text}));
             }
             op::Input::Skill { name, path } => {
-                let invocation = skill_invocation(name, path);
+                let invocation = skill_invocation(instance_id, name, path);
                 if !input
                     .iter()
                     .any(|part| matches!(part,op::Input::Text {text} if invocation.is_in(text)))
@@ -1560,7 +1585,7 @@ impl crate::host_rpc::agent::Identity for Claude {
         Ok(op::Accounts {
             accounts,
             selected: selected
-                .map(|id| (ProviderKind::Claude, id))
+                .map(|id| (self.reference.instance_id.clone(), id))
                 .into_iter()
                 .collect(),
             error: None,
@@ -1599,7 +1624,7 @@ pub(crate) fn request_origin(
     crate::host_rpc::requests::RequestOrigin {
         instance,
         native_id,
-        provider: ProviderKind::Claude,
+
         source: std::sync::Arc::new(RequestSource { input, answers }),
     }
 }
@@ -1640,6 +1665,9 @@ impl crate::host_rpc::requests::AnswerSource for RequestSource {
 
 #[async_trait::async_trait]
 impl Agent for Claude {
+    fn reference(&self) -> &ProviderRef {
+        &self.reference
+    }
     fn capabilities(&self) -> agent_protocol::session::Capabilities {
         agent_protocol::session::Capabilities {
             active_steering: true,
@@ -1801,6 +1829,7 @@ impl Agent for Claude {
     }
     async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {
         Ok(op::ModelPage {
+            instances: Vec::new(),
             data: if params.cursor.is_none() {
                 Claude::models(self)
                     .await
@@ -1836,6 +1865,8 @@ impl Agent for Claude {
                 .try_acquire_owned()
                 .map_err(|error| error.to_string())?;
             let (process, initialized) = Process::start(
+                &self.environment,
+                &self.launch_args,
                 &self.program,
                 &self.native_home,
                 &auth_home,
@@ -1848,7 +1879,7 @@ impl Agent for Claude {
             if let Err(error) = process.finish().await {
                 catalog
                     .errors
-                    .entry(ProviderKind::Claude)
+                    .entry(self.reference.instance_id.clone())
                     .or_default()
                     .push(error);
             }
@@ -1861,7 +1892,11 @@ impl Agent for Claude {
                     .filter_map(|command| {
                         let name = command["name"].as_str()?;
                         Some(ComposerCandidate {
-                            invocation: skill_invocation(name, &format!("skill://claude/{name}")),
+                            invocation: skill_invocation(
+                                &self.reference.instance_id,
+                                name,
+                                &format!("skill://claude/{name}"),
+                            ),
                             description: command["description"].as_str().unwrap_or_default().into(),
                         })
                     })
@@ -1874,7 +1909,7 @@ impl Agent for Claude {
             Err(error) => {
                 catalog
                     .errors
-                    .entry(ProviderKind::Claude)
+                    .entry(self.reference.instance_id.clone())
                     .or_default()
                     .push(error);
             }
@@ -1970,9 +2005,15 @@ mod execution_tests {
     async fn steer_uses_priority_now_and_waits_for_the_active_owner_receipt() {
         let root = tempfile::tempdir().unwrap();
         let claude = Claude::load(
+            ProviderRef {
+                instance_id: "claude".parse().unwrap(),
+                driver: "claudeAgent".parse().unwrap(),
+            },
             root.path().join("unused-cli"),
             root.path().join("state"),
             Some(root.path().join("native")),
+            Vec::new(),
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -2349,7 +2390,7 @@ mod execution_tests {
                 + "\n",
         )
         .unwrap();
-        let history = history::read(&path, 10).unwrap();
+        let history = history::read(&"claude".parse().unwrap(), &path, 10).unwrap();
         let saved = history.thread.turns.unwrap();
         let live = router.current_turn(&session, "turn").unwrap();
         assert_eq!(live.items, saved[0].items);

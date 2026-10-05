@@ -4,7 +4,7 @@ use super::service::Failure;
 use agent_protocol::{
     models::{Item, ThreadResponse},
     operations as op,
-    session::{ProviderKind, SessionChange, SessionRef, TextField},
+    session::{ProviderRef, SessionChange, SessionRef, TextField},
 };
 use agent_transport::peer::{RpcMessage, RpcMessageKind};
 use codex_app_server::{CodexAppServer, Error as AppServerError};
@@ -62,6 +62,7 @@ fn unmaterialized_history(code: Option<&str>, message: &str, thread_id: &str) ->
 }
 
 pub(super) struct Codex {
+    pub(super) reference: ProviderRef,
     accounts: Arc<tokio::sync::Mutex<Option<crate::codex_accounts::Accounts>>>,
     restoration_error: tokio::sync::watch::Sender<Option<String>>,
     directory: PathBuf,
@@ -72,12 +73,18 @@ pub(super) struct Codex {
     history_catalog: tokio::sync::Mutex<Option<Arc<super::codex_history::Catalog>>>,
 }
 impl Codex {
-    pub(super) fn new(process: Result<Arc<CodexAppServer>, String>, home: Option<PathBuf>) -> Self {
-        let directory = process
-            .as_ref()
-            .ok()
-            .map(|server| server.initialize_response().codex_home.clone())
-            .or(home)
+    pub(super) fn new(
+        reference: ProviderRef,
+        process: Result<Arc<CodexAppServer>, String>,
+        home: Option<PathBuf>,
+    ) -> Self {
+        let directory = home
+            .or_else(|| {
+                process
+                    .as_ref()
+                    .ok()
+                    .map(|server| server.initialize_response().codex_home.clone())
+            })
             .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
             .unwrap_or_else(|| {
                 directories::BaseDirs::new()
@@ -85,6 +92,7 @@ impl Codex {
                     .unwrap_or_default()
             });
         Self {
+            reference,
             accounts: Arc::default(),
             restoration_error: tokio::sync::watch::channel(None).0,
             directory,
@@ -101,6 +109,7 @@ impl Codex {
         config: codex_app_server::AppServerConfig,
     ) -> Result<(), String> {
         let accounts = crate::codex_accounts::Accounts::load(
+            self.reference.instance_id.clone(),
             directory,
             config,
             self.server().map_err(|error| error.to_string())?,
@@ -172,8 +181,11 @@ impl Codex {
         method: &str,
         params: &P,
     ) -> Result<ThreadResponse, Failure> {
-        super::native::codex_thread_response(self.request(method, params).await?)
-            .map_err(Into::into)
+        super::native::codex_thread_response(
+            self.request(method, params).await?,
+            &self.reference.instance_id,
+        )
+        .map_err(Into::into)
     }
 
     async fn wait_for_events(&self, sequence: u64) -> Result<(), Failure> {
@@ -492,7 +504,7 @@ pub(crate) fn request_origin(
     super::requests::RequestOrigin {
         instance,
         native_id,
-        provider: ProviderKind::Codex,
+
         source: Arc::new(RequestSource {
             process,
             stopped,
@@ -594,6 +606,13 @@ impl Identity for Codex {
 
 #[async_trait::async_trait]
 impl Agent for Codex {
+    fn dictation_backend(&self) -> Option<Arc<CodexAppServer>> {
+        self.server().ok()?;
+        self.process.as_ref().ok().cloned()
+    }
+    fn reference(&self) -> &ProviderRef {
+        &self.reference
+    }
     fn capabilities(&self) -> agent_protocol::session::Capabilities {
         agent_protocol::session::Capabilities {
             active_steering: true,
@@ -779,7 +798,7 @@ impl Agent for Codex {
             .await
             .map_err(Failure::before_submission)?;
         let needs_reload = native["thread"]["status"]["type"] == "notLoaded";
-        let response = super::native::codex_thread_response(native)
+        let response = super::native::codex_thread_response(native, &self.reference.instance_id)
             .map_err(|error| Failure::new("invalid_thread", error))?;
         Ok(SubmissionState {
             response,
@@ -852,8 +871,9 @@ impl Agent for Codex {
             .ok_or_else(|| Failure::new("invalid_models", "native model catalog is missing"))?;
         for model in data {
             let id = model["model"].take();
-            model["model"] = serde_json::json!({"provider":"codex","id":id});
+            model["model"] = serde_json::json!({"instanceId":self.reference.instance_id,"id":id});
         }
+        native["instances"] = serde_json::json!([]);
         serde_json::from_value(native).map_err(Into::into)
     }
     async fn catalog(&self, cwd: &str) -> agent_protocol::composer::ComposerCatalog {
@@ -1046,7 +1066,7 @@ impl Agent for Codex {
             {
                 tracing::error!(target: "bex", operation = "host.codex.shutdown", message = %error);
             }
-            let _=emit(&output,AgentChange::Stopped {provider:ProviderKind::Codex,reason:"エージェントとの接続が終了しました。Hostを再起動してから再送信してください。".into()}).await;
+            let _=emit(&output,AgentChange::Stopped {reason:"エージェントとの接続が終了しました。Hostを再起動してから再送信してください。".into()}).await;
         });
         Some(receiver)
     }

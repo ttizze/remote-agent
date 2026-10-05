@@ -5,7 +5,7 @@ use crate::{
     presentation::conversation::{
         ItemPresentation, RenderedConversation, RenderedItem, RenderedTurn,
     },
-    session::ProviderKind,
+    session::ProviderInstanceId,
     state::{Draft, FileDraft, Navigation, Snapshot},
 };
 use agent_protocol::operations::{AccountLogin, Accounts};
@@ -118,12 +118,18 @@ impl Snapshot {
     pub fn accounts(&self) -> Option<Accounts> {
         self.account.accounts.as_deref().cloned()
     }
-    pub fn account_is_selected(&self, provider: ProviderKind, id: String) -> bool {
+    pub fn provider_instances(&self) -> Vec<agent_protocol::providers::ProviderInstance> {
+        self.provider_instances.as_ref().clone()
+    }
+    pub fn provider_settings(&self) -> Option<agent_protocol::providers::ProviderSettings> {
+        self.provider_settings.as_deref().cloned()
+    }
+    pub fn account_is_selected(&self, provider: ProviderInstanceId, id: String) -> bool {
         self.account.accounts.as_ref().is_some_and(|accounts| {
             accounts
                 .accounts
                 .iter()
-                .find(|account| account.provider == provider && account.id == id)
+                .find(|account| account.instance_id == provider && account.id == id)
                 .is_some_and(|account| accounts.is_selected(account))
         })
     }
@@ -248,7 +254,10 @@ mod tests {
         Arc::make_mut(&mut snapshot.conversations).insert(
             agent_protocol::session::SessionRef { id: "chat".into() },
             Arc::new(crate::models::Thread {
-                provider: Some(agent_protocol::session::ProviderKind::Codex),
+                provider: Some(agent_protocol::providers::ProviderRef {
+                    instance_id: "codex".parse().unwrap(),
+                    driver: "codex".parse().unwrap(),
+                }),
                 id: Some(agent_protocol::session::SessionRef { id: "chat".into() }),
                 ..Default::default()
             }),

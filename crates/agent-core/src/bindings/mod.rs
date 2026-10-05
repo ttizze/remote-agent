@@ -517,9 +517,9 @@ mod tests {
                 let open = &requests["host/session/open"];
                 assert_eq!(open["params"]["session"]["id"], "thread");
                 // Finish the conversation before the lists; no reload invalidates another.
-                writer.reply(open, json!({"result":{"session":{"id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"provider":"codex","id":{"id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"after reconnect","phase":"unknown"}}}}}],"status":"unknown"}]}}}})).await.unwrap();
-                writer.reply(&requests["host/model/list"], json!({ "result":{"data":[{"id":"fresh-model","model":{"provider": "codex", "id": "fresh-model"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}})).await.unwrap();
-                writer.reply(list, json!({ "result":{"data":[{"provider":"codex","id":{"id":"thread"},"name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
+                writer.reply(open, json!({"result":{"session":{"id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"after reconnect","phase":"unknown"}}}}}],"status":"unknown"}]}}}})).await.unwrap();
+                writer.reply(&requests["host/model/list"], json!({ "result":{"instances":[],"data":[{"id":"fresh-model","model":{"instanceId": "codex", "id": "fresh-model"},"displayName":"Fresh","defaultReasoningEffort":"medium","supportedReasoningEfforts":[]}],"nextCursor":null}})).await.unwrap();
+                writer.reply(list, json!({ "result":{"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"name":"reloaded"}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}})).await.unwrap();
                 assert!(!matches!(reader.read_request().await, Ok(Some(_))));
                 next.close();
             };
@@ -543,7 +543,7 @@ mod tests {
                 assert_eq!(snapshot.navigation.thread_id.as_ref().map(|session| session.id.as_str()), Some("thread"));
                 assert!(snapshot.threads.as_ref().unwrap().data.iter().any(|thread| thread.id.as_ref().map(|session| session.id.as_str()) == Some("thread")));
                 assert_eq!(item_text(&(snapshot.conversations[&agent_protocol::session::SessionRef { id: "thread".into() }].turns.as_ref().unwrap()[0].items.as_ref().unwrap()[0])), Some("after reconnect"));
-                assert_eq!(snapshot.models[0].model, agent_protocol::models::ModelRef {provider:agent_protocol::session::ProviderKind::Codex,id:"fresh-model".into()});
+                assert_eq!(snapshot.models[0].model, agent_protocol::models::ModelRef {instance_id:"codex".parse::<crate::session::ProviderInstanceId>().unwrap(),id:"fresh-model".into()});
                 assert_eq!(snapshot.drafts[&crate::state::DraftKey::from(agent_protocol::session::SessionRef { id: "thread".into() })].text, "preserved");
                 store.shutdown().await.unwrap();
             };
@@ -568,7 +568,7 @@ mod tests {
         use crate::transport::Trust;
         use serde_json::{Value, json};
         let silent = mode == "silent";
-        tokio::time::timeout(Duration::from_secs(10), async {
+        let (store, host) = tokio::time::timeout(Duration::from_secs(10), async {
                     let identity = Identity::generate();
                     let trust = Trust { allowed: [identity.node_id()].into(), ..Default::default() };
                     let host = Endpoint::bind(Identity::generate(), Relays::Disabled).await.unwrap();
@@ -591,9 +591,9 @@ mod tests {
                             "host/session/scope" => json!("fixture-storage"),
                             "host/diagnostics/connection" => json!({}),
                             "host/account/list" => json!({"accounts":[],"selected":{}}),
-                            "host/session/list" => json!({"data":[{"provider":"codex","id":{"id":"thread"},"name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
-                            "host/session/open" => json!({"session":{"id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"provider":"codex","id":{"id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}}],"status":"unknown"}]}}}),
-                            "host/model/list" => json!({"data":[],"nextCursor":null}),
+                            "host/session/list" => json!({"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"name":text}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                            "host/session/open" => json!({"session":{"id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[{"id":"turn","items":[{"id":"answer","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}}],"status":"unknown"}]}}}),
+                            "host/model/list" => json!({"instances":[],"data":[],"nextCursor":null}),
                             method => panic!("unexpected request: {method}"),
                         };
                         json!({"result":result})
@@ -667,11 +667,20 @@ mod tests {
                         assert!(store.snapshot().connected());
                         assert_eq!(store.snapshot().drafts[&crate::state::DraftKey::from(agent_protocol::session::SessionRef { id: "thread".into() })].text, "keep draft");
                         assert_eq!(store.endpoint.lock().await.as_ref().unwrap().endpoint.node_id(), old_identity, "recovery retains the endpoint identity; discovered addresses can change");
-                        store.shutdown().await.unwrap();
+                        store.store.close().await.unwrap();
                     };
                     tokio::join!(server, client);
-                    first.close(); host.close().await;
+                    first.close();
+                    (store, host)
                 }).await.unwrap();
+        // Graceful QUIC endpoint shutdown drains speculative connections with
+        // PTOs. Keep that cleanup separate from the 500 ms recovery assertion.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            store.shutdown().await.unwrap();
+            host.close().await;
+        })
+        .await
+        .expect("foreground fixture endpoints must finish graceful shutdown");
     }
 
     #[tokio::test]
@@ -909,10 +918,10 @@ mod tests {
                         }
                         for request in requests {
                             let result = match request["method"].as_str().unwrap() {
-                                "host/session/list" => json!({"data":[{"provider":"codex","id":{"id":"thread"},"name":format!("round {round}")}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
-                                "host/session/open" => json!({"session":{"id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"provider":"codex","id":{"id":"thread"},"turns":[]}}}),
+                                "host/session/list" => json!({"data":[{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"name":format!("round {round}")}],"projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false}),
+                                "host/session/open" => json!({"session":{"id":"thread"},"subscriptionId":uuid::Uuid::new_v4(),"revision":0,"response":{"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"thread"},"turns":[]}}}),
                                 "host/account/list" if round == 0 => json!({"accounts":[],"selected":{}}),
-                                "host/model/list" if round == 0 => json!({"data":[],"nextCursor":null}),
+                                "host/model/list" if round == 0 => json!({"instances":[],"data":[],"nextCursor":null}),
                                 method => panic!("unexpected refresh request {method}"),
                             };
                             if round == 2 && selected && request["method"] == "host/session/open" { pending.push(request); continue; }

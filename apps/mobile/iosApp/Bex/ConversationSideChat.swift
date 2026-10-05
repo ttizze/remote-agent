@@ -51,8 +51,11 @@ final class SideChatRequest: ObservableObject {
             if let threadId {
                 _ = try await model.outcome(for: .readThread(ReadThread(threadId: threadId, open: true)))
             } else {
+                guard let instanceId = model.snapshot.providerSelection(key: model.coreDraftKey, preferred: nil) else {
+                    throw AgentError.Failed(reason: "接続が設定されていません")
+                }
                 let result = try await model.outcome(for: .createSession(CreateSession(
-                    provider: model.snapshot.modelProviderForDraft(threadId: model.coreDraftKey),
+                    instanceId: instanceId,
                     cwd: cwd,
                     model: nil
                 )))
@@ -72,7 +75,11 @@ final class SideChatRequest: ObservableObject {
                   model.sideChatRequest?.id == id else { return }
             model.composerFocusRequest = UUID()
         } catch {
-            self.error = model.snapshot.error() ?? error.localizedDescription
+            if case let AgentError.Failed(reason) = error {
+                self.error = model.snapshot.error() ?? reason
+            } else {
+                self.error = model.snapshot.error() ?? error.localizedDescription
+            }
             await restoreOriginal(model)
         }
         preparing = false

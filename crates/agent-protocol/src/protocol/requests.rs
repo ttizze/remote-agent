@@ -62,6 +62,8 @@ macro_rules! contracts {
     };
 }
 contracts! {
+    ReadProviderSettings, "host/provider/settings/read" => (crate::providers::ReadProviderSettings, crate::providers::ProviderSettings) [clone],
+    UpdateProviderInstance, "host/provider/instance/update" => (crate::providers::UpdateProviderInstance, crate::providers::ProviderSettings) [clone],
     OpenSession, "host/session/open" => (s::OpenSession, s::OpenedSession),
     ReadHistory, "host/session/history/read" => (s::ReadHistory, s::HistoryPage) [clone],
     ReadTurnItems, "host/session/turn/items" => (s::ReadTurnItems, m::Empty) [clone],

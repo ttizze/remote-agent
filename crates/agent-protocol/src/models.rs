@@ -83,7 +83,7 @@ fn project_membership<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
-    pub provider: Option<crate::session::ProviderKind>,
+    pub provider: Option<crate::providers::ProviderRef>,
     pub history_read_state: Option<crate::session::HistoryReadState>,
     pub capabilities: Option<crate::session::Capabilities>,
     #[serde(default)]
@@ -212,10 +212,11 @@ pub struct Project {
 pub struct ProjectRoot {
     pub path: String,
 }
-/// Native model identity scoped by provider; neither field is encoded in the other.
+/// Native model identity scoped by configured instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRef {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::providers::ProviderInstanceId,
     pub id: String,
 }
 
@@ -231,10 +232,13 @@ pub struct Model {
     pub default_service_tier: Option<String>,
     pub is_default: Option<bool>,
 }
-pub fn provider_models(models: &[Model], provider: crate::session::ProviderKind) -> Vec<Model> {
+pub fn provider_models(
+    models: &[Model],
+    instance_id: &crate::providers::ProviderInstanceId,
+) -> Vec<Model> {
     models
         .iter()
-        .filter(|model| model.model.provider == provider)
+        .filter(|model| &model.model.instance_id == instance_id)
         .cloned()
         .collect()
 }
@@ -368,7 +372,7 @@ mod tests {
     #[test]
     fn deferred_read_keeps_conversation_and_activity_headers() {
         let text = "会話".repeat(4096);
-        let result = json!({"thread":{"turns":[{"id":"turn","items":[{"id":"user","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[{"text":{"text":text}}]}}}}},{"id":"agent","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}},{"id":"command","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"日本語".repeat(1000),"cwd":null,"output":text,"exitCode":null}}}}},{"id":"files","status":"completed","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[{"path":"a.txt","kind":{"update":{"movePath":null}},"diff":text,"proposal":null}],"output":""}}}}},{"id":"future","status":"completed","clientInputId":null,"body":{"inline":{"body":{"custom":{"provider":"codex","kind":"futureTool","value":{"id":"future","type":"futureTool","tool":"inspect","status":"completed","result":{"content":text}}}}}}},{"id":"small","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":["short"]}}}}}],"status":"unknown"}]}});
+        let result = json!({"thread":{"turns":[{"id":"turn","items":[{"id":"user","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"userMessage":{"text":null,"content":[{"text":{"text":text}}]}}}}},{"id":"agent","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":text,"phase":"unknown"}}}}},{"id":"command","status":"completed","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"日本語".repeat(1000),"cwd":null,"output":text,"exitCode":null}}}}},{"id":"files","status":"completed","clientInputId":null,"body":{"inline":{"body":{"fileChange":{"changes":[{"path":"a.txt","kind":{"update":{"movePath":null}},"diff":text,"proposal":null}],"output":""}}}}},{"id":"future","status":"completed","clientInputId":null,"body":{"inline":{"body":{"custom":{"driver":"codex","kind":"futureTool","value":{"id":"future","type":"futureTool","tool":"inspect","status":"completed","result":{"content":text}}}}}}},{"id":"small","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"reasoning":{"content":[],"summary":["short"]}}}}}],"status":"unknown"}]}});
         let mut typed: ThreadResponse = serde_json::from_value(result).unwrap();
         typed.thread.defer_item_details(MAX_INLINE_ITEM_BYTES);
         let items = typed.thread.turns.as_ref().unwrap()[0]

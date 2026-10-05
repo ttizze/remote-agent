@@ -7,7 +7,7 @@ use agent_protocol::{
     operations as op,
     protocol::Call,
     requests::{Answer, QuestionAnswer, RequestBody},
-    session::{OpenSession, OpenedSession, ProviderKind, SessionChange, SessionRef},
+    session::{OpenSession, OpenedSession, ProviderInstanceId, SessionChange, SessionRef},
 };
 use agent_transport::{client::Client, framing::Reader};
 use host_fixture::test_support::{HostFixture, Memory};
@@ -56,20 +56,20 @@ fn submission(session: &SessionRef, text: &str) -> op::Submission {
         service_tier: None,
     }
 }
-fn prompt(provider: ProviderKind, scenario: &str) -> &str {
-    match (provider, scenario) {
-        (ProviderKind::Codex, "wait") => "[delayed-input]",
-        (ProviderKind::Codex, "approval") => "[approval]",
-        (ProviderKind::Codex, "question") => "[request]",
-        (ProviderKind::Codex, "crash") => "[crash]",
-        (ProviderKind::Claude, "approval") => "permission",
+fn prompt<'a>(provider: &ProviderInstanceId, scenario: &'a str) -> &'a str {
+    match (provider.as_str(), scenario) {
+        ("codex", "wait") => "[delayed-input]",
+        ("codex", "approval") => "[approval]",
+        ("codex", "question") => "[request]",
+        ("codex", "crash") => "[crash]",
+        ("claude", "approval") => "permission",
         (_, other) => other,
     }
 }
-async fn create(client: &Client, provider: ProviderKind, root: &Path) -> SessionRef {
+async fn create(client: &Client, provider: ProviderInstanceId, root: &Path) -> SessionRef {
     client
         .call(&op::CreateSession {
-            provider,
+            instance_id: provider.clone(),
             cwd: Some(root.to_string_lossy().into_owned()),
             model: None,
         })
@@ -109,7 +109,7 @@ async fn start(root: &Path, memory: Arc<Memory>) -> HostFixture {
     .unwrap()
 }
 
-async fn scenarios(provider: ProviderKind) {
+async fn scenarios(provider: ProviderInstanceId) {
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();
     let memory = Arc::new(Memory::default());
@@ -122,20 +122,20 @@ async fn scenarios(provider: ProviderKind) {
         })
         .await
         .unwrap();
-    assert!(
-        catalog
-            .candidates
-            .iter()
-            .any(|candidate| candidate.invocation.provider == ProviderKind::Codex)
-    );
-    assert!(
-        catalog
-            .candidates
-            .iter()
-            .any(|candidate| candidate.invocation.provider == ProviderKind::Claude)
-    );
+    assert!(catalog.candidates.iter().any(|candidate| {
+        candidate.invocation.instance_id
+            == "codex"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap()
+    }));
+    assert!(catalog.candidates.iter().any(|candidate| {
+        candidate.invocation.instance_id
+            == "claude"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap()
+    }));
     // Creation, sending, typed streamed output, history, and client reconnection.
-    let session = create(&local.peer, provider, &root).await;
+    let session = create(&local.peer, provider.clone(), &root).await;
     let native_id = host_fixture::test_support::native_id(&root, &session);
     let (_, mut events) = open(&local.peer, &session).await;
     let first = submission(&session, "first input");
@@ -175,7 +175,7 @@ async fn scenarios(provider: ProviderKind) {
         .candidates
         .iter()
         .find(|candidate| {
-            candidate.invocation.provider == provider
+            candidate.invocation.instance_id == provider
                 && candidate.invocation.kind == agent_protocol::composer::InvocationKind::Skill
         })
         .unwrap()
@@ -185,7 +185,11 @@ async fn scenarios(provider: ProviderKind) {
     invoke.input.push(skill.input());
     local.peer.call(&invoke).await.unwrap();
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
-    if provider == ProviderKind::Claude {
+    if provider
+        == "claude"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap()
+    {
         let received: serde_json::Value = serde_json::from_slice(
             &std::fs::read(root.join(format!("claude-session-{native_id}.json"))).unwrap(),
         )
@@ -204,7 +208,11 @@ async fn scenarios(provider: ProviderKind) {
     // Resume after the Host and native subprocesses have actually exited.
     local.close().await;
     host.close().await.unwrap();
-    if provider == ProviderKind::Codex {
+    if provider
+        == "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap()
+    {
         // Codex's fixture loads archived native state from this file;
         // Claude's fixture writes its native transcript during the first run.
         std::fs::write(root.join("list-fixture.json"), serde_json::json!([{
@@ -230,7 +238,11 @@ async fn scenarios(provider: ProviderKind) {
         }))
     })
     }));
-    let trace_offset = if provider == ProviderKind::Codex {
+    let trace_offset = if provider
+        == "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap()
+    {
         std::fs::read_to_string(root.join("rpc-trace.jsonl"))
             .unwrap()
             .lines()
@@ -244,7 +256,11 @@ async fn scenarios(provider: ProviderKind) {
         .await
         .unwrap();
     assert_eq!(finished(&mut events).await.status, TurnStatus::Completed);
-    if provider == ProviderKind::Codex {
+    if provider
+        == "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap()
+    {
         let trace = std::fs::read_to_string(root.join("rpc-trace.jsonl")).unwrap();
         let operations: Vec<_> = trace
             .lines()
@@ -266,14 +282,19 @@ async fn scenarios(provider: ProviderKind) {
     // Additional input is accepted once while the initial turn is still live.
     // Codex steers the live turn; Claude starts a queued input after approval completes it.
     for interrupt in [false, true] {
-        let session = create(&local.peer, provider, &root).await;
+        let session = create(&local.peer, provider.clone(), &root).await;
         let (_, mut events) = open(&local.peer, &session).await;
-        let scenario = if !interrupt && provider == ProviderKind::Claude {
+        let scenario = if !interrupt
+            && provider
+                == "claude"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap()
+        {
             "approval"
         } else {
             "wait"
         };
-        let initial = submission(&session, prompt(provider, scenario));
+        let initial = submission(&session, prompt(&provider, scenario));
         let turn = local.peer.call(&initial).await.unwrap().turn_id.unwrap();
         loop {
             if matches!(
@@ -299,7 +320,11 @@ async fn scenarios(provider: ProviderKind) {
         } else {
             let additional = submission(&session, "queued follow-up");
             local.peer.call(&additional).await.unwrap();
-            if provider == ProviderKind::Codex {
+            if provider
+                == "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap()
+            {
                 std::fs::write(root.join("release-inputs"), "").unwrap();
             }
             let mut completed = BTreeSet::new();
@@ -372,11 +397,11 @@ async fn scenarios(provider: ProviderKind) {
     }
     // Approval and questions use only the choices supplied by the adapter.
     for scenario in ["approval", "question"] {
-        let session = create(&local.peer, provider, &root).await;
+        let session = create(&local.peer, provider.clone(), &root).await;
         let (_, mut events) = open(&local.peer, &session).await;
         local
             .peer
-            .call(&submission(&session, prompt(provider, scenario)))
+            .call(&submission(&session, prompt(&provider, scenario)))
             .await
             .unwrap();
         let request = loop {
@@ -429,19 +454,27 @@ async fn scenarios(provider: ProviderKind) {
         );
     }
     // Abnormal provider exit terminates the owned execution with neutral evidence.
-    let session = create(&local.peer, provider, &root).await;
+    let session = create(&local.peer, provider.clone(), &root).await;
     let (_, mut events) = open(&local.peer, &session).await;
     let _ = local
         .peer
-        .call(&submission(&session, prompt(provider, "crash")))
+        .call(&submission(&session, prompt(&provider, "crash")))
         .await;
     let failed = finished(&mut events).await;
     assert_eq!(failed.status, TurnStatus::Failed);
     assert_eq!(failed.error.unwrap().category, ErrorCategory::Network);
-    let other = if provider == ProviderKind::Codex {
-        ProviderKind::Claude
+    let other = if provider
+        == "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap()
+    {
+        "claude"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap()
     } else {
-        ProviderKind::Codex
+        "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap()
     };
     let healthy = create(&local.peer, other, &root).await;
     let (_, mut healthy_events) = open(&local.peer, &healthy).await;
@@ -471,11 +504,21 @@ async fn scenarios(provider: ProviderKind) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn codex_conforms_to_bex_conversations() {
-    scenarios(ProviderKind::Codex).await;
+    scenarios(
+        "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
+    )
+    .await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn claude_conforms_to_bex_conversations() {
-    scenarios(ProviderKind::Claude).await;
+    scenarios(
+        "claude"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -494,7 +537,14 @@ async fn session_pages_preserve_healthy_listings_and_reject_repeated_native_curs
     .unwrap();
     let host = start(&root, Arc::new(Memory::default())).await;
     let local = host.local().await.unwrap();
-    let session = create(&local.peer, ProviderKind::Claude, &root).await;
+    let session = create(
+        &local.peer,
+        "claude"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
+        &root,
+    )
+    .await;
     let (_, mut events) = open(&local.peer, &session).await;
     local
         .peer
@@ -570,7 +620,14 @@ async fn imported_title_lists_page_and_search_without_reading_provider_history()
     std::fs::write(&fixture, serde_json::to_vec(&threads).unwrap()).unwrap();
     let host = start(&root, Arc::new(Memory::default())).await;
     let local = host.local().await.unwrap();
-    let session = create(&local.peer, ProviderKind::Claude, &root).await;
+    let session = create(
+        &local.peer,
+        "claude"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
+        &root,
+    )
+    .await;
     let (_, mut events) = open(&local.peer, &session).await;
     local
         .peer
@@ -882,7 +939,14 @@ async fn adapter_initialization_failure_preserves_the_other_provider_and_host() 
         models.provider_errors.unwrap()["claude"]["code"],
         "provider_unavailable"
     );
-    let session = create(&local.peer, ProviderKind::Codex, &root).await;
+    let session = create(
+        &local.peer,
+        "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
+        &root,
+    )
+    .await;
     let (_, mut events) = open(&local.peer, &session).await;
     local
         .peer
@@ -917,7 +981,9 @@ async fn adapter_initialization_failure_preserves_the_other_provider_and_host() 
         local
             .peer
             .call(&op::CreateSession {
-                provider: ProviderKind::Claude,
+                instance_id: "claude"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 cwd: Some(root.to_string_lossy().into_owned()),
                 model: None
             })

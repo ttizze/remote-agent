@@ -21,6 +21,8 @@ pub struct Config {
     pub trace: bool,
     pub expected_cwd: Option<PathBuf>,
     pub stream_delay_ms: u64,
+    pub expected_launch_args: Vec<String>,
+    pub expected_environment: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Config {
@@ -31,6 +33,8 @@ impl Default for Config {
             trace: false,
             expected_cwd: None,
             stream_delay_ms: 2000,
+            expected_launch_args: Vec::new(),
+            expected_environment: Default::default(),
         }
     }
 }
@@ -68,15 +72,26 @@ pub async fn run(arguments: &[String]) -> Result<()> {
         ));
         arguments = &arguments[2..];
     }
-    if arguments != ["app-server"] && arguments != ["app-server", "--listen", "stdio://"] {
-        return Err("usage: bex-codex-fixture app-server --listen stdio://".into());
-    }
     let program = std::env::current_exe()?;
     let home = program
         .parent()
         .ok_or("fixture executable has no directory")?
         .to_path_buf();
-    let config = serde_json::from_slice(&fs::read(home.join("fixture-config.json"))?)?;
+    let config: Config = serde_json::from_slice(&fs::read(home.join("fixture-config.json"))?)?;
+    let expected: Vec<_> = std::iter::once("app-server")
+        .chain(config.expected_launch_args.iter().map(String::as_str))
+        .chain(["--listen", "stdio://"])
+        .collect();
+    if arguments != expected
+        && !(arguments == ["app-server"] && config.expected_launch_args.is_empty())
+    {
+        return Err("unexpected fixture launch arguments".into());
+    }
+    for (name, expected) in &config.expected_environment {
+        if std::env::var(name).as_ref() != Ok(expected) {
+            return Err("unexpected fixture environment".into());
+        }
+    }
     // Only the explicit auth-helper override uses the supplied credential home.
     // Ordinary fixtures never read an inherited personal CODEX_HOME.
     server::run(credential_home.unwrap_or(home), config).await

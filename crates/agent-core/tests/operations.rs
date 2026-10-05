@@ -36,7 +36,9 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         "startThread" => serde_json::to_value(
             client
                 .call(&CreateSession {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    instance_id: "codex"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap(),
                     cwd: optional(command, "cwd").map(str::to_owned),
                     model: serde_json::from_value(command["model"].clone()).unwrap(),
                 })
@@ -155,20 +157,28 @@ async fn execute(client: &Client, command: &Value) -> Result<Value, PeerError> {
         }
         "accounts" => call!(ListAccounts {}),
         "selectAccount" => call!(SelectAccount {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             id: text(command, "accountId").to_owned()
         }),
         "startAccountLogin" => call!(StartAccountLogin {
-            provider: agent_protocol::session::ProviderKind::Codex
+            instance_id: "codex"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap()
         }),
         "accountLoginStatus" => call!(ReadAccountLogin {
-            provider: agent_protocol::session::ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             id: text(command, "loginId").to_owned(),
             thread_id: None,
         }),
         "cancelAccountLogin" => {
             call!(CancelAccountLogin {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: text(command, "loginId").to_owned()
             });
             Value::Null

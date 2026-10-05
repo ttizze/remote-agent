@@ -9,7 +9,9 @@ use std::sync::Arc;
 fn device_model_defaults_apply_across_hosts_without_replacing_their_user_work() {
     let defaults = agent_core::state::ModelDefaults {
         model: Some(agent_protocol::models::ModelRef {
-            provider: agent_protocol::session::ProviderKind::Claude,
+            instance_id: "claude"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap(),
             id: "sonnet".into(),
         }),
         effort: Some("high".into()),

@@ -407,7 +407,7 @@ fn normalize_draft_settings(snapshot: &mut Snapshot, key: &DraftKey, catalog_rec
             previous.model.as_ref(),
             previous.effort.as_deref(),
             previous.service_tier.as_deref(),
-            provider,
+            provider.as_ref(),
             &snapshot.models,
             !snapshot.model_errors.is_empty(),
         );
@@ -582,6 +582,7 @@ impl Operation for LoadModels {
         context.client.models().await
     }
     fn apply(self, snapshot: &mut Snapshot, catalog: Self::Output) -> Vec<Effect> {
+        snapshot.provider_instances = Arc::new(catalog.instances);
         snapshot.models = Arc::new(catalog.data);
         snapshot.model_errors = Arc::new(catalog.provider_errors.unwrap_or_default());
         let drafts = snapshot.drafts.clone();
@@ -617,7 +618,7 @@ impl Operation for OpenRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{ProviderKind, SessionRef};
+    use crate::session::{ProviderInstanceId, SessionRef};
 
     #[test]
     fn confirmed_empty_catalog_clears_unsupported_options_but_loading_or_failed_catalog_preserves_them()
@@ -629,7 +630,9 @@ mod tests {
         let original = Arc::new(Draft {
             text: "keep text".into(),
             model: Some(crate::models::ModelRef {
-                provider: crate::session::ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "selected".into(),
             }),
             effort: Some("max".into()),
@@ -648,6 +651,7 @@ mod tests {
             LoadModels {}.apply(
                 &mut snapshot,
                 agent_protocol::operations::ModelPage {
+                    instances: Vec::new(),
                     data: Vec::new(),
                     next_cursor: None,
                     provider_errors: failed.then(|| {
@@ -671,24 +675,26 @@ mod tests {
     #[case::saved_settings(true, true)]
     fn opening_without_model_metadata_uses_the_provider_catalog(
         #[values(true, false)] catalog_first: bool,
-        #[values(ProviderKind::Codex, ProviderKind::Claude)] provider: ProviderKind,
+        #[values("codex".parse::<crate::session::ProviderInstanceId>().unwrap(), "claude".parse::<crate::session::ProviderInstanceId>().unwrap())]
+        provider: ProviderInstanceId,
         #[case] existing_draft: bool,
         #[case] saved_choice: bool,
     ) {
         let models: Vec<Model> = serde_json::from_value(serde_json::json!([
-            {"id":"codex-default","model":{"provider":"codex","id":"default"},"displayName":"Codex default",
+            {"id":"codex-default","model":{"instanceId":"codex","id":"default"},"displayName":"Codex default",
              "isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"}]},
-            {"id":"claude-default","model":{"provider":"claude","id":"default"},"displayName":"Claude default",
+            {"id":"claude-default","model":{"instanceId":"claude","id":"default"},"displayName":"Claude default",
              "isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]},
-            {"id":"codex-saved","model":{"provider":"codex","id":"saved"},"displayName":"Codex saved",
+            {"id":"codex-saved","model":{"instanceId":"codex","id":"saved"},"displayName":"Codex saved",
              "defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"}]},
-            {"id":"claude-saved","model":{"provider":"claude","id":"saved"},"displayName":"Claude saved",
+            {"id":"claude-saved","model":{"instanceId":"claude","id":"saved"},"displayName":"Claude saved",
              "defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"high"}]}
         ])).unwrap();
         let session = SessionRef::new("external".into()).unwrap();
         let key: DraftKey = session.clone().into();
         let mut snapshot = Snapshot::default();
         let catalog = || agent_protocol::operations::ModelPage {
+            instances: Vec::new(),
             data: models.clone(),
             next_cursor: None,
             provider_errors: None,
@@ -702,7 +708,7 @@ mod tests {
                 Arc::new(Draft {
                     text: "Unsent input".into(),
                     model: saved_choice.then(|| crate::models::ModelRef {
-                        provider,
+                        instance_id: provider.clone(),
                         id: "saved".into(),
                     }),
                     effort: saved_choice.then(|| "low".into()),
@@ -717,7 +723,16 @@ mod tests {
             &mut snapshot,
             Thread {
                 id: Some(session),
-                provider: Some(provider),
+                provider: Some(agent_protocol::providers::ProviderRef {
+                    driver: if provider.as_str() == "codex" {
+                        "codex"
+                    } else {
+                        "claudeAgent"
+                    }
+                    .parse()
+                    .unwrap(),
+                    instance_id: provider.clone(),
+                }),
                 ..Default::default()
             },
             None,
@@ -730,13 +745,17 @@ mod tests {
         assert_eq!(
             draft.model,
             Some(crate::models::ModelRef {
-                provider,
+                instance_id: provider.clone(),
                 id: if saved_choice { "saved" } else { "default" }.into(),
             })
         );
         let effort = if saved_choice {
             "low"
-        } else if provider == ProviderKind::Codex {
+        } else if provider
+            == "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap()
+        {
             "medium"
         } else {
             "high"
@@ -765,7 +784,7 @@ mod item_read_tests {
     use crate::session::{SessionChange, TextField};
 
     fn fixture() -> (Snapshot, ReadItem) {
-        let thread = serde_json::from_value(serde_json::json!({"provider":"codex","id":{"id":"chat"},"turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":{"deferred":{"summary":{"assistantText":{"text":"summary","phase":"unknown"}}}}}]}]})).unwrap();
+        let thread = serde_json::from_value(serde_json::json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"chat"},"turns":[{"id":"turn","status":"running","items":[{"id":"item","status":"unknown","clientInputId":null,"body":{"deferred":{"summary":{"assistantText":{"text":"summary","phase":"unknown"}}}}}]}]})).unwrap();
         let snapshot = Snapshot {
             conversations: Arc::new(BTreeMap::from([(
                 agent_protocol::session::SessionRef { id: "chat".into() },

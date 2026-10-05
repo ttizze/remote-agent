@@ -23,14 +23,14 @@ impl Operation for ListAccounts {
                     .as_ref()
                     .and_then(|previous| {
                         previous.accounts.iter().find(|old| {
-                            old.provider == account.provider
+                            old.instance_id == account.instance_id
                                 && old.id == account.id
                                 && old.email == account.email
                         })
                     })
                     .and_then(|old| old.usage.clone());
                 Effect::execute(ReadAccountUsage {
-                    provider: account.provider,
+                    instance_id: account.instance_id.clone(),
                     id: account.id.clone(),
                     email: account.email.clone(),
                 })
@@ -43,7 +43,7 @@ impl Operation for ListAccounts {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadAccountUsage {
-    pub provider: crate::session::ProviderKind,
+    pub instance_id: crate::session::ProviderInstanceId,
     #[serde(rename = "accountId")]
     pub id: String,
     // The native profile can change identity while a usage read is in flight.
@@ -53,7 +53,7 @@ pub struct ReadAccountUsage {
 
 rpc::rpc_method!(ReadAccountUsage, ReadAccountUsage, |self| {
     agent_protocol::operations::ReadAccountUsage {
-        provider: self.provider,
+        instance_id: self.instance_id.clone(),
         id: self.id.clone(),
     }
 });
@@ -63,7 +63,7 @@ impl Operation for ReadAccountUsage {
     fn apply(self, snapshot: &mut Snapshot, output: Self::Output) -> Vec<Effect> {
         if let Some(accounts) = &mut Arc::make_mut(&mut snapshot.account).accounts
             && let Some(account) = Arc::make_mut(accounts).accounts.iter_mut().find(|account| {
-                account.provider == self.provider
+                account.instance_id == self.instance_id
                     && account.id == self.id
                     && account.email == self.email
             })
@@ -94,7 +94,7 @@ fn apply_selection(snapshot: &mut Snapshot, output: rpc::AccountSelection) {
     snapshot.composer_catalog = None;
     let rpc::AccountSelection {
         selected_id,
-        provider,
+        instance_id: provider,
         persistence_error,
     } = output;
     if let Some(accounts) = &mut Arc::make_mut(&mut snapshot.account).accounts {
@@ -107,7 +107,7 @@ fn apply_selection(snapshot: &mut Snapshot, output: rpc::AccountSelection) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct SelectAccountForDraft {
-    pub provider: crate::session::ProviderKind,
+    pub instance_id: crate::session::ProviderInstanceId,
     pub id: String,
     pub thread_id: DraftKey,
 }
@@ -126,7 +126,7 @@ impl Operation for SelectAccountForDraft {
     ) -> Result<Self::Output, PeerError> {
         let selection = context
             .call(&SelectAccount {
-                provider: self.provider,
+                instance_id: self.instance_id.clone(),
                 id: self.id.clone(),
             })
             .await?;
@@ -134,13 +134,13 @@ impl Operation for SelectAccountForDraft {
     }
 
     fn apply(self, snapshot: &mut Snapshot, (selection, catalog): Self::Output) -> Vec<Effect> {
-        let previous_provider = snapshot.model_provider_for_draft(self.thread_id.clone());
+        let previous_provider = snapshot.model_instance_for_draft(self.thread_id.clone());
         let mut draft = snapshot
             .drafts
             .get(&self.thread_id)
             .map(|draft| (**draft).clone())
             .unwrap_or_default();
-        let provider = selection.provider;
+        let provider = selection.instance_id.clone();
         apply_selection(snapshot, selection);
         match catalog {
             Ok(catalog) => {
@@ -148,9 +148,9 @@ impl Operation for SelectAccountForDraft {
                 if snapshot
                     .models
                     .iter()
-                    .any(|model| model.model.provider == provider)
+                    .any(|model| model.model.instance_id == provider)
                 {
-                    if previous_provider != provider {
+                    if previous_provider.as_ref() != Some(&provider) {
                         draft.model = None;
                         draft.effort = None;
                         draft.service_tier = None;
@@ -159,7 +159,7 @@ impl Operation for SelectAccountForDraft {
                         draft.model.as_ref(),
                         draft.effort.as_deref(),
                         draft.service_tier.as_deref(),
-                        Some(provider),
+                        Some(&provider),
                         &snapshot.models,
                         false,
                     );
@@ -183,7 +183,7 @@ pub use agent_protocol::operations::{StartAccountLogin, SubmitAccountLogin};
 impl Operation for StartAccountLogin {
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::AccountLogin {
-            provider: self.provider,
+            instance_id: self.instance_id.clone(),
         })
     }
     rpc_operation!();
@@ -197,13 +197,13 @@ impl Operation for StartAccountLogin {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct ReadAccountLogin {
-    pub provider: crate::session::ProviderKind,
+    pub instance_id: crate::session::ProviderInstanceId,
     pub id: String,
     pub thread_id: Option<DraftKey>,
 }
 rpc::rpc_method!(ReadAccountLogin, ReadAccountLogin, |self| {
     agent_protocol::operations::ReadAccountLogin {
-        provider: self.provider,
+        instance_id: self.instance_id.clone(),
         id: self.id.clone(),
     }
 });
@@ -211,7 +211,7 @@ rpc::rpc_method!(ReadAccountLogin, ReadAccountLogin, |self| {
 impl Operation for ReadAccountLogin {
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::AccountLogin {
-            provider: self.provider,
+            instance_id: self.instance_id.clone(),
         })
     }
     rpc_operation!();
@@ -221,12 +221,12 @@ impl Operation for ReadAccountLogin {
             if let Some(id) = status.account_id {
                 let intent = match self.thread_id {
                     Some(thread_id) => Intent::SelectAccountForDraft(SelectAccountForDraft {
-                        provider: self.provider,
+                        instance_id: self.instance_id.clone(),
                         id,
                         thread_id,
                     }),
                     None => Intent::SelectAccount(SelectAccount {
-                        provider: self.provider,
+                        instance_id: self.instance_id.clone(),
                         id,
                     }),
                 };
@@ -248,7 +248,7 @@ pub use agent_protocol::operations::CancelAccountLogin;
 impl Operation for CancelAccountLogin {
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::AccountLogin {
-            provider: self.provider,
+            instance_id: self.instance_id.clone(),
         })
     }
     rpc_operation!();
@@ -278,7 +278,7 @@ impl Operation for LogoutAccount {
 impl Operation for SubmitAccountLogin {
     fn key(&self) -> Option<OperationKey> {
         Some(OperationKey::AccountLogin {
-            provider: self.provider,
+            instance_id: self.instance_id.clone(),
         })
     }
     rpc_operation!();
@@ -293,7 +293,7 @@ mod account_model_tests {
     fn usage_updates_only_its_account_and_survives_list_refresh() {
         let mut snapshot = Snapshot::default();
         let accounts: rpc::Accounts = serde_json::from_value(json!({
-            "accounts": [{"id":"a","provider":"codex","email":"a@example.invalid"}, {"id":"b","provider":"codex"}, {"id":"a","provider":"claude","email":"a@example.invalid"}],
+            "accounts": [{"id":"a","instanceId":"codex","email":"a@example.invalid"}, {"id":"b","instanceId":"codex"}, {"id":"a","instanceId":"claude","email":"a@example.invalid"}],
             "selected":{"codex":"b","claude":"a"}
         })).unwrap();
         let effects = ListAccounts {}.apply(&mut snapshot, accounts.clone());
@@ -304,7 +304,9 @@ mod account_model_tests {
             error: Some("unavailable".into()),
         };
         ReadAccountUsage {
-            provider: crate::session::ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             id: "a".into(),
             email: Some("a@example.invalid".into()),
         }
@@ -314,7 +316,11 @@ mod account_model_tests {
         assert_eq!(
             listed
                 .selected
-                .get(&crate::session::ProviderKind::Codex)
+                .get(
+                    &"codex"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap()
+                )
                 .map(String::as_str),
             Some("b")
         );
@@ -328,7 +334,9 @@ mod account_model_tests {
         changed.accounts[0].email = Some("different@example.invalid".into());
         ListAccounts {}.apply(&mut snapshot, changed);
         ReadAccountUsage {
-            provider: crate::session::ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             id: "a".into(),
             email: Some("a@example.invalid".into()),
         }
@@ -343,7 +351,9 @@ mod account_model_tests {
             serde_json::from_value(json!({"accounts":[],"selected":{}})).unwrap(),
         );
         ReadAccountUsage {
-            provider: crate::session::ProviderKind::Codex,
+            instance_id: "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             id: "a".into(),
             email: Some("a@example.invalid".into()),
         }
@@ -363,17 +373,19 @@ mod account_model_tests {
     fn account_selection_preserves_supported_settings_and_normalizes_new_catalog() {
         let mut snapshot = Snapshot::default();
         Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(json!({
-            "accounts":[{"id":"a","provider":"codex"},{"id":"b","provider":"codex"},{"id":"claude:c","provider":"claude"}],
+            "accounts":[{"id":"a","instanceId":"codex"},{"id":"b","instanceId":"codex"},{"id":"claude:c","instanceId":"claude"}],
             "selected":{"codex":"a","claude":"claude:c"}
         })).unwrap()));
-        let codex: Model = serde_json::from_value(json!({"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"fast"}]})).unwrap();
-        let claude: Model = serde_json::from_value(json!({"id":"claude:sonnet","model":{"provider": "claude", "id": "sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]})).unwrap();
+        let codex: Model = serde_json::from_value(json!({"id":"gpt","model":{"instanceId": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],"serviceTiers":[{"id":"fast"}]})).unwrap();
+        let claude: Model = serde_json::from_value(json!({"id":"claude:sonnet","model":{"instanceId": "claude", "id": "sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]})).unwrap();
         snapshot.models = Arc::new(vec![codex.clone(), claude.clone()]);
         Arc::make_mut(&mut snapshot.drafts).insert(
             "draft".into(),
             Arc::new(Draft {
                 model: Some(agent_protocol::models::ModelRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    instance_id: "codex"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "gpt".into(),
                 }),
                 effort: Some("medium".into()),
@@ -381,9 +393,12 @@ mod account_model_tests {
                 ..Default::default()
             }),
         );
-        let select = |snapshot: &mut Snapshot, id: &str, provider, data| {
+        let select = |snapshot: &mut Snapshot,
+                      id: &str,
+                      provider: crate::session::ProviderInstanceId,
+                      data| {
             SelectAccountForDraft {
-                provider,
+                instance_id: provider.clone(),
                 id: id.into(),
                 thread_id: "draft".into(),
             }
@@ -392,10 +407,11 @@ mod account_model_tests {
                 (
                     rpc::AccountSelection {
                         selected_id: id.into(),
-                        provider,
+                        instance_id: provider.clone(),
                         persistence_error: None,
                     },
                     Ok(rpc::ModelPage {
+                        instances: Vec::new(),
                         data,
                         next_cursor: None,
                         provider_errors: None,
@@ -406,7 +422,9 @@ mod account_model_tests {
         select(
             &mut snapshot,
             "b",
-            crate::session::ProviderKind::Codex,
+            "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             vec![codex.clone(), claude.clone()],
         );
         assert_eq!(
@@ -414,7 +432,9 @@ mod account_model_tests {
                 .model
                 .as_ref(),
             Some(&agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "gpt".into()
             })
         );
@@ -433,14 +453,18 @@ mod account_model_tests {
         select(
             &mut snapshot,
             "claude:c",
-            crate::session::ProviderKind::Claude,
+            "claude"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             vec![codex.clone(), claude.clone()],
         );
         let draft = &snapshot.drafts[&crate::state::DraftKey::from("draft")];
         assert_eq!(
             draft.model.as_ref(),
             Some(&agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Claude,
+                instance_id: "claude"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "sonnet".into()
             })
         );
@@ -453,13 +477,18 @@ mod account_model_tests {
                 .as_ref()
                 .unwrap()
                 .selected
-                .get(&crate::session::ProviderKind::Claude)
+                .get(
+                    &"claude"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap()
+                )
                 .map(String::as_str),
             Some("claude:c")
         );
         LoadModels {}.apply(
             &mut snapshot,
             rpc::ModelPage {
+                instances: Vec::new(),
                 data: vec![codex.clone()],
                 next_cursor: None,
                 provider_errors: None,
@@ -470,7 +499,9 @@ mod account_model_tests {
                 .model
                 .as_ref(),
             Some(&agent_protocol::models::ModelRef {
-                provider: agent_protocol::session::ProviderKind::Claude,
+                instance_id: "claude"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap(),
                 id: "sonnet".into()
             })
         );
@@ -480,7 +511,9 @@ mod account_model_tests {
         select(
             &mut snapshot,
             "b",
-            crate::session::ProviderKind::Codex,
+            "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             vec![restricted.clone(), claude],
         );
         assert_eq!(
@@ -490,12 +523,23 @@ mod account_model_tests {
                 .as_ref()
                 .unwrap()
                 .selected
-                .get(&crate::session::ProviderKind::Codex)
+                .get(
+                    &"codex"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap()
+                )
                 .map(String::as_str),
             Some("b")
         );
         assert_eq!(
-            snapshot.models_matching(Some(crate::session::ProviderKind::Codex), String::new()),
+            snapshot.models_matching(
+                Some(
+                    "codex"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap()
+                ),
+                String::new()
+            ),
             vec![restricted]
         );
         assert_eq!(

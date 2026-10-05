@@ -39,6 +39,8 @@ macro_rules! rpc_operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Enum))]
 pub enum Intent {
+    ReadProviderSettings(ReadProviderSettings),
+    UpdateProviderInstance(UpdateProviderInstance),
     ReadPermissionSettings(ReadPermissionSettings),
     UpdatePermissionSettings(UpdatePermissionSettings),
     ListAccounts(ListAccounts),
@@ -213,12 +215,13 @@ pub enum OperationKey {
     },
     WorkspaceReview,
     Models,
+    ProviderSettings,
     Accounts,
     AccountLogin {
-        provider: crate::session::ProviderKind,
+        instance_id: crate::session::ProviderInstanceId,
     },
     Permissions {
-        provider: crate::session::ProviderKind,
+        provider: crate::session::ProviderInstanceId,
     },
     WorktreeSettings,
     Worktrees,
@@ -353,7 +356,9 @@ pub trait Operation: Send + Sync + std::fmt::Debug + Sized + 'static {
 }
 
 mod permissions;
+mod providers;
 pub use permissions::*;
+pub use providers::*;
 mod composer;
 pub use composer::*;
 mod accounts;

@@ -3,7 +3,7 @@
 use super::agent::{SessionPage, SessionSummary};
 use agent_protocol::{
     models::{Thread, ThreadResponse},
-    session::{HistoryReadKind, HistoryReadState, ProviderKind, SessionRef},
+    session::{HistoryReadKind, HistoryReadState, SessionRef},
 };
 use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::Value;
@@ -346,7 +346,7 @@ impl Catalog {
                     .and_then(|path| metadata(&home, path)),
             };
             let mut thread = Thread {
-                provider: Some(ProviderKind::Codex),
+                provider: None,
                 id: Some(SessionRef { id: id.to_string() }),
                 ..Default::default()
             };
@@ -501,7 +501,9 @@ impl Catalog {
         Ok(ThreadResponse {
             thread,
             model: model.map(|id| agent_protocol::models::ModelRef {
-                provider: ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 id,
             }),
         })

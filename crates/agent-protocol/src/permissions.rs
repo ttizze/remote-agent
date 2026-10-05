@@ -1,5 +1,5 @@
 //! Editing provider-owned user defaults, never per-turn overrides.
-use crate::session::ProviderKind;
+use crate::session::ProviderInstanceId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,12 +17,14 @@ pub struct PermissionSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadPermissionSettings {
-    pub provider: ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: ProviderInstanceId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatePermissionSettings {
-    pub provider: ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: ProviderInstanceId,
     pub mode: PermissionMode,
     pub version: String,
 }

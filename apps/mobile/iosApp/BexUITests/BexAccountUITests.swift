@@ -178,7 +178,7 @@ extension BexLaunchUITests {
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "週間残量 86%"))
             .firstMatch.waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["model.account.add"].isHittable)
-        app.segmentedControls["account.provider"].buttons["Claude Code"].tap()
+        app.segmentedControls["account.provider"].buttons["Claude"].tap()
         XCTAssertFalse(app.buttons["model.account.desktop"].exists)
         app.segmentedControls["account.provider"].buttons["Codex"].tap()
         captureScreen(app, named: "Agent account settings")
@@ -199,7 +199,7 @@ extension BexLaunchUITests {
         XCTAssertFalse(app.buttons["account.actions.desktop"].exists)
         captureScreen(app, named: "Model picker with read-only account")
         openAccountManagement(app)
-        app.segmentedControls["account.provider"].buttons["Claude Code"].tap()
+        app.segmentedControls["account.provider"].buttons["Claude"].tap()
         openModelChoices(app)
         XCTAssertEqual(app.buttons["model.choice.fixture-model"].value as? String, "選択中",
                        "Browsing agent settings must not change the draft model")

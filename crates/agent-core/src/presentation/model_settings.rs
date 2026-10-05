@@ -1,28 +1,33 @@
 //! Model-picker and quick-control decisions shared by native clients.
 use crate::{
     models::{Model, ModelRef, provider_models},
-    session::ProviderKind,
-    state::{ModelDefaults, ModelDefaultsScope, Snapshot},
+    session::ProviderInstanceId,
+    state::{DraftKey, ModelDefaults, ModelDefaultsScope, Snapshot},
 };
 use agent_protocol::operations::UsageWindow;
 
-pub(crate) fn draft_provider(
-    provider: Option<ProviderKind>,
+pub(crate) fn draft_instance(
+    instance: Option<&ProviderInstanceId>,
     model: Option<&ModelRef>,
-) -> ProviderKind {
-    provider
-        .or_else(|| model.map(|model| model.provider))
-        .unwrap_or(ProviderKind::Codex)
+) -> Option<ProviderInstanceId> {
+    instance
+        .or_else(|| model.map(|model| &model.instance_id))
+        .cloned()
 }
 
 impl Snapshot {
     pub(crate) fn session_provider(
         &self,
         session: &crate::session::SessionRef,
-    ) -> Option<ProviderKind> {
+    ) -> Option<ProviderInstanceId> {
         self.conversations
             .get(session)
-            .and_then(|thread| thread.provider)
+            .and_then(|thread| {
+                thread
+                    .provider
+                    .as_ref()
+                    .map(|provider| provider.instance_id.clone())
+            })
             .or_else(|| {
                 self.threads
                     .as_ref()?
@@ -30,6 +35,8 @@ impl Snapshot {
                     .iter()
                     .find(|thread| thread.id.as_ref() == Some(session))?
                     .provider
+                    .as_ref()
+                    .map(|provider| provider.instance_id.clone())
             })
     }
 }
@@ -170,24 +177,76 @@ impl Snapshot {
         )
     }
 
-    pub fn model_provider_for_draft(&self, thread_id: crate::state::DraftKey) -> ProviderKind {
-        draft_provider(
-            match &thread_id {
-                crate::state::DraftKey::Session { session }
-                | crate::state::DraftKey::Queued { session, .. } => self.session_provider(session),
-                crate::state::DraftKey::Local { .. } => None,
-            },
+    /// Prefer a configured instance while retaining an existing conversation's owner.
+    pub fn provider_selection(
+        &self,
+        key: DraftKey,
+        preferred: Option<ProviderInstanceId>,
+    ) -> Option<ProviderInstanceId> {
+        preferred
+            .filter(|id| {
+                self.provider_instances
+                    .iter()
+                    .any(|entry| &entry.reference.instance_id == id)
+            })
+            .or_else(|| self.model_instance_for_draft(key))
+            .or_else(|| {
+                self.provider_instances
+                    .first()
+                    .map(|entry| entry.reference.instance_id.clone())
+            })
+    }
+    pub fn instance_name(&self, instance_id: ProviderInstanceId) -> String {
+        self.provider_instances
+            .iter()
+            .find(|entry| entry.reference.instance_id == instance_id)
+            .map(|entry| entry.display_name.clone())
+            .unwrap_or_else(|| instance_id.to_string())
+    }
+    pub fn instance_driver(
+        &self,
+        instance_id: ProviderInstanceId,
+    ) -> Option<agent_protocol::providers::ProviderDriver> {
+        self.provider_instances
+            .iter()
+            .find(|entry| entry.reference.instance_id == instance_id)
+            .map(|entry| entry.reference.driver.clone())
+    }
+    pub fn model_instance_for_draft(
+        &self,
+        thread_id: crate::state::DraftKey,
+    ) -> Option<ProviderInstanceId> {
+        let instance = match &thread_id {
+            crate::state::DraftKey::Session { session }
+            | crate::state::DraftKey::Queued { session, .. } => self.session_provider(session),
+            crate::state::DraftKey::Local { .. } => None,
+        };
+        draft_instance(
+            instance.as_ref(),
             self.drafts
                 .get(&thread_id)
                 .and_then(|draft| draft.model.as_ref()),
         )
+        .or_else(|| {
+            self.models
+                .first()
+                .map(|model| model.model.instance_id.clone())
+        })
     }
 
-    pub fn models_matching(&self, provider: Option<ProviderKind>, query: String) -> Vec<Model> {
+    pub fn models_matching(
+        &self,
+        provider: Option<ProviderInstanceId>,
+        query: String,
+    ) -> Vec<Model> {
         let query = query.trim().to_lowercase();
         self.models
             .iter()
-            .filter(|model| provider.is_none_or(|provider| model.model.provider == provider))
+            .filter(|model| {
+                provider
+                    .as_ref()
+                    .is_none_or(|provider| &model.model.instance_id == provider)
+            })
             .filter(|model| {
                 model.display_name.to_lowercase().contains(&query)
                     || model.model.id.to_lowercase().contains(&query)
@@ -196,12 +255,12 @@ impl Snapshot {
             .collect()
     }
 
-    pub fn model_for_provider(
+    pub fn model_for_instance(
         &self,
         thread_id: crate::state::DraftKey,
-        provider: ProviderKind,
+        provider: ProviderInstanceId,
     ) -> Option<ModelRef> {
-        let models = provider_models(&self.models, provider);
+        let models = provider_models(&self.models, &provider);
         let saved = self
             .drafts
             .get(&thread_id)
@@ -216,7 +275,11 @@ impl Snapshot {
 
     /// Keep every weekly bucket (including model-specific limits); never turn
     /// an unavailable quota into a full or empty bar. Labels are Host-normalized.
-    pub fn account_weekly_usage(&self, provider: ProviderKind, id: String) -> Vec<UsageWindow> {
+    pub fn account_weekly_usage(
+        &self,
+        provider: ProviderInstanceId,
+        id: String,
+    ) -> Vec<UsageWindow> {
         self.account
             .accounts
             .as_ref()
@@ -224,7 +287,7 @@ impl Snapshot {
                 accounts
                     .accounts
                     .iter()
-                    .find(|account| account.provider == provider && account.id == id)
+                    .find(|account| account.instance_id == provider && account.id == id)
             })
             .and_then(|account| account.usage.as_ref())
             .filter(|usage| usage.error.is_none())
@@ -313,22 +376,22 @@ mod tests {
             let id = format!("claude:{suffix}");
             let mut snapshot = Snapshot {
                 models: Arc::new(serde_json::from_value(serde_json::json!([
-                    {"id":id,"model":{"provider":"codex","id":id},"displayName":"Codex","isDefault":true,
+                    {"id":id,"model":{"instanceId":"codex","id":id},"displayName":"Codex","isDefault":true,
                      "defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]},
-                    {"id":id,"model":{"provider":"claude","id":id},"displayName":"Claude","isDefault":true,
+                    {"id":id,"model":{"instanceId":"claude","id":id},"displayName":"Claude","isDefault":true,
                      "defaultReasoningEffort":"low","supportedReasoningEfforts":[{"reasoningEffort":"low"}]}
                 ])).unwrap()),
                 ..Default::default()
             };
-            for (provider, effort) in [(ProviderKind::Codex, "high"), (ProviderKind::Claude, "low")] {
-                let selected = ModelRef { provider, id: id.clone() };
+            for (provider, effort) in [("codex".parse::<crate::session::ProviderInstanceId>().unwrap(), "high"), ("claude".parse::<crate::session::ProviderInstanceId>().unwrap(), "low")] {
+                let selected = ModelRef { instance_id: provider.clone(), id: id.clone() };
                 for key in [crate::state::DraftKey::from("local"), crate::session::SessionRef { id: "session".into() }.into()] {
                     Arc::make_mut(&mut snapshot.drafts).insert(key.clone(), Arc::new(Draft {model:Some(selected.clone()),..Default::default()}));
-                    proptest::prop_assert_eq!(snapshot.model_provider_for_draft(key.clone()), provider);
-                    proptest::prop_assert_eq!(snapshot.model_for_provider(key.clone(), provider), Some(selected.clone()));
+                    proptest::prop_assert_eq!(snapshot.model_instance_for_draft(key.clone()), Some(provider.clone()));
+                    proptest::prop_assert_eq!(snapshot.model_for_instance(key.clone(), provider.clone()), Some(selected.clone()));
                     proptest::prop_assert_eq!(snapshot.model_quick_controls(key).effort, effort);
                 }
-                let choices = snapshot.models_matching(Some(provider), id.clone());
+                let choices = snapshot.models_matching(Some(provider.clone()), id.clone());
                 proptest::prop_assert_eq!(choices.len(), 1);
                 proptest::prop_assert_eq!(&choices[0].model, &selected);
             }
@@ -349,11 +412,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            snapshot.model_error_messages(Some(ProviderKind::Codex)),
+            snapshot.model_error_messages(Some(
+                "codex"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap()
+            )),
             ["codex: Codex catalog failed"]
         );
         assert_eq!(
-            snapshot.model_error_messages(Some(ProviderKind::Claude)),
+            snapshot.model_error_messages(Some(
+                "claude"
+                    .parse::<crate::session::ProviderInstanceId>()
+                    .unwrap()
+            )),
             ["claude: Claude catalog failed"]
         );
         assert_eq!(snapshot.model_error_messages(None).len(), 2);
@@ -362,16 +433,18 @@ mod tests {
     #[test]
     fn quick_controls_use_capabilities_and_saved_values_without_inventing_quotas() {
         let mut snapshot = Snapshot { models: Arc::new(serde_json::from_value(serde_json::json!([
-            {"id":"gpt","model":{"provider": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium",
+            {"id":"gpt","model":{"instanceId": "codex", "id": "gpt"},"displayName":"GPT","defaultReasoningEffort":"medium",
              "supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"}],
              "serviceTiers":[{"id":"priority"}]},
-            {"id":"claude:haiku","model":{"provider": "claude", "id": "haiku"},"displayName":"Haiku","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+            {"id":"claude:haiku","model":{"instanceId": "claude", "id": "haiku"},"displayName":"Haiku","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
         ])).unwrap()), ..Default::default() };
         Arc::make_mut(&mut snapshot.drafts).insert(
             "draft".into(),
             Arc::new(Draft {
                 model: Some(agent_protocol::models::ModelRef {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    instance_id: "codex"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap(),
                     id: "gpt".into(),
                 }),
                 ..Default::default()
@@ -399,7 +472,9 @@ mod tests {
                 .unwrap(),
         )
         .model = Some(agent_protocol::models::ModelRef {
-            provider: agent_protocol::session::ProviderKind::Claude,
+            instance_id: "claude"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
             id: "haiku".into(),
         });
         let controls = snapshot.model_quick_controls("draft".into());
@@ -407,12 +482,19 @@ mod tests {
         assert!(controls.toggle_fast_to.is_none());
         assert!(
             snapshot
-                .models_matching(Some(ProviderKind::Codex), "haiku".into())
+                .models_matching(
+                    Some(
+                        "codex"
+                            .parse::<crate::session::ProviderInstanceId>()
+                            .unwrap()
+                    ),
+                    "haiku".into()
+                )
                 .is_empty()
         );
         Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(
             serde_json::from_value(serde_json::json!({"accounts":[
-            {"id":"a","provider":"codex","usage":{"fetchedAt":1,"windows":[
+            {"id":"a","instanceId":"codex","usage":{"fetchedAt":1,"windows":[
                 {"label":"5時間枠","remainingPercent":72},{"label":"週間枠","remainingPercent":42},
                 {"label":"Opus 週間枠","remainingPercent":12}]}}
         ],"selected":{}}))
@@ -420,7 +502,12 @@ mod tests {
         ));
         assert_eq!(
             snapshot
-                .account_weekly_usage(ProviderKind::Codex, "a".into())
+                .account_weekly_usage(
+                    "codex"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap(),
+                    "a".into()
+                )
                 .len(),
             2
         );
@@ -433,7 +520,12 @@ mod tests {
         accounts.accounts[0].usage.as_mut().unwrap().error = Some("unavailable".into());
         assert!(
             snapshot
-                .account_weekly_usage(ProviderKind::Codex, "a".into())
+                .account_weekly_usage(
+                    "codex"
+                        .parse::<crate::session::ProviderInstanceId>()
+                        .unwrap(),
+                    "a".into()
+                )
                 .is_empty()
         );
     }

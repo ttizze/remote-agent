@@ -23,7 +23,6 @@
           "result": {
             "data": [
               {
-                "provider": "codex",
                 "id": {
                   "id": "recent"
                 },
@@ -32,7 +31,11 @@
                 "cwd": "/workspace",
                 "futureField": [
                   42
-                ]
+                ],
+                "provider": {
+                  "instanceId": "codex",
+                  "driver": "codex"
+                }
               }
             ],
             "projects": [
@@ -57,7 +60,6 @@
     "result": {
       "data": [
         {
-          "provider": "codex",
           "id": {
             "id": "recent"
           },
@@ -66,7 +68,11 @@
           "cwd": "/workspace",
           "futureField": [
             42
-          ]
+          ],
+          "provider": {
+            "instanceId": "codex",
+            "driver": "codex"
+          }
         }
       ],
       "projects": [
@@ -114,7 +120,6 @@
           "result": {
             "data": [
               {
-                "provider": "codex",
                 "id": {
                   "id": "recent"
                 },
@@ -123,7 +128,11 @@
                 "cwd": "/workspace",
                 "futureField": [
                   42
-                ]
+                ],
+                "provider": {
+                  "instanceId": "codex",
+                  "driver": "codex"
+                }
               }
             ],
             "projects": [
@@ -148,7 +157,6 @@
     "result": {
       "data": [
         {
-          "provider": "codex",
           "id": {
             "id": "recent"
           },
@@ -157,7 +165,11 @@
           "cwd": "/workspace",
           "futureField": [
             42
-          ]
+          ],
+          "provider": {
+            "instanceId": "codex",
+            "driver": "codex"
+          }
         }
       ],
       "projects": [
@@ -183,8 +195,8 @@
       "type": "startThread",
       "cwd": "/workspace",
       "model": {
-        "provider": "codex",
-        "id": "model-b"
+        "id": "model-b",
+        "instanceId": "codex"
       }
     },
     "exchanges": [
@@ -193,15 +205,14 @@
         "params": {
           "cwd": "/workspace",
           "model": {
-            "provider": "codex",
-            "id": "model-b"
+            "id": "model-b",
+            "instanceId": "codex"
           },
-          "provider": "codex"
+          "instanceId": "codex"
         },
         "response": {
           "result": {
             "thread": {
-              "provider": "codex",
               "id": {
                 "id": "thread-new"
               },
@@ -209,11 +220,15 @@
               "turns": [],
               "future": {
                 "opaque": 42
+              },
+              "provider": {
+                "instanceId": "codex",
+                "driver": "codex"
               }
             },
             "model": {
-              "provider": "codex",
-              "id": "model-b"
+              "id": "model-b",
+              "instanceId": "codex"
             }
           }
         }
@@ -221,7 +236,6 @@
     ],
     "result": {
       "thread": {
-        "provider": "codex",
         "id": {
           "id": "thread-new"
         },
@@ -235,11 +249,15 @@
           "fork": true,
           "rename": true,
           "modelChange": true
+        },
+        "provider": {
+          "instanceId": "codex",
+          "driver": "codex"
         }
       },
       "model": {
-        "provider": "codex",
-        "id": "model-b"
+        "id": "model-b",
+        "instanceId": "codex"
       }
     }
   },
@@ -269,7 +287,6 @@
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
             "response": {
               "thread": {
-                "provider": "codex",
                 "id": {
                   "id": "thread-1"
                 },
@@ -301,11 +318,15 @@
                 ],
                 "future": {
                   "opaque": 42
+                },
+                "provider": {
+                  "instanceId": "codex",
+                  "driver": "codex"
                 }
               },
               "model": {
-                "provider": "codex",
-                "id": "model-b"
+                "id": "model-b",
+                "instanceId": "codex"
               }
             }
           }
@@ -314,7 +335,6 @@
     ],
     "result": {
       "thread": {
-        "provider": "codex",
         "id": {
           "id": "thread-1"
         },
@@ -346,11 +366,15 @@
         ],
         "future": {
           "opaque": 42
+        },
+        "provider": {
+          "instanceId": "codex",
+          "driver": "codex"
         }
       },
       "model": {
-        "provider": "codex",
-        "id": "model-b"
+        "id": "model-b",
+        "instanceId": "codex"
       }
     }
   },
@@ -380,7 +404,6 @@
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
             "response": {
               "thread": {
-                "provider": "codex",
                 "id": {
                   "id": "other"
                 },
@@ -388,11 +411,15 @@
                 "turns": [],
                 "future": {
                   "opaque": 42
+                },
+                "provider": {
+                  "instanceId": "codex",
+                  "driver": "codex"
                 }
               },
               "model": {
-                "provider": "codex",
-                "id": "model-b"
+                "id": "model-b",
+                "instanceId": "codex"
               }
             }
           }
@@ -407,7 +434,6 @@
       "subscriptionId": "00000000-0000-0000-0000-000000000000",
       "response": {
         "thread": {
-          "provider": "codex",
           "id": {
             "id": "other"
           },
@@ -415,11 +441,15 @@
           "turns": [],
           "future": {
             "opaque": 42
+          },
+          "provider": {
+            "instanceId": "codex",
+            "driver": "codex"
           }
         },
         "model": {
-          "provider": "codex",
-          "id": "model-b"
+          "id": "model-b",
+          "instanceId": "codex"
         }
       }
     }
@@ -498,7 +528,6 @@
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
             "response": {
               "thread": {
-                "provider": "codex",
                 "id": {
                   "id": "thread-1"
                 },
@@ -529,11 +558,15 @@
                 "future": {
                   "opaque": 42
                 },
-                "historyCursor": null
+                "historyCursor": null,
+                "provider": {
+                  "instanceId": "codex",
+                  "driver": "codex"
+                }
               },
               "model": {
-                "provider": "codex",
-                "id": "model-b"
+                "id": "model-b",
+                "instanceId": "codex"
               }
             }
           }
@@ -542,7 +575,6 @@
     ],
     "result": {
       "thread": {
-        "provider": "codex",
         "id": {
           "id": "thread-1"
         },
@@ -573,11 +605,15 @@
         "future": {
           "opaque": 42
         },
-        "historyCursor": null
+        "historyCursor": null,
+        "provider": {
+          "instanceId": "codex",
+          "driver": "codex"
+        }
       },
       "model": {
-        "provider": "codex",
-        "id": "model-b"
+        "id": "model-b",
+        "instanceId": "codex"
       }
     }
   },
@@ -609,7 +645,6 @@
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
             "response": {
               "thread": {
-                "provider": "codex",
                 "id": {
                   "id": "thread-1"
                 },
@@ -640,11 +675,15 @@
                 "future": {
                   "opaque": 42
                 },
-                "historyCursor": null
+                "historyCursor": null,
+                "provider": {
+                  "instanceId": "codex",
+                  "driver": "codex"
+                }
               },
               "model": {
-                "provider": "codex",
-                "id": "model-b"
+                "id": "model-b",
+                "instanceId": "codex"
               }
             }
           }
@@ -653,7 +692,6 @@
     ],
     "result": {
       "thread": {
-        "provider": "codex",
         "id": {
           "id": "thread-1"
         },
@@ -684,11 +722,15 @@
         "future": {
           "opaque": 42
         },
-        "historyCursor": null
+        "historyCursor": null,
+        "provider": {
+          "instanceId": "codex",
+          "driver": "codex"
+        }
       },
       "model": {
-        "provider": "codex",
-        "id": "model-b"
+        "id": "model-b",
+        "instanceId": "codex"
       }
     }
   },
@@ -875,8 +917,8 @@
         "clientUserMessageId": "client-1"
       },
       "model": {
-        "provider": "codex",
-        "id": "model-b"
+        "id": "model-b",
+        "instanceId": "codex"
       },
       "effort": "high",
       "snapshot": {
@@ -903,8 +945,8 @@
             }
           ],
           "model": {
-            "provider": "codex",
-            "id": "model-b"
+            "id": "model-b",
+            "instanceId": "codex"
           },
           "effort": "high"
         },
@@ -1346,8 +1388,8 @@
               {
                 "id": "a",
                 "model": {
-                  "provider": "codex",
-                  "id": "model-a"
+                  "id": "model-a",
+                  "instanceId": "codex"
                 },
                 "displayName": "Model a",
                 "defaultReasoningEffort": "medium",
@@ -1378,8 +1420,8 @@
               {
                 "id": "b",
                 "model": {
-                  "provider": "codex",
-                  "id": "model-b"
+                  "id": "model-b",
+                  "instanceId": "codex"
                 },
                 "displayName": "Model b",
                 "defaultReasoningEffort": "medium",
@@ -1396,8 +1438,8 @@
               {
                 "id": "a",
                 "model": {
-                  "provider": "codex",
-                  "id": "model-a"
+                  "id": "model-a",
+                  "instanceId": "codex"
                 },
                 "displayName": "Updated A",
                 "defaultReasoningEffort": "medium",
@@ -1420,8 +1462,8 @@
       {
         "id": "a",
         "model": {
-          "provider": "codex",
-          "id": "model-a"
+          "id": "model-a",
+          "instanceId": "codex"
         },
         "displayName": "Updated A",
         "defaultReasoningEffort": "medium",
@@ -1438,8 +1480,8 @@
       {
         "id": "b",
         "model": {
-          "provider": "codex",
-          "id": "model-b"
+          "id": "model-b",
+          "instanceId": "codex"
         },
         "displayName": "Model b",
         "defaultReasoningEffort": "medium",
@@ -1472,8 +1514,8 @@
               {
                 "id": "a",
                 "model": {
-                  "provider": "codex",
-                  "id": "model-a"
+                  "id": "model-a",
+                  "instanceId": "codex"
                 },
                 "displayName": "Model a",
                 "defaultReasoningEffort": "medium",
@@ -1504,8 +1546,8 @@
               {
                 "id": "a",
                 "model": {
-                  "provider": "codex",
-                  "id": "model-a"
+                  "id": "model-a",
+                  "instanceId": "codex"
                 },
                 "displayName": "Model a",
                 "defaultReasoningEffort": "medium",
@@ -1592,7 +1634,6 @@
             "subscriptionId": "00000000-0000-0000-0000-000000000000",
             "response": {
               "thread": {
-                "provider": "codex",
                 "id": {
                   "id": "thread"
                 },
@@ -1689,7 +1730,11 @@
                       }
                     ]
                   }
-                ]
+                ],
+                "provider": {
+                  "instanceId": "codex",
+                  "driver": "codex"
+                }
               }
             }
           }

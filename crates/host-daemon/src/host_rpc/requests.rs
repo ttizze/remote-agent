@@ -19,7 +19,7 @@ pub(crate) trait AnswerSource: Send + Sync {
 pub(crate) struct RequestOrigin {
     pub instance: uuid::Uuid,
     pub native_id: Value,
-    pub provider: agent_protocol::session::ProviderKind,
+
     pub source: std::sync::Arc<dyn AnswerSource>,
 }
 #[cfg(test)]
@@ -49,7 +49,7 @@ pub(crate) fn unavailable_origin(
     RequestOrigin {
         instance,
         native_id,
-        provider: agent_protocol::session::ProviderKind::Codex,
+
         source: std::sync::Arc::new(UnavailableSource(stopped)),
     }
 }

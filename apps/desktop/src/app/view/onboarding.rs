@@ -17,12 +17,12 @@ impl Desktop {
                 .child("この環境で使えるAI"),
         );
         for agent in agents {
-            let provider = agent.provider;
-            if login && provider == login_provider {
+            let provider = agent.instance_id.clone();
+            if login && Some(&provider) == login_provider.as_ref() {
                 body = body.child(self.account_login_controls(Some(&agent.name), cx));
                 continue;
             }
-            let pending = self.account_busy && provider == login_provider;
+            let pending = self.account_busy && Some(&provider) == login_provider.as_ref();
             let mut row = h_flex()
                 .items_center()
                 .gap_3()
@@ -46,11 +46,11 @@ impl Desktop {
                 agent.availability,
                 AgentAvailability::LoginRequired | AgentAvailability::Unavailable
             ) {
-                let id = format!("connection-agent-{}", agent.name);
+                let id = format!("connection-agent-{}", agent.instance_id);
                 row = row.child(
                     self.button(id.clone(), "ログイン", cx, move |view, _, _| {
                         view.account_operation(Intent::StartAccountLogin(op::StartAccountLogin {
-                            provider,
+                            instance_id: provider.clone(),
                         }));
                     })
                     .debug_selector(move || id.clone())
@@ -294,9 +294,10 @@ mod tests {
                 view.connecting = false;
                 let snapshot = Arc::make_mut(&mut view.snapshot);
                 snapshot.connected = true;
+                snapshot.provider_instances = crate::app::fixture_instances();
                 snapshot.models = Arc::new(serde_json::from_value(serde_json::json!([
-                    {"id":"gpt","model":{"provider":"codex","id":"gpt"},"displayName":"GPT","defaultReasoningEffort":"","supportedReasoningEfforts":[]},
-                    {"id":"sonnet","model":{"provider":"claude","id":"sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
+                    {"id":"gpt","model":{"instanceId":"codex","id":"gpt"},"displayName":"GPT","defaultReasoningEffort":"","supportedReasoningEfforts":[]},
+                    {"id":"sonnet","model":{"instanceId":"claude","id":"sonnet"},"displayName":"Sonnet","defaultReasoningEffort":"","supportedReasoningEfforts":[]}
                 ])).unwrap());
                 Arc::make_mut(&mut snapshot.account).accounts = Some(Arc::new(serde_json::from_value(serde_json::json!({"accounts":[],"selected":{}})).unwrap()));
             });
@@ -307,14 +308,18 @@ mod tests {
         let start = window.debug_bounds("onboarding-start").unwrap();
         window.simulate_click(start.center(), Modifiers::default());
         window.update(|_, cx| assert!(view.read(cx).0.read(cx).tab == Tab::Chat));
-        let login = window.debug_bounds("connection-agent-Claude Code").unwrap();
+        let login = window.debug_bounds("connection-agent-claude").unwrap();
         window.simulate_click(login.center(), Modifiers::default());
         window.update(|_, cx| {
             let desktop = view.read(cx).0.read(cx);
             assert!(desktop.tab == Tab::Chat);
             assert_eq!(
                 desktop.model_provider,
-                Some(agent_protocol::session::ProviderKind::Claude)
+                Some(
+                    "claude"
+                        .parse::<agent_protocol::session::ProviderInstanceId>()
+                        .unwrap()
+                )
             );
             assert!(desktop.account_busy);
         });
@@ -324,7 +329,9 @@ mod tests {
                 view.account_polling = true;
                 Arc::make_mut(&mut Arc::make_mut(&mut view.snapshot).account).login =
                     Some(Arc::new(agent_protocol::operations::AccountLogin {
-                        provider: agent_protocol::session::ProviderKind::Claude,
+                        instance_id: "claude"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
                         login_id: "fixture-login".into(),
                         requires_code_submission: true,
                         user_code: String::new(),
@@ -334,12 +341,8 @@ mod tests {
             })
         });
         window.run_until_parked();
-        assert!(
-            window
-                .debug_bounds("connection-agent-Claude Code")
-                .is_none()
-        );
-        assert!(window.debug_bounds("connection-agent-Codex").is_some());
+        assert!(window.debug_bounds("connection-agent-claude").is_none());
+        assert!(window.debug_bounds("connection-agent-codex").is_some());
         assert!(window.debug_bounds("account-open-login").is_some());
         let submit = window.debug_bounds("account-submit-code").unwrap();
         window.simulate_click(submit.center(), Modifiers::default());

@@ -4,7 +4,7 @@ use agent_protocol::{
     ids::ItemId,
     items::*,
     models::{Thread, ThreadResponse, Turn},
-    session::{ProviderKind, SessionRef},
+    session::{ProviderInstanceId, SessionRef},
 };
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 use serde_json::Value;
@@ -355,7 +355,7 @@ pub(crate) fn codex_item(mut value: Value) -> Result<Item, serde_json::Error> {
         },
         "sleep" => ItemBody::Sleep {},
         _ => ItemBody::Custom {
-            provider: ProviderKind::Codex,
+            driver: "codex".parse().expect("valid built-in driver"),
             kind: string(&value, "type"),
             value,
         },
@@ -487,11 +487,14 @@ pub(crate) fn codex_thread(mut value: Value) -> Result<Thread, serde_json::Error
         ..Default::default()
     })
 }
-pub(crate) fn codex_thread_response(mut value: Value) -> Result<ThreadResponse, serde_json::Error> {
+pub(crate) fn codex_thread_response(
+    mut value: Value,
+    instance_id: &ProviderInstanceId,
+) -> Result<ThreadResponse, serde_json::Error> {
     Ok(ThreadResponse {
         model: field::<Option<String>>(&value, "model")?.map(|id| {
             agent_protocol::models::ModelRef {
-                provider: ProviderKind::Codex,
+                instance_id: instance_id.clone(),
                 id,
             }
         }),

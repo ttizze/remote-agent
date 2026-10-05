@@ -205,13 +205,14 @@ mod tests {
                 desktop.update(cx, |view, cx| {
                     let snapshot = Arc::make_mut(&mut view.snapshot);
                     snapshot.connected = true;
+                snapshot.provider_instances = crate::app::fixture_instances();
                     snapshot.composer_catalog = Some(Arc::new(ComposerCatalog {
                         cwd: snapshot.navigation.cwd.clone(), loading: true,
                         candidates: [
                             ("Review", "Investigate whether structured datasets and query results are trustworthy enough to use, including freshness, duplicates and missing values"),
                             ("Analyze Data Quality With A Very Long Skill Name", "First line\nSecond line"),
                         ].into_iter().map(|(name, description)| ComposerCandidate {
-                            invocation: Invocation { provider: agent_protocol::session::ProviderKind::Codex, kind: InvocationKind::Skill, name: name.into(), path: format!("/fixture/{name}/SKILL.md") },
+                            invocation: Invocation { instance_id: "codex".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(), kind: InvocationKind::Skill, name: name.into(), path: format!("/fixture/{name}/SKILL.md") },
                             description: description.into(),
                         }).collect(), ..Default::default()
                     }));
@@ -368,11 +369,14 @@ mod tests {
         view.update(cx, |view, window, cx| {
             let snapshot = Arc::make_mut(&mut view.snapshot);
             snapshot.connected = true;
+            snapshot.provider_instances = crate::app::fixture_instances();
             snapshot.composer_catalog = Some(Arc::new(ComposerCatalog {
                 cwd: snapshot.navigation.cwd.clone(),
                 candidates: vec![ComposerCandidate {
                     invocation: Invocation {
-                        provider: agent_protocol::session::ProviderKind::Codex,
+                        instance_id: "codex"
+                            .parse::<agent_protocol::session::ProviderInstanceId>()
+                            .unwrap(),
                         kind: InvocationKind::Skill,
                         name: "review".into(),
                         path: "/fixture/review/SKILL.md".into(),

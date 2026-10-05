@@ -212,6 +212,10 @@ pub struct TerminalView {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Object))]
 pub struct Snapshot {
+    #[serde(default)]
+    pub provider_instances: Arc<Vec<agent_protocol::providers::ProviderInstance>>,
+    #[serde(skip)]
+    pub provider_settings: Option<Arc<agent_protocol::providers::ProviderSettings>>,
     pub follow_up_behavior: FollowUpBehavior,
     #[serde(skip)]
     pub operations: Arc<BTreeMap<operations::OperationKey, operations::OperationState>>,
@@ -317,15 +321,15 @@ impl Snapshot {
 
     pub fn model_error_messages(
         &self,
-        provider: Option<crate::session::ProviderKind>,
+        provider: Option<crate::session::ProviderInstanceId>,
     ) -> Vec<String> {
-        let provider = provider.map(|provider| match provider {
-            crate::session::ProviderKind::Codex => "codex",
-            crate::session::ProviderKind::Claude => "claude",
-        });
         self.model_errors
             .iter()
-            .filter(|(key, _)| provider.is_none_or(|provider| provider == key.as_str()))
+            .filter(|(key, _)| {
+                provider
+                    .as_ref()
+                    .is_none_or(|provider| provider.as_str() == key.as_str())
+            })
             .map(|(provider, error)| {
                 let message = error
                     .get("message")
@@ -425,7 +429,7 @@ fn reduce_intent(previous: &Snapshot, intent: Intent) -> (Snapshot, Vec<Effect>)
     }
     let mut next = previous.clone();
     prepare_operations!(intent, previous, next, [
-        ReadPermissionSettings, UpdatePermissionSettings,
+        ReadProviderSettings, UpdateProviderInstance, ReadPermissionSettings, UpdatePermissionSettings,
         ListAccounts, SelectAccount, SelectAccountForDraft, LogoutAccount, StartAccountLogin,
         ReadAccountLogin, CancelAccountLogin, SubmitAccountLogin, ForkSession,
         StartTerminal, DetachTerminal, KillTerminal, CreateInvitation, RemoveRemoteHost,
@@ -825,6 +829,8 @@ fn reduce_event(previous: &Snapshot, event: Event) -> (Snapshot, Vec<Effect>) {
                 next.workspace = Arc::default();
                 next.account = Arc::default();
                 next.models = Arc::default();
+                next.provider_instances = Arc::default();
+                next.provider_settings = None;
                 next.model_errors = Arc::default();
                 reset_session(&mut next);
             }
@@ -974,7 +980,7 @@ pub(crate) fn supported_settings<'a>(
     selected_model: Option<&'a crate::models::ModelRef>,
     selected_effort: Option<&'a str>,
     selected_tier: Option<&'a str>,
-    default_provider: Option<crate::session::ProviderKind>,
+    default_provider: Option<&crate::session::ProviderInstanceId>,
     models: &'a [Model],
     catalog_incomplete: bool,
 ) -> (
@@ -994,11 +1000,11 @@ pub(crate) fn supported_settings<'a>(
     let provider = default_provider.or_else(|| {
         selected_model
             .filter(|model| !model.id.is_empty())
-            .map(|model| model.provider)
+            .map(|model| &model.instance_id)
     });
     let mut available = models
         .iter()
-        .filter(|model| provider.is_none_or(|provider| model.model.provider == provider));
+        .filter(|model| provider.is_none_or(|provider| &model.model.instance_id == provider));
     let model = available
         .clone()
         .find(|model| Some(&model.model) == selected_model)
@@ -1108,6 +1114,23 @@ fn submission(
             },
         );
     }
+    let instance_id = if thread_id.is_none() {
+        crate::presentation::model_settings::draft_instance(None, draft.model.as_ref()).or_else(
+            || {
+                previous
+                    .models
+                    .first()
+                    .map(|model| model.model.instance_id.clone())
+            },
+        )
+    } else {
+        None
+    };
+    if thread_id.is_none() && instance_id.is_none() {
+        let mut next = previous.clone();
+        next.error = Some("利用できる接続とモデルを選んでください。".into());
+        return (next, Vec::new());
+    }
     let mut next = previous.clone();
     next.error = None;
     let cleared = clear_draft.as_ref().unwrap_or(&draft);
@@ -1157,10 +1180,8 @@ fn submission(
             force_queue,
         }),
         None => Effect::execute(op::StartSubmission {
-            provider: crate::presentation::model_settings::draft_provider(
-                None,
-                draft.model.as_ref(),
-            ),
+            instance_id: instance_id
+                .expect("new conversation instance was checked before clearing its draft"),
             draft_key,
             cwd: (!previous.navigation.cwd.trim().is_empty())
                 .then(|| previous.navigation.cwd.clone()),

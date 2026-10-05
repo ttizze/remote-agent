@@ -32,11 +32,11 @@ class ThreadListTest {
                     JSONObject(
                         """{
                 "data":[
-                    {"provider":"codex","id":{"id":"running"},"name":"Running worktree","worktreeStatus":"merged","status":"running"},
-                    {"provider":"codex","id":{"id":"unread"},"name":"Unread worktree","worktreeStatus":"merged"},
-                    {"provider":"claude","id":{"id":"pending"},"name":"Pending worktree","worktreeStatus":"unmerged","status":"running"},
-                    {"provider":"claude","id":{"id":"pending-unread"},"name":"Pending unread worktree","worktreeStatus":"unmerged"},
-                    {"provider":"claude","id":{"id":"other-running"},"name":"Claude conversation"}
+                    {"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"running"},"name":"Running worktree","worktreeStatus":"merged","status":"running"},
+                    {"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"unread"},"name":"Unread worktree","worktreeStatus":"merged"},
+                    {"provider":{"instanceId":"claude","driver":"claudeAgent"},"id":{"id":"pending"},"name":"Pending worktree","worktreeStatus":"unmerged","status":"running"},
+                    {"provider":{"instanceId":"claude","driver":"claudeAgent"},"id":{"id":"pending-unread"},"name":"Pending unread worktree","worktreeStatus":"unmerged"},
+                    {"provider":{"instanceId":"claude","driver":"claudeAgent"},"id":{"id":"other-running"},"name":"Claude conversation"}
                 ],
                 "projects":[],"moreProjectIds":[],"hasMoreChats":false,"hasMoreProjects":false
             }"""

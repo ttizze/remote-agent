@@ -137,6 +137,7 @@ pub struct ListModels {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPage {
+    pub instances: Vec<crate::providers::ProviderInstance>,
     pub data: Vec<crate::models::Model>,
     pub next_cursor: Option<String>,
     #[serde(default)]
@@ -183,7 +184,8 @@ pub struct WriteFile {
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub id: String,
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
     pub email: Option<String>,
     pub plan_type: Option<String>,
     pub usage: Option<AccountUsage>,
@@ -218,24 +220,26 @@ impl UsageWindow {
 #[serde(rename_all = "camelCase")]
 pub struct Accounts {
     pub accounts: Vec<Account>,
-    pub selected: std::collections::HashMap<crate::session::ProviderKind, String>,
+    pub selected: std::collections::HashMap<crate::session::ProviderInstanceId, String>,
     pub error: Option<String>,
 }
 
 impl Accounts {
     pub fn is_selected(&self, account: &Account) -> bool {
-        self.selected.get(&account.provider) == Some(&account.id)
+        self.selected.get(&account.instance_id) == Some(&account.id)
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartAccountLogin {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SubmitAccountLogin {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
     pub id: String,
     pub code: String,
 }
@@ -250,7 +254,8 @@ impl std::fmt::Debug for SubmitAccountLogin {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSelection {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
     pub selected_id: String,
     pub persistence_error: Option<String>,
 }
@@ -258,7 +263,8 @@ pub struct AccountSelection {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountLogin {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
     pub login_id: String,
     pub requires_code_submission: bool,
     pub user_code: String,
@@ -326,28 +332,32 @@ pub struct RemoveWorktree {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelectAccount {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
     #[serde(rename = "accountId")]
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogoutAccount {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
     #[serde(rename = "accountId")]
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadAccountLogin {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
     #[serde(rename = "loginId")]
     pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelAccountLogin {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
     #[serde(rename = "loginId")]
     pub id: String,
 }
@@ -443,7 +453,8 @@ impl ForkSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSession {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
     pub cwd: Option<String>,
     pub model: Option<crate::models::ModelRef>,
 }
@@ -457,7 +468,14 @@ impl RpcMethod for CreateSession {
         output.subscription_id = id;
     }
     fn validate(&self, output: &Self::Output) -> Result<(), &'static str> {
-        if output.response.thread.provider != Some(self.provider) {
+        if output
+            .response
+            .thread
+            .provider
+            .as_ref()
+            .map(|provider| &provider.instance_id)
+            != Some(&self.instance_id)
+        {
             return Err("created session provider does not match");
         }
         validate_thread(&output.response, Some(&output.session))
@@ -507,7 +525,8 @@ pub struct LoadComposerCatalog {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadAccountUsage {
-    pub provider: crate::session::ProviderKind,
+    #[serde(rename = "instanceId")]
+    pub instance_id: crate::session::ProviderInstanceId,
     #[serde(rename = "accountId")]
     pub id: String,
 }

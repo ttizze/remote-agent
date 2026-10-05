@@ -31,6 +31,29 @@ pub(super) fn notification(
     }
 
     match message {
+        Notification::ProviderSettingsChanged { revision } => {
+            let mut next = previous.clone();
+            next.permission_settings = None;
+            next.composer_catalog = None;
+            let mut effects = if next.connected {
+                vec![
+                    Effect::execute(op::LoadModels {}),
+                    Effect::execute(op::ListAccounts {}),
+                ]
+            } else {
+                Vec::new()
+            };
+            effects.extend(refresh_list(&next));
+            if next.connected
+                && next
+                    .provider_settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.revision < revision)
+            {
+                effects.push(Effect::execute(op::ReadProviderSettings {}));
+            }
+            (next, effects)
+        }
         Notification::TerminalFailed { handle, reason } => {
             reduce(previous, Event::TerminalFailed { handle, reason })
         }
@@ -178,4 +201,41 @@ pub(super) fn session_update(
         effects.extend(op::review_workspace(&mut next));
     }
     (next, effects)
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::*;
+
+    #[test]
+    fn registry_changes_refresh_source_catalogs_and_only_open_settings() {
+        let snapshot = Snapshot {
+            connected: true,
+            ..Default::default()
+        };
+        let event = || crate::protocol::Notification::ProviderSettingsChanged { revision: 2 };
+        let (_, effects) = notification(&snapshot, event());
+        assert_eq!(effects.len(), 3);
+        let mut snapshot = snapshot;
+        snapshot.provider_settings = Some(Arc::new(agent_protocol::providers::ProviderSettings {
+            revision: 1,
+            instances: Vec::new(),
+        }));
+        let (_, effects) = notification(&snapshot, event());
+        assert_eq!(effects.len(), 4);
+        snapshot.provider_settings = Some(Arc::new(agent_protocol::providers::ProviderSettings {
+            revision: 2,
+            instances: Vec::new(),
+        }));
+        assert_eq!(notification(&snapshot, event()).1.len(), 3);
+        snapshot.connected = false;
+        assert!(notification(&snapshot, event()).1.is_empty());
+        snapshot.connected = true;
+        assert_eq!(
+            notification(&snapshot, crate::protocol::Notification::CatalogChanged {})
+                .1
+                .len(),
+            1
+        );
+    }
 }

@@ -738,6 +738,8 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         threads,
         models,
         model_errors,
+        provider_instances,
+        provider_settings,
         drafts,
         queue_edits,
         pending_submissions,
@@ -772,6 +774,8 @@ fn publish_locked(current: &mut Arc<Snapshot>, next: Snapshot) -> bool {
         && Arc::ptr_eq(&current.account, account)
         && Arc::ptr_eq(&current.conversations, conversations)
         && same_threads
+        && Arc::ptr_eq(&current.provider_instances, provider_instances)
+        && current.provider_settings == *provider_settings
         && Arc::ptr_eq(&current.models, models)
         && Arc::ptr_eq(&current.model_errors, model_errors)
         && Arc::ptr_eq(&current.drafts, drafts)
@@ -1456,7 +1460,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_full_command_queue_keeps_the_draft_and_all_submission_state() {
-        let store = Store::offline(Snapshot::default());
+        let store = Store::offline(Snapshot { models: Arc::new(vec![serde_json::from_value(serde_json::json!({"id":"fixture","model":{"instanceId":"codex","id":"fixture"},"displayName":"Fixture","defaultReasoningEffort":"","supportedReasoningEfforts":[]})).unwrap()]), ..Default::default() });
         let draft_key = store.snapshot().navigation.draft_key.clone();
         store
             .dispatch(Intent::SetDraftText {
@@ -1506,7 +1510,9 @@ mod tests {
             ("permission_settings", |snapshot| {
                 snapshot.permission_settings = Some(Arc::new(
                     crate::state::operations::PermissionSettingsState {
-                        provider: agent_protocol::session::ProviderKind::Codex,
+                        instance_id: "codex"
+                            .parse::<crate::session::ProviderInstanceId>()
+                            .unwrap(),
                         result: None,
                     },
                 ));
@@ -1517,6 +1523,16 @@ mod tests {
                 snapshot.conversations = Arc::default()
             }),
             ("models", |snapshot| snapshot.models = Arc::default()),
+            ("provider_instances", |snapshot| {
+                snapshot.provider_instances = Arc::default()
+            }),
+            ("provider_settings", |snapshot| {
+                snapshot.provider_settings =
+                    Some(Arc::new(agent_protocol::providers::ProviderSettings {
+                        revision: 0,
+                        instances: Vec::new(),
+                    }))
+            }),
             ("drafts", |snapshot| snapshot.drafts = Arc::default()),
             ("queue_edits", |snapshot| {
                 snapshot.queue_edits = Arc::default()

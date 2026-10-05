@@ -15,8 +15,29 @@ pub(super) struct Process {
     stderr: tokio::task::JoinHandle<String>,
 }
 
+pub(super) fn command(
+    program: &Path,
+    environment: &[(String, String)],
+    config_home: &Path,
+    credentials_home: &Path,
+) -> std::io::Result<tokio::process::Command> {
+    let mut command = bex_process::command(program)?;
+    command
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+        .env_remove("CLAUDE_CODE_OAUTH_REFRESH_TOKEN")
+        .envs(environment.iter().map(|(name, value)| (name, value)))
+        .env("CLAUDE_CONFIG_DIR", config_home)
+        .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", credentials_home);
+    Ok(command)
+}
+
 impl Process {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn start(
+        environment: &[(String, String)],
+        launch_args: &[String],
         program: &Path,
         config_home: &Path,
         credentials_home: &Path,
@@ -25,16 +46,12 @@ impl Process {
         model: Option<(&str, Option<&str>)>,
         browser: Option<Value>,
     ) -> Result<(Self, Value), String> {
-        let mut command = bex_process::command(program).map_err(|error| error.to_string())?;
+        let launch_args = settings_args(launch_args, cwd).await?;
+        let mut command = command(program, environment, config_home, credentials_home)
+            .map_err(|error| error.to_string())?;
         // Account changes must not replace skills, settings, plugins or history.
         command
-            .env("CLAUDE_CONFIG_DIR", config_home)
-            .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", credentials_home)
             .env("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1")
-            .env_remove("ANTHROPIC_API_KEY")
-            .env_remove("ANTHROPIC_AUTH_TOKEN")
-            .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
-            .env_remove("CLAUDE_CODE_OAUTH_REFRESH_TOKEN")
             .current_dir(cwd)
             .args([
                 "-p",
@@ -48,6 +65,7 @@ impl Process {
                 "--permission-prompt-tool",
                 "stdio",
             ]);
+        command.args(&launch_args);
         if let Some(browser) = browser {
             command
                 .arg("--mcp-config")
@@ -180,5 +198,161 @@ impl Process {
             ));
         }
         Ok(())
+    }
+}
+
+// The instance's auto-compact setting and user CLI settings share one flag.
+// Resolve files at the native process's cwd and retain the user's other keys.
+async fn settings_args(args: &[String], cwd: &Path) -> Result<Vec<String>, String> {
+    let original = args;
+    let mut retained = Vec::new();
+    let mut sources = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            retained.push(arg.clone());
+            retained.extend(args.cloned());
+            break;
+        }
+        if arg == "--settings" {
+            sources.push(
+                args.next()
+                    .ok_or("Claude settings flag requires a value")?
+                    .clone(),
+            );
+        } else if let Some(value) = arg.strip_prefix("--settings=") {
+            sources.push(value.to_owned());
+        } else {
+            retained.push(arg.clone());
+        }
+    }
+    if sources.len() <= 1 {
+        // Preserve native CLI validation and file loading for unmodified flags.
+        return Ok(original.to_vec());
+    }
+    let mut settings = serde_json::Map::new();
+    for source in sources {
+        let value = match serde_json::from_str::<Value>(&source) {
+            Ok(value) => value,
+            Err(_) => {
+                let bytes = tokio::fs::read(cwd.join(source))
+                    .await
+                    .map_err(|_| "Claude settings file cannot be read")?;
+                serde_json::from_slice(&bytes)
+                    .map_err(|_| "Claude settings file contains invalid JSON")?
+            }
+        };
+        let Value::Object(fields) = value else {
+            return Err("Claude settings must be a JSON object".into());
+        };
+        settings.extend(fields);
+    }
+    // Insert before a positional delimiter, if one was supplied.
+    let position = retained
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(retained.len());
+    retained.splice(
+        position..position,
+        ["--settings".into(), Value::Object(settings).to_string()],
+    );
+    Ok(retained)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_environment_cannot_replace_bound_history_or_account_storage() {
+        let environment = vec![
+            ("CLAUDE_CONFIG_DIR".into(), "/other-history".into()),
+            (
+                "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
+                "/other-account".into(),
+            ),
+            ("ANTHROPIC_API_KEY".into(), "placeholder".into()),
+            ("EXAMPLE_VALUE".into(), "public-placeholder".into()),
+        ];
+        let command = command(
+            Path::new("unstarted-fixture"),
+            &environment,
+            Path::new("/bound-history"),
+            Path::new("/selected-account"),
+        )
+        .unwrap();
+        let variables: std::collections::BTreeMap<_, _> = command.as_std().get_envs().collect();
+        let value = |name: &str| variables.get(std::ffi::OsStr::new(name)).copied().flatten();
+        assert_eq!(
+            value("CLAUDE_CONFIG_DIR"),
+            Some(std::ffi::OsStr::new("/bound-history"))
+        );
+        assert_eq!(
+            value("CLAUDE_SECURESTORAGE_CONFIG_DIR"),
+            Some(std::ffi::OsStr::new("/selected-account"))
+        );
+        assert_eq!(
+            value("ANTHROPIC_API_KEY"),
+            Some(std::ffi::OsStr::new("placeholder"))
+        );
+        assert_eq!(
+            value("EXAMPLE_VALUE"),
+            Some(std::ffi::OsStr::new("public-placeholder"))
+        );
+        for name in [
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+        ] {
+            assert_eq!(variables.get(std::ffi::OsStr::new(name)), Some(&None));
+        }
+    }
+
+    #[tokio::test]
+    async fn instance_settings_merge_with_inline_and_cwd_relative_files_before_positional_args() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("native.json"),
+            r#"{"permissions":{"allow":["Read"]},"autoCompactWindow":100000}"#,
+        )
+        .unwrap();
+        for source in [
+            "native.json",
+            r#"{"permissions":{"allow":["Read"]},"autoCompactWindow":100000}"#,
+        ] {
+            let args = vec![
+                "--settings".into(),
+                source.into(),
+                "--effort".into(),
+                "high".into(),
+                "--settings={\"autoCompactWindow\":500000}".into(),
+                "--".into(),
+                "--settings".into(),
+            ];
+            let actual = settings_args(&args, root.path()).await.unwrap();
+            assert_eq!(&actual[..2], &["--effort", "high"]);
+            assert_eq!(actual[2], "--settings");
+            assert_eq!(
+                serde_json::from_str::<Value>(&actual[3]).unwrap(),
+                json!({"permissions":{"allow":["Read"]},"autoCompactWindow":500000})
+            );
+            assert_eq!(&actual[4..], &["--", "--settings"]);
+        }
+        let single = vec!["--settings=native.json".into()];
+        assert_eq!(settings_args(&single, root.path()).await.unwrap(), single);
+        for first in ["missing.json", "[]", "false"] {
+            let invalid = vec![
+                "--settings".into(),
+                first.into(),
+                "--settings".into(),
+                "{}".into(),
+            ];
+            assert!(settings_args(&invalid, root.path()).await.is_err());
+        }
+        assert!(
+            settings_args(&["--settings".into()], root.path())
+                .await
+                .is_err()
+        );
     }
 }

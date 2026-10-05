@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -66,20 +66,34 @@ impl Prepared {
 // One recording per authenticated client. Replacing or cancelling a recording
 // drops its task and socket; another client's preparation remains independent.
 pub(crate) struct Dictation {
-    backend: Result<Arc<CodexAppServer>, String>,
+    backend: Mutex<Result<Arc<CodexAppServer>, String>>,
     prepared: Mutex<HashMap<SessionId, Prepared>>,
 }
 impl Dictation {
     pub(crate) fn new(backend: Result<Arc<CodexAppServer>, String>) -> Self {
         Self {
-            backend,
+            backend: Mutex::new(backend),
             prepared: Default::default(),
         }
+    }
+    pub(crate) fn replace_backend(&self, backend: Result<Arc<CodexAppServer>, String>) {
+        let mut current = self.backend.lock().unwrap();
+        if match (&*current, &backend) {
+            (Ok(current), Ok(next)) => Arc::ptr_eq(current, next),
+            (Err(current), Err(next)) => current == next,
+            _ => false,
+        } {
+            return;
+        }
+        *current = backend;
+        self.prepared.lock().unwrap().clear();
     }
     pub(crate) fn prepare(&self, session: SessionId, id: String) -> Result<(), String> {
         uuid::Uuid::parse_str(&id).map_err(|_| "録音の識別子が無効です。")?;
         let app_server = self
             .backend
+            .lock()
+            .unwrap()
             .as_ref()
             .map_err(|_| "音声入力のCodexバックエンドを利用できません。")?
             .clone();
@@ -128,11 +142,14 @@ impl Dictation {
         let prepared = self.take_preparation(session, preparation);
         let app_server = self
             .backend
-            .as_deref()
-            .map_err(|error| format!("音声入力のCodexバックエンドを利用できません: {error}"))?;
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_err(|error| format!("音声入力のCodexバックエンドを利用できません: {error}"))?
+            .clone();
         tokio::time::timeout(
             Duration::from_secs(25),
-            transcribe_request(app_server, audio, prepared),
+            transcribe_request(&app_server, audio, prepared),
         )
         .await
         .map_err(|_| "文字起こしがタイムアウトしました。")?
@@ -303,23 +320,37 @@ enum RecordingService<'a> {
     OpenAi,
 }
 
+async fn recording_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: tokio::sync::OnceCell<Option<reqwest::Client>> =
+        tokio::sync::OnceCell::const_new();
+    CLIENT
+        .get_or_init(|| async {
+            // System proxy discovery can block. It must not stall the runtime
+            // that also owns recording, stream fallback and cancellation.
+            tokio::task::spawn_blocking(|| {
+                install_tls_provider();
+                reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(25))
+                    .build()
+                    .ok()
+            })
+            .await
+            .ok()
+            .flatten()
+        })
+        .await
+        .as_ref()
+        .ok_or_else(|| "録音ファイルの接続を初期化できませんでした。".to_owned())
+}
+
 async fn transcribe_recording(
     token: &str,
     service: RecordingService<'_>,
     pcm: &[u8],
     url: &str,
 ) -> Result<String, String> {
-    install_tls_provider();
-    static CLIENT: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
-    let client = CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(25))
-                .build()
-        })
-        .as_ref()
-        .map_err(|_| "録音ファイルの接続を初期化できませんでした。")?;
+    let client = recording_client().await?;
 
     // The WAV container preserves native PCM and declares its capture format.
     let data_len = u32::try_from(pcm.len()).map_err(|_| "録音データが大きすぎます。")?;
@@ -653,6 +684,8 @@ mod tests {
                 Prepared::new(format!("recording-{session}"), std::future::pending()),
             );
         }
+        dictation.replace_backend(Err("isolated backend".into()));
+        assert_eq!(dictation.prepared.lock().unwrap().len(), 2);
         dictation.cancel(1, "old-recording");
         assert!(dictation.take_preparation(2, Some("recording-1")).is_none());
         assert!(dictation.take_preparation(1, None).is_none());
@@ -672,6 +705,12 @@ mod tests {
             Prepared::new("last-recording".into(), std::future::pending()),
         );
         dictation.close_session(3);
+        assert!(dictation.prepared.lock().unwrap().is_empty());
+        dictation.prepared.lock().unwrap().insert(
+            4,
+            Prepared::new("replacement-recording".into(), std::future::pending()),
+        );
+        dictation.replace_backend(Err("replacement backend".into()));
         assert!(dictation.prepared.lock().unwrap().is_empty());
     }
 
@@ -942,6 +981,10 @@ mod tests {
         api_key: bool,
         pending_preparation: bool,
     ) -> Result<String, String> {
+        tokio::time::timeout(Duration::from_secs(10), recording_client())
+            .await
+            .expect("recording HTTP client initialization stalled")
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(if pending_preparation { 25 } else { 3 }), async {
             // Keep IPv4 port-discovery probes out of the isolated provider.
             let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();

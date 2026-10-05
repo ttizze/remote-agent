@@ -108,6 +108,15 @@ hydration must not change this default.
   all saved conversations from the database, including unavailable sources.
   Native execution still checks the binding against its configured source.
   This replaces source-filtered lists under the October 5, 2026 rewrite requirement.
+- Provider drivers are open validated identifiers; configured instance IDs own
+  routing, accounts, models and settings. Model/account controls render the Host's
+  instance catalog, including multiple instances of one driver and unavailable
+  unknown drivers. Labels use configured display names. Control selectors use
+  instance IDs so duplicate names do not collide; the approved interactions and
+  layout assertions stay in place. This follows the pinned T3 provider-instance
+  contract under the October 5, 2026 rewrite requirement. Reconfiguration retains
+  conversation bindings and replaces only changed native resources; stale source
+  events cannot write through a replacement's native scope.
 - If Codex app-server cannot start, import its native rollout storage read-only.
   Honor the current index's immutable rollout after revert, compressed files,
   inherited byte/ordinal boundaries and the subagent cutoff. Bound decompressed

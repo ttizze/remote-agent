@@ -97,15 +97,12 @@ private struct UsageWindowView: View {
 
 struct AccountIdentityView: View {
     let account: Account?
+    let driver: String?
 
     var body: some View {
         HStack(spacing: 4) {
             if let account {
-                Image(account.provider == .codex ? "openai" : "anthropic")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 12, height: 12)
-                    .accessibilityLabel(account.provider == .codex ? "OpenAI" : "Anthropic")
+                ProviderIconView(driver: driver, size: 12)
                 Text(account.email ?? account.id)
                     .lineLimit(1)
                     .accessibilityIdentifier("account.identity." + account.id)
@@ -164,5 +161,22 @@ struct AccountLoginSection: View {
                 Button("認証状態を再確認", action: retry)
             }
         }
+    }
+}
+
+struct ProviderIconView: View {
+    let driver: String?
+    let size: CGFloat
+
+    var body: some View {
+        Group {
+            switch driver {
+            case "codex": Image("openai").resizable().accessibilityLabel("OpenAI")
+            case "claudeAgent": Image("claude").resizable().accessibilityLabel("Anthropic")
+            default: Image(systemName: "cpu").resizable().accessibilityLabel("エージェント")
+            }
+        }
+        .scaledToFit().frame(width: size, height: size)
+        .foregroundStyle(driver == "claudeAgent" ? Color(red: 0.85, green: 0.47, blue: 0.34) : .primary)
     }
 }

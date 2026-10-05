@@ -64,7 +64,7 @@ impl Codex {
                     if !group.errors.is_empty() {
                         catalog
                             .errors
-                            .entry(agent_protocol::session::ProviderKind::Codex)
+                            .entry(self.reference.instance_id.clone())
                             .or_default()
                             .push("一部のスキルを読み込めませんでした".into());
                     }
@@ -73,7 +73,7 @@ impl Codex {
                         .extend(group.skills.into_iter().filter(|s| s.enabled).map(|s| {
                             ComposerCandidate {
                                 invocation: Invocation {
-                                    provider: agent_protocol::session::ProviderKind::Codex,
+                                    instance_id: self.reference.instance_id.clone(),
                                     kind: InvocationKind::Skill,
                                     name: s.name,
                                     path: s.path,
@@ -85,7 +85,7 @@ impl Codex {
             }
             Err(_) => catalog
                 .errors
-                .entry(agent_protocol::session::ProviderKind::Codex)
+                .entry(self.reference.instance_id.clone())
                 .or_default()
                 .push("スキルを取得できませんでした".into()),
         }
@@ -94,7 +94,7 @@ impl Codex {
                 if !plugins.marketplace_load_errors.is_empty() {
                     catalog
                         .errors
-                        .entry(agent_protocol::session::ProviderKind::Codex)
+                        .entry(self.reference.instance_id.clone())
                         .or_default()
                         .push("一部のプラグインを読み込めませんでした".into());
                 }
@@ -114,7 +114,7 @@ impl Codex {
                                 });
                             ComposerCandidate {
                                 invocation: Invocation {
-                                    provider: agent_protocol::session::ProviderKind::Codex,
+                                    instance_id: self.reference.instance_id.clone(),
                                     kind: InvocationKind::Plugin,
                                     name,
                                     path: format!("plugin://{}", p.id),
@@ -126,7 +126,7 @@ impl Codex {
             }
             Err(_) => catalog
                 .errors
-                .entry(agent_protocol::session::ProviderKind::Codex)
+                .entry(self.reference.instance_id.clone())
                 .or_default()
                 .push("プラグインを取得できませんでした".into()),
         }

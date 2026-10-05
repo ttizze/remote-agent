@@ -184,14 +184,14 @@ mod tests {
         let mut list = TitleList::new(&projects, &query);
         for index in 0..9 {
             for project in (1..=7).rev() {
-                let retained = list.push(thread(json!({"provider":"codex","id":{"id":format!("p{project}-{index}")},"projectId":format!("p{project}"),"name":"title","preview":"long body".repeat(10000),"turns":[{"id":"turn"}]})));
+                let retained = list.push(thread(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":format!("p{project}-{index}")},"projectId":format!("p{project}"),"name":"title","preview":"long body".repeat(10000),"turns":[{"id":"turn"}]})));
                 assert_eq!(
                     retained,
                     project >= 3 && index <= 5,
                     "retain only five visible titles and one lookahead per visible project"
                 );
             }
-            assert_eq!(list.push(thread(json!({"provider":"codex","id":{"id":format!("chat-{index}")},"preview":"\nFirst line\nprivate body","cwd":"/other"}))), index <= 5);
+            assert_eq!(list.push(thread(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":format!("chat-{index}")},"preview":"\nFirst line\nprivate body","cwd":"/other"}))), index <= 5);
         }
         assert!(list.complete());
         let page = list.finish();
@@ -233,7 +233,7 @@ mod tests {
         let mut list = TitleList::new(&projects, &query);
         for index in 0..1001 {
             list.push(thread(
-                json!({"provider":"codex","id":{"id":format!("t{index}")},"projectId":"p","name":"Title"}),
+                json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":format!("t{index}")},"projectId":"p","name":"Title"}),
             ));
         }
         let result = serde_json::to_value(list.finish()).unwrap();
@@ -252,10 +252,10 @@ mod tests {
         let mut list = TitleList::new(&projects, &query);
         for index in 0..15 {
             list.push(thread(
-                json!({"provider":"codex","id":{"id":format!("p{index}")},"projectId":"p","name":"P"}),
+                json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":format!("p{index}")},"projectId":"p","name":"P"}),
             ));
             list.push(thread(
-                json!({"provider":"codex","id":{"id":format!("q{index}")},"projectId":"q","name":"Q"}),
+                json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":format!("q{index}")},"projectId":"q","name":"Q"}),
             ));
         }
         let result = serde_json::to_value(list.finish()).unwrap();

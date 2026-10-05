@@ -329,10 +329,7 @@ pub struct ItemPresentation {
     pub title: Option<String>,
     pub collapsible: bool,
 }
-pub fn item_presentation(
-    item: &Item,
-    provider: Option<crate::session::ProviderKind>,
-) -> ItemPresentation {
+pub fn item_presentation(item: &Item, provider_name: Option<&str>) -> ItemPresentation {
     let (kind, title, collapsible) = match item.body() {
         ItemBody::UserMessage { .. } => ("user", Some("You".into()), false),
         ItemBody::AssistantText { phase, .. } => (
@@ -341,14 +338,7 @@ pub fn item_presentation(
             } else {
                 "agent"
             },
-            Some(
-                match provider {
-                    Some(crate::session::ProviderKind::Codex) => "Codex",
-                    Some(crate::session::ProviderKind::Claude) => "Claude",
-                    None => "Assistant",
-                }
-                .into(),
-            ),
+            Some(provider_name.unwrap_or("Assistant").into()),
             false,
         ),
         ItemBody::Reasoning { .. } => ("reasoning", Some("作業の詳細".into()), true),
@@ -439,8 +429,8 @@ fn tool_title(body: &ItemBody) -> String {
             "レビューを終了しました"
         }
         .into(),
-        ItemBody::Custom { provider, kind, .. } => {
-            format!("{provider:?} item ({})", compact_title(kind))
+        ItemBody::Custom { driver, kind, .. } => {
+            format!("{driver} item ({})", compact_title(kind))
         }
         _ => unreachable!("messages use their own presentation"),
     }
@@ -464,10 +454,8 @@ mod presentation_tests {
             segment.role(1, turn.items.as_ref().unwrap()[1].as_ref().into()),
             Role::Response
         );
-        let presentation = item_presentation(
-            turn.items.as_ref().unwrap()[1].as_ref(),
-            Some(crate::session::ProviderKind::Codex),
-        );
+        let presentation =
+            item_presentation(turn.items.as_ref().unwrap()[1].as_ref(), Some("Codex"));
         assert!(!presentation.collapsible);
         assert!(presentation.title.is_none());
     }
@@ -671,18 +659,14 @@ mod projection_tests {
     fn titles_keep_one_bounded_unicode_line() {
         let command: Item = serde_json::from_value(json!({"id":"command","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"  cargo test\nsecret second line","cwd":null,"output":"","exitCode":null}}}}})).unwrap();
         assert_eq!(
-            item_presentation(&command, Some(crate::session::ProviderKind::Codex))
-                .title
-                .as_deref(),
+            item_presentation(&command, Some("Codex")).title.as_deref(),
             Some("cargo test")
         );
         let command: Item = serde_json::from_value(
             json!({"id":"command","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"日".repeat(121),"cwd":null,"output":"","exitCode":null}}}}}),
         )
         .unwrap();
-        let title = item_presentation(&command, Some(crate::session::ProviderKind::Codex))
-            .title
-            .unwrap();
+        let title = item_presentation(&command, Some("Codex")).title.unwrap();
         assert_eq!(title.chars().count(), 121);
         assert!(title.ends_with('…'));
     }
@@ -708,20 +692,14 @@ mod deferred_item_tests {
                     exit_code: None,
                 },
             );
-            let title = crate::presentation::item_presentation(
-                &item,
-                Some(crate::session::ProviderKind::Codex),
-            )
-            .title
-            .unwrap();
+            let title = crate::presentation::item_presentation(&item, Some("Codex"))
+                .title
+                .unwrap();
             item.defer();
             assert_eq!(
-                crate::presentation::item_presentation(
-                    &item,
-                    Some(crate::session::ProviderKind::Codex)
-                )
-                .title
-                .as_deref(),
+                crate::presentation::item_presentation(&item, Some("Codex"))
+                    .title
+                    .as_deref(),
                 Some(title.as_str())
             );
             assert!(item.is_deferred());

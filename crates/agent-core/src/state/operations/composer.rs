@@ -2,7 +2,6 @@ use super::*;
 
 use agent_protocol::composer::{ComposerCandidate, ComposerCatalog};
 pub use agent_protocol::operations::LoadComposerCatalog;
-use agent_protocol::session::ProviderKind;
 
 pub(crate) fn prefetch_composer_catalog(snapshot: &mut Snapshot) -> Option<Effect> {
     if !snapshot.connected
@@ -80,15 +79,22 @@ fn unavailable_catalog(cwd: &str, candidates: &[ComposerCandidate]) -> ComposerC
     ComposerCatalog {
         cwd: cwd.into(),
         candidates: candidates.to_vec(),
-        errors: [ProviderKind::Codex, ProviderKind::Claude]
-            .into_iter()
-            .map(|provider| {
-                (
-                    provider,
-                    vec!["候補を取得できませんでした。再度 @ または / を入力してください。".into()],
-                )
-            })
-            .collect(),
+        errors: [
+            "codex"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
+            "claude"
+                .parse::<crate::session::ProviderInstanceId>()
+                .unwrap(),
+        ]
+        .into_iter()
+        .map(|provider| {
+            (
+                provider,
+                vec!["候補を取得できませんでした。再度 @ または / を入力してください。".into()],
+            )
+        })
+        .collect(),
         ..Default::default()
     }
 }

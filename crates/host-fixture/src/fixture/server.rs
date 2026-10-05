@@ -358,6 +358,24 @@ pub(super) async fn run(home: PathBuf, config: Config) -> Result<()> {
                     }
                 }
                 "model/list" => {
+                    let gate = context.home.join("models-release");
+                    if context.home.join("models-wait").exists() {
+                        fs::write(gate.with_extension("entered"), [])?;
+                        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                            while !gate.exists() {
+                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            }
+                        }).await?;
+                    }
+                    let pages = context.home.join("model-pages.json");
+                    if pages.exists() {
+                        let pages: Vec<Vec<Value>> = serde_json::from_slice(&fs::read(pages)?)?;
+                        let cursor = params["cursor"].as_str().map(str::parse::<usize>).transpose()?.unwrap_or(0);
+                        let page = pages.get(cursor).ok_or("invalid fixture model cursor")?;
+                        let next = (cursor + 1 < pages.len()).then(|| (cursor + 1).to_string());
+                        context.respond(id, &json!({"data":page,"nextCursor":next}))?;
+                        continue;
+                    }
                     let models = json!([{"id":"fixture-model","model":"fixture-model","displayName":"Fixture Model",
                             "defaultServiceTier":"default","serviceTiers":[{"id":"priority","name":"高速"}],
                             "defaultReasoningEffort":"medium","supportedReasoningEfforts":[

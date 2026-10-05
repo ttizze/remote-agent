@@ -11,6 +11,7 @@ pub mod models;
 pub mod operations;
 pub mod permissions;
 pub mod protocol;
+pub mod providers;
 pub mod queue;
 pub mod requests;
 pub mod session;

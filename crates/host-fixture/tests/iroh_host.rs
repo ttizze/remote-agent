@@ -53,7 +53,11 @@ async fn imported_codex_session(peer: &Client, title: &str) -> agent_protocol::s
                 .into_iter()
                 .find(|thread| {
                     thread.name.as_deref() == Some(title)
-                        && thread.provider == Some(agent_protocol::session::ProviderKind::Codex)
+                        && thread.provider
+                            == Some(agent_protocol::providers::ProviderRef {
+                                instance_id: "codex".parse().unwrap(),
+                                driver: "codex".parse().unwrap(),
+                            })
                 })
                 .and_then(|thread| thread.id)
             {
@@ -146,7 +150,7 @@ async fn pairing_is_atomic_local_management_is_private_and_revocation_closes_act
                 .request::<agent_protocol::session::OpenedSession>(
                     &agent_protocol::protocol::Call::CreateSession(
                         serde_json::from_value::<op::CreateSession>(
-                            json!({"provider":"codex","cwd":directory.path()}),
+                            json!({"instanceId":"codex","cwd":directory.path()}),
                         )
                         .unwrap()
                     )
@@ -390,7 +394,7 @@ async fn simultaneous_clients_share_one_request_and_only_one_valid_answer_wins()
         let second = fixture.local().await.unwrap();
 
 
-        let started = first.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::CreateSession(serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path()})).unwrap())).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
+        let started = first.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::CreateSession(serde_json::from_value::<op::CreateSession>(json!({"instanceId":"codex","cwd":directory.path()})).unwrap())).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
         let id = &started["thread"]["id"];
         let (_, mut first_events) = open_session(&first.peer, id, 5).await;
         let (_, mut second_events) = open_session(&second.peer, id, 5).await;
@@ -1378,7 +1382,7 @@ async fn refreshed_history_pages_recover_every_turn_and_item_through_store() {
         let target = imported_codex_session(&local.peer, "History pagination").await;
         // First-run import hydrates the source once. Subsequent reads own no provider IO.
         wait_for_import(&local.peer, &target).await;
-        let mut previous: models::Thread = serde_json::from_value(json!({"provider":"codex","id":{"id":"history"},"historyCursor":null,
+        let mut previous: models::Thread = serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"history"},"historyCursor":null,
             "turns":[{"id":"turn-0","status":"completed","items":[{"id":"item-0-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 0/0","phase":"unknown"}}}}}]}, {"id":"turn-11","status":"completed","items":[{"id":"item-11-0","status":"completed","clientInputId":null,"body":{"inline":{"body":{"assistantText":{"text":"answer 11/0","phase":"unknown"}}}}}],
                 "itemsSummary":true}]})).unwrap();
         previous.id = Some(target.clone());
@@ -1604,7 +1608,7 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
         assert_eq!(ids.len(), items.len(), "no item is duplicated when expanding the window");
         assert!(items.len() <= 20, "activity is not hydrated while paging summaries");
 
-        let started = mobile.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path()})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
+        let started = mobile.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"instanceId":"codex","cwd":directory.path()})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
         let image_thread = &started["thread"]["id"];
 
         let (_, mut messages) = open_session(&mobile.peer, image_thread, 5).await;
@@ -1631,7 +1635,6 @@ async fn large_history_loads_conversation_before_lossless_item_details() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn initial_catalog_returns_committed_pages_while_another_page_is_blocked() {
     tokio::time::timeout(Duration::from_secs(45), async {
-        use agent_protocol::session::ProviderKind;
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let rows: Vec<_> = (0..260)
@@ -1699,7 +1702,11 @@ async fn initial_catalog_returns_committed_pages_while_another_page_is_blocked()
             first
                 .data
                 .iter()
-                .filter(|row| row.provider == Some(ProviderKind::Codex))
+                .filter(|row| row.provider
+                    == Some(agent_protocol::providers::ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap()
+                    }))
                 .count(),
             100
         );
@@ -1769,11 +1776,13 @@ async fn initial_catalog_returns_committed_pages_while_another_page_is_blocked()
                     .call(&rpc::ListSessions::new(query.clone()))
                     .await
                     .unwrap();
-                if page
-                    .data
-                    .iter()
-                    .any(|row| row.provider == Some(ProviderKind::Claude))
-                {
+                if page.data.iter().any(|row| {
+                    row.provider
+                        == Some(agent_protocol::providers::ProviderRef {
+                            instance_id: "claude".parse().unwrap(),
+                            driver: "claudeAgent".parse().unwrap(),
+                        })
+                }) {
                     assert!(
                         page.importing,
                         "the held Codex source must not block Claude discovery"
@@ -1931,7 +1940,8 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         let project_state = root.join("bex-projects.json");
         std::fs::write(&project_state, serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":workspace}]}])).unwrap()).unwrap();
         let server = Arc::new(CodexAppServer::spawn(codex_fixture::config(&root)).await.unwrap());
-        let service = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")),Some(root.join("codex-native"))).unwrap();
+        let service = HostRpcService::with_codex(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")),Some(root.join("codex-native")),
+            None).await.unwrap();
         let mut session = service.open_session();
         async fn request(service: &HostRpcService, session: &mut host_daemon::HostSession, method: &str, params: Value) -> Value {
             let reply = service.dispatch(session.id(), &agent_protocol::protocol::json_boundary::call(method, params).unwrap()).await.unwrap();
@@ -1940,7 +1950,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
             assert!(response.get("error").is_none(), "{response}");
             response["result"].clone()
         }
-        let initial = request(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":workspace})).await["response"].clone();
+        let initial = request(&service, &mut session, "host/session/create", json!({"instanceId":"codex","cwd":workspace})).await["response"].clone();
         assert_eq!(initial["thread"]["cwd"], workspace.to_str().unwrap());
         let destination = root.join("worktree storage");
         let settings = json!({"createOnNewSession":true,"copyOnCreate":true,"copyPaths":[".env"],"worktreeDirectory":destination,"deleteMerged":false});
@@ -1948,7 +1958,7 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
         let mut ids = Vec::new();
         let mut paths = Vec::new();
         for _ in 0..2 {
-            let started = request(&service, &mut session, "host/session/create", json!({"provider":"codex","cwd":workspace,"model":{"provider":"codex","id":"fixture-model"}})).await["response"].clone();
+            let started = request(&service, &mut session, "host/session/create", json!({"instanceId":"codex","cwd":workspace,"model":{"instanceId":"codex","id":"fixture-model"}})).await["response"].clone();
             let thread = &started["thread"];
             let cwd = std::path::PathBuf::from(thread["cwd"].as_str().unwrap());
             assert_ne!(cwd, workspace);
@@ -1966,13 +1976,14 @@ async fn session_worktree_settings_apply_to_new_threads_and_preserve_project_mem
             assert_eq!(read["thread"]["projectId"], json!({"Assigned":"workspace"}));
         }
         let mut chat_ids = Vec::new();
-        for params in [json!({"provider":"codex"}), json!({"provider":"codex","cwd":"  "}), json!({"provider":"codex","cwd":""})] {
+        for params in [json!({"instanceId":"codex"}), json!({"instanceId":"codex","cwd":"  "}), json!({"instanceId":"codex","cwd":""})] {
                 let global = request(&service, &mut session, "host/session/create", params).await["response"].clone();
                 assert_eq!(global["thread"]["cwd"], root.join("bex-chats").to_str().unwrap());
                 assert_eq!(global["thread"]["projectId"], json!({"Unassigned":{}}));
                 chat_ids.push(global["thread"]["id"].clone());
         }
-        let restarted = HostRpcService::new(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")),Some(root.join("codex-native"))).unwrap();
+        let restarted = HostRpcService::with_codex(Ok(server.clone()), ProjectStore::new(root.join("bex-worktrees.json")),Some(root.join("codex-native")),
+            None).await.unwrap();
         let mut restarted_session = restarted.open_session();
         assert_eq!(request(&restarted, &mut restarted_session, "host/worktree/settings/read", json!({})).await, settings);
         for id in &chat_ids {
@@ -2063,7 +2074,7 @@ async fn daemon_exposes_project_roots_and_structured_tool_results() {
         std::fs::write(directory.path().join("bex-projects.json"), serde_json::to_vec(&json!([{"id":"workspace","name":"Workspace","roots":[{"path":directory.path()}]}])).unwrap()).unwrap();
         let fixture = start_host(directory.path()).await;
         let local = fixture.local().await.unwrap();
-        let started = local.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path()})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
+        let started = local.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"instanceId":"codex","cwd":directory.path()})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
         let thread_id = &started["thread"]["id"];
 
         let (_, mut events) = open_session(&local.peer, thread_id, 5).await;
@@ -2270,7 +2281,7 @@ async fn passive_approval_after(delay: Duration) {
         let directory = tempfile::tempdir().unwrap();
         let fixture = start_host(directory.path()).await;
         let sender = fixture.local().await.unwrap();
-        let started = sender.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::CreateSession(serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path()})).unwrap())).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
+        let started = sender.peer.request::<agent_protocol::session::OpenedSession>(&agent_protocol::protocol::Call::CreateSession(serde_json::from_value::<op::CreateSession>(json!({"instanceId":"codex","cwd":directory.path()})).unwrap())).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
 
         let id = &started["thread"]["id"];
         let (_, mut sender_events) = open_session(&sender.peer, id, 5).await;
@@ -2381,11 +2392,13 @@ async fn discovered_host_keeps_mobile_and_desktop_turns_in_sync_across_reconnect
                 .await
                 .unwrap(),
         );
-        let service = HostRpcService::new(
+        let service = HostRpcService::with_codex(
             Ok(server.clone()),
             ProjectStore::new(root.join("bex-worktrees.json")),
             None,
+            None,
         )
+        .await
         .unwrap();
         let runtime = Arc::new(
             HostRuntime::new(
@@ -2863,7 +2876,7 @@ async fn merged_worktree_cleanup_defers_live_work_and_rechecks_new_commits() {
             let response = local
                 .peer
                 .call(&rpc::CreateSession {
-                    provider: agent_protocol::session::ProviderKind::Codex,
+                    instance_id: "codex".parse::<agent_protocol::session::ProviderInstanceId>().unwrap(),
                     cwd: Some(project.to_str().unwrap().into()),
                     model: None,
                 })
@@ -3343,7 +3356,7 @@ async fn session_open_delivers_a_snapshot_before_updates_and_reopens_current_sta
         let directory = tempfile::tempdir().unwrap();
         let fixture = start_host(directory.path()).await;
         let client = fixture.local().await.unwrap();
-        let created = client.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"provider":"codex","cwd":directory.path()})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
+        let created = client.peer.call(&serde_json::from_value::<op::CreateSession>(json!({"instanceId":"codex","cwd":directory.path()})).unwrap()).await.map(|output| serde_json::to_value(output.response).unwrap()).unwrap();
         let id = &created["thread"]["id"];
         let (opened, mut events) = client
             .peer
@@ -3396,7 +3409,7 @@ async fn gallery_reads_native_older_images_after_a_live_turn_completes() {
         .request::<agent_protocol::session::OpenedSession>(
             &agent_protocol::protocol::Call::CreateSession(
                 serde_json::from_value::<op::CreateSession>(
-                    json!({"provider":"codex","cwd":directory.path()}),
+                    json!({"instanceId":"codex","cwd":directory.path()}),
                 )
                 .unwrap(),
             ),
@@ -3602,7 +3615,9 @@ async fn adding_a_chat_folder_registers_a_project_before_submission() {
             .clone();
         let created = peer
             .call(&op::CreateSession {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 cwd: Some(folder.to_str().unwrap().into()),
                 model: None,
             })
@@ -3690,7 +3705,9 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
         let thread = first
             .peer
             .call(&op::CreateSession {
-                provider: agent_protocol::session::ProviderKind::Codex,
+                instance_id: "codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
                 cwd: None,
                 model: None,
             })
@@ -3815,14 +3832,16 @@ async fn host_routes_client_intents_and_replays_delivery_before_native_echo() {
 
 #[tokio::test]
 async fn permission_settings_edit_native_codex_defaults_and_detect_external_changes() {
-    use agent_protocol::{permissions::*, session::ProviderKind};
+    use agent_protocol::permissions::*;
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("fixture-native-config.json");
     std::fs::write(&path, r#"{"model":"preserve-me","approval_policy":"on-request","sandbox_mode":"workspace-write"}"#).unwrap();
     let fixture = start_host(root.path()).await;
     let local = fixture.local().await.unwrap();
     let read = ReadPermissionSettings {
-        provider: ProviderKind::Codex,
+        instance_id: "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
     };
     let mut settings = local.peer.call(&read).await.unwrap();
     assert_eq!(settings.mode, Some(PermissionMode::Ask));
@@ -3844,7 +3863,7 @@ async fn permission_settings_edit_native_codex_defaults_and_detect_external_chan
         settings = local
             .peer
             .call(&UpdatePermissionSettings {
-                provider: read.provider,
+                instance_id: read.instance_id.clone(),
                 mode,
                 version: settings.version,
             })
@@ -3866,7 +3885,7 @@ async fn permission_settings_edit_native_codex_defaults_and_detect_external_chan
         local
             .peer
             .call(&UpdatePermissionSettings {
-                provider: read.provider,
+                instance_id: read.instance_id.clone(),
                 mode: PermissionMode::FullAccess,
                 version: settings.version
             })

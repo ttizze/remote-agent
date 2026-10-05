@@ -55,6 +55,8 @@ pub enum Notification {
     SessionRenamed { session: crate::session::SessionRef },
     #[serde(rename = "host/session/catalog/changed")]
     CatalogChanged {},
+    #[serde(rename = "host/provider/settings/changed")]
+    ProviderSettingsChanged { revision: u64 },
     #[serde(rename = "host/session/history/changed")]
     HistoryChanged { session: crate::session::SessionRef },
 }
@@ -96,6 +98,7 @@ macro_rules! results {
     }
 }
 results! {
+    ProviderSettings(crate::providers::ProviderSettings),
     Browser(crate::browser::BrowserFrame),
     Opened(crate::session::OpenedSession), Item(crate::operations::ItemResponse),
     History(crate::session::HistoryPage),

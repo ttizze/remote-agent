@@ -1,4 +1,16 @@
 use super::*;
+fn reference(id: &str) -> agent_protocol::providers::ProviderRef {
+    agent_protocol::providers::ProviderRef {
+        instance_id: id.parse().unwrap(),
+        driver: if id == "claude" {
+            "claudeAgent"
+        } else {
+            "codex"
+        }
+        .parse()
+        .unwrap(),
+    }
+}
 use agent_protocol::{
     execution::TurnStatus,
     session::{SubmissionDelivery, TextField},
@@ -159,7 +171,7 @@ fn selected_queue_claim_preserves_hold_order_receipts_and_restart_uncertainty() 
 
 fn native(id: &str) -> NativeIdentity {
     NativeIdentity {
-        provider: ProviderKind::Codex,
+        provider: reference("codex"),
         id: id.into(),
     }
 }
@@ -186,7 +198,10 @@ fn first_page(
 ) {
     let response = ThreadResponse {
         thread: Thread {
-            provider: Some(ProviderKind::Codex),
+            provider: Some(agent_protocol::providers::ProviderRef {
+                instance_id: "codex".parse().unwrap(),
+                driver: "codex".parse().unwrap(),
+            }),
             id: Some(SessionRef {
                 id: "source".into(),
             }),
@@ -223,7 +238,10 @@ fn catalog_pages_commit_identity_metadata_and_journal_together() {
     let store = Conversations::memory();
     let page = ["healthy", ""].map(|id| SessionSummary {
         thread: Thread {
-            provider: Some(ProviderKind::Codex),
+            provider: Some(agent_protocol::providers::ProviderRef {
+                instance_id: "codex".parse().unwrap(),
+                driver: "codex".parse().unwrap(),
+            }),
             id: Some(SessionRef { id: id.into() }),
             name: Some(id.into()),
             ..Default::default()
@@ -232,7 +250,7 @@ fn catalog_pages_commit_identity_metadata_and_journal_together() {
     });
     assert!(
         store
-            .discover_page(ProviderKind::Codex, &page, "scope")
+            .discover_page(&reference("codex"), &page, "scope")
             .is_err()
     );
     assert!(
@@ -252,11 +270,11 @@ fn catalog_pages_commit_identity_metadata_and_journal_together() {
         0
     );
     store
-        .discover_page(ProviderKind::Codex, &page[..1], "scope")
+        .discover_page(&reference("codex"), &page[..1], "scope")
         .unwrap();
     let target = store.bind(&native("healthy"), "scope").unwrap();
     store
-        .discover_page(ProviderKind::Codex, &page[..1], "scope")
+        .discover_page(&reference("codex"), &page[..1], "scope")
         .unwrap();
     let (page, branches) = store
         .title_list(&Default::default(), &Default::default())
@@ -275,7 +293,10 @@ fn title_projection_is_globally_ordered_scoped_and_omits_command_and_request_pay
     let rows: Vec<_> = (0..200)
         .map(|index| SessionSummary {
             thread: Thread {
-                provider: Some(ProviderKind::Codex),
+                provider: Some(agent_protocol::providers::ProviderRef {
+                    instance_id: "codex".parse().unwrap(),
+                    driver: "codex".parse().unwrap(),
+                }),
                 id: Some(SessionRef {
                     id: format!("native-{index}"),
                 }),
@@ -291,14 +312,17 @@ fn title_projection_is_globally_ordered_scoped_and_omits_command_and_request_pay
         })
         .collect();
     store
-        .discover_page(ProviderKind::Codex, &rows, "scope")
+        .discover_page(&reference("codex"), &rows, "scope")
         .unwrap();
     store
         .discover_page(
-            ProviderKind::Codex,
+            &reference("codex"),
             &[SessionSummary {
                 thread: Thread {
-                    provider: Some(ProviderKind::Codex),
+                    provider: Some(agent_protocol::providers::ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap(),
+                    }),
                     id: Some(SessionRef {
                         id: "inactive".into(),
                     }),
@@ -323,7 +347,7 @@ fn title_projection_is_globally_ordered_scoped_and_omits_command_and_request_pay
     assert!(
         page.data
             .iter()
-            .all(|thread| thread.provider.unwrap() == ProviderKind::Codex)
+            .all(|thread| thread.provider.as_ref() == Some(&reference("codex")))
     );
     assert_eq!(page.data[0].name.as_deref(), Some("Inactive account"));
     for thread in page.data.iter().skip(1) {
@@ -436,7 +460,7 @@ fn pending_imports_are_bounded_scoped_and_resume_after_committed_pages() {
     store
         .bind(
             &NativeIdentity {
-                provider: ProviderKind::Claude,
+                provider: reference("claude"),
                 id: "other-provider".into(),
             },
             "scope",
@@ -446,7 +470,7 @@ fn pending_imports_are_bounded_scoped_and_resume_after_committed_pages() {
     let mut found = Vec::new();
     loop {
         let page = store
-            .pending_imports(ProviderKind::Codex, "scope", after)
+            .pending_imports(&reference("codex"), "scope", after)
             .unwrap();
         assert!(page.len() <= 32);
         if page.is_empty() {
@@ -454,7 +478,7 @@ fn pending_imports_are_bounded_scoped_and_resume_after_committed_pages() {
         }
         for (position, target) in page {
             assert!(position > after);
-            assert_eq!(store.provider(&target).unwrap(), ProviderKind::Codex);
+            assert_eq!(store.provider(&target).unwrap(), reference("codex"));
             found.push(target);
             after = position;
         }
@@ -466,7 +490,7 @@ fn pending_imports_are_bounded_scoped_and_resume_after_committed_pages() {
         .collect();
     assert_eq!(found, expected);
     let first = store
-        .pending_imports(ProviderKind::Codex, "scope", 0)
+        .pending_imports(&reference("codex"), "scope", 0)
         .unwrap();
     assert_eq!(first.len(), 32);
     assert_eq!(first[0].1, expected[0]);
@@ -476,7 +500,7 @@ fn pending_imports_are_bounded_scoped_and_resume_after_committed_pages() {
     );
     let appended = store.bind(&native("appended"), "scope").unwrap();
     let page = store
-        .pending_imports(ProviderKind::Codex, "scope", after)
+        .pending_imports(&reference("codex"), "scope", after)
         .unwrap();
     assert_eq!(page.len(), 1);
     assert_eq!(page[0].1, appended);
@@ -486,7 +510,10 @@ fn pending_imports_are_bounded_scoped_and_resume_after_committed_pages() {
 fn manual_titles_survive_discovery_import_and_provider_auto_titles() {
     let store = Conversations::memory();
     let source = Thread {
-        provider: Some(ProviderKind::Codex),
+        provider: Some(agent_protocol::providers::ProviderRef {
+            instance_id: "codex".parse().unwrap(),
+            driver: "codex".parse().unwrap(),
+        }),
         id: Some(SessionRef {
             id: "source".into(),
         }),
@@ -495,7 +522,7 @@ fn manual_titles_survive_discovery_import_and_provider_auto_titles() {
     };
     store
         .discover_page(
-            ProviderKind::Codex,
+            &reference("codex"),
             &[super::super::agent::SessionSummary {
                 thread: source.clone(),
                 branch: None,
@@ -514,7 +541,7 @@ fn manual_titles_survive_discovery_import_and_provider_auto_titles() {
         .updated_at;
     store
         .discover_page(
-            ProviderKind::Codex,
+            &reference("codex"),
             &[super::super::agent::SessionSummary {
                 thread: source.clone(),
                 branch: None,
@@ -562,7 +589,10 @@ fn manual_titles_survive_discovery_import_and_provider_auto_titles() {
 fn new_host_activity_moves_a_conversation_above_source_history_and_reading_does_not() {
     let store = Conversations::memory();
     let recent_source = Thread {
-        provider: Some(ProviderKind::Codex),
+        provider: Some(agent_protocol::providers::ProviderRef {
+            instance_id: "codex".parse().unwrap(),
+            driver: "codex".parse().unwrap(),
+        }),
         id: Some(SessionRef {
             id: "recent".into(),
         }),
@@ -571,7 +601,7 @@ fn new_host_activity_moves_a_conversation_above_source_history_and_reading_does_
     };
     store
         .discover_page(
-            ProviderKind::Codex,
+            &reference("codex"),
             &[super::super::agent::SessionSummary {
                 thread: recent_source,
                 branch: None,
@@ -752,7 +782,7 @@ fn native_identity_is_private_stable_and_scoped_to_provider_storage() {
     assert!(store.native(&target, "second").is_err());
     assert_ne!(store.bind(&native("source"), "second").unwrap(), target);
     let other = NativeIdentity {
-        provider: ProviderKind::Claude,
+        provider: reference("claude"),
         id: "source".into(),
     };
     assert_ne!(store.bind(&other, "first").unwrap(), target);
@@ -1623,7 +1653,9 @@ fn queue_edit_replaces_attachments_context_and_settings_without_changing_its_rec
         },
     ];
     edited.model = Some(agent_protocol::models::ModelRef {
-        provider: ProviderKind::Codex,
+        instance_id: "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
         id: "another-model".into(),
     });
     edited.effort = Some("high".into());
@@ -1673,7 +1705,9 @@ fn queue_edit_rejects_cross_conversation_cross_provider_and_missing_inputs_atomi
     edits.push(foreign);
     let mut foreign_model = original.clone();
     foreign_model.model = Some(agent_protocol::models::ModelRef {
-        provider: ProviderKind::Claude,
+        instance_id: "claude"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
         id: "model".into(),
     });
     edits.push(foreign_model);

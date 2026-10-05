@@ -2,7 +2,7 @@ use super::{requests::RequestOrigin, session_actor::SessionActor};
 use agent_protocol::{
     models::{Thread, ThreadResponse},
     protocol::{self, Notification},
-    session::{OpenedSession, ProviderKind, SessionChange, SessionRef},
+    session::{OpenedSession, ProviderInstanceId, SessionChange, SessionRef},
 };
 #[cfg(test)]
 use agent_transport::peer::RpcMessage;
@@ -552,12 +552,17 @@ impl SessionRouter {
     }
     pub(crate) fn request(
         &self,
+        provider: &agent_protocol::providers::ProviderRef,
         target: SessionRef,
         origin: RequestOrigin,
         request: agent_protocol::requests::Request,
     ) -> Result<(), String> {
-        if let Some(store) = lock_state(&self.state).conversations.clone()
-            && store.provider(&target).map_err(|error| error.to_string())? != origin.provider
+        let conversations = lock_state(&self.state).conversations.clone();
+        if let Some(conversations) = conversations
+            && conversations
+                .provider(&target)
+                .map_err(|error| error.to_string())?
+                != *provider
         {
             return Err("request provider does not match session".into());
         }
@@ -821,7 +826,7 @@ impl SessionRouter {
     }
     pub(crate) fn fail_provider(
         &self,
-        provider: ProviderKind,
+        provider: &ProviderInstanceId,
         message: &str,
     ) -> Result<(), String> {
         let (store, actors) = {
@@ -839,7 +844,12 @@ impl SessionRouter {
             )
         };
         for (target, actor) in actors {
-            if store.provider(&target).map_err(|error| error.to_string())? != provider {
+            if &store
+                .provider(&target)
+                .map_err(|error| error.to_string())?
+                .instance_id
+                != provider
+            {
                 continue;
             }
             let mut owned = lock_state(&actor);
@@ -990,7 +1000,10 @@ mod tests {
         let target = store
             .bind(
                 &super::super::conversations::NativeIdentity {
-                    provider: ProviderKind::Codex,
+                    provider: agent_protocol::providers::ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap(),
+                    },
                     id: "source".into(),
                 },
                 "scope",
@@ -1071,7 +1084,10 @@ mod tests {
         let target = store
             .bind(
                 &super::super::conversations::NativeIdentity {
-                    provider: ProviderKind::Codex,
+                    provider: agent_protocol::providers::ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap(),
+                    },
                     id: "source".into(),
                 },
                 "scope",
@@ -1418,40 +1434,49 @@ mod tests {
         let target = store
             .bind(
                 &super::super::conversations::NativeIdentity {
-                    provider: ProviderKind::Codex,
+                    provider: agent_protocol::providers::ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap(),
+                    },
                     id: "same-native-id".into(),
                 },
                 "scope",
             )
             .unwrap();
         let router = SessionRouter::with_conversations(store);
-        let (input, _receiver) = tokio::sync::mpsc::channel(1);
-        let adapted = super::super::requests::claude(
-            "request".into(),
-            &"turn".into(),
-            &json!({"subtype":"elicitation","requested_schema":{"type":"object","properties":{}}}),
-        )
-        .unwrap();
-        let error = router
-            .request(
-                target.clone(),
-                crate::claude::request_origin(
-                    uuid::Uuid::new_v4(),
-                    json!("native-request"),
-                    input,
-                    adapted.answers,
-                ),
-                adapted.request,
+        for instance_id in ["claude", "codex"] {
+            let (input, _receiver) = tokio::sync::mpsc::channel(1);
+            let adapted = super::super::requests::claude(
+                "request".into(),
+                &"turn".into(),
+                &json!({"subtype":"elicitation","requested_schema":{"type":"object","properties":{}}}),
             )
-            .unwrap_err();
-        assert_eq!(error, "request provider does not match session");
-        assert!(!lock_state(&router.state).executions.contains_key(&target));
-        assert!(
-            router
-                .overlay_execution(&target, Thread::default())
-                .requests
-                .is_empty()
-        );
+            .unwrap();
+            let error = router
+                .request(
+                    &agent_protocol::providers::ProviderRef {
+                        instance_id: instance_id.parse().unwrap(),
+                        driver: "claudeAgent".parse().unwrap(),
+                    },
+                    target.clone(),
+                    crate::claude::request_origin(
+                        uuid::Uuid::new_v4(),
+                        json!("native-request"),
+                        input,
+                        adapted.answers,
+                    ),
+                    adapted.request,
+                )
+                .unwrap_err();
+            assert_eq!(error, "request provider does not match session");
+            assert!(!lock_state(&router.state).executions.contains_key(&target));
+            assert!(
+                router
+                    .overlay_execution(&target, Thread::default())
+                    .requests
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
@@ -1468,6 +1493,10 @@ mod tests {
         .unwrap();
         router
             .request(
+                &agent_protocol::providers::ProviderRef {
+                    instance_id: "claude".parse().unwrap(),
+                    driver: "claudeAgent".parse().unwrap(),
+                },
                 target.clone(),
                 crate::claude::request_origin(
                     instance,
@@ -1504,6 +1533,10 @@ mod tests {
         };
         let register = || {
             router.request(
+                &agent_protocol::providers::ProviderRef {
+                    instance_id: "codex".parse().unwrap(),
+                    driver: "codex".parse().unwrap(),
+                },
                 target.clone(),
                 super::super::requests::unavailable_origin(
                     instance,
@@ -1612,7 +1645,10 @@ mod tests {
         );
         let response = ThreadResponse {
             thread: Thread {
-                provider: Some(agent_protocol::session::ProviderKind::Codex),
+                provider: Some(agent_protocol::providers::ProviderRef {
+                    instance_id: "codex".parse().unwrap(),
+                    driver: "codex".parse().unwrap(),
+                }),
                 id: Some(SessionRef {
                     id: "native".into(),
                 }),
@@ -1683,7 +1719,7 @@ mod tests {
             json!({"id":"tool","status":"unknown","clientInputId":null,"body":{"inline":{"body":{"commandExecution":{"command":"","cwd":null,"output":"z".repeat(8192),"exitCode":null}}}}}),
         );
         let response = serde_json::from_value(
-            json!({"thread":{"provider":"codex","id":{"id":"native"},"turns":[{"id":"turn","items":items,"status":"unknown"}]}}),
+            json!({"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"native"},"turns":[{"id":"turn","items":items,"status":"unknown"}]}}),
         )
         .unwrap();
         let response = router
@@ -1716,7 +1752,7 @@ mod tests {
         let connection = router.open_session();
         for _ in 0..2 {
             let response = serde_json::from_value(
-                json!({"thread":{"provider":"codex","id":{"id":"native"},"name":"x".repeat(MAX_QUEUED_BYTES + 1)}}),
+                json!({"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"native"},"name":"x".repeat(MAX_QUEUED_BYTES + 1)}}),
             )
             .unwrap();
             let response = router
@@ -1788,7 +1824,7 @@ mod tests {
             .finish_session_read(
                 read,
                 connection.id(),
-                serde_json::from_value(json!({"thread":{"provider":"codex","id":{"id":"native"},"turns":[{"id":"run","status":"running","items":[]}]}}))
+                serde_json::from_value(json!({"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"native"},"turns":[{"id":"run","status":"running","items":[]}]}}))
                 .unwrap(),
             )
             .unwrap();
@@ -1844,7 +1880,7 @@ mod tests {
             .unwrap();
         let thread = router.overlay_execution(
             &target,
-            serde_json::from_value(json!({"provider":"codex","id":{"id":"native"},"turns":[]}))
+            serde_json::from_value(json!({"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"native"},"turns":[]}))
                 .unwrap(),
         );
         assert_eq!(
@@ -1862,7 +1898,10 @@ mod tests {
         let target = store
             .bind(
                 &super::super::conversations::NativeIdentity {
-                    provider: ProviderKind::Codex,
+                    provider: agent_protocol::providers::ProviderRef {
+                        instance_id: "codex".parse().unwrap(),
+                        driver: "codex".parse().unwrap(),
+                    },
                     id: "native".into(),
                 },
                 "scope",
@@ -1871,7 +1910,10 @@ mod tests {
         let other = store
             .bind(
                 &super::super::conversations::NativeIdentity {
-                    provider: ProviderKind::Claude,
+                    provider: agent_protocol::providers::ProviderRef {
+                        instance_id: "claude".parse().unwrap(),
+                        driver: "claudeAgent".parse().unwrap(),
+                    },
                     id: "native".into(),
                 },
                 "scope",
@@ -1907,7 +1949,12 @@ mod tests {
             SessionStatus::Running
         );
         router
-            .fail_provider(ProviderKind::Codex, "provider stopped")
+            .fail_provider(
+                &"codex"
+                    .parse::<agent_protocol::session::ProviderInstanceId>()
+                    .unwrap(),
+                "provider stopped",
+            )
             .unwrap();
         assert_eq!(
             lock_state(&router.actor(&other)).timeline.status,
@@ -1940,7 +1987,7 @@ mod tests {
         let router = SessionRouter::new();
         let mut connection = router.open_session();
         let response: ThreadResponse = serde_json::from_value(
-            json!({"thread":{"provider":"codex","id":{"id":"native"},"turns":[]}}),
+            json!({"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"native"},"turns":[]}}),
         )
         .unwrap();
         let mut subscription = router
@@ -2000,7 +2047,7 @@ mod tests {
         let target = SessionRef::new("native".to_string()).unwrap();
         let _execution = open(&router, "native");
         let response: ThreadResponse = serde_json::from_value(
-            json!({"thread":{"provider":"codex","id":{"id":"native"},"turns":[]}}),
+            json!({"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"native"},"turns":[]}}),
         )
         .unwrap();
         let mut streams = Vec::new();
@@ -2034,7 +2081,7 @@ mod tests {
         let router = SessionRouter::new();
         let connection = router.open_session();
         let response: ThreadResponse = serde_json::from_value(
-            json!({"thread":{"provider":"codex","id":{"id":"native"},"turns":[]}}),
+            json!({"thread":{"provider":{"instanceId":"codex","driver":"codex"},"id":{"id":"native"},"turns":[]}}),
         )
         .unwrap();
         let first = router
@@ -2104,9 +2151,15 @@ fn identical_native_request_ids_keep_their_source_instance() {
     let (input, _receiver) = tokio::sync::mpsc::channel(1);
     let mut requests = Vec::new();
     for provider in [
-        ProviderKind::Codex,
-        ProviderKind::Claude,
-        ProviderKind::Codex,
+        "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
+        "claude"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
+        "codex"
+            .parse::<agent_protocol::session::ProviderInstanceId>()
+            .unwrap(),
     ] {
         let instance = uuid::Uuid::new_v4();
         let target = SessionRef::new("shared-native-session".into()).unwrap();
@@ -2122,7 +2175,11 @@ fn identical_native_request_ids_keep_their_source_instance() {
                 },
             )
             .unwrap();
-        let adapted = if provider == ProviderKind::Codex {
+        let adapted = if provider
+            == "codex"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap()
+        {
             super::requests::codex(
                 uuid::Uuid::new_v4().to_string().into(),
                 "item/commandExecution/requestApproval",
@@ -2134,13 +2191,31 @@ fn identical_native_request_ids_keep_their_source_instance() {
         };
         let request_id = adapted.request.id.clone();
         let choice_id = adapted.request.body.choices()[0].id.clone();
-        let origin = if provider == ProviderKind::Codex {
+        let origin = if provider
+            == "codex"
+                .parse::<agent_protocol::session::ProviderInstanceId>()
+                .unwrap()
+        {
             super::requests::unavailable_origin(instance, native.clone(), Default::default())
         } else {
             crate::claude::request_origin(instance, native.clone(), input.clone(), adapted.answers)
         };
         router
-            .request(target.clone(), origin, adapted.request)
+            .request(
+                &agent_protocol::providers::ProviderRef {
+                    instance_id: provider.clone(),
+                    driver: if provider.as_str() == "codex" {
+                        "codex"
+                    } else {
+                        "claudeAgent"
+                    }
+                    .parse()
+                    .unwrap(),
+                },
+                target.clone(),
+                origin,
+                adapted.request,
+            )
             .unwrap();
         let (origin, _) = router
             .claim_response(

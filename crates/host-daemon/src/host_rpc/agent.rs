@@ -1,4 +1,4 @@
-//! Bex's boundary for the two native agent implementations.
+//! Native resources belong to a configured provider instance.
 use super::{requests::RequestOrigin, routing::SessionRouter, service::Failure};
 use agent_protocol::{
     composer::ComposerCatalog,
@@ -105,6 +105,10 @@ pub(crate) trait Identity: Send + Sync {
 
 #[async_trait::async_trait]
 pub(crate) trait Agent: Identity {
+    fn dictation_backend(&self) -> Option<Arc<codex_app_server::CodexAppServer>> {
+        None
+    }
+    fn reference(&self) -> &agent_protocol::providers::ProviderRef;
     fn capabilities(&self) -> Capabilities;
     fn availability(&self) -> Result<(), Failure>;
     /// Reject creation before the Host creates a workspace. Some adapters can
@@ -187,7 +191,6 @@ pub(crate) enum AgentChange {
         name: String,
     },
     Stopped {
-        provider: agent_protocol::session::ProviderKind,
         reason: String,
     },
 }
@@ -199,11 +202,9 @@ impl AgentChange {
     pub fn apply(self, router: &SessionRouter) -> Result<(), String> {
         match self {
             Self::Session { session, change } => return router.session_change(&session, change),
-            Self::Request {
-                session,
-                origin,
-                request,
-            } => return router.request(session, origin, request),
+            Self::Request { .. } => {
+                return Err("request events require their owning adapter".into());
+            }
             Self::Resolved {
                 instance,
                 native_id,
@@ -212,7 +213,9 @@ impl AgentChange {
             Self::Renamed { session, .. } => {
                 router.broadcast(agent_protocol::protocol::Notification::SessionRenamed { session })
             }
-            Self::Stopped { provider, reason } => return router.fail_provider(provider, &reason),
+            Self::Stopped { .. } => {
+                return Err("stopped events require their owning adapter".into());
+            }
         }
         Ok(())
     }

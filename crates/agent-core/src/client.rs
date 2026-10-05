@@ -100,6 +100,7 @@ impl ClientExt for Client {
     async fn models(&self) -> Result<ModelPage, PeerError> {
         let mut provider_errors = Map::<String, Value>::new();
         let mut models: Vec<crate::models::Model> = Vec::new();
+        let mut instances = std::collections::BTreeMap::new();
         let mut cursor = None;
         let mut seen = std::collections::HashSet::new();
         loop {
@@ -109,12 +110,15 @@ impl ClientExt for Client {
                     cursor: cursor.clone(),
                 })
                 .await?;
+            for instance in page.instances {
+                instances.insert(instance.reference.instance_id.clone(), instance);
+            }
             if let Some(errors) = page.provider_errors {
                 provider_errors.extend(errors);
             }
             for model in page.data {
                 if let Some(index) = models.iter().position(|previous| {
-                    previous.id == model.id && previous.model.provider == model.model.provider
+                    previous.id == model.id && previous.model.instance_id == model.model.instance_id
                 }) {
                     models[index] = model;
                 } else {
@@ -125,6 +129,7 @@ impl ClientExt for Client {
             let Some(next) = &cursor else {
                 return Ok(ModelPage {
                     data: models,
+                    instances: instances.into_values().collect(),
                     next_cursor: None,
                     provider_errors: (!provider_errors.is_empty()).then_some(provider_errors),
                 });

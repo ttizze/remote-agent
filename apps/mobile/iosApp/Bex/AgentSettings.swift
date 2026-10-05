@@ -5,7 +5,7 @@ struct AgentSettingsScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var model: BexAppViewModel
-    @State var provider: ProviderKind = .codex
+    @State var provider = ""
     let close: () -> Void
     @State private var changingAccount = false
     @State private var loadingAccounts = false
@@ -17,11 +17,12 @@ struct AgentSettingsScreen: View {
     @State private var pollingLogin: Task<Void, Never>?
     @State private var signOutId: String?
     private var providerName: String {
-        (login?.provider ?? provider) == .codex ? "Codex" : "Claude Code"
+        let id = login?.instanceId ?? provider
+        return id.isEmpty ? "エージェント" : model.snapshot.instanceName(instanceId: id)
     }
 
     private var accounts: [Account] {
-        model.accounts.filter { $0.provider == provider }
+        model.accounts.filter { $0.instanceId == provider }
     }
 
     private var login: AccountLogin? {
@@ -33,7 +34,7 @@ struct AgentSettingsScreen: View {
     }
 
     private var busy: Bool {
-        changingAccount || loginInProgress || !model.isConnected
+        changingAccount || loginInProgress || !model.isConnected || provider.isEmpty
     }
 
     private var loginProgressMessage: String? {
@@ -50,19 +51,20 @@ struct AgentSettingsScreen: View {
                 AccountLoginSection(
                     login: login, providerName: providerName, loginCode: $loginCode,
                     progressMessage: loginProgressMessage, loginError: loginError,
-                    submit: { submitLoginCode(login.loginId, provider: login.provider) },
-                    retry: { pollLogin(login.loginId, provider: login.provider) }
+                    submit: { submitLoginCode(login.loginId, provider: login.instanceId) },
+                    retry: { pollLogin(login.loginId, provider: login.instanceId) }
                 )
             } else {
                 Section {
                     Picker("エージェント", selection: $provider) {
-                        Text("Codex").tag(ProviderKind.codex)
-                        Text("Claude Code").tag(ProviderKind.claude)
+                        ForEach(model.snapshot.providerInstances(), id: \.reference.instanceId) { instance in
+                            Text(instance.displayName).tag(instance.reference.instanceId)
+                        }
                     }
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("account.provider")
                     .disabled(busy)
-                    if let agent = model.snapshot.connectionSetup().agents.first(where: { $0.provider == provider }) {
+                    if let agent = model.snapshot.connectionSetup().agents.first(where: { $0.instanceId == provider }) {
                         Label(
                             agent.label,
                             systemImage: agent.availability == .ready ? "checkmark.circle.fill" : "circle"
@@ -130,6 +132,12 @@ struct AgentSettingsScreen: View {
                 refresh()
             }
         }
+        .onChange(of: model.snapshot.providerInstances().map(\.reference.instanceId)) { _ in
+            provider = model.snapshot.providerSelection(
+                key: model.coreDraftKey,
+                preferred: provider.isEmpty ? nil : provider
+            ) ?? ""
+        }
         .onChange(of: provider) { _ in loginError = nil }
         .onChange(of: model.selectedProfileId) { _ in
             loginError = nil
@@ -138,7 +146,7 @@ struct AgentSettingsScreen: View {
         }
         .onChange(of: scenePhase) { phase in
             if phase == .active, let login {
-                pollLogin(login.loginId, provider: login.provider)
+                pollLogin(login.loginId, provider: login.instanceId)
             }
         }
         .onDisappear { pollingLogin?.cancel(); pollingLogin = nil }
@@ -149,12 +157,15 @@ extension AgentSettingsScreen {
     private var accountSection: some View {
         Section {
             ForEach(accounts, id: \.id) { account in
-                let selected = model.snapshot.accountIsSelected(provider: account.provider, id: account.id)
+                let selected = model.snapshot.accountIsSelected(provider: account.instanceId, id: account.id)
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 12) {
                         Button { chooseAccount(account.id) } label: {
                             HStack(spacing: 12) {
-                                AccountIdentityView(account: account)
+                                AccountIdentityView(
+                                    account: account,
+                                    driver: model.snapshot.instanceDriver(instanceId: account.instanceId)
+                                )
                                 if let plan = account.planType, !plan.isEmpty {
                                     Text(plan.uppercased()).font(.caption2).foregroundStyle(.secondary)
                                 }
@@ -180,7 +191,7 @@ extension AgentSettingsScreen {
                                 .font(.caption).foregroundStyle(.orange)
                         } else {
                             WeeklyUsageView(windows: model.snapshot.accountWeeklyUsage(
-                                provider: account.provider,
+                                provider: account.instanceId,
                                 id: account.id
                             ))
                         }
@@ -222,12 +233,16 @@ extension AgentSettingsScreen {
 
     private func chooseAccount(_ id: String) {
         changingAccount = true
-        model.perform(.selectAccount(SelectAccount(provider: provider, id: id))) { _ in changingAccount = false }
+        model.perform(.selectAccount(SelectAccount(instanceId: provider, id: id))) { _ in changingAccount = false }
     }
 
     private func refresh() {
+        provider = model.snapshot.providerSelection(
+            key: model.coreDraftKey,
+            preferred: provider.isEmpty ? nil : provider
+        ) ?? ""
         if let login {
-            pollLogin(login.loginId, provider: login.provider); return
+            pollLogin(login.loginId, provider: login.instanceId); return
         }
         loadingAccounts = true
         model.perform(.listAccounts(ListAccounts())) { _ in loadingAccounts = false }
@@ -237,23 +252,23 @@ extension AgentSettingsScreen {
     private func signOut(_ id: String) {
         signOutId = nil
         changingAccount = true
-        model.perform(.logoutAccount(LogoutAccount(provider: provider, id: id))) { _ in changingAccount = false }
+        model.perform(.logoutAccount(LogoutAccount(instanceId: provider, id: id))) { _ in changingAccount = false }
     }
 
     private func startLogin() {
         loginCode = ""
         loginRequestInFlight = true
         loginError = nil
-        model.perform(.startAccountLogin(StartAccountLogin(provider: provider)), completion: finishLoginRequest)
+        model.perform(.startAccountLogin(StartAccountLogin(instanceId: provider)), completion: finishLoginRequest)
     }
 
-    private func submitLoginCode(_ id: String, provider: ProviderKind) {
+    private func submitLoginCode(_ id: String, provider: String) {
         loginRequestInFlight = true
         loginError = nil
         let code = loginCode
         loginCode = ""
         model.perform(
-            .submitAccountLogin(SubmitAccountLogin(provider: provider, id: id, code: code)),
+            .submitAccountLogin(SubmitAccountLogin(instanceId: provider, id: id, code: code)),
             completion: finishLoginRequest
         )
     }
@@ -266,21 +281,21 @@ extension AgentSettingsScreen {
         if case let .failure(error) = result {
             loginError = model.snapshot.error() ?? error.localizedDescription
         } else if let login {
-            pollLogin(login.loginId, provider: login.provider)
+            pollLogin(login.loginId, provider: login.instanceId)
         }
     }
 
-    private func pollLogin(_ id: String, provider: ProviderKind) {
+    private func pollLogin(_ id: String, provider: String) {
         guard pollingLogin == nil, !cancellingLogin else { return }
         loginError = nil
         pollingLogin = Task { @MainActor in
             defer { pollingLogin = nil }
             while !Task.isCancelled {
                 do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { return }
-                guard login?.loginId == id, login?.provider == provider else { return }
+                guard login?.loginId == id, login?.instanceId == provider else { return }
                 let result: Result<Outcome, Error> = await withCheckedContinuation { continuation in
                     model.perform(.readAccountLogin(ReadAccountLogin(
-                        provider: provider,
+                        instanceId: provider,
                         id: id,
                         threadId: nil
                     ))) {
@@ -306,7 +321,7 @@ extension AgentSettingsScreen {
             cancellingLogin = false; return
         }
         model.perform(.cancelAccountLogin(CancelAccountLogin(
-            provider: login.provider,
+            instanceId: login.instanceId,
             id: login.loginId
         ))) { result in
             cancellingLogin = false
