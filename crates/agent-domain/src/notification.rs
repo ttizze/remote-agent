@@ -212,7 +212,7 @@ pub fn delegated_notification(
     } else {
         let total = tasks
             .iter()
-            .filter(|task| task.app_owned && task.run.as_ref() == Some(parent_run))
+            .filter(|task| task.app_owned() && task.run.as_ref() == Some(parent_run))
             .count();
         let count = if total > task_ids.len() {
             format!("{} of {total}", task_ids.len())

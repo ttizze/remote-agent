@@ -361,7 +361,11 @@ pub enum FactBody {
         id: NodeId,
         native_task: String,
     },
+    DelegationAccepted {
+        origin: Delegation,
+    },
     TaskStarted {
+        original_message: Option<MessageId>,
         background: bool,
         id: NodeId,
         native_key: String,
@@ -369,7 +373,6 @@ pub enum FactBody {
         attempt: RunAttemptId,
         child: ThreadId,
         parent: Option<NodeId>,
-        app_owned: bool,
         prompt: String,
         model: Option<String>,
         wake: CompletionWake,
@@ -1236,7 +1239,16 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             find_mut(&mut state.tasks, "task", |t| &t.id == id)?.native_task =
                 Some(native_task.clone());
         }
+        DelegationAccepted { origin } => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .parent = Some(origin.parent.clone());
+            state.delegation = Some(origin.clone());
+        }
         TaskStarted {
+            original_message,
             background,
             id,
             native_key,
@@ -1244,7 +1256,6 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             attempt,
             child,
             parent,
-            app_owned,
             prompt,
             model,
             wake,
@@ -1253,6 +1264,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 return Err(FoldError::Conflict);
             }
             state.tasks.push(Task {
+                original_message: original_message.clone(),
                 native_task: None,
                 background: *background,
                 id: id.clone(),
@@ -1261,7 +1273,6 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 attempt: attempt.clone(),
                 child_thread: child.clone(),
                 parent_task: parent.clone(),
-                app_owned: *app_owned,
                 prompt: prompt.clone(),
                 title: None,
                 started_at: at.clone(),

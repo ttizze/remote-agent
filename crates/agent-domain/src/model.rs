@@ -404,6 +404,7 @@ pub struct Checkpoint {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
+    pub original_message: Option<MessageId>,
     pub native_task: Option<String>,
     pub background: bool,
     pub id: NodeId,
@@ -412,7 +413,6 @@ pub struct Task {
     pub attempt: RunAttemptId,
     pub child_thread: ThreadId,
     pub parent_task: Option<NodeId>,
-    pub app_owned: bool,
     pub prompt: String,
     pub title: Option<String>,
     pub started_at: Timestamp,
@@ -423,6 +423,11 @@ pub struct Task {
     pub progress: Option<String>,
     pub wake: CompletionWake,
     pub delivery: DeliveryState,
+}
+impl Task {
+    pub fn app_owned(&self) -> bool {
+        self.original_message.is_some()
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transfer {
@@ -436,6 +441,17 @@ pub struct Transfer {
     pub boundary: u64,
     pub history: HistoricalContext,
     pub superseded: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskResultContext {
+    pub boundary: u64,
+    pub history: HistoricalContext,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delegation {
+    pub parent: ThreadId,
+    pub task: NodeId,
+    pub message: MessageId,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingRollback {
@@ -496,6 +512,7 @@ pub struct Receipt {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct State {
+    pub delegation: Option<Delegation>,
     pub thread: Option<Thread>,
     pub checkpoint_scope: Option<CheckpointScope>,
     pub runs: Vec<Run>,
@@ -755,12 +772,24 @@ pub enum Command {
         selection: ModelSelection,
         wake: CompletionWake,
     },
+    AcceptDelegation {
+        thread: ThreadId,
+        project: String,
+        title: String,
+        selection: ModelSelection,
+        runtime_mode: RuntimeMode,
+        interaction_mode: InteractionMode,
+        origin: Delegation,
+        message: SendMessage,
+    },
     TaskProgress {
         task: NodeId,
         progress: Option<String>,
         model: Option<String>,
     },
     TaskResult {
+        source_message: Option<MessageId>,
+        context: Option<TaskResultContext>,
         task: NodeId,
         status: ItemStatus,
         result: String,

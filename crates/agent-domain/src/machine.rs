@@ -561,7 +561,7 @@ impl Decision {
             .filter(|task| {
                 &task.attempt == attempt
                     && (!task.status.terminal()
-                        || task.app_owned
+                        || task.app_owned()
                             && matches!(
                                 task.delivery,
                                 DeliveryState::Pending | DeliveryState::Claimed
@@ -622,7 +622,7 @@ impl Decision {
         {
             self.fact(FactBody::ItemCompleted { id: item, status });
         }
-        if changed && task.background && !task.app_owned && !task.status.terminal() {
+        if changed && task.background && !task.app_owned() && !task.status.terminal() {
             self.fact(FactBody::NativeWorkReported {
                 key: id.to_string(),
                 report: WorkReport {
@@ -687,6 +687,55 @@ impl Decision {
                 self.fact(FactBody::ItemCompleted { id: result, status });
             }
         }
+    }
+    fn complete_delegation(&mut self, run: &RunId, status: RunStatus) {
+        let Some(origin) = self.state.delegation.clone() else {
+            return;
+        };
+        let record = self
+            .state
+            .runs
+            .iter()
+            .find(|candidate| &candidate.id == run)
+            .unwrap();
+        if record.message != origin.message {
+            return;
+        }
+        let items = self
+            .state
+            .items
+            .iter()
+            .filter(|item| item.run.as_ref() == Some(run))
+            .cloned()
+            .collect::<Vec<_>>();
+        let result = items
+            .iter()
+            .filter(|item| matches!(item.kind, ItemKind::AssistantMessage { .. }))
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let history = prepare_history(&self.state, &items, record.ordinal);
+        self.effect(
+            record.attempt.clone(),
+            EffectBody::SendToThread {
+                thread: origin.parent,
+                command: Box::new(Command::TaskResult {
+                    source_message: Some(origin.message),
+                    context: Some(TaskResultContext {
+                        boundary: record.ordinal,
+                        history,
+                    }),
+                    task: origin.task,
+                    status: match status {
+                        RunStatus::Completed => ItemStatus::Completed,
+                        RunStatus::Interrupted => ItemStatus::Interrupted,
+                        RunStatus::Cancelled => ItemStatus::Cancelled,
+                        _ => ItemStatus::Failed,
+                    },
+                    result,
+                }),
+            },
+        );
     }
     fn finish(&mut self, run: &RunId, status: RunStatus, capture: bool) {
         let r = self
@@ -765,6 +814,7 @@ impl Decision {
                 id: run.clone(),
                 status,
             });
+            self.complete_delegation(run, status);
             self.promote();
         }
     }
@@ -932,7 +982,10 @@ impl Decision {
     }
     fn command(&mut self, id: &CommandId, command: &Command) -> Reply {
         use Command::*;
-        if !matches!(command, Create { .. } | AcceptFork { .. }) {
+        if !matches!(
+            command,
+            Create { .. } | AcceptFork { .. } | AcceptDelegation { .. }
+        ) {
             let Some(thread) = &self.state.thread else {
                 return reject("thread-not-found");
             };
@@ -1876,56 +1929,93 @@ impl Decision {
                 let Some(attempt) = run.attempt else {
                     return reject("no-active-attempt");
                 };
-                if self.state.tasks.iter().any(|t| &t.id == task) {
+                if self
+                    .state
+                    .tasks
+                    .iter()
+                    .any(|candidate| &candidate.id == task)
+                {
                     return reject("task-already-exists");
                 }
+                let message = MessageId::new(self.key("delegate-message", task.as_str())).unwrap();
                 self.fact(FactBody::TaskStarted {
+                    original_message: Some(message.clone()),
                     background: false,
                     id: task.clone(),
                     native_key: task.to_string(),
-                    run: Some(run.id),
-                    attempt,
+                    run: Some(run.id.clone()),
+                    attempt: attempt.clone(),
                     child: child.clone(),
                     parent: None,
-                    app_owned: true,
                     prompt: prompt.clone(),
                     model: Some(selection.model.clone()),
                     wake: *wake,
                 });
-                let t = self.state.thread.as_ref().unwrap();
+                self.item_start(
+                    TurnItemId::new(self.key("delegate-item", task.as_str())).unwrap(),
+                    Some(run.id),
+                    Some(attempt),
+                    task.to_string(),
+                    ItemKind::Subagent { task: task.clone() },
+                );
+                let thread = self.state.thread.as_ref().unwrap();
                 self.effect(
                     None,
                     EffectBody::SendToThread {
                         thread: child.clone(),
-                        command: Box::new(Create {
+                        command: Box::new(AcceptDelegation {
                             thread: child.clone(),
-                            project: t.project.clone(),
-                            title: prompt.lines().next().unwrap_or("Task").to_string(),
+                            project: thread.project.clone(),
+                            title: prompt.lines().next().unwrap_or("Task").into(),
                             selection: selection.clone(),
-                            runtime_mode: t.runtime_mode,
-                            interaction_mode: t.interaction_mode,
+                            runtime_mode: thread.runtime_mode,
+                            interaction_mode: thread.interaction_mode,
+                            origin: Delegation {
+                                parent: thread.id.clone(),
+                                task: task.clone(),
+                                message: message.clone(),
+                            },
+                            message: SendMessage {
+                                created_by: MessageAuthor::Agent,
+                                creation_source: "server".into(),
+                                id: message,
+                                text: prompt.clone(),
+                                attachments: vec![],
+                                selection: None,
+                                mode: DispatchMode::StartImmediately,
+                                intent: None,
+                                source_plan: None,
+                            },
                         }),
                     },
                 );
-                self.effect(
-                    None,
-                    EffectBody::SendToThread {
-                        thread: child.clone(),
-                        command: Box::new(Send(SendMessage {
-                            created_by: MessageAuthor::Agent,
-                            creation_source: "server".into(),
-                            id: MessageId::new(self.key("delegate-message", task.as_str()))
-                                .unwrap(),
-                            text: prompt.clone(),
-                            attachments: vec![],
-                            selection: None,
-                            mode: DispatchMode::StartImmediately,
-                            intent: None,
-                            source_plan: None,
-                        })),
-                    },
-                );
                 Reply::Thread(child.clone())
+            }
+            AcceptDelegation {
+                thread,
+                project,
+                title,
+                selection,
+                runtime_mode,
+                interaction_mode,
+                origin,
+                message,
+            } => {
+                if self.state.thread.is_some() {
+                    return reject("thread-already-exists");
+                }
+                self.fact(FactBody::ThreadCreated {
+                    id: thread.clone(),
+                    project: project.clone(),
+                    title: title.clone(),
+                    selection: selection.clone(),
+                    runtime_mode: *runtime_mode,
+                    interaction_mode: *interaction_mode,
+                });
+                self.fact(FactBody::DelegationAccepted {
+                    origin: origin.clone(),
+                });
+                self.create_run(message)
             }
             TaskProgress {
                 task,
@@ -1944,11 +2034,43 @@ impl Decision {
             }
             TaskResult {
                 task,
+                source_message,
+                context,
                 status,
                 result,
             } => {
-                if !self.state.tasks.iter().any(|t| &t.id == task) {
+                let Some(existing) = self
+                    .state
+                    .tasks
+                    .iter()
+                    .find(|candidate| &candidate.id == task)
+                    .cloned()
+                else {
                     return reject("task-not-found");
+                };
+                if existing.original_message != *source_message
+                    || existing.app_owned() && existing.status.terminal()
+                {
+                    return Reply::Ignored;
+                }
+                if let Some(context) = context {
+                    self.fact(FactBody::TransferOpened {
+                        native_fork: None,
+                        id: ContextTransferId::new(self.key("task-result", task.as_str())).unwrap(),
+                        kind: TransferKind::SubagentResult,
+                        source: existing.child_thread,
+                        target: self.state.thread.as_ref().unwrap().id.clone(),
+                        instance: self
+                            .state
+                            .thread
+                            .as_ref()
+                            .unwrap()
+                            .selection
+                            .instance
+                            .clone(),
+                        boundary: context.boundary,
+                        history: context.history.clone(),
+                    });
                 }
                 self.finish_task(task, *status, result);
                 self.wake_tasks();
@@ -1995,7 +2117,7 @@ impl Decision {
                     || tasks.len() != task_ids.len()
                     || tasks
                         .iter()
-                        .any(|task| !task.app_owned || task.run != tasks[0].run)
+                        .any(|task| !task.app_owned() || task.run != tasks[0].run)
                 {
                     return reject("invalid-completion-cohort");
                 }
@@ -2056,7 +2178,7 @@ impl Decision {
         let thread = thread.id.clone();
         let mut cohorts = BTreeMap::<RunId, Vec<NodeId>>::new();
         for task in &self.state.tasks {
-            if task.app_owned
+            if task.app_owned()
                 && task.status.terminal()
                 && task.delivery == DeliveryState::Pending
                 && (task.wake == CompletionWake::Always || self.state.active_run().is_none())
@@ -2570,6 +2692,8 @@ impl Decision {
                             EffectBody::SendToThread {
                                 thread: parent,
                                 command: Box::new(Command::TaskResult {
+                                    source_message: None,
+                                    context: None,
                                     task,
                                     status: match status {
                                         RunStatus::Failed => ItemStatus::Failed,
@@ -2905,6 +3029,7 @@ impl Decision {
                             )
                         });
                     self.fact(FactBody::TaskStarted {
+                        original_message: None,
                         background: *background,
                         id: id.clone(),
                         native_key: key.clone(),
@@ -2912,7 +3037,6 @@ impl Decision {
                         attempt: attempt.clone(),
                         child: child_thread.clone(),
                         parent: parent_task,
-                        app_owned: false,
                         prompt: prompt.clone(),
                         model: model.clone(),
                         wake: CompletionWake::Always,
@@ -3509,6 +3633,7 @@ impl Decision {
                         id: run.clone(),
                         status,
                     });
+                    self.complete_delegation(run, status);
                     self.promote();
                 }
             }
@@ -3621,7 +3746,7 @@ impl Decision {
             .state
             .tasks
             .iter()
-            .filter(|t| !t.app_owned && !t.status.terminal())
+            .filter(|t| !t.app_owned() && !t.status.terminal())
             .map(|t| t.id.clone())
             .collect::<Vec<_>>();
         for id in tasks {
@@ -3637,7 +3762,7 @@ impl Decision {
                 state: DeliveryState::Disposed,
             });
         }
-        let items=self.state.items.iter().filter(|i| !i.status.terminal() && !matches!(&i.kind,ItemKind::Subagent { task } if self.state.tasks.iter().any(|t| &t.id==task && t.app_owned)) && !matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message))).map(|i| i.id.clone()).collect::<Vec<_>>();
+        let items=self.state.items.iter().filter(|i| !i.status.terminal() && !matches!(&i.kind,ItemKind::Subagent { task } if self.state.tasks.iter().any(|t| &t.id==task && t.app_owned())) && !matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message))).map(|i| i.id.clone()).collect::<Vec<_>>();
         for id in items {
             self.fact(FactBody::ItemCompleted {
                 id,

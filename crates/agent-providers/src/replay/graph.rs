@@ -550,3 +550,185 @@ fn merge_back_replays_deliver_only_each_fork_delta_and_preserve_source_conversat
         }
     }
 }
+
+#[test]
+fn delegated_task_status_replay_keeps_the_original_result_while_followups_run_and_queue() {
+    let rows = transcript("delegated_task_status", Driver::Codex);
+    let mut graph = GraphReplay::new(Driver::Codex, &rows);
+    let parent = ThreadId::new("root").unwrap();
+    let child = ThreadId::new("delegated-child").unwrap();
+    let task = NodeId::new("delegated-task").unwrap();
+    let mut starts = 0;
+    let mut turns = 0;
+    let mut original = None;
+    let mut original_transfer = None;
+    let observe = |graph: &GraphReplay| {
+        let owner = &graph.replay.states[&parent];
+        let child = &graph.replay.states[&child];
+        delegated_task_status(
+            &owner.tasks[0],
+            &child.runs,
+            &child.items,
+            &owner.transfers,
+            &child.messages,
+        )
+    };
+    for row in &rows {
+        let frame = &row["frame"];
+        if row["type"] == "expect_outbound" {
+            if frame["method"] == "thread/start" {
+                starts += 1;
+                graph.outbound(frame);
+                if starts == 2 {
+                    let selection = graph.replay.states[&parent]
+                        .thread
+                        .as_ref()
+                        .unwrap()
+                        .selection
+                        .clone();
+                    assert_eq!(
+                        graph.replay.command(
+                            &parent,
+                            Command::Delegate {
+                                task: task.clone(),
+                                child: child.clone(),
+                                prompt: "Inspect the delegated API boundary and return the result."
+                                    .into(),
+                                selection,
+                                wake: CompletionWake::SettledOnly
+                            }
+                        ),
+                        Reply::Thread(child.clone())
+                    );
+                    assert_eq!(
+                        graph.replay.states[&child]
+                            .thread
+                            .as_ref()
+                            .unwrap()
+                            .parent
+                            .as_ref(),
+                        Some(&parent)
+                    );
+                    assert!(graph.replay.states[&child].native_owner.is_none());
+                    graph.requests.insert(
+                        frame["id"].as_u64().unwrap(),
+                        (child.clone(), "thread/start".into()),
+                    );
+                    graph.select(&child);
+                }
+            } else if frame["method"] == "turn/start" && starts == 2 {
+                turns += 1;
+                if turns == 2 {
+                    graph.outbound(frame);
+                } else {
+                    graph.select(&child);
+                    graph.replay.codex.replay_outbound(frame);
+                    let attempt = graph
+                        .replay
+                        .state()
+                        .active_run()
+                        .unwrap()
+                        .attempt
+                        .clone()
+                        .unwrap();
+                    graph.replay.owner = Some(attempt.clone());
+                    graph.replay.apply(
+                        &child,
+                        Input::Provider {
+                            attempt,
+                            event: ProviderEvent::SessionReady {
+                                native_thread: string(&frame["params"], "threadId"),
+                            },
+                        },
+                    );
+                }
+            } else if frame["method"] == "turn/interrupt" {
+                let active = graph.replay.states[&child].active_run().unwrap().id.clone();
+                assert_eq!(
+                    graph.replay.command(
+                        &child,
+                        Command::Interrupt {
+                            run: active,
+                            hold_queue: false
+                        }
+                    ),
+                    Reply::Accepted
+                );
+                graph.replay.codex.replay_outbound(frame);
+            } else {
+                graph.outbound(frame);
+            }
+        } else if row["type"] == "emit_inbound" {
+            graph.inbound(frame);
+            if frame["method"] == "turn/completed" && turns == 1 {
+                let status = observe(&graph);
+                original = status.child_run_id.clone();
+                original_transfer = status.result_context_transfer_id.clone();
+                assert_eq!(status.status, ItemStatus::Completed);
+                assert_eq!(
+                    status.summary.as_deref(),
+                    Some("Delegated API boundary inspected.")
+                );
+                assert!(!status.has_pending_child_runs);
+                assert_eq!(status.latest_terminal_run_id, original);
+                assert_eq!(status.latest_terminal_status, Some(RunStatus::Completed));
+                assert_eq!(status.latest_terminal_summary, status.summary);
+                assert!(original_transfer.is_some());
+                assert_eq!(
+                    status.latest_terminal_result_context_transfer_id,
+                    original_transfer
+                );
+            }
+            if frame["method"] == "turn/started" && turns == 2 {
+                graph.select(&child);
+                graph.replay.send(
+                    "Complete the queued follow-up and return the final result.".into(),
+                    false,
+                );
+                let state = &graph.replay.states[&child];
+                assert_eq!(
+                    state.runs.iter().map(|run| run.status).collect::<Vec<_>>(),
+                    [RunStatus::Completed, RunStatus::Running, RunStatus::Queued]
+                );
+                assert_eq!(
+                    graph.replay.states[&parent].active_run().unwrap().status,
+                    RunStatus::Running
+                );
+                let status = observe(&graph);
+                assert!(status.has_pending_child_runs);
+                assert_eq!(status.child_run_id, original);
+                assert_eq!(status.status, ItemStatus::Completed);
+                assert_eq!(
+                    status.summary.as_deref(),
+                    Some("Delegated API boundary inspected.")
+                );
+                assert_eq!(status.result_context_transfer_id, original_transfer);
+                assert_eq!(status.latest_terminal_run_id, original);
+            }
+        }
+    }
+    let status = observe(&graph);
+    assert_eq!(status.child_run_id, original);
+    assert_eq!(status.status, ItemStatus::Completed);
+    assert_eq!(
+        status.summary.as_deref(),
+        Some("Delegated API boundary inspected.")
+    );
+    assert_eq!(status.result_context_transfer_id, original_transfer);
+    assert!(!status.has_pending_child_runs);
+    assert_eq!(
+        status.latest_terminal_run_id,
+        Some(graph.replay.states[&child].runs[2].id.clone())
+    );
+    assert_eq!(status.latest_terminal_status, Some(RunStatus::Completed));
+    assert_eq!(
+        status.latest_terminal_summary.as_deref(),
+        Some("Queued delegated follow-up completed.")
+    );
+    assert_eq!(status.latest_terminal_result_context_transfer_id, None);
+    assert_eq!(
+        graph.replay.states[&child].runs[1].status,
+        RunStatus::Interrupted
+    );
+    graph.replay.integrity();
+}

@@ -865,10 +865,17 @@ fn cancelled_delegated_wake_stays_disposed_after_reconciliation() {
             wake: CompletionWake::Always,
         },
     );
+    let source_message = s
+        .tasks
+        .iter()
+        .find(|candidate| &candidate.id == &task)
+        .and_then(|task| task.original_message.clone());
     command(
         &mut s,
         "task-result",
         Command::TaskResult {
+            source_message,
+            context: None,
             task: task.clone(),
             status: ItemStatus::Completed,
             result: "done".into(),
@@ -1148,10 +1155,17 @@ fn automatic_completion_delivery_precedes_visible_queued_messages() {
             wake: CompletionWake::Always,
         },
     );
+    let source_message = s
+        .tasks
+        .iter()
+        .find(|candidate| &candidate.id == &task)
+        .and_then(|task| task.original_message.clone());
     command(
         &mut s,
         "result",
         Command::TaskResult {
+            source_message,
+            context: None,
             task: task.clone(),
             status: ItemStatus::Completed,
             result: "done".into(),
@@ -1722,10 +1736,17 @@ fn delegated_notifications_report_the_original_count_labels_and_child_links() {
         );
     }
     for task in &ids[..2] {
+        let source_message = s
+            .tasks
+            .iter()
+            .find(|candidate| &candidate.id == task)
+            .and_then(|task| task.original_message.clone());
         command(
             &mut s,
             &format!("finish-{task}"),
             Command::TaskResult {
+                source_message,
+                context: None,
                 task: task.clone(),
                 status: ItemStatus::Completed,
                 result: "Done".into(),
@@ -1794,10 +1815,17 @@ fn cancelling_one_delegated_delivery_disposes_only_its_cohort_and_parent_stop_di
                 wake: CompletionWake::Always,
             },
         );
+        let source_message = s
+            .tasks
+            .iter()
+            .find(|candidate| &candidate.id == &task)
+            .and_then(|task| task.original_message.clone());
         command(
             &mut s,
             &format!("finish-{id}"),
             Command::TaskResult {
+                source_message,
+                context: None,
                 task: task.clone(),
                 status: ItemStatus::Completed,
                 result: "Done".into(),
