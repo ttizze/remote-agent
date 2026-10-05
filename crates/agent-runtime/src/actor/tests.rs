@@ -52,6 +52,7 @@ pub(crate) fn command_id(id: &str) -> CommandId {
 }
 pub(crate) fn create(thread: &ThreadId) -> Command {
     Command::Create {
+        workspace: None,
         thread: thread.clone(),
         project: "project".into(),
         title: "Thread".into(),
@@ -62,6 +63,7 @@ pub(crate) fn create(thread: &ThreadId) -> Command {
 }
 pub(crate) fn send(id: &str) -> Command {
     Command::Send(SendMessage {
+        title_seed: None,
         created_by: MessageAuthor::User,
         creation_source: "client".into(),
         id: MessageId::new(id).unwrap(),
@@ -776,6 +778,7 @@ async fn settles_the_consumed_effect_in_the_same_commit() {
         .effect_result(
             start.effect.id.clone(),
             EffectResult::ProviderFailed {
+                session_lost: false,
                 attempt,
                 operation: ProviderOperation::Start,
                 message: "spawn failed".into(),

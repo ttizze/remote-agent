@@ -244,6 +244,7 @@ async fn created_thread(id: &str) -> (tempfile::TempDir, ActorHandle, ThreadId) 
         .dispatch(
             CommandId::new("create").unwrap(),
             Command::Create {
+                workspace: None,
                 thread: thread.clone(),
                 project: "project".into(),
                 title: "Thread".into(),

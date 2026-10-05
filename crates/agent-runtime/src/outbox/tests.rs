@@ -104,7 +104,13 @@ fn cleanup(id: &str) -> Effect {
     effect(id, EffectBody::DeleteAttachments { paths: vec![] })
 }
 fn title(id: &str) -> Effect {
-    effect(id, EffectBody::GenerateTitle { text: id.into() })
+    effect(
+        id,
+        EffectBody::GenerateTitle {
+            request: agent_domain::CommandId::new(id).unwrap(),
+            message: None,
+        },
+    )
 }
 fn forward(id: &str) -> Effect {
     effect(
@@ -1422,6 +1428,7 @@ async fn thread_with_start(db: &Db, id: &ThreadId) -> OutboxRow {
 }
 fn start_failed(effect: &Effect, message: &str) -> EffectResult {
     EffectResult::ProviderFailed {
+        session_lost: false,
         attempt: effect.attempt.clone().unwrap(),
         operation: ProviderOperation::Start,
         message: message.into(),

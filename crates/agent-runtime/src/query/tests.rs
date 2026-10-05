@@ -4,7 +4,7 @@ use super::*;
 use crate::store::tests::{selection, temp_store};
 use crate::{
     ActorContext, CommandOrigin, CommitBatch, ProjectShell, ShellProjector, ThreadHead,
-    ThreadRecordShell, search_changes,
+    ThreadShellProjector, search_changes,
 };
 use agent_domain::{
     Command, CommandId, DispatchMode, Fact, FactBody, InputIntent, InteractionMode, MessageAuthor,
@@ -77,7 +77,7 @@ impl Writer {
             facts,
             effects: vec![],
             settle: None,
-            shell: ThreadRecordShell.project(&self.state),
+            shell: ThreadShellProjector.project(&self.state),
             needs_recovery: false,
             snapshot: None,
         };
@@ -298,6 +298,7 @@ async fn reads_history_pages_and_single_items_from_the_actor() {
     dispatch(
         "create",
         Command::Create {
+            workspace: None,
             thread,
             project: "project".into(),
             title: "History".into(),
@@ -310,6 +311,7 @@ async fn reads_history_pages_and_single_items_from_the_actor() {
     dispatch(
         "hello",
         Command::Send(SendMessage {
+            title_seed: None,
             created_by: MessageAuthor::User,
             creation_source: "client".into(),
             id: MessageId::new("hello").unwrap(),

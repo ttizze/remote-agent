@@ -12,6 +12,10 @@ use std::sync::{Arc, Mutex, RwLock};
 
 /// Cached projections older than this marker are rebuilt from facts.
 pub const SNAPSHOT_FORMAT: &str = "state-json-1";
+const _: () = assert!(
+    agent_domain::STATE_FORMAT == 1,
+    "bump SNAPSHOT_FORMAT with STATE_FORMAT"
+);
 pub const SNAPSHOT_INTERVAL: u64 = 256;
 pub const FACT_PAGE: usize = 500;
 const SCHEMA_VERSION: &str = "1";

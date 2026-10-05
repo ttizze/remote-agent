@@ -360,6 +360,7 @@ fn with_control_state(mut state: State) -> State {
     fold_into(
         &mut state,
         FactBody::CheckpointCaptured {
+            status: agent_domain::CheckpointStatus::Ready,
             scope: None,
             id: agent_domain::CheckpointId::new("checkpoint-linked").unwrap(),
             run: Some(run),

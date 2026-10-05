@@ -17,20 +17,17 @@ pub trait ShellProjector: Send + Sync {
     fn project(&self, state: &State) -> Option<ShellRow>;
 }
 
-/// Placeholder until agent-domain provides the shell summary.
-pub struct ThreadRecordShell;
-impl ShellProjector for ThreadRecordShell {
+pub struct ThreadShellProjector;
+impl ShellProjector for ThreadShellProjector {
     fn project(&self, state: &State) -> Option<ShellRow> {
         let thread = state.thread.as_ref()?;
+        let shell = agent_domain::shell(state)?;
         Some(ShellRow {
             project: thread.project.clone(),
             archived: thread.archived_at.is_some(),
             deleted: thread.deleted_at.is_some(),
             needs_recovery: needs_recovery(state),
-            payload: serde_json::json!({
-                "thread": thread,
-                "active_run": state.active_run().map(|run| (&run.id, run.status)),
-            }),
+            payload: serde_json::to_value(shell).ok()?,
         })
     }
 }

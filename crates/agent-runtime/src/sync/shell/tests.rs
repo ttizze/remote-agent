@@ -4,7 +4,7 @@
 use super::*;
 use crate::store::tests::{selection, temp_store};
 use crate::sync::history::tests::{created, fold_into};
-use crate::{ActorContext, ActorHandle, CommandOrigin, ShellProjector, ThreadRecordShell};
+use crate::{ActorContext, ActorHandle, CommandOrigin, ShellProjector, ThreadShellProjector};
 use agent_domain::{Command, CommandId, InteractionMode, Role, RuntimeMode};
 use std::sync::Mutex;
 
@@ -192,7 +192,7 @@ fn keeps_transcript_bodies_out_of_shell_rows() {
             creation_source: "provider".into(),
         },
     );
-    let row = ThreadRecordShell.project(&state).unwrap();
+    let row = ThreadShellProjector.project(&state).unwrap();
     assert!(serde_json::to_string(&row).unwrap().len() < 2_000);
 }
 
@@ -308,6 +308,7 @@ async fn thread(context: &ActorContext, id: &str) -> ActorHandle {
         &handle,
         &format!("create:{id}"),
         Command::Create {
+            workspace: None,
             thread,
             project: "project".into(),
             title: id.into(),

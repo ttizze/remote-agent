@@ -11,7 +11,7 @@ use crate::sync::{
 };
 use crate::{
     Clock, CommitBatch, RuntimeError, SNAPSHOT_INTERVAL, Settlement, ShellProjector, ShellRow,
-    Store, StoreError, StoredFact, SystemClock, ThreadHead, ThreadRecordShell, attachment_paths,
+    Store, StoreError, StoredFact, SystemClock, ThreadHead, ThreadShellProjector, attachment_paths,
     envelope_key, needs_recovery, search_changes,
 };
 use agent_domain::{
@@ -112,7 +112,7 @@ impl ActorContext {
         Self {
             store,
             clock: Arc::new(SystemClock),
-            shell: Arc::new(ThreadRecordShell),
+            shell: Arc::new(ThreadShellProjector),
             handoff: Arc::new(NoHandoffCatalog),
             residency: Arc::new(NoResidency),
             mailbox: 1024,

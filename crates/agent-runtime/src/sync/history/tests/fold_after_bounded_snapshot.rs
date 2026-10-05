@@ -53,6 +53,7 @@ impl Script {
             open: vec![],
         };
         script.command(Command::Create {
+            workspace: None,
             thread: thread_id(),
             project: "project-1".into(),
             title: "Thread".into(),
@@ -96,6 +97,7 @@ impl Script {
     fn send(&mut self, mode: DispatchMode) {
         let id = MessageId::new(format!("message-{}", self.step)).unwrap();
         self.command(Command::Send(SendMessage {
+            title_seed: None,
             created_by: MessageAuthor::User,
             creation_source: "client".into(),
             id,
