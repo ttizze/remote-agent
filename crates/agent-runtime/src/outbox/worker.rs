@@ -2,7 +2,7 @@ use super::{
     Durability, EffectError, EffectHandler, EffectHandlers, EffectJob, EffectStatus, OutboxQueue,
     OutboxRow,
 };
-use crate::{ActorRegistry, Clock, RuntimeError, Settlement, StoreError};
+use crate::{ActorRegistry, Clock, EffectSettlement, RuntimeError, Settlement, StoreError};
 use agent_domain::EffectResult;
 use futures_util::FutureExt;
 use std::panic::AssertUnwindSafe;
@@ -233,17 +233,7 @@ impl EffectWorker {
                         )
                         .await?
                 }
-                Some(result) => {
-                    self.threads
-                        .settle_effect(
-                            &row.thread,
-                            row.effect.id.clone(),
-                            result,
-                            Settlement::Succeeded,
-                        )
-                        .await?;
-                    true
-                }
+                Some(result) => self.deliver(row, result, Settlement::Succeeded).await?,
             };
             self.settled(row, settled, "complete").await
         }
@@ -282,12 +272,7 @@ impl EffectWorker {
             .unwrap_or(None);
             let settlement = Settlement::Failed(message);
             let settled = match mapped {
-                Some(result) => self
-                    .threads
-                    .settle_effect(&row.thread, row.effect.id.clone(), result, settlement)
-                    .await
-                    .map(|_| true)
-                    .map_err(OutboxError::from),
+                Some(result) => self.deliver(row, result, settlement).await,
                 None => self
                     .queue
                     .settle(&row.effect.id, &self.options.worker_id, settlement)
@@ -321,6 +306,32 @@ impl EffectWorker {
             }
         };
         self.settled(row, settled, "reschedule").await
+    }
+
+    /// Feeds `result` to the thread and settles the row in that commit. False when the
+    /// row left this worker's lease, in which case nothing was committed.
+    async fn deliver(
+        &self,
+        row: &OutboxRow,
+        result: EffectResult,
+        settlement: Settlement,
+    ) -> Result<bool, OutboxError> {
+        let settle = EffectSettlement {
+            effect_id: row.effect.id.clone(),
+            worker: self.options.worker_id.clone(),
+            settlement,
+        };
+        match self
+            .threads
+            .settle_effect(&row.thread, settle, result)
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(RuntimeError::Store(error)) if matches!(*error, StoreError::NotLeased(_)) => {
+                Ok(false)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// A row this worker could not settle is fine only if someone cancelled it.

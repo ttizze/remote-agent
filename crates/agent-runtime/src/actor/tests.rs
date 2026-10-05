@@ -1,6 +1,6 @@
 use super::*;
 use crate::store::tests::{at, selection, temp_store, thread};
-use crate::{CommitListener, CommitNotice, ManualClock, StoredFact};
+use crate::{CommitListener, CommitNotice, ManualClock, OutboxQueue, SqliteOutbox, StoredFact};
 use agent_domain::{
     DispatchMode, EffectBody, InteractionMode, ItemKind, MessageAuthor, MessageId, ProviderCommand,
     ProviderItem, ProviderOperation, RunId, RunStatus, RuntimeMode, SendMessage, fold,
@@ -755,36 +755,56 @@ async fn closes_a_subscriber_that_falls_behind() {
     assert_eq!(received, 4);
 }
 
+/// Claims rows as `worker` until the thread's provider start is running under its lease.
+async fn claim_start(h: &Harness, id: &ThreadId, worker: &str) -> (Arc<SqliteOutbox>, String) {
+    let outbox = SqliteOutbox::new(h.context.store.clone(), h.clock.clone());
+    loop {
+        let row = outbox
+            .claim(worker, Duration::from_secs(30))
+            .await
+            .unwrap()
+            .expect("the provider start is claimable");
+        if &row.thread == id
+            && matches!(
+                row.effect.body,
+                EffectBody::Provider(ProviderCommand::Start { .. })
+            )
+        {
+            return (outbox, row.effect.id);
+        }
+    }
+}
+fn start_failed(attempt: RunAttemptId) -> EffectResult {
+    EffectResult::ProviderFailed {
+        session_lost: false,
+        attempt,
+        operation: ProviderOperation::Start,
+        message: "spawn failed".into(),
+        message_id: None,
+        turn_completed: false,
+    }
+}
+
 #[tokio::test]
 async fn settles_the_consumed_effect_in_the_same_commit() {
     let h = harness();
     let id = thread("thread:settle");
     let handle = created(&h.context, &id).await;
     let (run, attempt) = started_run(&handle, "message").await;
+    let (_outbox, start) = claim_start(&h, &id, "worker").await;
     let start = h
         .context
         .store
         .outbox(&id)
         .unwrap()
         .into_iter()
-        .find(|row| {
-            matches!(
-                row.effect.body,
-                EffectBody::Provider(ProviderCommand::Start { .. })
-            )
-        })
+        .find(|row| row.effect.id == start)
         .unwrap();
     let committed = handle
         .effect_result(
             start.effect.id.clone(),
-            EffectResult::ProviderFailed {
-                session_lost: false,
-                attempt,
-                operation: ProviderOperation::Start,
-                message: "spawn failed".into(),
-                message_id: None,
-                turn_completed: false,
-            },
+            "worker".into(),
+            start_failed(attempt),
         )
         .await
         .unwrap();
@@ -798,6 +818,72 @@ async fn settles_the_consumed_effect_in_the_same_commit() {
         .find(|row| row.effect.id == start.effect.id)
         .unwrap();
     assert_eq!(row.status, crate::EffectStatus::Succeeded);
+    let view = handle.view().await.unwrap();
+    assert_eq!(
+        view.state.runs.iter().find(|r| r.id == run).unwrap().status,
+        RunStatus::Failed
+    );
+}
+
+#[tokio::test]
+async fn commits_no_result_of_an_effect_cancelled_while_it_ran() {
+    let h = harness();
+    let id = thread("thread:settle-cancelled");
+    let handle = created(&h.context, &id).await;
+    let (run, attempt) = started_run(&handle, "message").await;
+    let (outbox, start) = claim_start(&h, &id, "worker").await;
+    let cancelled = outbox
+        .cancel(&id, &["Provider.Start"], "superseded")
+        .await
+        .unwrap();
+    assert_eq!(cancelled, std::slice::from_ref(&start));
+    let before = stored_facts(&h.context, &id).len();
+
+    let error = handle
+        .effect_result(start.clone(), "worker".into(), start_failed(attempt))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, RuntimeError::Store(store) if matches!(**store, StoreError::NotLeased(_))),
+        "{error:?}"
+    );
+    assert_eq!(stored_facts(&h.context, &id).len(), before);
+    let view = handle.view().await.unwrap();
+    assert_eq!(
+        view.state.runs.iter().find(|r| r.id == run).unwrap().status,
+        RunStatus::Running
+    );
+    let row = h.context.store.outbox(&id).unwrap();
+    let row = row.iter().find(|row| row.effect.id == start).unwrap();
+    assert_eq!(row.status, crate::EffectStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn commits_no_result_from_a_worker_that_does_not_hold_the_lease() {
+    let h = harness();
+    let id = thread("thread:settle-foreign");
+    let handle = created(&h.context, &id).await;
+    let (run, attempt) = started_run(&handle, "message").await;
+    let (_outbox, start) = claim_start(&h, &id, "owner").await;
+    let before = stored_facts(&h.context, &id).len();
+
+    assert!(
+        handle
+            .effect_result(start.clone(), "other".into(), start_failed(attempt.clone()))
+            .await
+            .is_err()
+    );
+    assert_eq!(stored_facts(&h.context, &id).len(), before);
+    let row = h.context.store.outbox(&id).unwrap();
+    let row = row.iter().find(|row| row.effect.id == start).unwrap();
+    assert_eq!(row.status, crate::EffectStatus::Running);
+    assert_eq!(row.lease_owner.as_deref(), Some("owner"));
+
+    handle
+        .effect_result(start, "owner".into(), start_failed(attempt))
+        .await
+        .unwrap();
     let view = handle.view().await.unwrap();
     assert_eq!(
         view.state.runs.iter().find(|r| r.id == run).unwrap().status,

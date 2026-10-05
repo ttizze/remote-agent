@@ -19,6 +19,8 @@ pub enum StoreError {
     Schema(String),
     #[error("stored data is invalid: {0}")]
     Corrupt(String),
+    #[error("effect {0} is not running under this worker's lease")]
+    NotLeased(String),
     #[error("the writer has stopped")]
     WriterStopped,
 }

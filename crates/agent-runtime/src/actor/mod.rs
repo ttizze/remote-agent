@@ -10,9 +10,9 @@ use crate::sync::{
     replay_raw_payload_safe,
 };
 use crate::{
-    Clock, CommitBatch, RuntimeError, SNAPSHOT_INTERVAL, Settlement, ShellProjector, ShellRow,
-    Store, StoreError, StoredFact, SystemClock, ThreadHead, ThreadShellProjector, attachment_paths,
-    envelope_key, needs_recovery, search_changes,
+    Clock, CommitBatch, EffectSettlement, RuntimeError, SNAPSHOT_INTERVAL, Settlement,
+    ShellProjector, ShellRow, Store, StoreError, StoredFact, SystemClock, ThreadHead,
+    ThreadShellProjector, attachment_paths, envelope_key, needs_recovery, search_changes,
 };
 use agent_domain::{
     Command, CommandId, EffectResult, FactBody, Input, InputEnvelope, ModelSelection,
@@ -135,9 +135,8 @@ pub(crate) enum Mail {
         ack: Option<Ack>,
     },
     EffectResult {
-        effect_id: String,
+        settle: EffectSettlement,
         result: EffectResult,
-        settlement: Settlement,
         ack: Ack,
     },
     Input {
@@ -228,27 +227,35 @@ impl ActorHandle {
         .await
     }
 
-    /// Feeds an effect result back and marks its outbox row succeeded in the same commit.
+    /// Feeds the result of an effect claimed by `worker` back and marks its outbox row
+    /// succeeded in the same commit.
     pub async fn effect_result(
         &self,
         effect_id: String,
+        worker: String,
         result: EffectResult,
     ) -> Result<Committed, RuntimeError> {
-        self.settle_effect(effect_id, result, Settlement::Succeeded)
-            .await
+        self.settle_effect(
+            EffectSettlement {
+                effect_id,
+                worker,
+                settlement: Settlement::Succeeded,
+            },
+            result,
+        )
+        .await
     }
 
-    /// Feeds an effect result back and settles its outbox row as `settlement` in the same commit.
+    /// Feeds an effect result back and settles its claimed outbox row in the same commit.
+    /// Fails with `StoreError::NotLeased`, committing nothing, once the row left the lease.
     pub async fn settle_effect(
         &self,
-        effect_id: String,
+        settle: EffectSettlement,
         result: EffectResult,
-        settlement: Settlement,
     ) -> Result<Committed, RuntimeError> {
         self.request(|ack| Mail::EffectResult {
-            effect_id,
+            settle,
             result,
-            settlement,
             ack,
         })
         .await?
@@ -402,14 +409,11 @@ impl Actor {
                 }
             }
             Mail::EffectResult {
-                effect_id,
+                settle,
                 result,
-                settlement,
                 ack,
             } => {
-                let result = self
-                    .step(Input::Effect(result), Some((effect_id, settlement)))
-                    .await;
+                let result = self.step(Input::Effect(result), Some(settle)).await;
                 let _ = ack.send(result);
             }
             Mail::Input { input, ack } => {
@@ -521,7 +525,7 @@ impl Actor {
     async fn step(
         &mut self,
         input: Input,
-        settle: Option<(String, Settlement)>,
+        settle: Option<EffectSettlement>,
     ) -> Result<Committed, RuntimeError> {
         let (at, step) = self.decide(input);
         self.persist(at, step, settle).await
@@ -547,7 +551,7 @@ impl Actor {
         &mut self,
         at: Timestamp,
         step: Step,
-        settle: Option<(String, Settlement)>,
+        settle: Option<EffectSettlement>,
     ) -> Result<Committed, RuntimeError> {
         let Step {
             facts,

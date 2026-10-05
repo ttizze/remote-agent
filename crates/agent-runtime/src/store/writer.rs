@@ -18,8 +18,8 @@ pub struct CommitBatch {
     pub receipt: Option<Receipt>,
     pub facts: Vec<Fact>,
     pub effects: Vec<Effect>,
-    /// The outbox row whose result this step consumed, and how it ends.
-    pub settle: Option<(String, Settlement)>,
+    /// The claimed outbox row whose result this step consumed, and how it ends.
+    pub settle: Option<EffectSettlement>,
     pub shell: Option<ShellRow>,
     pub needs_recovery: bool,
     pub search: SearchChanges,
@@ -43,6 +43,16 @@ pub struct CommitNotice {
     pub effects: Arc<[Effect]>,
     pub shell: Option<ShellRow>,
     pub settled: Option<String>,
+}
+
+/// Settles a claimed outbox row with the step that consumes its result. The commit
+/// fails unless the row is still running under `worker`'s lease, so a cancelled or
+/// reclaimed effect never contributes facts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectSettlement {
+    pub effect_id: String,
+    pub worker: String,
+    pub settlement: Settlement,
 }
 
 /// How a claimed outbox row ends.
@@ -277,19 +287,23 @@ fn write_batch(
             ])?;
         }
     }
-    if let Some((effect, settlement)) = &batch.settle {
-        tx.execute(
+    if let Some(settle) = &batch.settle {
+        let changed = tx.execute(
             "UPDATE outbox SET status = ?4, last_error = ?5, completed_at = ?2, updated_at = ?2,
                  lease_owner = NULL, lease_expires_at = NULL
-             WHERE effect_id = ?1 AND thread_id = ?3 AND status IN ('pending', 'running')",
+             WHERE effect_id = ?1 AND thread_id = ?3 AND status = 'running' AND lease_owner = ?6",
             params![
-                effect,
+                settle.effect_id,
                 at_millis,
                 thread,
-                settlement.status().as_str(),
-                settlement.error()
+                settle.settlement.status().as_str(),
+                settle.settlement.error(),
+                settle.worker,
             ],
         )?;
+        if changed != 1 {
+            return Err(StoreError::NotLeased(settle.effect_id.clone()));
+        }
     }
     if let Some(shell) = &batch.shell {
         tx.execute(
@@ -354,7 +368,7 @@ fn write_batch(
             facts: facts.clone(),
             effects: batch.effects.into(),
             shell: batch.shell,
-            settled: batch.settle.map(|(effect, _)| effect),
+            settled: batch.settle.map(|settle| settle.effect_id),
         },
         CommitOutcome { head, facts },
     ))

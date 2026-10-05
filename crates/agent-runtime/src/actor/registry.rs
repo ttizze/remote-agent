@@ -1,5 +1,5 @@
 use super::{ActorContext, ActorHandle, CommandOrigin, Committed};
-use crate::{KeyedSerial, RuntimeError, Settlement};
+use crate::{EffectSettlement, KeyedSerial, RuntimeError};
 use agent_domain::{Command, CommandId, EffectResult, State, ThreadId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -100,23 +100,19 @@ impl ActorRegistry {
         }
     }
 
-    /// Feeds an effect result to its thread and settles the outbox row in the same commit.
+    /// Feeds an effect result to its thread and settles the claimed outbox row in the same commit.
     pub async fn settle_effect(
         &self,
         thread: &ThreadId,
-        effect_id: String,
+        settle: EffectSettlement,
         result: EffectResult,
-        settlement: Settlement,
     ) -> Result<Committed, RuntimeError> {
         let handle = self.get_or_load(thread).await?;
-        match handle
-            .settle_effect(effect_id.clone(), result.clone(), settlement.clone())
-            .await
-        {
+        match handle.settle_effect(settle.clone(), result.clone()).await {
             Err(RuntimeError::ActorStopped) => {
                 self.get_or_load(thread)
                     .await?
-                    .settle_effect(effect_id, result, settlement)
+                    .settle_effect(settle, result)
                     .await
             }
             result => result,
