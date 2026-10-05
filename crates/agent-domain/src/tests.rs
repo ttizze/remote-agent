@@ -69,7 +69,7 @@ fn provider(s: &mut State, key: &str, attempt: &RunAttemptId, event: ProviderEve
             key: key.into(),
             input: Input::Provider {
                 attempt: attempt.clone(),
-                event,
+                event: Box::new(event),
             },
         },
     );
@@ -138,6 +138,7 @@ fn recover(s: &mut State) {
             key: "recover".into(),
             input: Input::Recover {
                 trigger: RecoveryTrigger::Startup,
+                continue_after_restart: false,
             },
         },
     );
@@ -569,6 +570,488 @@ fn waiting_capture_survives_recovery_without_releasing_the_queue() {
     checkpoint(&mut s, &run, &b, "second-cp");
     assert_eq!(s.runs[1].status, RunStatus::Completed);
     assert_eq!(s.runs[2].status, RunStatus::Queued);
+}
+#[test]
+fn recovery_keeps_lost_work_for_its_provider_until_a_completed_non_compact_turn() {
+    let mut s = state();
+    let original_selection = selection();
+    let (_, a) = running(&mut s, "root");
+    provider(
+        &mut s,
+        "child-start",
+        &a,
+        ProviderEvent::SubagentStarted {
+            background: true,
+            native_thread: None,
+            key: "child".into(),
+            parent: None,
+            prompt: "Background subagent test".into(),
+            model: None,
+        },
+    );
+    finish(&mut s, &a);
+    recover(&mut s);
+    assert_eq!(s.runs[0].status, RunStatus::Completed);
+    assert_eq!(s.tasks[0].status, ItemStatus::Cancelled);
+    assert_eq!(
+        s.runs[0].restart_cancelled_work[0].label,
+        "Background subagent test"
+    );
+    let mut other = original_selection.clone();
+    other.instance = "other".into();
+    command(
+        &mut s,
+        "other-selection",
+        Command::SwitchProvider { selection: other },
+    );
+    let (_, other) = running(&mut s, "other");
+    assert!(pending_restart_work(&s.runs[1], &s.runs, &s.attempts, &s.messages).is_empty());
+    finish(&mut s, &other);
+    command(
+        &mut s,
+        "original-selection",
+        Command::SwitchProvider {
+            selection: original_selection,
+        },
+    );
+    let compact = command(&mut s, "compact", Command::Compact);
+    assert!(compact.effects.iter().any(|effect| matches!(
+        effect.body,
+        EffectBody::Provider(ProviderCommand::Compact { .. })
+    )));
+    let compact = s.active_run().unwrap().attempt.clone().unwrap();
+    finish(&mut s, &compact);
+    let start = command(
+        &mut s,
+        "after-compact",
+        send_message("continue", DispatchMode::StartImmediately),
+    );
+    assert!(start.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start { text, .. }) if text == "Note: the T3 server restarted, and this background work was cancelled before it finished. It will not report back:\n- subagent: Background subagent test\n\nUser message:\ncontinue")));
+    let delivered = s.active_run().unwrap().attempt.clone().unwrap();
+    provider(
+        &mut s,
+        "delivered",
+        &delivered,
+        ProviderEvent::TurnStarted {
+            native_turn: Some("delivery".into()),
+        },
+    );
+    finish(&mut s, &delivered);
+    let later = command(
+        &mut s,
+        "later",
+        send_message("later", DispatchMode::StartImmediately),
+    );
+    assert!(later.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start { text, .. }) if text == "later")));
+}
+#[test]
+fn restart_notes_use_completion_order_and_do_not_repeat_after_a_delivered_attempt() {
+    let mut s = state();
+    let (_, first) = running(&mut s, "resumed");
+    finish(&mut s, &first);
+    let (_, second) = running(&mut s, "ran-first");
+    finish(&mut s, &second);
+    running(&mut s, "next");
+    let lost = vec![CancelledBackgroundWork {
+        id: "item-1".into(),
+        kind: "subagent".into(),
+        label: "Background subagent test".into(),
+    }];
+    s.runs[0].restart_cancelled_work = lost.clone();
+    s.runs[0].completed_at = Some(Timestamp::parse("2026-10-03T10:05:00.000Z").unwrap());
+    s.runs[1].completed_at = Some(Timestamp::parse("2026-10-03T10:00:00.000Z").unwrap());
+    assert_eq!(
+        pending_restart_work(&s.runs[2], &s.runs, &s.attempts, &s.messages),
+        lost
+    );
+    let replacement = RunAttemptId::new("replacement").unwrap();
+    let mut steered = s.runs[2].clone();
+    steered.attempt = Some(replacement);
+    let mut attempts = s.attempts.clone();
+    attempts.last_mut().unwrap().status = AttemptStatus::Completed;
+    assert!(pending_restart_work(&steered, &s.runs, &attempts, &s.messages).is_empty());
+    attempts.last_mut().unwrap().status = AttemptStatus::Cancelled;
+    assert_eq!(
+        pending_restart_work(&steered, &s.runs, &attempts, &s.messages),
+        lost
+    );
+}
+#[test]
+fn recovery_preserves_distinct_work_ids_and_shutdown_reason() {
+    let mut s = state();
+    let (_, a) = running(&mut s, "root");
+    for key in ["first", "second"] {
+        provider(
+            &mut s,
+            key,
+            &a,
+            ProviderEvent::SubagentStarted {
+                background: true,
+                native_thread: None,
+                key: key.into(),
+                parent: None,
+                prompt: "sleep 20".into(),
+                model: None,
+            },
+        );
+    }
+    let recovered = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "shutdown".into(),
+            input: Input::Recover {
+                trigger: RecoveryTrigger::Shutdown,
+                continue_after_restart: true,
+            },
+        },
+    );
+    s = fold(&s, &recovered.facts).unwrap();
+    assert_eq!(s.runs[0].restart_cancelled_work.len(), 2);
+    assert_ne!(
+        s.runs[0].restart_cancelled_work[0].id,
+        s.runs[0].restart_cancelled_work[1].id
+    );
+    assert!(s.tasks.iter().all(|task| task.result.as_deref()
+        == Some("Cancelled because the server shut down before the provider work completed.")));
+    assert!(!recovered.effects.iter().any(|effect| matches!(effect.body, EffectBody::SendToThread { command: ref next, .. } if matches!(**next, Command::ContinueRestart { .. }))));
+    recover(&mut s);
+    assert_eq!(s.runs[0].restart_cancelled_work.len(), 2);
+}
+#[test]
+fn restart_continuation_precedes_held_queue_and_carries_notes_across_an_unaccepted_restart() {
+    for lost_work in [false, true] {
+        let mut s = state();
+        let (source, attempt) = running(&mut s, "cut");
+        command(
+            &mut s,
+            "queue",
+            send_message("queued", DispatchMode::QueueAfterActive),
+        );
+        if lost_work {
+            provider(
+                &mut s,
+                "lost",
+                &attempt,
+                ProviderEvent::BackgroundTask {
+                    key: "work".into(),
+                    tool: "bash".into(),
+                    kind: BackgroundKind::Command,
+                    description: "sleep 20".into(),
+                    status: None,
+                    summary: None,
+                },
+            );
+        }
+        let recovered = ThreadMachine::step(
+            &s,
+            &InputEnvelope {
+                at: at(),
+                key: "restart".into(),
+                input: Input::Recover {
+                    trigger: RecoveryTrigger::Startup,
+                    continue_after_restart: true,
+                },
+            },
+        );
+        s = fold(&s, &recovered.facts).unwrap();
+        assert_eq!(s.runs[0].status, RunStatus::Cancelled);
+        assert!(s.runs[1].queue_held);
+        let next = recovered
+            .effects
+            .iter()
+            .find_map(|effect| match &effect.body {
+                EffectBody::SendToThread { command, .. } => Some(*command.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let started = command(&mut s, "continue", next.clone());
+        assert_eq!(s.runs[2].restart_of.as_ref(), Some(&source));
+        assert_eq!(s.runs[1].status, RunStatus::Queued);
+        assert_eq!(s.runs[2].status, RunStatus::Starting);
+        assert!(started.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start { resume_interrupted_turn, text, .. }) if *resume_interrupted_turn != lost_work && if lost_work { text.ends_with("Continue where you left off.") && text.contains("sleep 20 (id work)") } else { text == "Continue where you left off." })));
+        assert_eq!(command(&mut s, "duplicate", next).reply, Reply::Ignored);
+        if lost_work {
+            let recovered = ThreadMachine::step(
+                &s,
+                &InputEnvelope {
+                    at: at(),
+                    key: "restart-again".into(),
+                    input: Input::Recover {
+                        trigger: RecoveryTrigger::Startup,
+                        continue_after_restart: true,
+                    },
+                },
+            );
+            s = fold(&s, &recovered.facts).unwrap();
+            let next = recovered
+                .effects
+                .iter()
+                .find_map(|effect| match &effect.body {
+                    EffectBody::SendToThread { command, .. } => Some(*command.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            let started = command(&mut s, "chained", next);
+            assert!(started.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start { resume_interrupted_turn: false, text, .. }) if text.contains("sleep 20 (id work)"))));
+        }
+    }
+}
+#[test]
+fn stopped_maintenance_and_settled_runs_do_not_receive_automatic_restart_prompts() {
+    for kind in ["stop", "/compact", "/logout", "completed"] {
+        let mut s = state();
+        let (_, a) = running(&mut s, kind);
+        if kind == "stop" {
+            command(&mut s, "stop", Command::Stop);
+        }
+        if kind == "completed" {
+            finish(&mut s, &a);
+        }
+        let recovered = ThreadMachine::step(
+            &s,
+            &InputEnvelope {
+                at: at(),
+                key: "restart".into(),
+                input: Input::Recover {
+                    trigger: RecoveryTrigger::Startup,
+                    continue_after_restart: true,
+                },
+            },
+        );
+        s = fold(&s, &recovered.facts).unwrap();
+        for effect in recovered.effects {
+            if let EffectBody::SendToThread { command: next, .. } = effect.body {
+                command(&mut s, "continue", *next);
+            }
+        }
+        assert_eq!(s.runs.len(), 1);
+    }
+}
+#[test]
+fn a_new_user_run_takes_precedence_over_a_delayed_restart_continuation() {
+    let mut s = state();
+    let (source, _) = running(&mut s, "cut");
+    command(
+        &mut s,
+        "queue",
+        send_message("held", DispatchMode::QueueAfterActive),
+    );
+    recover(&mut s);
+    let step = command(
+        &mut s,
+        "new-user",
+        send_message("new-user", DispatchMode::StartImmediately),
+    );
+    assert!(step.effects.iter().any(|effect| matches!(
+        effect.body,
+        EffectBody::Provider(ProviderCommand::Start { .. })
+    )));
+    assert_eq!(s.runs[1].status, RunStatus::Queued);
+    assert!(s.runs[1].queue_held);
+    let before = s.runs.len();
+    assert_eq!(
+        command(
+            &mut s,
+            "continue",
+            Command::ContinueRestart {
+                source,
+                enabled: true
+            }
+        )
+        .reply,
+        Reply::Ignored
+    );
+    assert_eq!(s.runs.len(), before);
+}
+#[test]
+fn a_delegated_child_reports_recovery_cancellation_or_its_continuation_result() {
+    for (continue_after_restart, enabled) in [(false, false), (true, false), (true, true)] {
+        let mut parent = state();
+        let (_, _) = running(&mut parent, "parent");
+        let task = NodeId::new("delegated").unwrap();
+        let delegated = command(
+            &mut parent,
+            "delegate",
+            Command::Delegate {
+                task: task.clone(),
+                child: ThreadId::new("child").unwrap(),
+                prompt: "Inspect boundary".into(),
+                selection: selection(),
+                wake: CompletionWake::SettledOnly,
+            },
+        );
+        let accept = delegated
+            .effects
+            .into_iter()
+            .find_map(|effect| match effect.body {
+                EffectBody::SendToThread { command, .. } => Some(*command),
+                _ => None,
+            })
+            .unwrap();
+        let mut child = State::default();
+        command(&mut child, "accept", accept);
+        let attempt = child.active_run().unwrap().attempt.clone().unwrap();
+        provider(
+            &mut child,
+            "ready",
+            &attempt,
+            ProviderEvent::SessionReady {
+                native_thread: "child-native".into(),
+            },
+        );
+        provider(
+            &mut child,
+            "started",
+            &attempt,
+            ProviderEvent::TurnStarted {
+                native_turn: Some("turn".into()),
+            },
+        );
+        let recovered = ThreadMachine::step(
+            &child,
+            &InputEnvelope {
+                at: at(),
+                key: "restart-child".into(),
+                input: Input::Recover {
+                    trigger: RecoveryTrigger::Startup,
+                    continue_after_restart,
+                },
+            },
+        );
+        child = fold(&child, &recovered.facts).unwrap();
+        for effect in recovered.effects {
+            if let EffectBody::SendToThread {
+                thread,
+                command: next,
+            } = effect.body
+            {
+                if thread == ThreadId::new("child").unwrap() {
+                    let mut next = *next;
+                    if let Command::ContinueRestart {
+                        enabled: current, ..
+                    } = &mut next
+                    {
+                        *current = enabled;
+                    }
+                    let continued = command(&mut child, "continue", next);
+                    for effect in continued.effects {
+                        if let EffectBody::SendToThread { command: next, .. } = effect.body {
+                            command(&mut parent, "result", *next);
+                        }
+                    }
+                } else {
+                    command(&mut parent, "result", *next);
+                }
+            }
+        }
+        if continue_after_restart && enabled {
+            assert_eq!(parent.tasks[0].status, ItemStatus::Running);
+            let attempt = child.active_run().unwrap().attempt.clone().unwrap();
+            provider(
+                &mut child,
+                "accepted",
+                &attempt,
+                ProviderEvent::TurnStarted {
+                    native_turn: Some("continued".into()),
+                },
+            );
+            provider(
+                &mut child,
+                "reply",
+                &attempt,
+                ProviderEvent::TextDelta {
+                    key: "reply".into(),
+                    kind: ProviderItem::Text,
+                    text: "Recovered result".into(),
+                },
+            );
+            let finished = provider(
+                &mut child,
+                "finished",
+                &attempt,
+                ProviderEvent::TurnFinished {
+                    status: RunStatus::Completed,
+                    native_head: Some("continued".into()),
+                },
+            );
+            for effect in finished.effects {
+                if let EffectBody::SendToThread { command: next, .. } = effect.body {
+                    command(&mut parent, "result", *next);
+                }
+            }
+            assert_eq!(parent.tasks[0].status, ItemStatus::Completed);
+            assert_eq!(parent.tasks[0].result.as_deref(), Some("Recovered result"));
+            let status = delegated_task_status(
+                &parent.tasks[0],
+                &child.runs,
+                &child.items,
+                &parent.transfers,
+                &child.messages,
+            );
+            assert_eq!(status.child_run_id.as_ref(), Some(&child.runs[0].id));
+            assert_eq!(
+                status.latest_terminal_run_id.as_ref(),
+                Some(&child.runs[1].id)
+            );
+            assert!(status.result_context_transfer_id.is_some());
+        } else {
+            assert_eq!(parent.tasks[0].status, ItemStatus::Cancelled);
+            assert_eq!(child.runs.len(), 1);
+        }
+    }
+}
+#[test]
+fn recovered_native_children_reject_old_output_and_remain_provider_owned() {
+    let mut child = state();
+    let owner = RunAttemptId::new("native-owner").unwrap();
+    command(
+        &mut child,
+        "bind",
+        Command::BindNativeChild {
+            native_thread: Some("native-child".into()),
+            owner: owner.clone(),
+            parent: ThreadId::new("parent").unwrap(),
+            task: NodeId::new("task").unwrap(),
+        },
+    );
+    provider(
+        &mut child,
+        "output",
+        &owner,
+        ProviderEvent::TextDelta {
+            key: "text".into(),
+            kind: ProviderItem::Text,
+            text: "partial".into(),
+        },
+    );
+    recover(&mut child);
+    let before = child.clone();
+    assert_eq!(
+        provider(
+            &mut child,
+            "late",
+            &owner,
+            ProviderEvent::TextDelta {
+                key: "text".into(),
+                kind: ProviderItem::Text,
+                text: "late".into()
+            }
+        )
+        .reply,
+        Reply::Ignored
+    );
+    assert_eq!(child, before);
+    assert!(matches!(
+        command(
+            &mut child,
+            "send",
+            send_message("send", DispatchMode::StartImmediately)
+        )
+        .reply,
+        Reply::Rejected { .. }
+    ));
+    assert!(child.runs.is_empty());
 }
 #[test]
 fn fork_history_and_provider_context_are_fixed_at_creation() {
@@ -1095,6 +1578,23 @@ fn unread_uses_latest_completion_even_with_newer_queued_run() {
 use proptest::prelude::*;
 proptest! {
     #[test]
+    fn repeated_restart_continuations_never_overlap_or_release_the_held_queue(queued in 0usize..6, restarts in 1usize..6) {
+        let mut s = state();
+        running(&mut s, "cut");
+        for index in 0..queued { command(&mut s, &format!("queue-{index}"), send_message(&format!("queued-{index}"), DispatchMode::QueueAfterActive)); }
+        for index in 0..restarts {
+            let recovered = ThreadMachine::step(&s, &InputEnvelope { at: at(), key: format!("restart-{index}"), input: Input::Recover { trigger: RecoveryTrigger::Startup, continue_after_restart: true } });
+            s = fold(&s, &recovered.facts).unwrap();
+            for effect in recovered.effects { if let EffectBody::SendToThread { command: next, .. } = effect.body { command(&mut s, &format!("continue-{index}"), *next); } }
+            prop_assert_eq!(s.runs.iter().filter(|run| run.status.blocking()).count(), 1);
+            prop_assert_eq!(s.queued_runs().len(), queued);
+            prop_assert!(s.queued_runs().iter().all(|run| run.queue_held));
+            prop_assert!(s.runs.iter().filter(|run| run.status.terminal()).all(|run| run.completed_at.is_some()));
+            prop_assert!(s.attempts.iter().all(|attempt| s.runs.iter().any(|run| run.id == attempt.run)));
+            prop_assert!(s.items.windows(2).all(|pair| pair[0].ordinal < pair[1].ordinal));
+        }
+    }
+    #[test]
     fn mixed_provider_commands_requests_and_restarts_preserve_attempt_ownership(ops in prop::collection::vec(0u8..12,0..100)) {
         let mut s = state(); let mut all_attempts = vec![];
         for (index,op) in ops.into_iter().enumerate() {
@@ -1145,7 +1645,8 @@ proptest! {
     fn fold_matches_incremental_application_and_step_never_changes_its_input(parts in prop::collection::vec(".{0,30}",0..40)) {
         let mut s=state(); let (_,a)=running(&mut s,"first"); let initial=s.clone(); let mut facts=vec![];
         for (index,text) in parts.into_iter().enumerate() {
-            let envelope=InputEnvelope { at:at(),key:index.to_string(),input:Input::Provider { attempt:a.clone(),event:ProviderEvent::TextDelta { key:"text".into(),kind:ProviderItem::Text,text } } };
+            let envelope=InputEnvelope { at:at(),key:index.to_string(),input:Input::Provider { attempt:a.clone(),event: Box::new(ProviderEvent::TextDelta { key:"text".into(),kind:ProviderItem::Text,text }),
+} };
             let before=s.clone(); let step=ThreadMachine::step(&s,&envelope);
             prop_assert_eq!(&s,&before); prop_assert_eq!(&step,&ThreadMachine::step(&s,&envelope));
             s=fold(&s,&step.facts).unwrap(); facts.extend(step.facts);

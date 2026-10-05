@@ -84,6 +84,7 @@ impl CodexProtocol {
     ) -> Result<Vec<Value>, ProtocolError> {
         let frame = match command {
             ProviderCommand::Start {
+                resume_interrupted_turn,
                 selection,
                 runtime_mode,
                 interaction_mode,
@@ -94,13 +95,15 @@ impl CodexProtocol {
                 ..
             } => {
                 let mut input = vec![];
-                for file in attachments {
-                    if native_image(file) {
-                        input.push(json!({"type":"localImage","path":file.path}));
+                if !resume_interrupted_turn {
+                    for file in attachments {
+                        if native_image(file) {
+                            input.push(json!({"type":"localImage","path":file.path}));
+                        }
                     }
+                    let text = attachment_text(text, attachments);
+                    input.push(json!({"type":"text","text":text}));
                 }
-                let text = attachment_text(text, attachments);
-                input.push(json!({"type":"text","text":text}));
                 let (approval, reviewer, sandbox) = codex_runtime(*runtime_mode);
                 let mut start = json!({"input":input,"cwd":context.cwd,"model":selection.model,"summary":"detailed","approvalPolicy":approval,"approvalsReviewer":reviewer,"sandboxPolicy":{"type":sandbox}});
                 if let Some(policy) = &context.approval_policy {

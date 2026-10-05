@@ -151,6 +151,8 @@ pub struct Message {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
+    pub restart_of: Option<RunId>,
+    pub restart_cancelled_work: Vec<CancelledBackgroundWork>,
     pub checkpoint_scope: Option<CheckpointScope>,
     pub native_baseline_heads: BTreeMap<String, Option<String>>,
     pub id: RunId,
@@ -643,6 +645,10 @@ pub enum DispatchMode {
 values! { DeliveryIntent { Auto, Steer, Restart } }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Command {
+    ContinueRestart {
+        source: RunId,
+        enabled: bool,
+    },
     Create {
         thread: ThreadId,
         project: String,
@@ -995,6 +1001,7 @@ pub struct NativeResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProviderCommand {
     Start {
+        resume_interrupted_turn: bool,
         selection: ModelSelection,
         runtime_mode: RuntimeMode,
         interaction_mode: InteractionMode,
@@ -1142,11 +1149,12 @@ pub enum Input {
     },
     Provider {
         attempt: RunAttemptId,
-        event: ProviderEvent,
+        event: Box<ProviderEvent>,
     },
     Effect(EffectResult),
     Recover {
         trigger: RecoveryTrigger,
+        continue_after_restart: bool,
     },
     Timer,
 }

@@ -63,6 +63,7 @@ async fn json_lines_continue_after_invalid_frames_and_preserve_large_unicode_out
 
 fn codex_start() -> ProviderCommand {
     ProviderCommand::Start {
+        resume_interrupted_turn: false,
         selection: ModelSelection {
             instance: "codex".into(),
             driver: Driver::Codex,
@@ -208,6 +209,30 @@ fn codex_turn_selection_is_explicit_and_managed_sessions_omit_service_tiers() {
     assert_eq!(
         params["additionalContext"],
         context.additional_context.unwrap().0
+    );
+}
+#[test]
+fn codex_restart_continuation_resumes_natively_without_an_extra_user_prompt() {
+    let mut command = codex_start();
+    if let ProviderCommand::Start {
+        resume_interrupted_turn,
+        text,
+        ..
+    } = &mut command
+    {
+        *resume_interrupted_turn = true;
+        *text = "Continue where you left off.".into();
+    }
+    assert_eq!(
+        codex_turn_params(&command, &wire_context())["input"],
+        json!([])
+    );
+    let output = ClaudeProtocol::default()
+        .command(&command, "continuation", &[])
+        .unwrap();
+    assert_eq!(
+        output.outbound[0]["message"]["content"],
+        "Continue where you left off."
     );
 }
 #[test]

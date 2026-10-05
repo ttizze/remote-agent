@@ -319,6 +319,21 @@ impl Decision {
             .get(&run.selection.instance)
             .cloned();
         self.prepare_provider_handoff(&run, native_thread.as_deref());
+        let restart_work = pending_restart_work(
+            &run,
+            &self.state.runs,
+            &self.state.attempts,
+            &self.state.messages,
+        );
+        let text = if restart_work.is_empty() {
+            message.text.clone()
+        } else {
+            format!(
+                "{}\n\nUser message:\n{}",
+                restart_background_note(&restart_work),
+                message.text
+            )
+        };
         let native_forks = self
             .state
             .transfers
@@ -434,7 +449,7 @@ impl Decision {
                 self.state
                     .handoff_token_cap
                     .unwrap_or(DEFAULT_HANDOFF_TOKEN_CAP),
-                &message.text,
+                &text,
                 &message.attachments,
                 usage.as_ref(),
                 estimate,
@@ -513,10 +528,24 @@ impl Decision {
         self.effect(
             Some(attempt),
             EffectBody::Provider(ProviderCommand::Start {
+                resume_interrupted_turn: native_thread.is_some()
+                    && context.is_none()
+                    && run
+                        .restart_of
+                        .as_ref()
+                        .and_then(|source| self.state.runs.iter().find(|run| &run.id == source))
+                        .is_some_and(|source| {
+                            restart_continuation_work(
+                                source,
+                                &self.state.runs,
+                                &self.state.attempts,
+                            )
+                            .is_empty()
+                        }),
                 selection: run.selection.clone(),
                 runtime_mode: thread.runtime_mode,
                 interaction_mode: thread.interaction_mode,
-                text: message.text,
+                text,
                 attachments: message.attachments,
                 native_thread,
                 resume_at: self
@@ -792,7 +821,7 @@ impl Decision {
             .iter()
             .find(|candidate| &candidate.id == run)
             .unwrap();
-        if record.message != origin.message {
+        if original_run(record, &self.state.runs).message != origin.message {
             return;
         }
         let items = self
@@ -913,7 +942,7 @@ impl Decision {
         }
     }
     fn create_run(&mut self, message: &SendMessage) -> Reply {
-        if self.state.native_owner.is_some() {
+        if self.state.native_parent.is_some() {
             return reject(
                 "This subagent is run by its provider and cannot take messages. Message the parent thread instead.",
             );
@@ -1000,6 +1029,7 @@ impl Decision {
                 });
                 let t = self.state.thread.as_ref().unwrap();
                 let command = ProviderCommand::Start {
+                    resume_interrupted_turn: false,
                     selection: target.selection.clone(),
                     runtime_mode: t.runtime_mode,
                     interaction_mode: t.interaction_mode,
@@ -1026,10 +1056,7 @@ impl Decision {
             return Reply::Run(run.clone());
         }
         let held = self.state.queued_runs().iter().any(|r| r.queue_held);
-        let queued = active.is_some()
-            || !self.state.captures.is_empty()
-            || held
-            || !self.state.queued_runs().is_empty();
+        let queued = active.is_some() || !self.state.captures.is_empty();
         let deferred = matches!(mode, DispatchMode::DeferStart);
         if deferred && active.is_some() {
             return reject("run-already-active");
@@ -1093,6 +1120,7 @@ impl Decision {
             && matches!(
                 command,
                 Send(_)
+                    | ContinueRestart { .. }
                     | ReleasePrepared { .. }
                     | RetryPrepared { .. }
                     | ResumeQueue
@@ -1111,6 +1139,103 @@ impl Decision {
             return reject("rollback-pending");
         }
         match command {
+            ContinueRestart { source, enabled } => {
+                let Some(source) = self
+                    .state
+                    .runs
+                    .iter()
+                    .find(|run| &run.id == source)
+                    .cloned()
+                else {
+                    return reject("run-not-found");
+                };
+                if self
+                    .state
+                    .runs
+                    .iter()
+                    .any(|run| run.restart_of.as_ref() == Some(&source.id))
+                {
+                    return Reply::Ignored;
+                }
+                let thread = self.state.thread.as_ref().unwrap();
+                let declined = !enabled
+                    || source.status != RunStatus::Cancelled
+                    || !source.restart_cancelled_work.is_empty()
+                        && source.attempt.as_ref().is_some_and(|id| {
+                            self.state.attempts.iter().any(|attempt| {
+                                &attempt.id == id && attempt.status == AttemptStatus::Completed
+                            })
+                        })
+                    || self.state.active_run().is_some()
+                    || thread.archived_at.is_some()
+                    || thread.selection.instance != source.selection.instance
+                    || source
+                        .attempt
+                        .as_ref()
+                        .is_some_and(|attempt| self.state.stopping.contains(attempt))
+                    || self.state.messages.iter().any(|message| {
+                        message.id == source.message
+                            && matches!(
+                                message.text.trim().to_ascii_lowercase().as_str(),
+                                "/compact" | "/logout"
+                            )
+                    })
+                    || self.state.runs.iter().any(|run| {
+                        run.id != source.id
+                            && run.status != RunStatus::Queued
+                            && run_ran_after(run, &source)
+                    });
+                if declined {
+                    self.complete_delegation(&source.id, source.status);
+                    return Reply::Ignored;
+                }
+                let work =
+                    restart_continuation_work(&source, &self.state.runs, &self.state.attempts);
+                let text = if work.is_empty() {
+                    "Continue where you left off.".into()
+                } else {
+                    format!(
+                        "{}\n\nContinue where you left off.",
+                        restart_background_note(&work)
+                    )
+                };
+                let message =
+                    MessageId::new(self.key("restart-message", source.id.as_str())).unwrap();
+                let run = RunId::new(self.key("restart-run", source.id.as_str())).unwrap();
+                self.fact(FactBody::MessageCreated {
+                    id: message.clone(),
+                    run: Some(run.clone()),
+                    role: Role::User,
+                    text,
+                    attachments: vec![],
+                    intent: InputIntent::TurnStart,
+                    created_by: MessageAuthor::Agent,
+                    creation_source: "server".into(),
+                });
+                self.fact(FactBody::RunRequested {
+                    id: run.clone(),
+                    message,
+                    ordinal: self
+                        .state
+                        .runs
+                        .iter()
+                        .map(|run| run.ordinal)
+                        .max()
+                        .unwrap_or(0)
+                        + 1,
+                    selection: source.selection,
+                    status: RunStatus::Starting,
+                    queue_position: None,
+                    held: false,
+                    source_plan: None,
+                });
+                self.fact(FactBody::RestartContinuationLinked {
+                    run: run.clone(),
+                    source: source.id,
+                });
+                self.start_run(&run);
+                Reply::Run(run)
+            }
             Stop => {
                 if let Some(run) = self.state.active_run().map(|r| r.id.clone()) {
                     return self.command(
@@ -3860,8 +3985,165 @@ impl Decision {
         }
         Reply::Accepted
     }
-    fn recover(&mut self, trigger: RecoveryTrigger) {
+    fn record_cancelled_background_work(&mut self) {
+        let mut work: BTreeMap<String, Vec<CancelledBackgroundWork>> = BTreeMap::new();
+        let mut native = std::collections::BTreeSet::new();
+        for item in self
+            .state
+            .items
+            .iter()
+            .filter(|item| !item.status.terminal())
+        {
+            let (kind, label) = match &item.kind {
+                ItemKind::CommandExecution { command, .. } => {
+                    ("shell", compact_restart_label(command))
+                }
+                ItemKind::DynamicTool {
+                    name,
+                    input,
+                    presentation,
+                    ..
+                } => (
+                    if input.0["persistent"] == true {
+                        "monitor"
+                    } else {
+                        "task"
+                    },
+                    presentation
+                        .title
+                        .as_deref()
+                        .map(compact_restart_label)
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or_else(|| compact_restart_label(name)),
+                ),
+                ItemKind::Subagent { task } => {
+                    let Some(task) = self
+                        .state
+                        .tasks
+                        .iter()
+                        .find(|candidate| &candidate.id == task && !candidate.app_owned())
+                    else {
+                        continue;
+                    };
+                    (
+                        "subagent",
+                        task.title
+                            .as_deref()
+                            .map(compact_restart_label)
+                            .filter(|title| !title.is_empty())
+                            .unwrap_or_else(|| compact_restart_label(&task.prompt)),
+                    )
+                }
+                _ => continue,
+            };
+            let instance = item
+                .attempt
+                .as_ref()
+                .and_then(|id| self.state.attempts.iter().find(|attempt| &attempt.id == id))
+                .and_then(|attempt| self.state.runs.iter().find(|run| run.id == attempt.run))
+                .map(|run| &run.selection.instance);
+            let Some(instance) = instance else {
+                continue;
+            };
+            native.insert((instance.clone(), item.native_key.clone()));
+            work.entry(instance.clone())
+                .or_default()
+                .push(CancelledBackgroundWork {
+                    id: item.id.to_string(),
+                    kind: kind.into(),
+                    label: if label.is_empty() {
+                        match kind {
+                            "shell" => "background command",
+                            "subagent" => "subagent",
+                            _ => "background tool",
+                        }
+                        .into()
+                    } else {
+                        label
+                    },
+                });
+        }
+        for (key, task) in &self.state.background_work {
+            let Some(run) = self
+                .state
+                .attempts
+                .iter()
+                .find(|attempt| attempt.id == task.attempt)
+                .and_then(|attempt| self.state.runs.iter().find(|run| run.id == attempt.run))
+            else {
+                continue;
+            };
+            if native.contains(&(run.selection.instance.clone(), key.clone()))
+                || native.contains(&(run.selection.instance.clone(), task.tool.clone()))
+            {
+                continue;
+            }
+            let description = compact_restart_label(&task.description);
+            work.entry(run.selection.instance.clone())
+                .or_default()
+                .push(CancelledBackgroundWork {
+                    id: key.clone(),
+                    kind: match task.kind {
+                        BackgroundKind::Command => "shell",
+                        BackgroundKind::Monitor => "monitor",
+                        BackgroundKind::Subagent => "subagent",
+                        BackgroundKind::BackgroundTask => "task",
+                    }
+                    .into(),
+                    label: compact_restart_label(&if description.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{description} (id {key})")
+                    }),
+                });
+        }
+        for (instance, work) in work {
+            let target = self
+                .state
+                .runs
+                .iter()
+                .filter(|run| {
+                    run.selection.instance == instance
+                        && !matches!(run.status, RunStatus::Queued | RunStatus::RolledBack)
+                })
+                .reduce(|latest, run| {
+                    if run_ran_after(run, latest) {
+                        run
+                    } else {
+                        latest
+                    }
+                })
+                .map(|run| run.id.clone());
+            if let Some(run) = target {
+                self.fact(FactBody::RunBackgroundWorkCancelled { run, work });
+            }
+        }
+    }
+    fn recover(&mut self, trigger: RecoveryTrigger, continue_after_restart: bool) {
+        let continuation = continue_after_restart
+            .then(|| self.state.active_run())
+            .flatten()
+            .filter(|run| {
+                trigger == RecoveryTrigger::Startup
+                    && (run.status == RunStatus::Running
+                        || run.status == RunStatus::Starting && run.restart_of.is_some())
+                    && self.state.thread.as_ref().is_some_and(|thread| {
+                        thread.archived_at.is_none()
+                            && thread.deleted_at.is_none()
+                            && thread.selection.instance == run.selection.instance
+                    })
+                    && self
+                        .state
+                        .native_sessions
+                        .contains_key(&run.selection.instance)
+                    && run
+                        .attempt
+                        .as_ref()
+                        .is_none_or(|attempt| !self.state.stopping.contains(attempt))
+            })
+            .map(|run| run.id.clone());
         self.hold_queue();
+        self.record_cancelled_background_work();
         self.fact(FactBody::BackgroundWorkStopped);
         let requests = self
             .state
@@ -3904,9 +4186,12 @@ impl Decision {
                 self.close_attempt_items(attempt, ItemStatus::Cancelled, true);
             }
             self.fact(FactBody::RunFinished {
-                id: run.id,
+                id: run.id.clone(),
                 status: RunStatus::Cancelled,
             });
+            if continuation.as_ref() != Some(&run.id) {
+                self.complete_delegation(&run.id, RunStatus::Cancelled);
+            }
         }
         let tasks = self
             .state
@@ -3919,9 +4204,14 @@ impl Decision {
             self.fact(FactBody::TaskFinished {
                 id: id.clone(),
                 status: ItemStatus::Cancelled,
-                result:
-                    "Cancelled because the server restarted before the provider work completed."
-                        .into(),
+                result: format!(
+                    "Cancelled because the server {} before the provider work completed.",
+                    if trigger == RecoveryTrigger::Startup {
+                        "restarted"
+                    } else {
+                        "shut down"
+                    }
+                ),
             });
             self.fact(FactBody::TaskDeliveryChanged {
                 id,
@@ -3945,6 +4235,28 @@ impl Decision {
         for id in messages {
             self.fact(FactBody::MessageFinished { id });
         }
+        if let Some(owner) = self.state.native_owner.clone() {
+            self.provider(
+                &owner,
+                &ProviderEvent::TurnFinished {
+                    status: RunStatus::Cancelled,
+                    native_head: None,
+                },
+            );
+            self.fact(FactBody::NativeChildClosed);
+        }
+        if let Some(source) = continuation {
+            self.effect(
+                None,
+                EffectBody::SendToThread {
+                    thread: self.state.thread.as_ref().unwrap().id.clone(),
+                    command: Box::new(Command::ContinueRestart {
+                        source,
+                        enabled: true,
+                    }),
+                },
+            );
+        }
     }
 }
 fn reject(reason: &str) -> Reply {
@@ -3962,6 +4274,7 @@ impl ThreadMachine {
             event,
         } = &envelope.input
         {
+            let event = event.as_ref();
             let mut attempt = owner;
             let mut observed = false;
             let event = if let ProviderEvent::NativeOutput {
@@ -4161,8 +4474,11 @@ impl ThreadMachine {
             }
             Input::Provider { attempt, event } => decision.provider(attempt, event),
             Input::Effect(result) => decision.effect_result(result),
-            Input::Recover { trigger } => {
-                decision.recover(*trigger);
+            Input::Recover {
+                trigger,
+                continue_after_restart,
+            } => {
+                decision.recover(*trigger, *continue_after_restart);
                 Reply::Accepted
             }
             Input::Timer => {

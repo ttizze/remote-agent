@@ -9,6 +9,15 @@ pub struct Fact {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FactBody {
+    RestartContinuationLinked {
+        run: RunId,
+        source: RunId,
+    },
+    RunBackgroundWorkCancelled {
+        run: RunId,
+        work: Vec<CancelledBackgroundWork>,
+    },
+    NativeChildClosed,
     CheckpointScopeBound {
         run: Option<RunId>,
         scope: Option<CheckpointScope>,
@@ -474,6 +483,25 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 Some(usage.clone());
         }
 
+        RestartContinuationLinked { run, source } => {
+            find_mut(&mut state.runs, "run", |r| &r.id == run)?.restart_of = Some(source.clone());
+        }
+        RunBackgroundWorkCancelled { run, work } => {
+            let target = find_mut(&mut state.runs, "run", |r| &r.id == run)?;
+            for entry in work {
+                if !target
+                    .restart_cancelled_work
+                    .iter()
+                    .any(|existing| existing.id == entry.id)
+                {
+                    target.restart_cancelled_work.push(entry.clone());
+                }
+            }
+        }
+        NativeChildClosed => {
+            state.native_owner = None;
+            state.native_child_turn = None;
+        }
         HandoffPolicyChanged {
             instance,
             model_window,
@@ -845,6 +873,8 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 return Err(FoldError::Conflict);
             }
             state.runs.push(Run {
+                restart_of: None,
+                restart_cancelled_work: vec![],
                 checkpoint_scope: None,
                 native_baseline_heads: BTreeMap::new(),
                 id: id.clone(),

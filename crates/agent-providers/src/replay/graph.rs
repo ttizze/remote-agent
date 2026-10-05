@@ -312,9 +312,9 @@ impl GraphReplay {
                     &thread,
                     Input::Provider {
                         attempt: owner,
-                        event: ProviderEvent::SessionReady {
+                        event: Box::new(ProviderEvent::SessionReady {
                             native_thread: string(&frame["params"], "threadId"),
-                        },
+                        }),
                     },
                 );
             }
@@ -634,9 +634,9 @@ fn delegated_task_status_replay_keeps_the_original_result_while_followups_run_an
                         &child,
                         Input::Provider {
                             attempt,
-                            event: ProviderEvent::SessionReady {
+                            event: Box::new(ProviderEvent::SessionReady {
                                 native_thread: string(&frame["params"], "threadId"),
-                            },
+                            }),
                         },
                     );
                 }

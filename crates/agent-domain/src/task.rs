@@ -41,7 +41,13 @@ pub fn delegated_task_status(
                         })
                 })
         })
-        .max_by_key(|run| run.ordinal);
+        .reduce(|latest, run| {
+            if run_ran_after(run, latest) {
+                run
+            } else {
+                latest
+            }
+        });
     let transfer = |run: &Run| {
         parent_transfers
             .iter()
@@ -70,7 +76,13 @@ pub fn delegated_task_status(
         status: task.status,
         summary: task.result.clone(),
         provider_instance_id: original.map(|run| run.selection.instance.clone()),
-        result_context_transfer_id: original.and_then(transfer),
+        result_context_transfer_id: parent_transfers
+            .iter()
+            .find(|transfer| {
+                transfer.kind == TransferKind::SubagentResult
+                    && transfer.source == task.child_thread
+            })
+            .map(|transfer| transfer.id.clone()),
         has_pending_child_runs: child_runs.iter().any(|run| {
             (run.status.blocking() || run.status == RunStatus::Queued)
                 && original.is_none_or(|original| run.ordinal > original.ordinal)

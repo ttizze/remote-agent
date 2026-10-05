@@ -205,7 +205,7 @@ impl Replay {
                                 thread,
                                 Input::Provider {
                                     attempt: attempt.clone(),
-                                    event,
+                                    event: Box::new(event),
                                 },
                             );
                         }
@@ -262,7 +262,7 @@ impl Replay {
                     &root,
                     Input::Provider {
                         attempt: owner.clone(),
-                        event,
+                        event: Box::new(event),
                     },
                 );
             }
@@ -306,13 +306,13 @@ impl Replay {
                     &root,
                     Input::Provider {
                         attempt: owner,
-                        event: ProviderEvent::SessionClosed {
+                        event: Box::new(ProviderEvent::SessionClosed {
                             error: if row["status"] == "success" {
                                 None
                             } else {
                                 Some("Provider process exited".into())
                             },
-                        },
+                        }),
                     },
                 );
             }
@@ -403,7 +403,7 @@ impl Replay {
                         &root,
                         Input::Provider {
                             attempt,
-                            event: ProviderEvent::SessionReady { native_thread },
+                            event: Box::new(ProviderEvent::SessionReady { native_thread }),
                         },
                     );
                 }
@@ -1630,14 +1630,14 @@ fn stopped_root_accepts_its_child_confirmation_and_native_deletion_cannot_strand
             &root,
             Input::Provider {
                 attempt: owner.clone(),
-                event: ProviderEvent::SubagentStarted {
+                event: Box::new(ProviderEvent::SubagentStarted {
                     background: true,
                     native_thread: None,
                     key: "child".into(),
                     parent: None,
                     prompt: "child prompt".into(),
                     model: None,
-                },
+                }),
             },
         );
         let child = replay.state().tasks[0].child_thread.clone();
@@ -1645,14 +1645,14 @@ fn stopped_root_accepts_its_child_confirmation_and_native_deletion_cannot_strand
             &root,
             Input::Provider {
                 attempt: owner.clone(),
-                event: ProviderEvent::Child {
+                event: Box::new(ProviderEvent::Child {
                     key: "child".into(),
                     event: Box::new(ProviderEvent::TextDelta {
                         key: "text".into(),
                         kind: ProviderItem::Text,
                         text: "child output".into(),
                     }),
-                },
+                }),
             },
         );
         if delete {
@@ -1664,11 +1664,11 @@ fn stopped_root_accepts_its_child_confirmation_and_native_deletion_cannot_strand
                     &child,
                     Input::Provider {
                         attempt: owner,
-                        event: ProviderEvent::TextDelta {
+                        event: Box::new(ProviderEvent::TextDelta {
                             key: "late".into(),
                             kind: ProviderItem::Text,
                             text: "late output".into()
-                        }
+                        }),
                     }
                 ),
                 Reply::Ignored
@@ -1680,10 +1680,10 @@ fn stopped_root_accepts_its_child_confirmation_and_native_deletion_cannot_strand
                 &root,
                 Input::Provider {
                     attempt: owner.clone(),
-                    event: ProviderEvent::TurnFinished {
+                    event: Box::new(ProviderEvent::TurnFinished {
                         status: RunStatus::Interrupted,
                         native_head: None,
-                    },
+                    }),
                 },
             );
             assert_eq!(replay.state().tasks[0].status, ItemStatus::Running);
@@ -1691,7 +1691,7 @@ fn stopped_root_accepts_its_child_confirmation_and_native_deletion_cannot_strand
                 &root,
                 Input::Provider {
                     attempt: owner,
-                    event: ProviderEvent::NativeOutput {
+                    event: Box::new(ProviderEvent::NativeOutput {
                         echoed_prompts: vec![],
                         acknowledged_prompt: None,
                         root: false,
@@ -1700,7 +1700,7 @@ fn stopped_root_accepts_its_child_confirmation_and_native_deletion_cannot_strand
                             key: "child".into(),
                             event: Box::new(ProviderEvent::SessionClosed { error: None }),
                         }],
-                    },
+                    }),
                 },
             );
             assert_eq!(replay.state().tasks[0].status, ItemStatus::Interrupted);

@@ -1,4 +1,4 @@
-# Bex 会話ランタイムの設計（叩き台）
+# 会話ランタイムの設計
 
 機能と見た目は T3 Code Nightly（commit `4ee6bfd`）と同じにする。内部構造は T3 を写さず、作り直す。正しさは、T3 の外から見た挙動のテストと replay transcript で判定する。
 
@@ -133,3 +133,6 @@ T3 と同じ契約にする。snapshot、`afterSequence` からの再送、synch
 - 2026-10-06: Claude CLI の tools / permission callback / thinking summaries / settings / MCP config / resume 境界は SDK 0.3.276 の制御手順に合わせる。追加 system prompt は initialize に渡す。プロセスの環境は明示的な map とし、SDK と同じ識別値・NODE_OPTIONS と DEBUG の処理を純粋に行う。再接続時は native task/tool/親経路の対応だけを actor の確定値から復元し、翻訳器の旧プロセス状態を引き継がない。
 - 2026-10-06: provider handoff は model 選択時ではなく dispatch 時に固定する。queued run 自身の selection と、対象 native session が最後に受け取った completed/failed/interrupted run を基準に差分を選ぶ。queued/cancelled/rolled-back run は文脈に含めない。native session を失った場合は full history に戻し、他 instance の配送結果で履歴を消費しない。full と delta の戦略は TransferKind で区別する。
 - 2026-10-06: Codex wire は approval/sandbox override、MCP の instructions/additionalContext/config、managed token session の serviceTier 抑止を明示的な入力で受ける。thread/start・resume・fork・rollback の再開は同じ config 構築を使い、turn/start は各 run の selection/runtime を使う。Host の session 管理は native の能力・認証を解決し、Claude の再利用時は set_model / set_permission_mode の reply を待ってから Start を実行する（段階 3）。
+- 2026-10-06: 再起動で失われた provider background work は run の事実に記録する。通知は同じ instance の後続ターンに付け、completed attempt で配送を確認する。compaction、別 provider、rolled-back run は配送確認に使わない。ラベル 160 UTF-16 units・通知 10 件は固定版の上限を保持する。旧形式の ID 欠落への fallback は作らない。
+- 2026-10-06: 自動継続の設定は Recover と ContinueRestart の明示的な入力にする。未完了の root turn と、開始前に再度中断された継続だけを対象にし、自己宛ての command effect で継続する。新しいユーザー発言、停止、maintenance、provider 変更、archive が先行した場合は採用しない。held queue があるだけでは新しいユーザー発言を queue に入れない。Host は保存した native binding の再開可能性と現在の設定を解決して Recover を入力し、継続 effect の実行時にも現在の設定を enabled として渡す（段階 3）。無効化されていた場合の委任の取消結果も状態機械が返す。
+- 2026-10-06: background work の通知も portable context もない Codex の継続は input を空にして native turn を再開する。Claude は同じ継続文を通常の prompt として送る。未配送の通知は中断された継続の chain をたどって保持する。委任先の継続結果は元の依頼の anchor に返し、task_status の childRunId は元 run、latestTerminalRunId は継続 run を示す。復旧した native 子は owner を閉じて旧出力を拒否するが、provider が所有する子という関係は保持する。
