@@ -96,6 +96,12 @@ pub enum ShellUpdate {
         sequence: u64,
         project: String,
     },
+    /// Every live project; the subscriber drops the ones it holds that are missing.
+    /// Opens a resumed stream, since project changes are not replayed.
+    Projects {
+        sequence: u64,
+        projects: Vec<ProjectShell>,
+    },
     Synchronized,
 }
 
@@ -105,6 +111,7 @@ impl ShellUpdate {
         match self {
             Self::ThreadUpdated { thread, .. } => json_len(thread),
             Self::ProjectUpdated { project, .. } => json_len(project),
+            Self::Projects { projects, .. } => json_len(projects),
             Self::Snapshot(_)
             | Self::ThreadRemoved { .. }
             | Self::ProjectRemoved { .. }
@@ -314,20 +321,23 @@ impl ShellHub {
             }
             Initial::Replay { high_water, rows } => (
                 high_water,
-                rows.into_iter()
-                    .filter_map(|(sequence, thread)| {
-                        // Replayed rows lack the facts that left the archive.
-                        let left_archive = !thread.row.archived;
-                        update_for(
-                            options.location,
-                            ShellChange::Thread {
-                                sequence,
-                                thread,
-                                left_archive,
-                            },
-                        )
-                    })
-                    .collect(),
+                std::iter::once(ShellUpdate::Projects {
+                    sequence: high_water,
+                    projects: self.projects.projects(),
+                })
+                .chain(rows.into_iter().filter_map(|(sequence, thread)| {
+                    // Replayed rows lack the facts that left the archive.
+                    let left_archive = !thread.row.archived;
+                    update_for(
+                        options.location,
+                        ShellChange::Thread {
+                            sequence,
+                            thread,
+                            left_archive,
+                        },
+                    )
+                }))
+                .collect(),
             ),
         };
         if options.request_completion_marker {

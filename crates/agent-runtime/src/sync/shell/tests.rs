@@ -490,6 +490,14 @@ async fn replays_changed_rows_after_the_cursor() {
         .subscribe(resume(ShellLocation::Active))
         .await
         .unwrap();
+    let high_water = h.store.latest_global_seq().unwrap();
+    assert_eq!(
+        next(&mut active).await,
+        ShellUpdate::Projects {
+            sequence: high_water,
+            projects: vec![]
+        }
+    );
     let mut updates = vec![];
     loop {
         match next(&mut active).await {
@@ -510,6 +518,10 @@ async fn replays_changed_rows_after_the_cursor() {
         .subscribe(resume(ShellLocation::Archived))
         .await
         .unwrap();
+    assert!(matches!(
+        next(&mut archive).await,
+        ShellUpdate::Projects { .. }
+    ));
     assert!(matches!(
         next(&mut archive).await,
         ShellUpdate::ThreadUpdated { thread, .. } if thread.thread.as_str() == "thread-b"
@@ -578,6 +590,50 @@ async fn measures_the_replay_budget_in_utf8_bytes() {
         next(&mut subscription).await,
         ShellUpdate::Snapshot(snapshot) if snapshot.threads.len() == 1
     ));
+}
+
+// T3 ws.ts replays durable project events on resume; projects here live outside the
+// fact log, so a resumed stream starts from the complete live project list.
+#[tokio::test]
+async fn resumes_with_project_changes_made_while_disconnected() {
+    let (_dir, store) = temp_store();
+    let projects = Arc::new(Projects(Mutex::new(vec![
+        project("project-a"),
+        project("project-b"),
+    ])));
+    let hub = ShellHub::new(store.clone(), projects.clone()).unwrap();
+    let context = ActorContext::new(store.clone());
+    let _thread = thread(&context, "thread-a").await;
+    let mut first = hub.subscribe(ShellSubscribe::default()).await.unwrap();
+    let ShellUpdate::Snapshot(snapshot) = next(&mut first).await else {
+        panic!()
+    };
+    drop(first);
+
+    let mut renamed = project("project-a");
+    renamed.payload = serde_json::json!({ "title": "Renamed" });
+    *projects.0.lock().unwrap() = vec![renamed.clone(), project("project-c")];
+    for id in ["project-a", "project-b", "project-c"] {
+        hub.project_changed(id);
+    }
+    assert_eq!(store.latest_global_seq().unwrap(), snapshot.snapshot_seq);
+
+    let mut resumed = hub
+        .subscribe(ShellSubscribe {
+            after_global_seq: Some(snapshot.snapshot_seq),
+            request_completion_marker: true,
+            ..ShellSubscribe::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        next(&mut resumed).await,
+        ShellUpdate::Projects {
+            sequence: snapshot.snapshot_seq,
+            projects: vec![renamed, project("project-c")]
+        }
+    );
+    assert_eq!(next(&mut resumed).await, ShellUpdate::Synchronized);
 }
 
 #[tokio::test]
