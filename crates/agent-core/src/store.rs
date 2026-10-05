@@ -900,6 +900,38 @@ impl Owner {
                 None
             }
             Intent::Send { behavior } => {
+                if self.source == CreationSource::Desktop
+                    && crate::presentation::conversation(&self.state)
+                        .composer
+                        .plan_follow_up
+                    && behavior == SendBehavior::Default
+                    && self.state.editing_run.is_none()
+                {
+                    return self.prepare(Intent::PlanFollowUp { new_thread: false });
+                }
+                let slash = self.state.current_draft().text.trim().to_ascii_lowercase();
+                if matches!(slash.as_str(), "/plan" | "/default") {
+                    let interaction_mode = if slash == "/plan" {
+                        InteractionMode::Plan
+                    } else {
+                        InteractionMode::Default
+                    };
+                    let key = self.state.draft_key();
+                    let mut draft = self.state.current_draft();
+                    draft.text.clear();
+                    draft.interaction_mode = interaction_mode.as_str().into();
+                    self.state.drafts.insert(key, draft);
+                    body = target
+                        .as_ref()
+                        .map(|_| CommandBody::ThreadInteractionModeSet { interaction_mode });
+                    return Ok((
+                        body.map(|body| {
+                            Call::DispatchCommand(command(target.expect("selected thread"), body))
+                        }),
+                        None,
+                        None,
+                    ));
+                }
                 if target.is_none() && self.state.pending_launches.iter().any(|launch|matches!(&launch.create.body,CommandBody::ThreadCreate{project_id,..} if project_id.as_str()==self.state.selected_project.as_deref().unwrap_or("bex:chats"))) {return Err(invalid("Thread is being created"))}
                 if self.state.editing_run.is_some() {
                     return self.prepare(Intent::Queue {
@@ -962,6 +994,91 @@ impl Owner {
                         create,
                         input,
                     })))
+                }
+            }
+            Intent::PlanFollowUp { new_thread } => {
+                let p = self
+                    .state
+                    .projection()
+                    .ok_or_else(|| invalid("Thread not loaded"))?
+                    .clone();
+                let plan = crate::presentation::actionable_plan(
+                    &p.plans,
+                    p.thread.interaction_mode,
+                    p.runs.iter().any(|r| r.status.is_blocking()),
+                )
+                .ok_or_else(|| invalid("No actionable plan"))?;
+                let PlanBody::ProposedPlan { markdown } = &plan.body else {
+                    unreachable!()
+                };
+                let original = self.state.current_draft();
+                let mut draft = original.clone();
+                let (text, mode, implement) =
+                    crate::commands::plan_follow_up(&draft.text, markdown, new_thread);
+                draft.text = text;
+                let mut input = crate::commands::message(
+                    &draft,
+                    MessageId::new(id("message")).unwrap(),
+                    DispatchMode::StartImmediately,
+                    self.source,
+                )
+                .map_err(invalid)?;
+                if implement {
+                    input.source_plan_ref = Some(SourcePlanRef {
+                        thread_id: p.thread.id.clone(),
+                        plan_id: plan.id.clone(),
+                    });
+                }
+                sent = Some((self.state.draft_key(), original));
+                if new_thread {
+                    let child = ThreadId::new(id("thread")).unwrap();
+                    launched = Some(child.clone());
+                    let title = markdown
+                        .lines()
+                        .find_map(|line| {
+                            line.trim()
+                                .strip_prefix('#')
+                                .map(|line| line.trim_start_matches('#').trim())
+                        })
+                        .filter(|s| !s.is_empty())
+                        .map_or("Implement plan".into(), |s| format!("Implement {s}"));
+                    Some(Call::LaunchThread(Box::new(rpc::LaunchThread {
+                        create: command(
+                            child,
+                            CommandBody::ThreadCreate {
+                                created_by: CreatedBy::User,
+                                creation_source: self.source,
+                                project_id: p.thread.project_id,
+                                title,
+                                model_selection: draft.selection().map_err(invalid)?,
+                                runtime_mode: crate::commands::runtime_mode(
+                                    &self.state.default_draft.runtime_mode,
+                                )
+                                .map_err(invalid)?,
+                                interaction_mode: mode,
+                                branch: p.thread.branch,
+                                worktree_path: p.thread.worktree_path,
+                            },
+                        ),
+                        input,
+                    })))
+                } else {
+                    self.job(
+                        Call::DispatchCommand(command(
+                            p.thread.id,
+                            CommandBody::ThreadInteractionModeSet {
+                                interaction_mode: mode,
+                            },
+                        )),
+                        None,
+                        None,
+                        None,
+                    )?;
+                    if let Some(d) = self.state.drafts.get_mut(&self.state.draft_key()) {
+                        d.interaction_mode = mode.as_str().into();
+                    }
+                    body = Some(CommandBody::MessageDispatch(input));
+                    None
                 }
             }
             Intent::Fork {

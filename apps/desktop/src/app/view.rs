@@ -1149,14 +1149,46 @@ impl Desktop {
                     .child(
                         self.action(
                             "send-message",
-                            composer.send_label.clone(),
+                            if composer.plan_follow_up {
+                                composer.plan_send_label.clone()
+                            } else {
+                                composer.send_label.clone()
+                            },
                             Intent::Send {
                                 behavior: SendBehavior::Default,
                             },
                             cx,
                         )
                         .primary()
-                        .disabled(!composer.enabled),
+                        .disabled(!composer.enabled && !composer.plan_follow_up),
+                    )
+                    .when(
+                        composer.plan_follow_up && composer.draft.text.trim().is_empty(),
+                        |v| {
+                            let owner = cx.entity().downgrade();
+                            v.child(
+                                Button::new("implementation-actions")
+                                    .label("⌄")
+                                    .small()
+                                    .primary()
+                                    .dropdown_menu(move |menu, _, _| {
+                                        let owner = owner.clone();
+                                        menu.item(
+                                            PopupMenuItem::new("Implement in a new thread")
+                                                .on_click(move |_, _, cx| {
+                                                    let _ = owner.update(cx, |view, _| {
+                                                        view.perform(
+                                                            Intent::PlanFollowUp {
+                                                                new_thread: true,
+                                                            },
+                                                            None,
+                                                        )
+                                                    });
+                                                }),
+                                        )
+                                    }),
+                            )
+                        },
                     )
                     .when(composer.can_steer, |v| {
                         v.child(

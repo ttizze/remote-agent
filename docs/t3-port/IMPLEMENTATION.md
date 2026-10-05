@@ -5,7 +5,7 @@
 | 段階 | 状況 | 実装範囲 |
 | --- | --- | --- |
 | M1 | 完了 | 新しい orchestration crate、全 M1 コマンド、SQLite/outbox、Codex/Claude adapter、Host RPC、native 履歴取り込み、共通 client runtime、GPUI・SwiftUI・Compose、旧会話管理と旧テスト・fixture・runner・文書の削除 |
-| M2 | 一部実装 | root checkpoint、rollback、fork/merge back、provider handoff、停止・再起動時の capture、getTurnDiff、3 クライアントのターン差分選択 |
+| M2 | 一部実装 | root checkpoint、rollback、fork/merge back、provider handoff、compaction、計画フォローアップ、停止・再起動時の capture、getTurnDiff、3 クライアントのターン差分選択 |
 | M3 | 未着手 | T3 相当の周辺機能の拡張 |
 
 M1 は `af584c44` で完成し、同じ commit の Host・GPUI・iOS・Android
@@ -31,8 +31,7 @@ workspace・個別ターン・全ターンの差分を表示する。
 
 ## 残り
 
-- M2: compaction、app-owned
-  subagent/委任、計画の Implement/Refine、画像・ファイル添付、nested checkpoint
+- M2: app-owned subagent/委任、画像・ファイル添付、nested checkpoint
   scope、非 cone sparse checkpoint。provider の既存 tool/plan 通知は M1 で表示する。
 - M3: T3 の Git/worktree 操作、GitHub PR 連携、scheduled tasks、usage の拡張、
   全設定、Nightly 配布。既存 Host の peripheral 機能と基本設定だけが利用可能。
@@ -91,3 +90,13 @@ merge back は fork の親への転送だけを許す。native fork、portable f
 変更 crate の176単体/property test が通過（既存2件 skip）。開始判定、fork の
 冪等な再送、未完成 run の拒否、merge lineage、履歴の byte 枠、inherited/local
 履歴の position による pagination と単項目取得を検証した。clippy/fmt も通過。
+
+## M2 maintenance / plan follow-up
+
+compact は native maintenance turn として queue でき、steer は拒否する。
+workspace checkpoint は作らず、空の会話は失敗として表示する。desktop は
+Implement/Refine と新しい thread での実装を提供し、source plan を原子的に完了する。
+更新された案は以前の未完了案を superseded にする。mobile は T3 の /plan と
+/default を使い、desktop 専用の実装ボタンは追加しない。
+
+変更 crate の180単体/property test、全 target clippy と fmt が通過（既存2件 skip）。

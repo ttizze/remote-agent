@@ -45,6 +45,7 @@ pub fn send(id: &str, mode: DispatchMode) -> Command {
     command(
         id,
         CommandBody::MessageDispatch(MessageDispatch {
+            source_plan_ref: None,
             created_by: CreatedBy::User,
             creation_source: CreationSource::Desktop,
             message_id: MessageId::new(format!("message:{id}")).unwrap(),

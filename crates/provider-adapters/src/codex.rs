@@ -476,6 +476,11 @@ impl CodexAdapter {
             projection.thread.interaction_mode,
             cwd,
         );
+        if message.text.trim().eq_ignore_ascii_case("/compact") && message.attachments.is_empty() {
+            self.request("thread/compact/start", json!({"threadId":native}))
+                .await?;
+            return Ok(());
+        }
         let result = match self.request("turn/start", params).await {
             Ok(result) => result,
             Err(error) => {

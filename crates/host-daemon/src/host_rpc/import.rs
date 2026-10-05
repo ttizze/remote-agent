@@ -780,6 +780,7 @@ mod tests {
             command_id: CommandId::new("continue").unwrap(),
             thread_id: thread_id.clone(),
             body: CommandBody::MessageDispatch(MessageDispatch {
+                source_plan_ref: None,
                 created_by: CreatedBy::User,
                 creation_source: CreationSource::Desktop,
                 message_id: MessageId::new("next").unwrap(),

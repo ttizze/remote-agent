@@ -1438,6 +1438,7 @@ mod tests {
             command_id: CommandId::new("send").unwrap(),
             thread_id: command.thread_id,
             body: CommandBody::MessageDispatch(MessageDispatch {
+                source_plan_ref: None,
                 created_by: CreatedBy::User,
                 creation_source: CreationSource::Desktop,
                 message_id: MessageId::new("user-message").unwrap(),

@@ -317,6 +317,9 @@ pub enum Intent {
         run_id: String,
     },
     MergeBack,
+    PlanFollowUp {
+        new_thread: bool,
+    },
     Rollback {
         checkpoint_id: String,
         restore_files: bool,

@@ -1422,6 +1422,119 @@ impl ProviderAdapter for HostResources {
                 &now(),
             ));
         }
+        if let EffectBody::Start { run_id } = &effect.body {
+            let run = projection
+                .runs
+                .iter()
+                .find(|r| r.id == *run_id)
+                .ok_or_else(|| adapter_error("run missing"))?;
+            if !run.status.is_blocking() {
+                return Ok(vec![]);
+            }
+            let logout = projection
+                .messages
+                .iter()
+                .find(|m| m.id == run.user_message_id)
+                .is_some_and(|m| {
+                    m.text.trim().eq_ignore_ascii_case("/logout") && m.attachments.is_empty()
+                });
+            if logout {
+                let native = projection
+                    .runs
+                    .iter()
+                    .filter(|r| r.ordinal < run.ordinal)
+                    .max_by_key(|r| r.ordinal)
+                    .and_then(|r| {
+                        projection
+                            .provider_threads
+                            .iter()
+                            .find(|p| Some(&p.id) == r.provider_thread_id.as_ref())
+                    });
+                let auth_driver = native.map_or(
+                    driver(&run.provider_instance_id).map_err(adapter_error)?,
+                    |p| p.driver,
+                );
+                let (kind, identity): (ProviderKind, Arc<dyn Identity>) = match auth_driver {
+                    Driver::Codex => (ProviderKind::Codex, self.codex.clone()),
+                    Driver::Claude => (
+                        ProviderKind::Claude,
+                        self.claude
+                            .get()
+                            .ok_or_else(|| adapter_error("Claude unavailable"))?
+                            .clone(),
+                    ),
+                };
+                let accounts = identity.list().await.map_err(adapter_error)?;
+                if let Some(id) = accounts.selected.get(&kind) {
+                    identity
+                        .account(super::identity::AccountCommand::Logout { id: id.clone() })
+                        .await
+                        .map_err(adapter_error)?;
+                }
+                let timestamp = now();
+                let mut finished = run.clone();
+                finished.status = RunStatus::Completed;
+                finished.started_at = Some(timestamp.clone());
+                finished.completed_at = Some(timestamp.clone());
+                let mut payloads = vec![EventPayload::RunUpdated(finished)];
+                if let Some(attempt) = projection
+                    .attempts
+                    .iter()
+                    .find(|a| Some(&a.id) == run.active_attempt_id.as_ref())
+                {
+                    let mut attempt = attempt.clone();
+                    attempt.status = AttemptStatus::Completed;
+                    attempt.started_at = Some(timestamp.clone());
+                    attempt.completed_at = Some(timestamp.clone());
+                    payloads.push(EventPayload::RunAttemptUpdated(attempt));
+                }
+                if let Some(node) = projection
+                    .nodes
+                    .iter()
+                    .find(|n| Some(&n.id) == run.root_node_id.as_ref())
+                {
+                    let mut node = node.clone();
+                    node.status = NodeStatus::Completed;
+                    node.completed_at = Some(timestamp.clone());
+                    payloads.push(EventPayload::NodeUpdated(node));
+                }
+                if let Some(item) = projection
+                    .turn_items
+                    .iter()
+                    .find(|i| i.run_id.as_ref() == Some(&run.id))
+                {
+                    let mut item = item.clone();
+                    item.id =
+                        TurnItemId::new(format!("item:{}:sign-out", run.id)).expect("derived id");
+                    item.ordinal = 0;
+                    item.title = Some("Provider signed out".into());
+                    item.body = TurnItemBody::CommandExecution {
+                        input: "/logout".into(),
+                        output: Some("Provider signed out".into()),
+                        output_omitted: false,
+                        output_indicates_failure: false,
+                        exit_code: Some(0),
+                    };
+                    payloads.push(EventPayload::TurnItemUpdated(item));
+                }
+                return Ok(orchestration::events(
+                    &projection.thread.id,
+                    &format!("{}:sign-out", effect.id),
+                    payloads,
+                    &timestamp,
+                ));
+            }
+            let compact = projection
+                .messages
+                .iter()
+                .find(|m| m.id == run.user_message_id)
+                .is_some_and(|m| {
+                    m.text.trim().eq_ignore_ascii_case("/compact") && m.attachments.is_empty()
+                });
+            if compact && !projection.visible_turn_items.iter().any(|row|matches!(&row.item.body,TurnItemBody::AssistantMessage{..}) || matches!(&row.item.body,TurnItemBody::UserMessage{message_id,..} if *message_id!=run.user_message_id)) {
+                return Err(adapter_error("Start a conversation before compacting this thread."));
+            }
+        }
         if let EffectBody::CaptureCheckpoint { run_id } = &effect.body {
             let run = projection
                 .runs
@@ -1566,64 +1679,73 @@ impl ProviderAdapter for HostResources {
                 .iter()
                 .find(|run| run.id == *run_id)
                 .ok_or_else(|| adapter_error("run missing"))?;
-            let root = run
-                .root_node_id
-                .as_ref()
-                .ok_or_else(|| adapter_error("checkpoint root missing"))?;
-            let scope = CheckpointScope {
-                id: CheckpointScopeId::new(format!("scope:{}:root", effect.thread_id))
-                    .expect("derived id"),
-                thread_id: effect.thread_id.clone(),
-                run_id: Some(run_id.clone()),
-                node_id: root.clone(),
-                parent_scope_id: None,
-                provider_thread_id: run.provider_thread_id.clone(),
-                kind: ScopeKind::RootRun,
-                ordinal_within_parent: 0,
-                advances_app_run_count: true,
-                cwd: cwd.to_string_lossy().into(),
-                created_at: now(),
-            };
-            let timestamp = now();
-            let baseline_recorded =
-                projection.checkpoint_scopes.iter().any(|existing| {
-                    existing.id == scope.id
-                        && existing.run_id == scope.run_id
-                        && existing.node_id == scope.node_id
-                }) && [0, run.ordinal.saturating_sub(1)].iter().all(|ordinal| {
-                    projection.checkpoints.iter().any(|checkpoint| {
-                        checkpoint.scope_id == scope.id
-                            && checkpoint.app_run_ordinal == Some(*ordinal)
-                    })
+            let maintenance = projection
+                .messages
+                .iter()
+                .find(|m| m.id == run.user_message_id)
+                .is_some_and(|m| {
+                    orchestration::native_maintenance(&m.text, !m.attachments.is_empty())
                 });
-            if !baseline_recorded {
-                let mut payloads = self
-                    .checkpoints
-                    .baseline(&scope, run.ordinal.saturating_sub(1), &timestamp)
-                    .await;
-                payloads.retain(|payload| !matches!(payload, EventPayload::CheckpointCaptured(checkpoint) if projection.checkpoints.iter().any(|existing| existing.id == checkpoint.id && existing.status == CheckpointStatus::Ready)));
-                let (receipt, completed) = tokio::sync::oneshot::channel();
-                self.provider_output
-                    .send(provider_adapters::ProviderBatch {
-                        thread_id: effect.thread_id.clone(),
-                        run_id: run_id.clone(),
-                        attempt_id: run
-                            .active_attempt_id
-                            .clone()
-                            .ok_or_else(|| adapter_error("attempt missing"))?,
-                        events: orchestration::events(
-                            &effect.thread_id,
-                            &format!("{}:baseline", effect.id),
-                            payloads,
-                            &timestamp,
-                        ),
-                        occurred_at: timestamp,
-                        acknowledged: Some(receipt),
-                    })
-                    .await
-                    .map_err(adapter_error)?;
-                if !completed.await.map_err(adapter_error)? {
-                    return Err(adapter_error("checkpoint baseline superseded"));
+            if !maintenance {
+                let root = run
+                    .root_node_id
+                    .as_ref()
+                    .ok_or_else(|| adapter_error("checkpoint root missing"))?;
+                let scope = CheckpointScope {
+                    id: CheckpointScopeId::new(format!("scope:{}:root", effect.thread_id))
+                        .expect("derived id"),
+                    thread_id: effect.thread_id.clone(),
+                    run_id: Some(run_id.clone()),
+                    node_id: root.clone(),
+                    parent_scope_id: None,
+                    provider_thread_id: run.provider_thread_id.clone(),
+                    kind: ScopeKind::RootRun,
+                    ordinal_within_parent: 0,
+                    advances_app_run_count: true,
+                    cwd: cwd.to_string_lossy().into(),
+                    created_at: now(),
+                };
+                let timestamp = now();
+                let baseline_recorded =
+                    projection.checkpoint_scopes.iter().any(|existing| {
+                        existing.id == scope.id
+                            && existing.run_id == scope.run_id
+                            && existing.node_id == scope.node_id
+                    }) && [0, run.ordinal.saturating_sub(1)].iter().all(|ordinal| {
+                        projection.checkpoints.iter().any(|checkpoint| {
+                            checkpoint.scope_id == scope.id
+                                && checkpoint.app_run_ordinal == Some(*ordinal)
+                        })
+                    });
+                if !baseline_recorded {
+                    let mut payloads = self
+                        .checkpoints
+                        .baseline(&scope, run.ordinal.saturating_sub(1), &timestamp)
+                        .await;
+                    payloads.retain(|payload| !matches!(payload, EventPayload::CheckpointCaptured(checkpoint) if projection.checkpoints.iter().any(|existing| existing.id == checkpoint.id && existing.status == CheckpointStatus::Ready)));
+                    let (receipt, completed) = tokio::sync::oneshot::channel();
+                    self.provider_output
+                        .send(provider_adapters::ProviderBatch {
+                            thread_id: effect.thread_id.clone(),
+                            run_id: run_id.clone(),
+                            attempt_id: run
+                                .active_attempt_id
+                                .clone()
+                                .ok_or_else(|| adapter_error("attempt missing"))?,
+                            events: orchestration::events(
+                                &effect.thread_id,
+                                &format!("{}:baseline", effect.id),
+                                payloads,
+                                &timestamp,
+                            ),
+                            occurred_at: timestamp,
+                            acknowledged: Some(receipt),
+                        })
+                        .await
+                        .map_err(adapter_error)?;
+                    if !completed.await.map_err(adapter_error)? {
+                        return Err(adapter_error("checkpoint baseline superseded"));
+                    }
                 }
             }
         }

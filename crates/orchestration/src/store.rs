@@ -150,6 +150,46 @@ impl Store {
         } else {
             decider::decide(command, projection.as_ref(), now, capabilities, driver)
         };
+        let planned = if let CommandBody::MessageDispatch(message) = &command.body
+            && let Some(reference) = &message.source_plan_ref
+        {
+            let source = load_projection(&transaction, &reference.thread_id)?;
+            planned.and_then(|mut decision| {
+                let source = source
+                    .as_ref()
+                    .ok_or_else(|| decider::DecisionError("source plan thread missing".into()))?;
+                if projection
+                    .as_ref()
+                    .is_none_or(|target| target.thread.project_id != source.thread.project_id)
+                {
+                    return Err(decider::DecisionError(
+                        "source plan belongs to another project".into(),
+                    ));
+                }
+                let mut plan = source
+                    .plans
+                    .iter()
+                    .find(|plan| {
+                        plan.id == reference.plan_id
+                            && plan.status == PlanStatus::Active
+                            && matches!(plan.body, PlanBody::ProposedPlan { .. })
+                    })
+                    .ok_or_else(|| {
+                        decider::DecisionError("source proposed plan is not active".into())
+                    })?
+                    .clone();
+                plan.status = PlanStatus::Completed;
+                decision.events.extend(crate::events(
+                    &reference.thread_id,
+                    &format!("{}:source-plan", command.command_id),
+                    vec![EventPayload::PlanUpdated(plan)],
+                    now,
+                ));
+                Ok(decision)
+            })
+        } else {
+            planned
+        };
         let decision = match planned {
             Ok(decision) => decision,
             Err(error) => {
@@ -278,6 +318,35 @@ impl Store {
                     replayed: false,
                 });
             }
+            let mut plans = projection.plans.clone();
+            let mut ordered = vec![];
+            for event in events {
+                if let EventPayload::PlanUpdated(plan) = &event.payload {
+                    if matches!(plan.status, PlanStatus::Draft | PlanStatus::Active) {
+                        for old in plans.iter_mut().filter(|old| {
+                            old.id != plan.id
+                                && std::mem::discriminant(&old.body)
+                                    == std::mem::discriminant(&plan.body)
+                                && matches!(old.status, PlanStatus::Draft | PlanStatus::Active)
+                        }) {
+                            old.status = PlanStatus::Superseded;
+                            ordered.extend(crate::events(
+                                &thread_id,
+                                &format!("{}:superseded:{}", event.id, old.id),
+                                vec![EventPayload::PlanUpdated(old.clone())],
+                                now,
+                            ));
+                        }
+                    }
+                    if let Some(old) = plans.iter_mut().find(|old| old.id == plan.id) {
+                        *old = plan.clone();
+                    } else {
+                        plans.push(plan.clone());
+                    }
+                }
+                ordered.push(event);
+            }
+            events = ordered;
             if events.iter().any(|e| matches!(&e.payload, EventPayload::ProviderTurnUpdated(t) if t.status == TurnStatus::Running)) {
                 let payloads = crate::context::consumed(&projection.context_transfers, run_id, now);
                 let trigger = events.first().expect("guarded events").id.to_string();
@@ -1137,6 +1206,107 @@ mod tests {
         store
             .dispatch(command, &now(), &turns(), Driver::Codex)
             .unwrap()
+    }
+    #[test]
+    fn new_proposal_supersedes_previous_active_proposal_under_the_run_guard() {
+        let store = setup();
+        dispatch(&store, &send("plan", DispatchMode::StartImmediately));
+        let p = store.projection(&create().thread_id).unwrap();
+        let run = &p.runs[0];
+        let plan = PlanArtifact {
+            id: PlanId::new("first-plan").unwrap(),
+            thread_id: p.thread.id.clone(),
+            run_id: Some(run.id.clone()),
+            node_id: run.root_node_id.clone().unwrap(),
+            status: PlanStatus::Active,
+            detail_in_turn_item: true,
+            body: PlanBody::ProposedPlan {
+                markdown: "first".into(),
+            },
+        };
+        store
+            .ingest(
+                crate::events(
+                    &p.thread.id,
+                    "first-plan",
+                    vec![EventPayload::PlanUpdated(plan.clone())],
+                    &now(),
+                ),
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        let mut next = plan;
+        next.id = PlanId::new("next-plan").unwrap();
+        let result = store
+            .ingest(
+                crate::events(
+                    &p.thread.id,
+                    "next-plan",
+                    vec![EventPayload::PlanUpdated(next)],
+                    &now(),
+                ),
+                Some((&run.id, run.active_attempt_id.as_ref())),
+                &now(),
+            )
+            .unwrap();
+        assert_eq!(result.events.len(), 2);
+        let p = store.projection(&p.thread.id).unwrap();
+        assert_eq!(p.plans[0].status, PlanStatus::Superseded);
+        assert_eq!(p.plans[1].status, PlanStatus::Active);
+    }
+    #[test]
+    fn implementation_links_and_completes_only_an_active_plan_atomically() {
+        let store = setup();
+        dispatch(&store, &send("plan", DispatchMode::StartImmediately));
+        let p = store.projection(&create().thread_id).unwrap();
+        let plan = PlanArtifact {
+            id: PlanId::new("proposal").unwrap(),
+            thread_id: p.thread.id.clone(),
+            run_id: Some(p.runs[0].id.clone()),
+            node_id: p.runs[0].root_node_id.clone().unwrap(),
+            status: PlanStatus::Active,
+            detail_in_turn_item: true,
+            body: PlanBody::ProposedPlan {
+                markdown: "# Build".into(),
+            },
+        };
+        store
+            .ingest(
+                crate::events(
+                    &p.thread.id,
+                    "proposal",
+                    vec![EventPayload::PlanUpdated(plan.clone())],
+                    &now(),
+                ),
+                None,
+                &now(),
+            )
+            .unwrap();
+        let mut c = send("implement", DispatchMode::QueueAfterActive);
+        let CommandBody::MessageDispatch(input) = &mut c.body else {
+            panic!()
+        };
+        input.source_plan_ref = Some(SourcePlanRef {
+            thread_id: p.thread.id.clone(),
+            plan_id: plan.id.clone(),
+        });
+        let commit = store.dispatch(&c, &now(), &turns(), Driver::Codex).unwrap();
+        assert!(commit.events.iter().any(|e|matches!(&e.event.payload,EventPayload::PlanUpdated(p) if p.status==PlanStatus::Completed)));
+        let p = store.projection(&p.thread.id).unwrap();
+        assert_eq!(p.plans[0].status, PlanStatus::Completed);
+        assert_eq!(p.runs[1].source_plan_ref.as_ref().unwrap().plan_id, plan.id);
+        let sequence = store.sequence().unwrap();
+        assert!(
+            store
+                .dispatch(&c, &now(), &turns(), Driver::Codex)
+                .unwrap()
+                .replayed
+        );
+        assert_eq!(store.sequence().unwrap(), sequence);
+        c.command_id = CommandId::new("again").unwrap();
+        assert!(store.dispatch(&c, &now(), &turns(), Driver::Codex).is_err());
+        assert_eq!(store.sequence().unwrap(), sequence);
     }
     #[test]
     fn receipts_replay_without_appending_or_publishing_twice() {

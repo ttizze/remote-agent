@@ -89,6 +89,7 @@ pub fn message(
         return Err("Enter a message".into());
     }
     Ok(MessageDispatch {
+        source_plan_ref: None,
         created_by: CreatedBy::User,
         creation_source: source,
         message_id,
@@ -99,4 +100,48 @@ pub fn message(
         delivery_intent: None,
         dispatch_mode,
     })
+}
+
+pub fn plan_follow_up(
+    draft_text: &str,
+    markdown: &str,
+    new_thread: bool,
+) -> (String, InteractionMode, bool) {
+    if new_thread || draft_text.trim().is_empty() {
+        (
+            format!("PLEASE IMPLEMENT THIS PLAN:\n{}", markdown.trim()),
+            InteractionMode::Default,
+            true,
+        )
+    } else {
+        (draft_text.trim().into(), InteractionMode::Plan, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn plan_follow_up_matches_t3_implement_refine_and_new_thread() {
+        assert_eq!(
+            plan_follow_up(" ", " # Plan ", false),
+            (
+                "PLEASE IMPLEMENT THIS PLAN:\n# Plan".into(),
+                InteractionMode::Default,
+                true
+            )
+        );
+        assert_eq!(
+            plan_follow_up(" Add tests ", "# Plan", false),
+            ("Add tests".into(), InteractionMode::Plan, false)
+        );
+        assert_eq!(
+            plan_follow_up("draft", "# Plan", true),
+            (
+                "PLEASE IMPLEMENT THIS PLAN:\n# Plan".into(),
+                InteractionMode::Default,
+                true
+            )
+        );
+    }
 }

@@ -361,7 +361,14 @@ pub struct Run {
     pub completed_at: Option<Timestamp>,
     pub checkpoint_id: Option<CheckpointId>,
     pub context_handoff_id: Option<ContextHandoffId>,
+    pub source_plan_ref: Option<SourcePlanRef>,
     pub workspace_preparation: Option<WorkspaceStrategy>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcePlanRef {
+    pub thread_id: ThreadId,
+    pub plan_id: PlanId,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1196,6 +1203,7 @@ pub enum CommandBody {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageDispatch {
+    pub source_plan_ref: Option<SourcePlanRef>,
     pub created_by: CreatedBy,
     pub creation_source: CreationSource,
     pub message_id: MessageId,

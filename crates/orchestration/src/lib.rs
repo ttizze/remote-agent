@@ -31,3 +31,12 @@ pub fn events(
         })
         .collect()
 }
+
+/// Provider maintenance has its own turn and does not capture workspace changes.
+pub fn native_maintenance(text: &str, has_attachments: bool) -> bool {
+    !has_attachments
+        && matches!(
+            text.trim().to_ascii_lowercase().as_str(),
+            "/compact" | "/logout"
+        )
+}

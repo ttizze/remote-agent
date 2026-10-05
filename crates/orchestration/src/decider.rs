@@ -407,6 +407,7 @@ pub fn decide(
                 .find(|message| message.id == queued.user_message_id)
                 .ok_or_else(|| DecisionError("queued message not found".into()))?;
             let input = crate::MessageDispatch {
+                source_plan_ref: None,
                 created_by: message.created_by,
                 creation_source: message.creation_source,
                 message_id: message.id.clone(),
@@ -1143,6 +1144,26 @@ fn dispatch(
         active,
         capabilities,
     );
+    if matches!(
+        mode,
+        DispatchMode::SteerActive { .. } | DispatchMode::RestartActive { .. }
+    ) {
+        require(
+            !crate::native_maintenance(&message.text, !message.attachments.is_empty()),
+            "maintenance must run as a separate turn; queue it or wait",
+        )?;
+        require(
+            active
+                .and_then(|run| {
+                    projection
+                        .messages
+                        .iter()
+                        .find(|m| m.id == run.user_message_id)
+                })
+                .is_none_or(|m| !crate::native_maintenance(&m.text, !m.attachments.is_empty())),
+            "wait for maintenance to finish before steering",
+        )?;
+    }
     let target = match &mode {
         DispatchMode::SteerActive { target_run_id }
         | DispatchMode::RestartActive { target_run_id } => {
@@ -1222,6 +1243,7 @@ fn dispatch(
             completed_at: None,
             checkpoint_id: None,
             context_handoff_id: None,
+            source_plan_ref: message.source_plan_ref.clone(),
             workspace_preparation: match &mode {
                 DispatchMode::DeferStart { workspace_strategy } => workspace_strategy.clone(),
                 _ => None,
@@ -1678,6 +1700,7 @@ fn respond(
                     }
                 });
             let input = MessageDispatch {
+                source_plan_ref: None,
                 created_by: CreatedBy::User,
                 creation_source: CreationSource::Server,
                 message_id: MessageId::new(format!("async-answer:{request_id}"))
@@ -1786,6 +1809,41 @@ mod tests {
     use super::*;
     use crate::test_support::*;
     use proptest::prelude::*;
+    #[test]
+    fn maintenance_can_queue_but_cannot_be_steered_or_receive_steering() {
+        let p = running();
+        let run_id = p.runs[0].id.clone();
+        let mut c = send(
+            "compact",
+            DispatchMode::SteerActive {
+                target_run_id: run_id.clone(),
+            },
+        );
+        let CommandBody::MessageDispatch(input) = &mut c.body else {
+            panic!()
+        };
+        input.text = "/compact".into();
+        assert!(decide(&c, Some(&p), &now(), &turns(), Driver::Codex).is_err());
+        let CommandBody::MessageDispatch(input) = &mut c.body else {
+            panic!()
+        };
+        input.dispatch_mode = DispatchMode::QueueAfterActive;
+        assert!(decide(&c, Some(&p), &now(), &turns(), Driver::Codex).is_ok());
+        let mut p = p;
+        let message = p
+            .messages
+            .iter_mut()
+            .find(|m| m.id == p.runs[0].user_message_id)
+            .unwrap();
+        message.text = "/compact".into();
+        let c = send(
+            "steer",
+            DispatchMode::SteerActive {
+                target_run_id: run_id,
+            },
+        );
+        assert!(decide(&c, Some(&p), &now(), &turns(), Driver::Codex).is_err());
+    }
     #[test]
     fn queued_runs_keep_execution_records_and_stop_holds_queue() {
         let (projection, _) = apply(&projection(), &send("one", DispatchMode::StartImmediately));

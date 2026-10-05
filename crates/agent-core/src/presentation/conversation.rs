@@ -185,6 +185,8 @@ pub struct QueueRow {
 pub struct ComposerView {
     pub draft: Draft,
     pub send_label: String,
+    pub plan_follow_up: bool,
+    pub plan_send_label: String,
     pub placeholder: String,
     pub enabled: bool,
     pub can_stop: bool,
@@ -796,6 +798,19 @@ pub fn timeline(projection: &ThreadProjection) -> Vec<TimelineRow> {
     rows
 }
 
+pub fn actionable_plan(
+    plans: &[PlanArtifact],
+    mode: InteractionMode,
+    has_blocking_run: bool,
+) -> Option<&PlanArtifact> {
+    if mode != InteractionMode::Plan || has_blocking_run {
+        return None;
+    }
+    plans.iter().rev().find(|p| {
+        p.status == PlanStatus::Active
+            && matches!(&p.body,PlanBody::ProposedPlan{markdown} if !markdown.trim().is_empty())
+    })
+}
 pub fn conversation(snapshot: &Snapshot) -> ConversationView {
     let projection = snapshot.projection();
     let draft = snapshot.current_draft();
@@ -861,6 +876,21 @@ pub fn conversation(snapshot: &Snapshot) -> ConversationView {
     let creating = snapshot.selected_thread.is_none() && snapshot.pending_launches.iter().any(|launch|matches!(&launch.create.body,CommandBody::ThreadCreate{project_id,..} if project_id.as_str()==snapshot.selected_project.as_deref().unwrap_or("bex:chats")));
     let composer = ComposerView {
         draft: draft.clone(),
+        plan_follow_up: snapshot.connected
+            && !archived
+            && !live_request
+            && !draft.model.is_empty()
+            && projection.is_some_and(|p| {
+                p.thread.rollback_request_id.is_none()
+                    && actionable_plan(&p.plans, p.thread.interaction_mode, active.is_some())
+                        .is_some()
+            }),
+        plan_send_label: if draft.text.trim().is_empty() {
+            "Implement"
+        } else {
+            "Refine"
+        }
+        .into(),
         send_label: if creating {
             "Creating thread…"
         } else if editing {
