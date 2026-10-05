@@ -8,7 +8,6 @@ struct GraphReplay {
     requests: BTreeMap<u64, (ThreadId, String)>,
     forks: BTreeMap<u64, (ThreadId, CommandId, ThreadId)>,
     claude_fork: Option<(ThreadId, CommandId, ThreadId)>,
-    last_fork: Option<ThreadId>,
     fork_order: Vec<ThreadId>,
     merges: usize,
 }
@@ -20,7 +19,6 @@ impl GraphReplay {
             requests: BTreeMap::new(),
             forks: BTreeMap::new(),
             claude_fork: None,
-            last_fork: None,
             fork_order: vec![],
             merges: 0,
         }
@@ -159,7 +157,6 @@ impl GraphReplay {
             Reply::Accepted
         );
         self.roots.insert(native, target.clone());
-        self.last_fork = Some(target);
     }
     fn rollback_to(&mut self, thread: &ThreadId, head: Option<&str>) {
         self.capture();

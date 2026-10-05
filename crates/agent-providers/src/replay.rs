@@ -1592,3 +1592,98 @@ fn subagent_resume_after_restart_keeps_one_child_and_its_tools_and_messages() {
                 && i.text.contains("Bug/edge case found"))
     );
 }
+
+#[test]
+fn stopped_root_accepts_its_child_confirmation_and_native_deletion_cannot_strand_the_task() {
+    for delete in [false, true] {
+        let mut replay = Replay::new(Driver::Claude, &[json!({"metadata":{"model":"model"}})]);
+        replay.send("root prompt".into(), false);
+        let root = replay.root.clone();
+        let owner = replay.owner.clone().unwrap();
+        replay.apply(
+            &root,
+            Input::Provider {
+                attempt: owner.clone(),
+                event: ProviderEvent::SubagentStarted {
+                    background: true,
+                    native_thread: None,
+                    key: "child".into(),
+                    parent: None,
+                    prompt: "child prompt".into(),
+                    model: None,
+                },
+            },
+        );
+        let child = replay.state().tasks[0].child_thread.clone();
+        replay.apply(
+            &root,
+            Input::Provider {
+                attempt: owner.clone(),
+                event: ProviderEvent::Child {
+                    key: "child".into(),
+                    event: Box::new(ProviderEvent::TextDelta {
+                        key: "text".into(),
+                        kind: ProviderItem::Text,
+                        text: "child output".into(),
+                    }),
+                },
+            },
+        );
+        if delete {
+            assert_eq!(replay.command(&child, Command::Delete), Reply::Accepted);
+            assert_eq!(replay.state().tasks[0].status, ItemStatus::Cancelled);
+            let before = replay.states[&child].clone();
+            assert_eq!(
+                replay.apply(
+                    &child,
+                    Input::Provider {
+                        attempt: owner,
+                        event: ProviderEvent::TextDelta {
+                            key: "late".into(),
+                            kind: ProviderItem::Text,
+                            text: "late output".into()
+                        }
+                    }
+                ),
+                Reply::Ignored
+            );
+            assert_eq!(replay.states[&child], before);
+        } else {
+            replay.command(&root, Command::Stop);
+            replay.apply(
+                &root,
+                Input::Provider {
+                    attempt: owner.clone(),
+                    event: ProviderEvent::TurnFinished {
+                        status: RunStatus::Interrupted,
+                        native_head: None,
+                    },
+                },
+            );
+            assert_eq!(replay.state().tasks[0].status, ItemStatus::Running);
+            replay.apply(
+                &root,
+                Input::Provider {
+                    attempt: owner,
+                    event: ProviderEvent::NativeOutput {
+                        echoed_prompts: vec![],
+                        acknowledged_prompt: None,
+                        root: false,
+                        result: None,
+                        events: vec![ProviderEvent::Child {
+                            key: "child".into(),
+                            event: Box::new(ProviderEvent::SessionClosed { error: None }),
+                        }],
+                    },
+                },
+            );
+            assert_eq!(replay.state().tasks[0].status, ItemStatus::Interrupted);
+            assert!(
+                replay.states[&child]
+                    .items
+                    .iter()
+                    .all(|item| item.status.terminal())
+            );
+        }
+    }
+}

@@ -1119,3 +1119,5 @@ Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機�
 `provider_thread_resume`、`plan_questions`、`subagent_continue`、`tool_call_read_only`、`tool_call_workspace_never`（両 provider）、`turn_interrupt_restart`、`claude_background_task_after_root`、`claude_compact_after_resume_wake`、`claude_subagent_resume_after_restart` の projection 期待値を replay に追加した。質問 ID `schema_preference`、元の返信、再開した子の会話と 3 command、2 run の compaction 帰属を保持する。休眠・再起動の実プロセス／SQLite 境界は段階 3 で接続する。
 
 `mcp/OrchestratorMcpToolkit.integration.test.ts` の `delegated_task_status/codex` replay を移植した。元の `Delegated API boundary inspected.` と result transfer を保持し、running / queued follow-up がある間の pending 判定、interrupt 後の queued run の完了、`Queued delegated follow-up completed.` と latest transfer の null を確認する。MCP の RPC 接続は段階 3 でこの domain の読み取り結果を利用する。
+
+R3 O6/O8/O9/O13 の再発検証を追加した。control RPC の失敗は run/attempt を Running に保つ（proptest を含む）。子の停止確認前は task/card を Running に保って rollback を拒否し、削除された native 子は親に Cancelled を確定させる。pending rollback 中の provider/interaction/runtime の変更も拒否する。provider の injection 待ちで停止した場合の成功／-32601 fallback の双方で未送信の prompt を抑止する。

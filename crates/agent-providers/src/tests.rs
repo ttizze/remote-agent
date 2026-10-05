@@ -516,3 +516,40 @@ fn codex_reasoning_omits_empty_native_items_and_keeps_summary_and_content_parts_
         assert_eq!(status, ItemStatus::Completed);
     }
 }
+
+#[test]
+fn stop_during_history_injection_suppresses_both_acceptance_and_unsupported_fallback_input() {
+    for code in [None, Some(-32601)] {
+        let mut protocol = CodexProtocol::default();
+        let mut start = codex_start();
+        if let ProviderCommand::Start { context, .. } = &mut start {
+            *context = Some(HistoricalContext {
+                messages: vec![],
+                context: "History coverage".into(),
+                omitted_items: 0,
+                omitted_item_ids: vec![],
+            });
+        }
+        let create = protocol.command(&start, &wire_context()).unwrap().remove(0);
+        let inject = protocol
+            .receive(&json!({"id":create["id"],"result":{"thread":{"id":"native"}}}))
+            .unwrap()
+            .outbound
+            .remove(0);
+        protocol
+            .command(
+                &ProviderCommand::Interrupt {
+                    native_thread: Some("native".into()),
+                    native_turn: None,
+                },
+                &wire_context(),
+            )
+            .unwrap();
+        let reply = if let Some(code) = code {
+            json!({"id":inject["id"],"error":{"code":code,"message":"not supported"}})
+        } else {
+            json!({"id":inject["id"],"result":{}})
+        };
+        assert!(protocol.receive(&reply).unwrap().outbound.is_empty());
+    }
+}

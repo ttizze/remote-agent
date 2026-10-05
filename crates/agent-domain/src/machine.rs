@@ -528,7 +528,7 @@ impl Decision {
         status: ItemStatus,
         keep_message_questions: bool,
     ) {
-        let items=self.state.items.iter().filter(|i| i.attempt.as_ref()==Some(attempt) && !i.status.terminal() && !(keep_message_questions && matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message)))).map(|i| i.id.clone()).collect::<Vec<_>>();
+        let items=self.state.items.iter().filter(|i| i.attempt.as_ref()==Some(attempt) && !i.status.terminal() && !matches!(&i.kind,ItemKind::Subagent {task} if self.state.tasks.iter().any(|candidate|&candidate.id==task && !candidate.status.terminal())) && !(keep_message_questions && matches!(&i.kind,ItemKind::UserInputRequest { request } if self.state.requests.iter().any(|r| &r.id==request && r.capability==ResponseCapability::Message)))).map(|i| i.id.clone()).collect::<Vec<_>>();
         for id in items {
             self.fact(FactBody::ItemCompleted { id, status });
         }
@@ -553,7 +553,7 @@ impl Decision {
             });
         }
     }
-    fn stop_tasks(&mut self, attempt: &RunAttemptId, status: ItemStatus) {
+    fn stop_tasks(&mut self, attempt: &RunAttemptId, status: ItemStatus, confirmed: bool) {
         let tasks = self
             .state
             .tasks
@@ -572,11 +572,13 @@ impl Decision {
         let task_ids = tasks.iter().map(|task| task.id.clone()).collect::<Vec<_>>();
         for task in tasks {
             if !task.status.terminal() {
-                self.fact(FactBody::TaskFinished {
-                    id: task.id.clone(),
-                    status,
-                    result: String::new(),
-                });
+                if confirmed {
+                    self.fact(FactBody::TaskFinished {
+                        id: task.id.clone(),
+                        status,
+                        result: String::new(),
+                    });
+                }
                 self.effect(
                     Some(attempt.clone()),
                     EffectBody::SendToThread {
@@ -888,7 +890,7 @@ impl Decision {
             });
             self.user_item(&message.id, run);
             if matches!(mode, DispatchMode::RestartActive { .. }) {
-                self.stop_tasks(&attempt, ItemStatus::Interrupted);
+                self.stop_tasks(&attempt, ItemStatus::Interrupted, true);
                 self.close_attempt_items(&attempt, ItemStatus::Interrupted, false);
                 self.fact(FactBody::AttemptFinished {
                     id: attempt.clone(),
@@ -1006,6 +1008,10 @@ impl Decision {
                     | Fork { .. }
                     | MergeBack { .. }
                     | Delegate { .. }
+                    | SelectModel { .. }
+                    | SwitchProvider { .. }
+                    | RuntimeMode { .. }
+                    | InteractionMode { .. }
                     | Compact
                     | PromoteToSteer { .. }
             )
@@ -1048,8 +1054,7 @@ impl Decision {
                     );
                 }
                 if let Some(owner) = self.state.native_owner.clone() {
-                    self.stop_tasks(&owner, ItemStatus::Interrupted);
-                    self.close_attempt_items(&owner, ItemStatus::Interrupted, false);
+                    self.stop_tasks(&owner, ItemStatus::Interrupted, false);
                     self.fact(FactBody::StopRequested {
                         attempt: owner.clone(),
                     });
@@ -1124,9 +1129,19 @@ impl Decision {
                 for run in runs {
                     if let Some(a) = &run.attempt {
                         self.interrupt_provider(a);
-                        self.stop_tasks(a, ItemStatus::Cancelled);
+                        self.stop_tasks(a, ItemStatus::Cancelled, true);
                     }
                     self.finish(&run.id, RunStatus::Cancelled, false);
+                }
+                if let Some(owner) = self.state.native_owner.clone() {
+                    self.interrupt_provider(&owner);
+                    self.provider(
+                        &owner,
+                        &ProviderEvent::TurnFinished {
+                            status: RunStatus::Cancelled,
+                            native_head: None,
+                        },
+                    );
                 }
                 self.fact(FactBody::ThreadDeleted);
                 let paths = self
@@ -1348,7 +1363,6 @@ impl Decision {
                 if *hold_queue {
                     self.hold_queue();
                 }
-                self.fact(FactBody::BackgroundWorkStopped);
                 if let Some(attempt) = &target.attempt {
                     if self.state.stopping.contains(attempt) {
                         return Reply::Ignored;
@@ -1358,7 +1372,7 @@ impl Decision {
                         attempt: attempt.clone(),
                     });
                     self.interrupt_provider(attempt);
-                    self.stop_tasks(attempt, ItemStatus::Interrupted);
+                    self.stop_tasks(attempt, ItemStatus::Interrupted, false);
                     if background && !target.status.blocking() {
                         return Reply::Accepted;
                     }
@@ -2357,6 +2371,14 @@ impl Decision {
         (id, item)
     }
     fn provider(&mut self, attempt: &RunAttemptId, event: &ProviderEvent) -> Reply {
+        if self
+            .state
+            .thread
+            .as_ref()
+            .is_some_and(|thread| thread.deleted_at.is_some())
+        {
+            return Reply::Ignored;
+        }
         if let ProviderEvent::NativeOutput {
             echoed_prompts,
             acknowledged_prompt,
@@ -2396,15 +2418,19 @@ impl Decision {
                     | ProviderEvent::Child { .. }
                     | ProviderEvent::BackgroundTask { .. }
                     | ProviderEvent::Wake { .. }
+                    | ProviderEvent::SessionClosed { .. }
             );
         if !child
             && run
                 .as_ref()
                 .is_some_and(|r| !matches!(r.status, RunStatus::Starting | RunStatus::Running))
             && !(background
-                && run
-                    .as_ref()
-                    .is_some_and(|r| matches!(r.status, RunStatus::Completed | RunStatus::Waiting)))
+                && run.as_ref().is_some_and(|r| {
+                    matches!(
+                        r.status,
+                        RunStatus::Completed | RunStatus::Waiting | RunStatus::Interrupted
+                    )
+                }))
         {
             return Reply::Ignored;
         }
@@ -2476,6 +2502,31 @@ impl Decision {
                 unreachable!("native output is routed before applying its events")
             }
             SessionClosed { error } => {
+                let background = self
+                    .state
+                    .background_work
+                    .iter()
+                    .filter(|(_, work)| &work.attempt == attempt)
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>();
+                for key in background {
+                    self.fact(FactBody::BackgroundTaskFinished { key });
+                }
+                if run.as_ref().is_some_and(|run| {
+                    !matches!(run.status, RunStatus::Starting | RunStatus::Running)
+                }) {
+                    self.stop_tasks(
+                        attempt,
+                        if self.state.stopping.contains(attempt) {
+                            ItemStatus::Interrupted
+                        } else {
+                            ItemStatus::Cancelled
+                        },
+                        true,
+                    );
+                    return Reply::Accepted;
+                }
+
                 if let Some(run) = &run {
                     let status = if self.state.stopping.contains(attempt) {
                         RunStatus::Interrupted
@@ -2506,8 +2557,31 @@ impl Decision {
                         } else {
                             ItemStatus::Failed
                         },
+                        true,
                     );
                     self.finish(&run.id, status, true);
+                } else if child {
+                    let status = if self.state.stopping.contains(attempt) {
+                        RunStatus::Interrupted
+                    } else {
+                        RunStatus::Failed
+                    };
+                    self.stop_tasks(
+                        attempt,
+                        if status == RunStatus::Interrupted {
+                            ItemStatus::Interrupted
+                        } else {
+                            ItemStatus::Failed
+                        },
+                        true,
+                    );
+                    self.provider(
+                        attempt,
+                        &ProviderEvent::TurnFinished {
+                            status,
+                            native_head: None,
+                        },
+                    );
                 }
             }
             TurnAborted { .. } => {
@@ -2664,6 +2738,7 @@ impl Decision {
                         match status {
                             RunStatus::Failed => ItemStatus::Failed,
                             RunStatus::Interrupted => ItemStatus::Interrupted,
+                            RunStatus::Cancelled => ItemStatus::Cancelled,
                             _ => ItemStatus::Completed,
                         },
                         false,
@@ -2698,6 +2773,7 @@ impl Decision {
                                     status: match status {
                                         RunStatus::Failed => ItemStatus::Failed,
                                         RunStatus::Interrupted => ItemStatus::Interrupted,
+                                        RunStatus::Cancelled => ItemStatus::Cancelled,
                                         _ => ItemStatus::Completed,
                                     },
                                     result,
@@ -3322,8 +3398,34 @@ impl Decision {
         result: Option<&NativeResult>,
         events: &[ProviderEvent],
     ) -> Reply {
-        if self.state.stopping.contains(owner) && self.state.active_run().is_none() {
-            return Reply::Ignored;
+        if root && self.state.stopping.contains(owner) {
+            for event in events {
+                if matches!(
+                    event,
+                    ProviderEvent::Child { .. }
+                        | ProviderEvent::SubagentFinished { .. }
+                        | ProviderEvent::BackgroundTask {
+                            status: Some(_),
+                            ..
+                        }
+                ) {
+                    self.provider(owner, event);
+                }
+            }
+            return Reply::Accepted;
+        }
+
+        if !root
+            && self
+                .state
+                .tasks
+                .iter()
+                .any(|task| &task.attempt == owner && !task.status.terminal())
+        {
+            for event in events {
+                self.provider(owner, event);
+            }
+            return Reply::Accepted;
         }
         if !self.state.attempts.iter().any(|a| {
             &a.id == owner
@@ -3521,14 +3623,10 @@ impl Decision {
                 match operation {
                     ProviderOperation::Start | ProviderOperation::Compact => {
                         self.error_item(&run.id, message);
-                        self.stop_tasks(attempt, ItemStatus::Failed);
+                        self.stop_tasks(attempt, ItemStatus::Failed, true);
                         self.finish(&run.id, RunStatus::Failed, false);
                     }
-                    // A failed control operation must never claim the native turn died.
-                    ProviderOperation::Interrupt => {
-                        self.stop_tasks(attempt, ItemStatus::Interrupted);
-                        self.finish(&run.id, RunStatus::Interrupted, true);
-                    }
+                    // Failed control requests keep the native turn authoritative.
                     _ => {
                         self.error_item(&run.id, message);
                     }

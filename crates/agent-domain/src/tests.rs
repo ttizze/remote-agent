@@ -868,7 +868,7 @@ fn cancelled_delegated_wake_stays_disposed_after_reconciliation() {
     let source_message = s
         .tasks
         .iter()
-        .find(|candidate| &candidate.id == &task)
+        .find(|candidate| candidate.id == task)
         .and_then(|task| task.original_message.clone());
     command(
         &mut s,
@@ -1158,7 +1158,7 @@ fn automatic_completion_delivery_precedes_visible_queued_messages() {
     let source_message = s
         .tasks
         .iter()
-        .find(|candidate| &candidate.id == &task)
+        .find(|candidate| candidate.id == task)
         .and_then(|task| task.original_message.clone());
     command(
         &mut s,
@@ -1818,7 +1818,7 @@ fn cancelling_one_delegated_delivery_disposes_only_its_cohort_and_parent_stop_di
         let source_message = s
             .tasks
             .iter()
-            .find(|candidate| &candidate.id == &task)
+            .find(|candidate| candidate.id == task)
             .and_then(|task| task.original_message.clone());
         command(
             &mut s,
@@ -1965,4 +1965,126 @@ fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_s
         },
     );
     assert!(rollback.effects.iter().any(|effect|matches!(&effect.body,EffectBody::RestoreCheckpoint {scope:Some(scope),file_ref,..} if scope.cwd=="/workspace/one" && file_ref=="before")));
+}
+
+#[test]
+fn interrupt_failure_keeps_the_root_and_children_live_until_provider_confirmation() {
+    let mut s = state();
+    let (run, attempt) = running(&mut s, "parent");
+    provider(
+        &mut s,
+        "child",
+        &attempt,
+        ProviderEvent::SubagentStarted {
+            background: true,
+            native_thread: Some("native-child".into()),
+            key: "child".into(),
+            parent: None,
+            prompt: "Continue working".into(),
+            model: None,
+        },
+    );
+    command(&mut s, "stop", Command::Stop);
+    assert_eq!(s.tasks[0].status, ItemStatus::Running);
+    assert_eq!(s.runs[0].status, RunStatus::Running);
+    result(
+        &mut s,
+        "interrupt-failed",
+        EffectResult::ProviderFailed {
+            attempt: attempt.clone(),
+            operation: ProviderOperation::Interrupt,
+            message: "temporary RPC failure".into(),
+            message_id: None,
+            turn_completed: false,
+        },
+    );
+    assert_eq!(s.runs[0].status, RunStatus::Running);
+    assert_eq!(s.tasks[0].status, ItemStatus::Running);
+    provider(
+        &mut s,
+        "root-stopped",
+        &attempt,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Interrupted,
+            native_head: None,
+        },
+    );
+    assert_eq!(s.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(s.tasks[0].status, ItemStatus::Running);
+    assert!(
+        s.items
+            .iter()
+            .any(|item| matches!(item.kind, ItemKind::Subagent { .. })
+                && item.status == ItemStatus::Running)
+    );
+    // A stable root alone cannot authorize restoring files still used by a child.
+    let cp = checkpoint(&mut s, &run, &attempt, "root-cp");
+    assert!(matches!(
+        command(
+            &mut s,
+            "unsafe-rollback",
+            Command::Rollback {
+                checkpoint: cp,
+                restore_files: true
+            }
+        )
+        .reply,
+        Reply::Rejected { .. }
+    ));
+}
+
+#[test]
+fn provider_selection_and_runtime_changes_are_blocked_during_rollback() {
+    let mut s = state();
+    let (run, attempt) = running(&mut s, "first");
+    finish(&mut s, &attempt);
+    let cp = checkpoint(&mut s, &run, &attempt, "first-cp");
+    command(
+        &mut s,
+        "rollback",
+        Command::Rollback {
+            checkpoint: cp,
+            restore_files: false,
+        },
+    );
+    for (i, change) in [
+        Command::SelectModel {
+            selection: selection(),
+        },
+        Command::SwitchProvider {
+            selection: selection(),
+        },
+        Command::RuntimeMode {
+            mode: RuntimeMode::Auto,
+        },
+        Command::InteractionMode {
+            mode: InteractionMode::Plan,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let before = s.clone();
+        assert_eq!(
+            command(&mut s, &format!("change-{i}"), change).reply,
+            Reply::Rejected {
+                reason: "rollback-pending".into()
+            }
+        );
+        assert_eq!(s, before);
+    }
+}
+
+proptest! {
+    #[test]
+    fn failed_control_operations_never_release_a_running_native_turn(op in 0usize..4, failures in 1usize..12) {
+        let mut s=state();
+        let (_,attempt)=running(&mut s,"run");
+        let operation=[ProviderOperation::Steer,ProviderOperation::Interrupt,ProviderOperation::Respond,ProviderOperation::SetModel][op];
+        for i in 0..failures {
+            result(&mut s,&format!("failed-{i}"),EffectResult::ProviderFailed{attempt:attempt.clone(),operation,message:"RPC failed".into(),message_id:None,turn_completed:false});
+            prop_assert_eq!(s.runs[0].status,RunStatus::Running);
+            prop_assert_eq!(s.attempts[0].status,AttemptStatus::Running);
+        }
+    }
 }

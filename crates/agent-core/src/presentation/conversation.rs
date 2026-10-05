@@ -1111,7 +1111,9 @@ pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
         && !maintenance
         && turns.is_some_and(|t| t.supports_steering_by_interrupt_restart);
     let queued = projection
-        .map(|p| orchestration::queued_run_order::queued_runs_in_delivery_order(&p.runs, &p.messages))
+        .map(|p| {
+            orchestration::queued_run_order::queued_runs_in_delivery_order(&p.runs, &p.messages)
+        })
         .unwrap_or_default();
     let queue = queued
         .iter()

@@ -291,6 +291,9 @@ impl CodexProtocol {
                 if error["code"] == -32601
                     && let Pending::Inject { mut start, history } = pending
                 {
+                    if std::mem::take(&mut self.stop_before_thread) {
+                        return Ok(output);
+                    }
                     prepend_inline_history(&mut start, &history);
                     output.outbound.push(self.request(
                         "turn/start",
