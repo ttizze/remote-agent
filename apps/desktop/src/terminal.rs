@@ -1,5 +1,6 @@
-use crate::{Runtime, store_session::StoreSession};
+use crate::Runtime;
 use agent_core::state::{Intent, Snapshot, TerminalPhase};
+use agent_core::store::Store;
 use agent_protocol::operations::TerminalSize;
 use alacritty_terminal::{
     Term,
@@ -41,14 +42,13 @@ impl EventListener for TerminalEvents {
     }
 }
 enum Event {
-    Connected(Result<StoreSession, String>),
     Snapshot(Arc<Snapshot>),
     Clipboard(String),
     Error(String),
 }
 
 pub(crate) struct Terminal {
-    session: Option<StoreSession>,
+    store: Arc<Store>,
     snapshot: Arc<Snapshot>,
     runtime: Runtime,
     events: async_channel::Sender<Event>,
@@ -70,34 +70,29 @@ pub(crate) struct Terminal {
 }
 impl Terminal {
     pub(crate) fn new(
-        remote: &str,
+        store: Arc<Store>,
         cwd: String,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<Self> {
         let (events, incoming) = async_channel::unbounded();
         let runtime = cx.global::<Runtime>().clone();
-        let connections = runtime.connections.clone();
-        let remote = (!remote.is_empty()).then(|| remote.to_owned());
         let updates = events.clone();
-        let session_runtime = runtime.clone();
+        let mut snapshots = store.subscribe();
         runtime.handle.spawn(async move {
-            StoreSession::publish(
-                connections
-                    .connect(remote.as_deref(), Snapshot::default())
-                    .await,
-                session_runtime,
-                updates,
-                Event::Connected,
-                Event::Snapshot,
-            )
-            .await;
+            loop {
+                let snapshot = snapshots.borrow_and_update().clone();
+                if updates.send(Event::Snapshot(snapshot)).await.is_err()
+                    || snapshots.changed().await.is_err()
+                {
+                    break;
+                }
+            }
         });
         let size = TerminalSize { cols: 80, rows: 24 };
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         cx.new(|cx: &mut Context<Self>| {
-            StoreSession::on_app_quit(cx, |view| &mut view.session);
             cx.spawn_in(window, async move |view, cx| {
                 while let Ok(event) = incoming.recv().await {
                     if view
@@ -110,7 +105,7 @@ impl Terminal {
             })
             .detach();
             Self {
-                session: None,
+                store,
                 snapshot: Arc::default(),
                 runtime,
                 handle: agent_core::client::terminal_handle(cwd.clone()),
@@ -137,8 +132,8 @@ impl Terminal {
         })
     }
     fn dispatch(&self, intent: Intent) {
-        if let Some(session) = &self.session {
-            let receipt = session.store.dispatch(intent);
+        {
+            let receipt = self.store.dispatch(intent);
             let events = self.events.clone();
             self.runtime.handle.spawn(async move {
                 if let Err(error) = receipt
@@ -165,11 +160,7 @@ impl Terminal {
     }
     fn event(&mut self, event: Event, cx: &mut Context<Self>) {
         match event {
-            Event::Connected(Ok(session)) => {
-                self.snapshot = session.store.snapshot();
-                self.session = Some(session);
-            }
-            Event::Connected(Err(error)) | Event::Error(error) => self.error = Some(error),
+            Event::Error(error) => self.error = Some(error),
             Event::Snapshot(snapshot) => self.snapshot = snapshot,
             Event::Clipboard(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
         }

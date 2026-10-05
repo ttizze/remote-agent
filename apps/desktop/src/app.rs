@@ -34,13 +34,19 @@ enum Panel {
     Files,
     Browser,
 }
+#[derive(Clone, Copy)]
+enum BufferRevision {
+    Draft(u64),
+    Editor(u64),
+}
 enum Update {
     Connected(Result<(StoreSession, PathBuf), String>),
     Snapshot(Arc<Snapshot>),
-    Completed(Option<u64>, Result<Outcome, String>),
+    Completed(Option<BufferRevision>, Result<Outcome, String>),
     Folder(Option<PathBuf>),
     PersistenceError(String),
     Recording(uuid::Uuid, platform::RecordingEvent),
+    Transcribed(uuid::Uuid, Result<Outcome, String>),
     Tick,
 }
 struct QuestionInput {
@@ -51,6 +57,7 @@ struct QuestionInput {
 pub(crate) struct Desktop {
     session: Option<StoreSession>,
     snapshot: Arc<Snapshot>,
+    conversation: Arc<ConversationView>,
     runtime: Runtime,
     updates: async_channel::Sender<(u64, Update)>,
     epoch: u64,
@@ -62,6 +69,8 @@ pub(crate) struct Desktop {
     composer: Entity<TextareaState>,
     composer_revision: u64,
     pending_draft: Option<u64>,
+    composer_base: String,
+    composer_key: String,
     search: Entity<InputState>,
     rename: Entity<InputState>,
     renaming: bool,
@@ -70,8 +79,7 @@ pub(crate) struct Desktop {
     show_archive: bool,
     expanded: BTreeSet<String>,
     questions: BTreeMap<(String, String), QuestionInput>,
-    timeline_scroll: ScrollHandle,
-    anchors: BTreeMap<String, ScrollAnchor>,
+    timeline: ListState,
     panel: Option<Panel>,
     terminal: Option<Entity<crate::terminal::Terminal>>,
     browser: Option<Entity<crate::browser::Browser>>,
@@ -80,6 +88,8 @@ pub(crate) struct Desktop {
     editor: Entity<EditorState>,
     editor_path: Option<String>,
     editor_value: String,
+    editor_revision: u64,
+    pending_editor: Option<u64>,
     account_code: Entity<InputState>,
     dictation: Option<dictation::Dictation>,
     tick: Option<tokio_util::task::AbortOnDropHandle<()>>,
@@ -173,6 +183,7 @@ impl Desktop {
             TextareaState::new(window, cx)
                 .placeholder("Ask anything…")
                 .auto_grow(2, 10)
+                .submit_on_enter(true)
         });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search threads…"));
         let rename = cx.new(|cx| InputState::new(window, cx).placeholder("Thread title"));
@@ -188,13 +199,33 @@ impl Desktop {
             cx.subscribe(&composer, |view, input, event, cx| {
                 if matches!(event, InputEvent::Change) {
                     let text = input.read(cx).value().to_string();
-                    if text != view.snapshot.current_draft().text {
+                    if view.session.is_some() && text != view.snapshot.current_draft().text {
                         let mut draft = view.snapshot.current_draft();
                         draft.text = text;
                         view.composer_revision += 1;
                         view.pending_draft = Some(view.composer_revision);
-                        view.perform(Intent::EditDraft { draft }, Some(view.composer_revision));
+                        let base_text = Some(std::mem::replace(
+                            &mut view.composer_base,
+                            draft.text.clone(),
+                        ));
+                        view.perform(
+                            Intent::EditDraft { draft, base_text },
+                            Some(BufferRevision::Draft(view.composer_revision)),
+                        );
                     }
+                }
+            }),
+            cx.subscribe(&composer, |view, _, event, _| {
+                if let InputEvent::PressEnter { shift: false, .. } = event
+                    && (view.conversation.composer.enabled
+                        || view.conversation.composer.plan_follow_up)
+                {
+                    view.perform(
+                        Intent::Send {
+                            behavior: SendBehavior::Default,
+                        },
+                        None,
+                    );
                 }
             }),
             cx.subscribe(&search, |view, input, event, cx| {
@@ -214,7 +245,12 @@ impl Desktop {
                     let text = input.read(cx).value().to_string();
                     if text != view.editor_value {
                         view.editor_value = text.clone();
-                        view.perform(Intent::EditFile { path, text }, None);
+                        view.editor_revision += 1;
+                        view.pending_editor = Some(view.editor_revision);
+                        view.perform(
+                            Intent::EditFile { path, text },
+                            Some(BufferRevision::Editor(view.editor_revision)),
+                        );
                     }
                 }
             }),
@@ -222,7 +258,13 @@ impl Desktop {
                 match event {
                     HostEvent::Selected(remote) => {
                         view.settings = false;
-                        view.connect(remote.clone());
+                        if view.remote.as_ref().map(|r| (&r.id, &r.ticket))
+                            != remote.as_ref().map(|r| (&r.id, &r.ticket))
+                            || !view.snapshot.connected
+                        {
+                            view.connect(remote.clone());
+                        }
+                        view.sync_browser_visibility(cx);
                     }
                     HostEvent::Removed(id) if view.remote.as_ref().is_some_and(|r| &r.id == id) => {
                         view.connect(None)
@@ -235,6 +277,7 @@ impl Desktop {
         let mut view = Self {
             session: None,
             snapshot: Arc::default(),
+            conversation: Arc::new(conversation(&Snapshot::default())),
             runtime,
             updates,
             epoch: 0,
@@ -246,6 +289,8 @@ impl Desktop {
             composer,
             composer_revision: 0,
             pending_draft: None,
+            composer_base: String::new(),
+            composer_key: String::new(),
             search,
             rename,
             renaming: false,
@@ -254,8 +299,7 @@ impl Desktop {
             show_archive: false,
             expanded: BTreeSet::new(),
             questions: BTreeMap::new(),
-            timeline_scroll: ScrollHandle::new(),
-            anchors: BTreeMap::new(),
+            timeline: ListState::new(1, ListAlignment::Bottom, px(600.)),
             panel: None,
             terminal: None,
             browser: None,
@@ -264,6 +308,8 @@ impl Desktop {
             editor,
             editor_path: None,
             editor_value: String::new(),
+            editor_revision: 0,
+            pending_editor: None,
             account_code,
             dictation: None,
             tick: None,
@@ -282,6 +328,12 @@ impl Desktop {
         self.remote = remote;
         self.pending_draft = None;
         self.snapshot = Arc::default();
+        self.conversation = Arc::new(conversation(&self.snapshot));
+        self.timeline.reset(1);
+        self.editor_path = None;
+        self.editor_value.clear();
+        self.pending_editor = None;
+        self.renaming = false;
         self.session.take();
         self.terminal = None;
         self.browser = None;
@@ -306,8 +358,11 @@ impl Desktop {
                 let preferences =
                     std::fs::read(path.with_file_name("orchestration-model-preferences.json"))
                         .unwrap_or_default();
-                let bytes = agent_core::persistence::apply_model_preferences(&bytes, &preferences)?;
-                Ok((path, agent_core::persistence::decode(&bytes)?))
+                let snapshot =
+                    agent_core::persistence::apply_model_preferences(&bytes, &preferences)
+                        .and_then(|bytes| agent_core::persistence::decode(&bytes))
+                        .unwrap_or_default();
+                Ok((path, snapshot))
             })();
             match state {
                 Err(error) => {
@@ -351,7 +406,7 @@ impl Desktop {
             }),
         ));
     }
-    fn perform(&self, intent: Intent, revision: Option<u64>) {
+    fn perform(&self, intent: Intent, revision: Option<BufferRevision>) {
         if let Some(session) = &self.session {
             let receipt = session.store.dispatch(intent);
             let updates = self.updates.clone();
@@ -368,9 +423,14 @@ impl Desktop {
         }
     }
     fn receive(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
-        let before = conversation(&self.snapshot);
-        let follow =
-            self.timeline_scroll.max_offset().y + self.timeline_scroll.offset().y <= px(80.);
+        if matches!(update, Update::Tick) {
+            cx.notify();
+            return;
+        }
+        let before = self.conversation.clone();
+        let follow = self.timeline.max_offset_for_scrollbar().y
+            + self.timeline.scroll_px_offset_for_scrollbar().y
+            <= px(80.);
         match update {
             Update::Connected(Ok((mut session, path))) => {
                 let (tx, rx) = async_channel::bounded(4);
@@ -394,17 +454,28 @@ impl Desktop {
                 self.error = error;
             }
             Update::Snapshot(snapshot) => {
+                if !snapshot_is_newer(self.snapshot.revision, snapshot.revision) {
+                    return;
+                }
                 self.snapshot = snapshot;
                 if let Some(session) = &self.session {
                     session.save(self.snapshot.clone());
                 }
             }
             Update::Completed(revision, result) => {
-                if revision.is_some() && revision == self.pending_draft {
+                if matches!(revision, Some(BufferRevision::Editor(r)) if self.pending_editor == Some(r))
+                {
+                    self.pending_editor = None;
+                }
+                if matches!(revision, Some(BufferRevision::Draft(r)) if self.pending_draft == Some(r))
+                {
                     self.pending_draft = None;
                 }
                 if let Some(session) = &self.session {
-                    self.snapshot = session.store.snapshot();
+                    let snapshot = session.store.snapshot();
+                    if snapshot_is_newer(self.snapshot.revision, snapshot.revision) {
+                        self.snapshot = snapshot;
+                    }
                     session.save(self.snapshot.clone());
                 }
                 if let Err(error) = result {
@@ -420,46 +491,88 @@ impl Desktop {
             Update::Folder(None) => {}
             Update::PersistenceError(error) => self.error = error,
             Update::Recording(id, event) => self.recording_update(id, event),
+            Update::Transcribed(id, result) => {
+                if self.dictation.as_ref().is_some_and(|d| d.id == id) {
+                    self.dictation = None;
+                }
+                if let Some(session) = &self.session {
+                    self.snapshot = session.store.snapshot();
+                }
+                if let Err(error) = result {
+                    self.error = error;
+                }
+            }
             Update::Tick => {}
+        }
+        let key = self.snapshot.draft_key();
+        if key != self.composer_key {
+            self.pending_draft = None;
+            self.composer_key = key;
         }
         if self.pending_draft.is_none() {
             let text = self.snapshot.current_draft().text;
             if self.composer.read(cx).value().as_ref() != text {
+                self.composer_base = text.clone();
                 self.composer
                     .update(cx, |input, cx| input.set_value(text, window, cx));
             }
         }
         let conversation = conversation(&self.snapshot);
-        let rows = conversation
-            .rows
-            .iter()
-            .map(|row| row.id.clone())
-            .collect::<BTreeSet<_>>();
-        self.anchors.retain(|id, _| rows.contains(id));
-        for id in rows {
-            self.anchors
-                .entry(id)
-                .or_insert_with(|| ScrollAnchor::for_handle(self.timeline_scroll.clone()));
-        }
-        if before.thread_id == conversation.thread_id
-            && before.rows.first().map(|r| &r.id) != conversation.rows.first().map(|r| &r.id)
-            && before.rows.last().map(|r| &r.id) == conversation.rows.last().map(|r| &r.id)
-            && conversation.rows.len() > before.rows.len()
-        {
-            if let Some(anchor) = before
-                .rows
-                .first()
-                .and_then(|row| self.anchors.get(&row.id))
-            {
-                anchor.scroll_to(window, cx);
+        let switched = before.thread_id != conversation.thread_id || before.cwd != conversation.cwd;
+        if switched {
+            self.renaming = false;
+            self.pending_draft = None;
+            self.pending_editor = None;
+            self.editor_path = None;
+            self.editor_value.clear();
+            self.terminal = None;
+            self.browser = None;
+            if !conversation.cwd.is_empty() {
+                match self.panel {
+                    Some(Panel::Diff) => self.perform(
+                        Intent::ReviewWorkspace {
+                            cwd: conversation.cwd.clone(),
+                        },
+                        None,
+                    ),
+                    Some(Panel::Files) => self.perform(
+                        Intent::ListFiles {
+                            path: conversation.cwd.clone(),
+                        },
+                        None,
+                    ),
+                    Some(Panel::Terminal) => {
+                        if let Some(session) = &self.session {
+                            self.terminal = Some(crate::terminal::Terminal::new(
+                                session.store.clone(),
+                                conversation.cwd.clone(),
+                                window,
+                                cx,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
             }
-        } else if before.thread_id != conversation.thread_id
-            || (follow && before.rows.last() != conversation.rows.last())
-        {
-            self.timeline_scroll.scroll_to_bottom();
+            self.timeline.reset(conversation.rows.len() + 1);
+        } else {
+            let (range, count) = timeline_splice(&before.rows, &conversation.rows);
+            self.timeline.splice(range, count);
+            for (index, (old, new)) in before.rows.iter().zip(&conversation.rows).enumerate() {
+                if old != new {
+                    self.timeline.remeasure_items(index + 1..index + 2);
+                }
+            }
         }
+        if switched || (follow && before.rows.last() != conversation.rows.last()) {
+            self.timeline.scroll_to_end();
+        }
+        self.conversation = Arc::new(conversation);
+        self.composer.update(cx, |input, cx| {
+            input.set_placeholder(self.conversation.composer.placeholder.clone(), window, cx)
+        });
         let mut live = BTreeSet::new();
-        for row in &conversation.rows {
+        for row in &self.conversation.requests {
             if let Some(request) = &row.request_id {
                 for question in &row.questions {
                     let key = (request.clone(), question.id.clone());
@@ -482,7 +595,9 @@ impl Desktop {
                 .get(&file.path)
                 .map(|draft| &draft.text)
                 .unwrap_or(&file.text);
-            if self.editor_path.as_ref() != Some(&file.path) || self.editor_value != *text {
+            if self.editor_path.as_ref() != Some(&file.path)
+                || (self.pending_editor.is_none() && self.editor_value != *text)
+            {
                 self.editor_path = Some(file.path.clone());
                 self.editor_value = text.clone();
                 self.editor
@@ -542,12 +657,14 @@ impl Desktop {
         } else {
             match panel {
                 Panel::Terminal if self.terminal.is_none() => {
-                    self.terminal = Some(crate::terminal::Terminal::new(
-                        self.remote.as_ref().map_or("", |r| &r.ticket),
-                        self.snapshot.cwd(),
-                        window,
-                        cx,
-                    ));
+                    if let Some(session) = &self.session {
+                        self.terminal = Some(crate::terminal::Terminal::new(
+                            session.store.clone(),
+                            self.snapshot.cwd(),
+                            window,
+                            cx,
+                        ));
+                    }
                 }
                 Panel::Browser if self.browser.is_none() => {
                     match crate::browser::Browser::new(
@@ -579,24 +696,67 @@ impl Desktop {
         }
         if let Some(browser) = &self.browser {
             browser.update(cx, |browser, cx| {
-                browser.set_visible(self.panel == Some(Panel::Browser), cx)
+                browser.set_visible(!self.settings && self.panel == Some(Panel::Browser), cx)
             });
         }
         cx.notify();
+    }
+    fn sync_browser_visibility(&mut self, cx: &mut Context<Self>) {
+        if let Some(browser) = &self.browser {
+            browser.update(cx, |browser, cx| {
+                browser.set_visible(!self.settings && self.panel == Some(Panel::Browser), cx)
+            });
+        }
+    }
+    fn confirm_thread_action(
+        &self,
+        id: String,
+        action: ThreadAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(action, ThreadAction::Delete) {
+            let answer = window.prompt(
+                gpui::PromptLevel::Warning,
+                "Delete this thread?",
+                Some("This permanently deletes the conversation."),
+                &["Cancel", "Delete"],
+                cx,
+            );
+            cx.spawn(async move |view, cx| {
+                if let Ok(1) = answer.await {
+                    let _ = view.update(cx, |view, _| {
+                        view.perform(
+                            Intent::Thread {
+                                thread_id: id,
+                                action: ThreadAction::Delete,
+                            },
+                            None,
+                        )
+                    });
+                }
+            })
+            .detach();
+        } else {
+            self.perform(
+                Intent::Thread {
+                    thread_id: id,
+                    action,
+                },
+                None,
+            );
+        }
     }
     fn answers(&self, request: &str, cx: &App) -> Vec<QuestionAnswer> {
         self.questions
             .iter()
             .filter(|((id, _), _)| id == request)
             .map(|((_, id), input)| {
-                let mut values = input.selected.iter().cloned().collect::<Vec<_>>();
-                let custom = input.custom.read(cx).value().to_string();
-                if !custom.trim().is_empty() {
-                    if !input.multi {
-                        values.clear();
-                    }
-                    values.push(custom);
-                }
+                let values = question_answer_values(
+                    input.selected.iter().cloned().collect(),
+                    input.custom.read(cx).value().to_string(),
+                    input.multi,
+                );
                 QuestionAnswer {
                     question_id: id.clone(),
                     values,
@@ -608,5 +768,74 @@ impl Desktop {
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.view(window, cx)
+    }
+}
+
+fn timeline_splice(old: &[TimelineRow], new: &[TimelineRow]) -> (std::ops::Range<usize>, usize) {
+    let prefix = old
+        .iter()
+        .zip(new)
+        .take_while(|(a, b)| a.id == b.id)
+        .count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(new[prefix..].iter().rev())
+        .take_while(|(a, b)| a.id == b.id)
+        .count();
+    (
+        prefix + 1..old.len() - suffix + 1,
+        new.len() - prefix - suffix,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ListAlignment, ListOffset, ListState, RowKind, TimelineRow, px, timeline_splice};
+    fn row(id: &str) -> TimelineRow {
+        TimelineRow {
+            id: id.into(),
+            kind: RowKind::Assistant,
+            text: id.into(),
+            title: String::new(),
+            status: String::new(),
+            streaming: false,
+            collapsible: false,
+            work: vec![],
+            request_id: None,
+            choices: vec![],
+            questions: vec![],
+            response_mode_message: false,
+            actionable: false,
+            run_id: None,
+            rollback_checkpoint_id: None,
+            fork_source_thread_id: None,
+            duration_ms: None,
+        }
+    }
+    #[test]
+    fn prepending_history_preserves_the_visible_item_anchor() {
+        let old = vec![row("a"), row("b")];
+        let new = vec![row("history"), row("older"), row("a"), row("b")];
+        let list = ListState::new(old.len() + 1, ListAlignment::Bottom, px(600.));
+        list.scroll_to(ListOffset {
+            item_ix: 2,
+            offset_in_item: px(17.),
+        });
+        let (range, count) = timeline_splice(&old, &new);
+        assert_eq!(range, 1..1);
+        assert_eq!(count, 2);
+        list.splice(range, count);
+        assert_eq!(list.logical_scroll_top().item_ix, 4);
+        assert_eq!(list.logical_scroll_top().offset_in_item, px(17.));
+    }
+    #[test]
+    fn replacing_middle_rows_preserves_the_suffix_and_streaming_reuses_identity() {
+        let old = vec![row("a"), row("b"), row("c")];
+        let new = vec![row("a"), row("replacement"), row("extra"), row("c")];
+        assert_eq!(timeline_splice(&old, &new), (2..3, 2));
+        let mut streamed = old.clone();
+        streamed[2].text.push_str(" more output");
+        assert_eq!(timeline_splice(&old, &streamed), (4..4, 0));
     }
 }

@@ -12,16 +12,17 @@ pub(super) fn section_heading(title: &'static str, description: &'static str) ->
 }
 impl Desktop {
     pub(super) fn view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let conversation = conversation(&self.snapshot);
+        let conversation = self.conversation.clone();
         h_flex()
             .id("t3-conversation")
             .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 if !view.settings
                     && view.composer.read(cx).focus_handle(cx).is_focused(window)
                     && event.keystroke.key == "enter"
+                    && event.keystroke.modifiers.alt
                     && !event.keystroke.modifiers.shift
                 {
-                    let composer = agent_core::presentation::conversation(&view.snapshot).composer;
+                    let composer = view.conversation.composer.clone();
                     let behavior = if event.keystroke.modifiers.alt && composer.can_steer {
                         SendBehavior::Steer
                     } else {
@@ -109,6 +110,11 @@ impl Desktop {
             }
         } else {
             for shelf in shelves(&self.snapshot, &now(), self.settled_limit) {
+                if matches!(shelf.kind, ShelfKind::Working | ShelfKind::Snoozed)
+                    && shelf.rows.is_empty()
+                {
+                    continue;
+                }
                 let kind = shelf.kind;
                 let collapsed = self.collapsed_shelves.contains(&kind);
                 list = list.child(
@@ -160,6 +166,7 @@ impl Desktop {
                 h_flex()
                     .h(px(palette().header_height))
                     .px_3()
+                    .when(cfg!(target_os = "macos"), |header| header.pl(px(90.)))
                     .gap_2()
                     .child(div().flex_1().font_semibold().child("Bex"))
                     .child(
@@ -169,6 +176,7 @@ impl Desktop {
                             .ghost()
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.settings = !view.settings;
+                                view.sync_browser_visibility(cx);
                                 view.hosts.update(cx, |hosts, cx| {
                                     hosts.refresh();
                                     cx.notify();
@@ -297,6 +305,7 @@ impl Desktop {
         let drop_id = id.clone();
         let owner = cx.entity().downgrade();
         let pinned = row.pinned;
+        let settled = row.settled;
         let archived = row.archived;
         let drag = PinnedDrag {
             id: id.clone(),
@@ -367,7 +376,7 @@ impl Desktop {
                         )
                         .child(
                             Icon::default()
-                                .path(if row.provider == "claude" {
+                                .path(if row.provider_kind == ProviderKind::Claude {
                                     "bex/claude.svg"
                                 } else {
                                     "bex/openai.svg"
@@ -418,7 +427,14 @@ impl Desktop {
                             ThreadAction::Pin
                         },
                     ),
-                    ("Settle", ThreadAction::Settle),
+                    (
+                        if settled { "Mark active" } else { "Settle" },
+                        if settled {
+                            ThreadAction::Unsettle
+                        } else {
+                            ThreadAction::Settle
+                        },
+                    ),
                     ("Mark unread", ThreadAction::MarkUnread),
                     (
                         if archived { "Unarchive" } else { "Archive" },
@@ -504,15 +520,16 @@ impl Desktop {
             );
         } else {
             header = header.child(
-                v_flex()
+                h_flex()
                     .flex_1()
                     .min_w_0()
+                    .gap_2()
                     .child(
                         div()
-                            .text_size(px(11.))
                             .text_color(color("textMuted"))
                             .child(chat.project.clone()),
                     )
+                    .child(div().text_color(color("textMuted")).child("/"))
                     .child(
                         div()
                             .font_semibold()
@@ -580,19 +597,19 @@ impl Desktop {
                     for (label, action) in actions.drain(..) {
                         let owner = owner.clone();
                         let id = selected.clone();
-                        menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _, cx| {
-                            let _ = owner.update(cx, |view, _| {
-                                if let Some(id) = &id {
-                                    view.perform(
-                                        Intent::Thread {
-                                            thread_id: id.clone(),
-                                            action: action.clone(),
-                                        },
-                                        None,
-                                    );
-                                }
-                            });
-                        }));
+                        menu =
+                            menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                                let _ = owner.update(cx, |view, cx| {
+                                    if let Some(id) = &id {
+                                        view.confirm_thread_action(
+                                            id.clone(),
+                                            action.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                });
+                            }));
                     }
                     let owner = owner.clone();
                     menu.item(PopupMenuItem::new("Rename").on_click(move |_, window, cx| {
@@ -626,62 +643,66 @@ impl Desktop {
         header.into_any_element()
     }
     fn timeline(&self, conversation: &ConversationView, cx: &Context<Self>) -> AnyElement {
-        let mut content = v_flex()
-            .w_full()
-            .max_w(px(palette().chat_max_width))
-            .mx_auto()
-            .px_5()
-            .py_6()
-            .gap_6();
-        if conversation.has_more_history {
-            content = content.child(self.action(
-                "load-history",
-                "Load earlier messages",
-                Intent::LoadHistory,
-                cx,
-            ));
+        if conversation.thread_id.is_none() && conversation.rows.is_empty() {
+            return v_flex()
+                .flex_1()
+                .justify_center()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(24.))
+                        .child("What would you like to build?"),
+                )
+                .child(
+                    div()
+                        .text_color(color("textMuted"))
+                        .child("Choose a project and send a message."),
+                )
+                .into_any_element();
         }
-        if conversation.loading {
-            content = content.child(
-                div()
-                    .text_color(color("textMuted"))
-                    .child("Loading conversation…"),
-            );
-        }
-        if conversation.rows.is_empty() && !conversation.loading {
-            content = content.child(
-                v_flex()
-                    .py_12()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_size(px(24.))
-                            .child("What would you like to build?"),
-                    )
-                    .child(
-                        div()
-                            .text_color(color("textMuted"))
-                            .child("Choose a project and send a message."),
-                    ),
-            );
-        }
-        for row in &conversation.rows {
-            content = content.child(self.timeline_row(row, cx));
-        }
-        div()
-            .id("conversation-timeline")
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .overflow_y_scroll()
-            .track_scroll(&self.timeline_scroll)
-            .child(content)
-            .into_any_element()
+        let owner = cx.entity().downgrade();
+        list(self.timeline.clone(), move |index, _, cx| {
+            owner
+                .update(cx, |view, cx| {
+                    let chat = &view.conversation;
+                    let content = if index == 0 {
+                        v_flex()
+                            .when(chat.has_more_history, |v| {
+                                v.child(view.action(
+                                    "load-history",
+                                    "Load earlier messages",
+                                    Intent::LoadHistory,
+                                    cx,
+                                ))
+                            })
+                            .when(chat.loading, |v| v.child("Loading conversation…"))
+                            .into_any_element()
+                    } else {
+                        chat.rows
+                            .get(index - 1)
+                            .map(|row| view.timeline_row(row, cx))
+                            .unwrap_or_else(|| div().into_any_element())
+                    };
+                    div()
+                        .w_full()
+                        .max_w(px(palette().chat_max_width))
+                        .mx_auto()
+                        .px_5()
+                        .py_3()
+                        .child(content)
+                        .into_any_element()
+                })
+                .unwrap_or_else(|_| div().into_any_element())
+        })
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .into_any_element()
     }
     fn timeline_row(&self, row: &TimelineRow, cx: &Context<Self>) -> AnyElement {
         let mut body = v_flex()
             .id(SharedString::from(format!("timeline-{}", row.id)))
-            .anchor_scroll(self.anchors.get(&row.id).cloned())
             .w_full()
             .gap_2();
         match row.kind {
@@ -865,7 +886,12 @@ impl Desktop {
                                 let value = option.value.clone();
                                 let key = key.clone();
                                 let multi = question.multi_select;
-                                let selected = input.selected.contains(&value);
+                                let selected = question_option_selected(
+                                    input.selected.iter().cloned().collect(),
+                                    input.custom.read(cx).value().to_string(),
+                                    multi,
+                                    value.clone(),
+                                );
                                 body = body.child(
                                     Button::new(SharedString::from(format!(
                                         "{}-{}-{}",
@@ -1113,6 +1139,9 @@ impl Desktop {
                     .child(notice.clone()),
             );
         }
+        for request in &conversation.requests {
+            content = content.child(self.timeline_row(request, cx));
+        }
         let mut prompt = v_flex()
             .border_1()
             .border_color(color("input"))
@@ -1123,7 +1152,7 @@ impl Desktop {
             .child(
                 Textarea::new(&self.composer)
                     .bordered(false)
-                    .disabled(conversation.archived)
+                    .disabled(!composer.can_edit)
                     .text_size(px(14.)),
             )
             .child(
@@ -1282,6 +1311,7 @@ impl Desktop {
     }
     fn model_picker(&self, cx: &Context<Self>) -> AnyElement {
         let draft = self.snapshot.current_draft();
+        let choices = agent_core::presentation::model_choices(&self.snapshot);
         let models = self.snapshot.models.clone();
         let owner = cx.entity().downgrade();
         Button::new("model-picker")
@@ -1294,15 +1324,11 @@ impl Desktop {
             .ghost()
             .dropdown_caret(true)
             .dropdown_menu(move |mut menu, _, _| {
-                for model in &models {
+                for choice in &choices {
                     let owner = owner.clone();
-                    let model = model.clone();
-                    let checked = draft.model == model.id
-                        && draft.instance_id
-                            == match model.model.provider {
-                                ProviderKind::Codex => "codex",
-                                ProviderKind::Claude => "claude",
-                            };
+                    let model = choice.model.clone();
+                    let instance_id = choice.instance_id.clone();
+                    let checked = choice.selected;
                     menu = menu.item(
                         PopupMenuItem::new(model.display_name.clone())
                             .checked(checked)
@@ -1310,11 +1336,7 @@ impl Desktop {
                                 let _ = owner.update(cx, |view, _| {
                                     view.perform(
                                         Intent::SetModel {
-                                            instance_id: match model.model.provider {
-                                                ProviderKind::Codex => "codex",
-                                                ProviderKind::Claude => "claude",
-                                            }
-                                            .into(),
+                                            instance_id: instance_id.clone(),
                                             model: model.id.clone(),
                                             effort: Some(model.default_reasoning_effort.clone()),
                                             service_tier: model.default_service_tier.clone(),
@@ -1383,25 +1405,31 @@ impl Desktop {
         let current = self.snapshot.current_draft().runtime_mode;
         let owner = cx.entity().downgrade();
         Button::new("runtime-mode")
-            .label(current.clone())
+            .label(
+                runtime_mode_choices()
+                    .into_iter()
+                    .find(|m| m.id == current)
+                    .map_or(current.clone(), |m| m.label),
+            )
             .small()
             .ghost()
             .dropdown_caret(true)
             .dropdown_menu(move |mut menu, _, _| {
-                for mode in [
-                    "approval-required",
-                    "auto-accept-edits",
-                    "auto",
-                    "full-access",
-                ] {
+                for choice in runtime_mode_choices() {
+                    let mode = choice.id;
                     let owner = owner.clone();
-                    menu = menu.item(PopupMenuItem::new(mode).checked(current == mode).on_click(
-                        move |_, _, cx| {
-                            let _ = owner.update(cx, |view, _| {
-                                view.perform(Intent::SetRuntimeMode { mode: mode.into() }, None)
-                            });
-                        },
-                    ));
+                    menu = menu.item(
+                        PopupMenuItem::new(choice.label)
+                            .checked(current == mode)
+                            .on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |view, _| {
+                                    view.perform(
+                                        Intent::SetRuntimeMode { mode: mode.clone() },
+                                        None,
+                                    )
+                                });
+                            }),
+                    );
                 }
                 menu
             })
@@ -1417,13 +1445,18 @@ impl Desktop {
             .dropdown_menu(move |mut menu, _, _| {
                 for mode in ["default", "plan"] {
                     let owner = owner.clone();
-                    menu = menu.item(PopupMenuItem::new(mode).checked(current == mode).on_click(
-                        move |_, _, cx| {
-                            let _ = owner.update(cx, |view, _| {
-                                view.perform(Intent::SetInteractionMode { mode: mode.into() }, None)
-                            });
-                        },
-                    ));
+                    menu = menu.item(
+                        PopupMenuItem::new(if mode == "plan" { "Plan" } else { "Default" })
+                            .checked(current == mode)
+                            .on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |view, _| {
+                                    view.perform(
+                                        Intent::SetInteractionMode { mode: mode.into() },
+                                        None,
+                                    )
+                                });
+                            }),
+                    );
                 }
                 menu
             })

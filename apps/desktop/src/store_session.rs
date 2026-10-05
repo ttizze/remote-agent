@@ -73,7 +73,7 @@ impl StoreSession {
     ) {
         let (send, mut receive) = watch::channel(self.store.snapshot());
         let mut preferences =
-            agent_core::persistence::encode_model_preferences(&self.store.snapshot())
+            std::fs::read(path.with_file_name("orchestration-model-preferences.json"))
                 .unwrap_or_default();
         self.persistence = Some(send);
         self.persistence_task = Some(self.runtime.closing.spawn_on(
@@ -144,5 +144,163 @@ impl StoreSession {
 impl Drop for StoreSession {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_core::state::Intent;
+    use std::time::Duration;
+
+    enum Update {
+        Connected(Result<StoreSession, String>),
+        Snapshot,
+        Error,
+    }
+    fn runtime() -> Runtime {
+        Runtime {
+            handle: tokio::runtime::Handle::current(),
+            connections: Arc::default(),
+            closing: tokio_util::task::TaskTracker::new(),
+            logging_error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn closing_flushes_the_latest_draft_and_closes_the_store() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("snapshot.json");
+            let runtime = runtime();
+            let store = Arc::new(Store::offline(Snapshot::default()));
+            let (updates, incoming) = async_channel::unbounded();
+            let publish = tokio::spawn(StoreSession::publish(
+                Ok(store.clone()),
+                runtime.clone(),
+                updates.clone(),
+                Update::Connected,
+                |_| Update::Snapshot,
+            ));
+            let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
+                panic!("missing session")
+            };
+            session.persist(path.clone(), updates, |_| Update::Error);
+            store
+                .dispatch(Intent::SetRuntimeMode {
+                    mode: "auto".into(),
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            let mut draft = store.snapshot().current_draft();
+            draft.text = "last edit before close".into();
+            store
+                .dispatch(Intent::EditDraft {
+                    draft,
+                    base_text: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            // No UI snapshot/save notification is needed for the final flush.
+            drop(session);
+            runtime.closing.close();
+            runtime.closing.wait().await;
+            publish.await.unwrap();
+            let restored: Snapshot =
+                agent_core::persistence::decode(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(restored.current_draft().text, "last edit before close");
+            assert!(store.dispatch(Intent::LeaveThread).await.unwrap().is_err());
+            let preferences = std::fs::read(
+                directory
+                    .path()
+                    .join("orchestration-model-preferences.json"),
+            )
+            .unwrap();
+            let other = agent_core::persistence::decode(
+                &agent_core::persistence::apply_model_preferences(&[], &preferences).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(other.default_draft, restored.default_draft);
+            assert!(other.drafts.is_empty());
+        })
+        .await
+        .expect("session close stalled");
+    }
+
+    #[tokio::test]
+    async fn persistence_failure_is_reported_and_a_later_save_recovers() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("snapshot.json");
+            std::fs::create_dir(&path).unwrap();
+            let runtime = runtime();
+            let store = Arc::new(Store::offline(Snapshot::default()));
+            let (updates, incoming) = async_channel::unbounded();
+            let publish = tokio::spawn(StoreSession::publish(
+                Ok(store.clone()),
+                runtime.clone(),
+                updates.clone(),
+                Update::Connected,
+                |_| Update::Snapshot,
+            ));
+            let Update::Connected(Ok(mut session)) = incoming.recv().await.unwrap() else {
+                panic!("missing session")
+            };
+            session.persist(path.clone(), updates, |_| Update::Error);
+            session.save(store.snapshot());
+            while !matches!(incoming.recv().await.unwrap(), Update::Error) {}
+            std::fs::remove_dir(&path).unwrap();
+            let mut draft = store.snapshot().current_draft();
+            draft.text = "recovered".into();
+            store
+                .dispatch(Intent::EditDraft {
+                    draft,
+                    base_text: None,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            session.save(store.snapshot());
+            drop(session);
+            runtime.closing.close();
+            runtime.closing.wait().await;
+            publish.await.unwrap();
+            let restored: Snapshot =
+                agent_core::persistence::decode(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(restored.current_draft().text, "recovered");
+        })
+        .await
+        .expect("persistence recovery stalled");
+    }
+
+    #[tokio::test]
+    async fn failed_connection_is_delivered_and_undelivered_session_closes_its_store() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let runtime = runtime();
+            let store = Arc::new(Store::offline(Snapshot::default()));
+            let (updates, incoming) = async_channel::unbounded();
+            StoreSession::publish(
+                Err(anyhow::anyhow!("connection failed").context("cannot open session")), runtime.clone(), updates.clone(),
+                Update::Connected, |_| Update::Snapshot,
+            ).await;
+            assert!(matches!(incoming.recv().await.unwrap(), Update::Connected(Err(error)) if error == "cannot open session: connection failed"));
+            assert!(incoming.try_recv().is_err());
+            drop(incoming);
+            StoreSession::publish(
+                Ok(store.clone()),
+                runtime.clone(),
+                updates,
+                Update::Connected,
+                |_| Update::Snapshot,
+            )
+            .await;
+            runtime.closing.close();
+            runtime.closing.wait().await;
+            assert!(store.dispatch(Intent::LeaveThread).await.unwrap().is_err());
+        })
+        .await
+        .expect("undelivered session remained open");
     }
 }

@@ -1,6 +1,6 @@
 use super::*;
 pub(super) struct Dictation {
-    id: uuid::Uuid,
+    pub(super) id: uuid::Uuid,
     key: String,
     pub(super) label: &'static str,
     pub(super) recording: bool,
@@ -105,10 +105,11 @@ impl Desktop {
                             .map_err(|e| e.to_string())
                             .and_then(|result| result.map_err(|e| e.to_string()));
                         drop(preparation);
-                        let _ = updates.send((epoch, Update::Completed(None, result))).await;
+                        let _ = updates.send((epoch, Update::Transcribed(id, result))).await;
                     });
                 }
-                self.dictation = None;
+                state.control = None;
+                state.label = "Transcribing…";
             }
         }
     }
