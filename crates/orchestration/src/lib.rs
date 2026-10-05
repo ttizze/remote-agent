@@ -2,6 +2,7 @@
 //! transactional persistence and an independently owned provider effect worker.
 #[cfg(feature = "adapter")]
 pub mod adapter;
+pub mod attachments;
 pub mod checkpoint;
 pub mod contracts;
 pub mod decider;

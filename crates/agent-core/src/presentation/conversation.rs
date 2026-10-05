@@ -156,6 +156,7 @@ pub fn question_error(
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct TimelineRow {
+    pub attachments: Vec<crate::state::DraftAttachment>,
     pub id: String,
     pub kind: RowKind,
     pub text: String,
@@ -843,6 +844,7 @@ pub fn timeline(projection: &ThreadProjection) -> Vec<TimelineRow> {
                 )
         });
         let mut row = TimelineRow {
+            attachments: vec![],
             id: format!("{}:{}", projected.source_thread_id, item.id),
             kind: RowKind::Work,
             text: String::new(),
@@ -902,8 +904,15 @@ pub fn timeline(projection: &ThreadProjection) -> Vec<TimelineRow> {
         };
         match &item.body {
             TurnItemBody::UserMessage {
-                text, input_intent, ..
+                text,
+                input_intent,
+                attachments,
+                ..
             } => {
+                row.attachments = attachments
+                    .iter()
+                    .map(crate::state::DraftAttachment::from_remote)
+                    .collect();
                 row.kind = RowKind::User;
                 row.text = text.clone();
                 row.title = if *input_intent == InputIntent::Steer {
@@ -1161,7 +1170,8 @@ pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
             .map(ToString::to_string)
             .collect(),
         draft: draft.clone(),
-        plan_follow_up: snapshot.connected
+        plan_follow_up: draft.attachment_refs().is_ok()
+            && snapshot.connected
             && !snapshot.draft_pending()
             && !archived
             && !live_request
@@ -1205,7 +1215,8 @@ pub fn conversation(snapshot: &Snapshot, now: &Timestamp) -> ConversationView {
             && !archived
             && thread.is_none_or(|t| t.rollback_request_id.is_none())
             && !live_request
-            && !draft.text.trim().is_empty()
+            && (!draft.text.trim().is_empty() || !draft.attachments.is_empty())
+            && draft.attachment_refs().is_ok()
             && !draft.model.is_empty(),
         can_stop: projection
             .is_some_and(|p| decider::interruptible_run(&p.runs, &p.subagents).is_some())

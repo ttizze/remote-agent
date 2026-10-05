@@ -6,6 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A855AA55AA55AA55AA550001 /* ConversationAttachments.swift in Sources */ = {isa = PBXBuildFile; fileRef = A855AA55AA55AA55AA550002 /* ConversationAttachments.swift */; };
         B55D00000000000000000001 /* DraftRevision.swift in Sources */ = {isa = PBXBuildFile; fileRef = B55D00000000000000000002; };
 		C0DE00000000000000000401 /* AgentSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE00000000000000000402; };
         D36E8C890D10474EB83C8D37 /* WorkspaceScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */; };
@@ -36,6 +37,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A855AA55AA55AA55AA550002 /* ConversationAttachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationAttachments.swift; sourceTree = "<group>"; };
         B55D00000000000000000002 /* DraftRevision.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftRevision.swift; sourceTree = "<group>"; };
 		C0DE00000000000000000402 /* AgentSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentSettings.swift; sourceTree = "<group>"; };
         F1E85101D97E4E84A7B33C96 /* WorkspaceScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceScreen.swift; sourceTree = "<group>"; };
@@ -94,6 +96,7 @@
 				A10000000000000000000013 /* QRCodeCaptureViewController.swift */,
 				A10000000000000000000017 /* SwiftUIRoot.swift */,
 				8550A6EE10FA45896134CE4D /* ConversationComposer.swift */,
+				A855AA55AA55AA55AA550002 /* ConversationAttachments.swift */,
 				2036041A039EEBAA78D55844 /* AppPresentationData.swift */,
 				1DBDDA3779489C57B929936E /* AppViewModel.swift */,
 				C0DE00000000000000000003 /* AppViewActions.swift */,
@@ -200,6 +203,7 @@
 				A10000000000000000000003 /* QRCodeCaptureViewController.swift in Sources */,
 				A10000000000000000000006 /* SwiftUIRoot.swift in Sources */,
 				D9577A51AE685A04BA449953 /* ConversationComposer.swift in Sources */,
+				A855AA55AA55AA55AA550001 /* ConversationAttachments.swift in Sources */,
 				B5EDE65C803E4BD5CE028DE5 /* AppPresentationData.swift in Sources */,
 				FD93084AF1873DEF927C9EDC /* AppViewModel.swift in Sources */,
 				C0DE00000000000000000103 /* AppViewActions.swift in Sources */,

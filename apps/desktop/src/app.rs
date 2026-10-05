@@ -1,4 +1,5 @@
 //! GPUI rendering of the shared T3 conversation presentation.
+mod attachments;
 mod dictation;
 mod hosts;
 mod view;
@@ -40,6 +41,8 @@ enum BufferRevision {
     Editor(u64),
 }
 enum Update {
+    AttachmentsPicked(String, Result<Vec<PathBuf>, String>),
+    AttachmentReady(String, Result<PathBuf, String>),
     Connected(Result<(StoreSession, PathBuf), String>),
     Snapshot(Arc<Snapshot>),
     Presentation {
@@ -59,6 +62,8 @@ struct QuestionInput {
     multi: bool,
 }
 pub(crate) struct Desktop {
+    attachment_cache: BTreeMap<String, Option<PathBuf>>,
+    attachment_directory: Arc<tempfile::TempDir>,
     session: Option<StoreSession>,
     snapshot: Arc<Snapshot>,
     conversation: Arc<ConversationView>,
@@ -286,6 +291,10 @@ impl Desktop {
             }),
         ];
         let mut view = Self {
+            attachment_cache: Default::default(),
+            attachment_directory: Arc::new(
+                tempfile::tempdir().expect("attachment cache directory"),
+            ),
             session: None,
             snapshot: Arc::default(),
             conversation: Arc::new(conversation(&Snapshot::default(), &now())),
@@ -335,6 +344,7 @@ impl Desktop {
         view
     }
     fn connect(&mut self, remote: Option<RemoteHost>) {
+        self.attachment_cache.clear();
         self.cancel_recording();
         self.epoch += 1;
         self.presentation_running = false;
@@ -441,6 +451,37 @@ impl Desktop {
         }
         let mut prepared = None;
         match update {
+            Update::AttachmentsPicked(key, paths) => {
+                let paths = match paths {
+                    Ok(paths) => paths,
+                    Err(error) => {
+                        self.error = error;
+                        return;
+                    }
+                };
+                for path in paths {
+                    if let Some(name) = path.file_name().and_then(|s| s.to_str()).map(str::to_owned)
+                    {
+                        self.perform(
+                            Intent::AttachFile {
+                                path: path.to_string_lossy().into_owned(),
+                                mime_type: agent_core::commands::attachment_mime(&name).into(),
+                                name,
+                                draft_key: key.clone(),
+                            },
+                            None,
+                        );
+                    }
+                }
+            }
+            Update::AttachmentReady(id, result) => {
+                match result {
+                    Ok(path) => {
+                        self.attachment_cache.insert(id, Some(path));
+                    }
+                    Err(error) => self.error = error,
+                };
+            }
             Update::Connected(Ok((mut session, path))) => {
                 let (tx, rx) = async_channel::bounded(4);
                 let updates = self.updates.clone();
@@ -537,6 +578,7 @@ impl Desktop {
             }
         }
         if let Some(view) = prepared {
+            self.preload_attachments(&view);
             self.set_conversation(view, window, cx);
         } else if self.conversation.thread_id.as_deref()
             != self.snapshot.selected_thread.as_ref().map(|id| id.as_str())
@@ -858,6 +900,7 @@ mod tests {
     use super::{ListAlignment, ListOffset, ListState, RowKind, TimelineRow, px, timeline_splice};
     fn row(id: &str) -> TimelineRow {
         TimelineRow {
+            attachments: vec![],
             id: id.into(),
             kind: RowKind::Assistant,
             text: id.into(),

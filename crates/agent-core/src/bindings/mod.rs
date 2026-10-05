@@ -353,6 +353,16 @@ impl AgentStore {
             .await
             .map_err(error)
     }
+    pub async fn download_attachment(
+        &self,
+        id: String,
+        destination: String,
+    ) -> Result<(), AgentError> {
+        self.store
+            .download_attachment(id, destination)
+            .await
+            .map_err(error)
+    }
 
     /// Enqueue synchronously; native task scheduling cannot reorder UI intents.
     pub fn dispatch(&self, intent: Intent) -> Result<Arc<Receipt>, AgentError> {

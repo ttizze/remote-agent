@@ -28,6 +28,7 @@ use crate::SessionId;
 const EDIT_LIMIT: u64 = 1024 * 1024;
 pub(crate) const TRANSFER_LIMIT: u64 = 512 * 1024 * 1024;
 const GRANT_LIFETIME: Duration = Duration::from_secs(120);
+mod attachments;
 
 #[derive(Clone)]
 pub(crate) struct WorkspaceFiles {
@@ -35,6 +36,7 @@ pub(crate) struct WorkspaceFiles {
     // Serialize our compare-and-replace writes across all authenticated peers.
     writes: Arc<Mutex<()>>,
     grants: Arc<Mutex<HashMap<[u8; 32], Grant>>>,
+    pending_sweep: Arc<Mutex<Option<Instant>>>,
 }
 
 struct Grant {
@@ -49,6 +51,7 @@ enum GrantFile {
     Upload {
         directory: PathBuf,
         file_name: String,
+        attachment_mime_type: Option<String>,
     },
     Download(File),
 }
@@ -59,6 +62,7 @@ impl WorkspaceFiles {
             upload_directory: upload_directory.into(),
             writes: Default::default(),
             grants: Default::default(),
+            pending_sweep: Default::default(),
         }
     }
 
@@ -220,12 +224,17 @@ impl WorkspaceFiles {
             Call::Upload(params) => {
                 // New chats have no workspace yet. Keep their attachments in
                 // Host-owned storage; explicit destinations remain absolute.
-                let directory = if params.directory.is_empty() {
+                let directory = if params.attachment_mime_type.is_some() {
+                    self.sweep_pending_attachments()?;
+                    let directory = self.upload_directory.join("pending");
+                    self.prepare_attachment_directory(&directory)?;
+                    directory
+                } else if params.directory.is_empty() {
                     let directory = absolute_path(&self.upload_directory)?;
                     crate::platform::create_state_directory(directory)?;
-                    directory
+                    directory.to_path_buf()
                 } else {
-                    absolute_path(&params.directory)?
+                    absolute_path(&params.directory)?.to_path_buf()
                 };
                 let directory = dunce::canonicalize(directory)?;
                 if !directory.is_dir() {
@@ -241,18 +250,30 @@ impl WorkspaceFiles {
                 {
                     return Err(anyhow!("invalid attachment display name"));
                 }
+                if let Some(mime) = &params.attachment_mime_type {
+                    Self::attachment_metadata(
+                        "pending:validation".into(),
+                        &params.file_name,
+                        mime,
+                        params.size,
+                    )?;
+                }
                 self.grant(Grant {
                     session,
                     expires: Instant::now() + GRANT_LIFETIME,
                     file: GrantFile::Upload {
                         directory,
                         file_name: params.file_name,
+                        attachment_mime_type: params.attachment_mime_type,
                     },
                     size: params.size,
                     digest: params.sha256,
                 })
                 .map(Body::from)
             }
+            Call::AttachmentPath(id) => self
+                .attachment_path(&id)
+                .map(|p| Body::from(p.to_string_lossy().into_owned())),
             Call::Download(params) => {
                 let path = absolute_path(&params.path)?;
                 let mut file = File::open(path)?;
@@ -323,6 +344,7 @@ impl WorkspaceFiles {
                 GrantFile::Upload {
                     directory,
                     file_name,
+                    attachment_mime_type,
                 } => {
                     let output = tempfile::NamedTempFile::new_in(&directory)?;
                     let async_file = output.reopen()?;
@@ -353,11 +375,34 @@ impl WorkspaceFiles {
                         .file_name()
                         .context("temporary upload path missing")?
                         .to_string_lossy();
-                    let path =
-                        directory.join(format!("{}-{}", random.trim_start_matches('.'), file_name));
+                    let token = uuid::Uuid::new_v4().simple().to_string();
+                    let path = if attachment_mime_type.is_some() {
+                        directory.join(&token)
+                    } else {
+                        directory.join(format!("{}-{}", random.trim_start_matches('.'), file_name))
+                    };
                     output.persist_noclobber(&path)?;
+                    let attachment = if let Some(mime) = attachment_mime_type {
+                        match self.save_attachment_upload(
+                            &path,
+                            format!("pending:{token}"),
+                            &file_name,
+                            &mime,
+                            grant.size,
+                            grant.digest,
+                        ) {
+                            Ok(attachment) => Some(attachment),
+                            Err(error) => {
+                                let _ = fs::remove_file(&path);
+                                return Err(error);
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let response =
                         agent_protocol::protocol::encode(agent_protocol::models::UploadedFile {
+                            attachment,
                             path: path.to_str().context("upload path is not UTF-8")?.into(),
                             size: grant.size,
                             sha256: grant.digest,
@@ -624,6 +669,7 @@ mod tests {
                     .dispatch(
                         1,
                         Call::Upload(Upload {
+                            attachment_mime_type: None,
                             directory: directory.path().to_str().unwrap().into(),
                             file_name: "safe.txt".into(),
                             size: 5,
@@ -646,6 +692,7 @@ mod tests {
                     .dispatch(
                         1,
                         Call::Upload(Upload {
+                            attachment_mime_type: None,
                             directory: directory.path().to_str().unwrap().into(),
                             file_name: "../escape".into(),
                             size: 0,
@@ -657,6 +704,7 @@ mod tests {
             for path in ["relative", ".", ".."] {
                 assert!(matches!(
                     files.dispatch(1, Call::Upload(Upload {
+                            attachment_mime_type: None,
                         directory: path.into(),
                         file_name: "safe.txt".into(),
                         size: 0,

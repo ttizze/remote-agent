@@ -34,6 +34,43 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = std::io::Result<S>>,
 {
+    upload_with_purpose(peer, open_stream, source, directory, file_name, None).await
+}
+pub async fn upload_attachment<S, F, Fut>(
+    peer: &Client,
+    open_stream: F,
+    source: &Path,
+    name: &str,
+    mime: &str,
+) -> Result<crate::models::UploadedFile, TransferError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+{
+    upload_with_purpose(
+        peer,
+        open_stream,
+        source,
+        Path::new(""),
+        name,
+        Some(mime.to_ascii_lowercase()),
+    )
+    .await
+}
+async fn upload_with_purpose<S, F, Fut>(
+    peer: &Client,
+    open_stream: F,
+    source: &Path,
+    directory: &Path,
+    file_name: &str,
+    attachment_mime_type: Option<String>,
+) -> Result<crate::models::UploadedFile, TransferError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = std::io::Result<S>>,
+{
     let mut file = tokio::fs::File::open(source).await?;
     if !file.metadata().await?.is_file() {
         return Err(TransferError::Protocol(
@@ -59,6 +96,7 @@ where
     let grant = peer
         .request::<TransferGrant>(&crate::protocol::Call::Upload(
             agent_protocol::operations::Upload {
+                attachment_mime_type,
                 directory: directory
                     .to_str()
                     .ok_or_else(|| TransferError::Protocol("directory is not UTF-8".into()))?

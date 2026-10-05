@@ -129,6 +129,35 @@ impl Store {
     pub fn projection(&self, id: &ThreadId) -> Result<ThreadProjection> {
         load_projection(&*self.lock()?, id)?.ok_or(StoreError::ThreadNotFound)
     }
+    pub fn live_attachment_references(&self, excluding: &ThreadId) -> Result<BTreeSet<String>> {
+        let connection = self.lock()?;
+        let mut references = BTreeSet::new();
+        let mut query =
+            connection.prepare("SELECT payload_json FROM orchestration_v2_projection_threads")?;
+        let threads = query
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for json in threads {
+            let thread: AppThread = serde_json::from_str(&json)?;
+            if thread.id == *excluding || thread.deleted_at.is_some() {
+                continue;
+            }
+            if let Some(p) = load_projection(&connection, &thread.id)? {
+                references.extend(
+                    p.messages
+                        .iter()
+                        .flat_map(|m| &m.attachments)
+                        .map(|a| a.id.clone()),
+                );
+                for row in p.visible_turn_items.iter() {
+                    if let TurnItemBody::UserMessage { attachments, .. } = &row.item.body {
+                        references.extend(attachments.iter().map(|a| a.id.clone()));
+                    }
+                }
+            }
+        }
+        Ok(references)
+    }
     pub fn sequence(&self) -> Result<u64> {
         latest_sequence(&*self.lock()?, None)
     }

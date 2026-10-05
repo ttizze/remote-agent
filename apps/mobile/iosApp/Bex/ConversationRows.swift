@@ -7,6 +7,7 @@ struct ConversationRow: View, Equatable {
     }
 
     let perform: (Intent) -> Void
+    let downloadAttachment: (String, String) async throws -> URL
     let row: TimelineRow
     @State private var expanded = false
     var body: some View {
@@ -15,6 +16,12 @@ struct ConversationRow: View, Equatable {
             HStack {
                 Spacer(minLength: 24)
                 VStack(alignment: .leading, spacing: 4) {
+                    if !row.attachments.isEmpty {
+                        ConversationAttachmentStrip(
+                            attachments: row.attachments,
+                            download: downloadAttachment
+                        )
+                    }
                     if !row.title.isEmpty {
                         Text(row.title).font(T3Theme.font(11)).foregroundStyle(T3Theme.color("textMuted"))
                     }

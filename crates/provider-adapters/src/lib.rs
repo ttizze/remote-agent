@@ -1,4 +1,5 @@
 //! Codex app-server and Claude stream-json adapters for orchestration-v2.
+mod attachments;
 pub mod claude;
 pub mod codex;
 mod native_agents;

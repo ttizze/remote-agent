@@ -158,11 +158,12 @@ impl CodexAdapter {
         effect: &EffectBody,
         projection: &ThreadProjection,
         cwd: &Path,
+        attachments_dir: &Path,
         tool_servers: Option<Value>,
     ) -> Result<(), AdapterError> {
         match effect {
             EffectBody::Start { run_id } => {
-                self.start(projection, run_id, None, cwd, tool_servers)
+                self.start(projection, run_id, None, cwd, attachments_dir, tool_servers)
                     .await
             }
             EffectBody::Steer {
@@ -183,12 +184,11 @@ impl CodexAdapter {
                 if state.terminal {
                     return Err(crate::turn_completed());
                 }
-                let text = projection
+                let message = projection
                     .messages
                     .iter()
                     .find(|message| message.id == *message_id)
                     .ok_or_else(|| error("steer message missing"))?
-                    .text
                     .clone();
                 let turn_id = state
                     .turn
@@ -196,7 +196,7 @@ impl CodexAdapter {
                     .as_ref()
                     .and_then(|reference| reference.native_id.as_ref())
                     .ok_or_else(|| error("native turn missing"))?;
-                if let Err(error) = self.request("turn/steer",json!({"threadId":native,"expectedTurnId":turn_id,"input":[{"type":"text","text":text,"text_elements":[]}]})).await {
+                if let Err(error) = self.request("turn/steer",json!({"threadId":native,"expectedTurnId":turn_id,"input":crate::attachments::codex_input(&message.text,&message.attachments,attachments_dir)?})).await {
                     let completed = self.state(run.provider_thread_id.as_ref().expect("provider thread")).is_ok_and(|(_, state)| state.terminal)
                         || error.message.to_ascii_lowercase().contains("turn completed")
                         || error.message.to_ascii_lowercase().contains("no active turn");
@@ -244,8 +244,15 @@ impl CodexAdapter {
                 })
                 .await
                 .map_err(|_| error("Codex interrupt did not reach a terminal state"))??;
-                self.start(projection, run_id, Some(message_id), cwd, tool_servers)
-                    .await
+                self.start(
+                    projection,
+                    run_id,
+                    Some(message_id),
+                    cwd,
+                    attachments_dir,
+                    tool_servers,
+                )
+                .await
             }
             EffectBody::Respond {
                 request_id,
@@ -306,6 +313,7 @@ impl CodexAdapter {
         run_id: &RunId,
         message_id: Option<&MessageId>,
         cwd: &Path,
+        attachments_dir: &Path,
         tool_servers: Option<Value>,
     ) -> Result<(), AdapterError> {
         let run = projection
@@ -477,7 +485,7 @@ impl CodexAdapter {
             .iter()
             .find(|message| message.id == *message_id)
             .ok_or_else(|| error("run input missing"))?;
-        let params = turn_start_params(
+        let mut params = turn_start_params(
             &native,
             &orchestration::context::input_text(&projection, &run, &message.text),
             &run.model_selection,
@@ -485,6 +493,11 @@ impl CodexAdapter {
             projection.thread.interaction_mode,
             cwd,
         );
+        params["input"] = crate::attachments::codex_input(
+            &orchestration::context::input_text(&projection, &run, &message.text),
+            &message.attachments,
+            attachments_dir,
+        )?;
         if message.text.trim().eq_ignore_ascii_case("/compact") && message.attachments.is_empty() {
             self.request("thread/compact/start", json!({"threadId":native}))
                 .await?;

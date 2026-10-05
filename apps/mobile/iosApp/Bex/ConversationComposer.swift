@@ -45,6 +45,13 @@ struct ConversationComposer: View {
                 Text(notice).font(T3Theme.font(12)).foregroundStyle(T3Theme.color("textMuted"))
             }
             VStack(alignment: .leading, spacing: 12) {
+                if !draft.attachments.isEmpty {
+                    ConversationAttachmentStrip(
+                        attachments: draft.attachments,
+                        download: model.downloadAttachment,
+                        perform: { model.perform($0) }
+                    )
+                }
                 TextField(
                     composer.placeholder,
                     text: Binding(get: { model.composerText }, set: { model.editDraft($0) }),
@@ -53,6 +60,7 @@ struct ConversationComposer: View {
                 .lineLimit(2 ... 8).font(T3Theme.font(16)).focused($focused).textInputAutocapitalization(.sentences)
                 .accessibilityIdentifier("composer.text").disabled(!composer.canEdit)
                 HStack(spacing: 12) {
+                    ComposerAttachmentButton(model: model)
                     Menu {
                         ForEach(model.snapshot.modelChoices(), id: \.model.id) { choice in
                             let value = choice.model
@@ -203,7 +211,10 @@ struct QueueSheet: View {
                         Text(row.text).font(T3Theme.font(14)).lineLimit(5)
                         Text(row.model).font(T3Theme.font(11)).foregroundStyle(T3Theme.color("textMuted"))
                         HStack {
-                            if row.canEdit { Button("Edit") { model.perform(.queue(action: .edit(runId: row.runId))); dismiss() } }
+                            if row
+                                .canEdit {
+                                Button("Edit") { model.perform(.queue(action: .edit(runId: row.runId))); dismiss() }
+                            }
                             if row
                                 .canSteer {
                                 Button("Steer") { model.perform(.queue(action: .steer(runId: row.runId))) }

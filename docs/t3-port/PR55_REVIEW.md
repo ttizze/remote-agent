@@ -180,3 +180,9 @@
 app-owned 委任に続き、Codex の collabAgentToolCall/subAgentActivity と Claude の Agent/Task、task_started/progress/notification、parent_tool_use_id を native task と runless 子履歴へ変換した。実 native ID による停止、親 return 後の出力、早着した子 frame、再開・復旧、権限境界と別 thread の出力拒否、子入力の待ち合わせ、Agents roster を検証する。Claude の完了応答は保持した CLI frame を通常の通知 queue から昇格して取り込む。
 
 対象3 crate の191件通過、変更4 crate と bindings の clippy（all-targets、warnings denied）通過。wire 契約を拡張した3 client の最終ビルドと全体検証は残り M2 完了時に再実行する。
+
+## M2 再開: 画像・ファイル添付
+
+3 クライアントの写真/ファイル選択、desktop の貼付け/drop、upload 状態、再試行、削除、72px preview と保存を core の下書きへ接続した。Host は size/digest 検証済み asset のみを claim し、同じ command の再送で変更済みファイルを上書きしない。部分失敗時の新規 claim を削除し、fork から参照される asset は保持する。送信 receipt は送った添付だけを消し、その後の入力・添付を残す。rollback と queue edit は元の添付を復元する。provider の実画像入力と制限、owned path 以外の拒否を単体テストで検証する。
+
+段階検証: 共通 path/limits、Host binary grant/claim、provider image、core receipt/queue edit の回帰テスト通過。変更 crate の Clippy/all-targets/bindings、fmt、Swiftformat/Swiftlint、Android detekt 通過。provider fixture を含む全体と同一 revision の native build は M2 最終検証で再実行する。Claude の親 return 後の background stop も process-lifetime regression を追加した。

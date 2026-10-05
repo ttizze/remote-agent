@@ -367,6 +367,13 @@ impl HostRpcService {
         &self,
         command: &Command,
     ) -> Result<agent_protocol::orchestration::DispatchReceipt, Failure> {
+        let command = self
+            .inner
+            .resources
+            .files
+            .claim_command_attachments(command)
+            .map_err(|e| Failure::new("attachment_unavailable", e))?;
+        let command = &command;
         let instance = match &command.body {
             CommandBody::ThreadCreate {
                 model_selection, ..
@@ -433,6 +440,7 @@ impl HostRpcService {
             Call::StartTerminal(_)
                 | Call::WriteFile(_)
                 | Call::Upload(_)
+                | Call::AttachmentPath(_)
                 | Call::ReviewWorkspace(_)
         ) {
             Some(self.inner.resources.worktree_access.read().await)
@@ -732,6 +740,7 @@ impl HostRpcService {
             | Call::ReadFile(_)
             | Call::WriteFile(_)
             | Call::Upload(_)
+            | Call::AttachmentPath(_)
             | Call::Download(_)
             | Call::ReadVisualization(_) => self
                 .inner
@@ -1824,7 +1833,12 @@ impl ProviderAdapter for HostResources {
         }
         if matches!(effect.body, EffectBody::AttachmentCleanup) {
             self.files
-                .cleanup_thread_attachments(effect.thread_id.as_str())
+                .cleanup_unreferenced_attachments(
+                    effect.thread_id.as_str(),
+                    self.orchestration
+                        .live_attachment_references(&effect.thread_id)
+                        .map_err(adapter_error)?,
+                )
                 .await
                 .map_err(adapter_error)?;
             return Ok(vec![]);
@@ -1919,7 +1933,13 @@ impl ProviderAdapter for HostResources {
                     self.codex_adapter
                         .as_ref()
                         .ok_or_else(|| adapter_error("Codex unavailable"))?
-                        .execute(&effect.body, &projection, Path::new(""), None)
+                        .execute(
+                            &effect.body,
+                            &projection,
+                            Path::new(""),
+                            self.files.attachment_root(),
+                            None,
+                        )
                         .await?
                 }
                 Driver::Claude => {
@@ -1931,6 +1951,7 @@ impl ProviderAdapter for HostResources {
                             &effect.body,
                             &projection,
                             Path::new(""),
+                            self.files.attachment_root(),
                             None,
                             Path::new(""),
                         )
@@ -2077,7 +2098,13 @@ impl ProviderAdapter for HostResources {
                 self.codex_adapter
                     .as_ref()
                     .ok_or_else(|| adapter_error("Codex unavailable"))?
-                    .execute(&effect.body, &projection, &cwd, tool_servers)
+                    .execute(
+                        &effect.body,
+                        &projection,
+                        &cwd,
+                        self.files.attachment_root(),
+                        tool_servers,
+                    )
                     .await?;
             }
             Driver::Claude => {
@@ -2088,7 +2115,14 @@ impl ProviderAdapter for HostResources {
                 let home = claude.credentials_home().await.map_err(adapter_error)?;
                 claude
                     .adapter
-                    .execute(&effect.body, &projection, &cwd, tool_servers, &home)
+                    .execute(
+                        &effect.body,
+                        &projection,
+                        &cwd,
+                        self.files.attachment_root(),
+                        tool_servers,
+                        &home,
+                    )
                     .await?;
             }
         }

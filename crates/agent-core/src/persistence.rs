@@ -66,6 +66,15 @@ pub fn recover(persisted: &[u8], defaults: &[u8]) -> Snapshot {
             }
         }
     }
+    for draft in state.drafts.values_mut() {
+        for a in &mut draft.attachments {
+            if a.status == "uploading" {
+                a.status = "failed".into();
+                a.error = Some("Upload interrupted. Retry to continue.".into());
+            }
+        }
+    }
+    state.default_draft.attachments.clear();
     state
 }
 

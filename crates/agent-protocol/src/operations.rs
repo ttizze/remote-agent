@@ -267,6 +267,7 @@ pub struct LoadVisualization {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Upload {
+    pub attachment_mime_type: Option<String>,
     pub directory: String,
     pub file_name: String,
     pub size: u64,

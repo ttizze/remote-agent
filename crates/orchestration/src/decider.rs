@@ -476,7 +476,6 @@ pub fn decide(
         } => {
             let target = run(&projection.runs, run_id)?;
             require(target.status == RunStatus::Queued, "run is not queued")?;
-            require(!text.trim().is_empty(), "queued message cannot be empty")?;
             let mut message = projection
                 .messages
                 .iter()
@@ -496,6 +495,11 @@ pub fn decide(
             if let Some(attachments) = attachments {
                 message.attachments = attachments.clone();
             }
+            crate::attachments::validate(&message.attachments).map_err(DecisionError)?;
+            require(
+                !message.text.trim().is_empty() || !message.attachments.is_empty(),
+                "queued message cannot be empty",
+            )?;
             emit(
                 &mut decision,
                 command,
@@ -1395,18 +1399,7 @@ fn dispatch(
         !message.text.trim().is_empty() || !message.attachments.is_empty(),
         "message cannot be empty",
     )?;
-    require(
-        message.attachments.len() <= 100
-            && message.attachments.iter().all(|a| {
-                a.size_bytes > 0
-                    && a.size_bytes
-                        <= match a.kind {
-                            AttachmentKind::Image => 10 * 1024 * 1024,
-                            AttachmentKind::File => 50 * 1024 * 1024,
-                        }
-            }),
-        "invalid attachments",
-    )?;
+    crate::attachments::validate(&message.attachments).map_err(DecisionError)?;
     require(
         message
             .context

@@ -16,6 +16,16 @@ impl Desktop {
         h_flex()
             .id("t3-conversation")
             .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                if view.composer.read(cx).focus_handle(cx).is_focused(window)
+                    && view.conversation.composer.can_edit
+                    && event.keystroke.key == "v"
+                    && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
+                    && let Some(item) = cx.read_from_clipboard()
+                    && view.paste_attachments(item)
+                {
+                    cx.stop_propagation();
+                    return;
+                }
                 if view.renaming
                     && view.rename.read(cx).focus_handle(cx).is_focused(window)
                     && event.keystroke.key == "escape"
@@ -789,6 +799,15 @@ impl Desktop {
             .gap_2();
         match row.kind {
             RowKind::User => {
+                if !row.attachments.is_empty() {
+                    body = body.child(
+                        h_flex().gap_2().children(
+                            row.attachments
+                                .iter()
+                                .map(|a| self.attachment_tile(a, false, cx)),
+                        ),
+                    );
+                }
                 body = body.items_end().child(
                     div()
                         .max_w_full()
@@ -1253,12 +1272,28 @@ impl Desktop {
             content = content.child(self.timeline_row(request, cx));
         }
         let mut prompt = v_flex()
+            .on_drop::<ExternalPaths>(cx.listener(|view, paths: &ExternalPaths, _, _| {
+                if view.conversation.composer.can_edit {
+                    view.stage_attachment_paths(paths.paths().to_vec());
+                }
+            }))
             .border_1()
             .border_color(color("input"))
             .rounded(px(14.))
             .bg(color("surface"))
             .p_2()
             .gap_2()
+            .when(!composer.draft.attachments.is_empty(), |v| {
+                v.child(
+                    h_flex().gap_2().children(
+                        composer
+                            .draft
+                            .attachments
+                            .iter()
+                            .map(|a| self.attachment_tile(a, true, cx)),
+                    ),
+                )
+            })
             .child(
                 Textarea::new(&self.composer)
                     .bordered(false)
@@ -1268,6 +1303,14 @@ impl Desktop {
             .child(
                 h_flex()
                     .gap_1()
+                    .child(
+                        Button::new("add-attachment")
+                            .label("Attach")
+                            .small()
+                            .ghost()
+                            .disabled(!composer.can_edit)
+                            .on_click(cx.listener(|view, _, _, _| view.pick_attachments())),
+                    )
                     .child(self.model_picker(cx))
                     .child(self.runtime_picker(cx))
                     .child(self.interaction_picker(cx))

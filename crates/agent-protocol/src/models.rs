@@ -174,6 +174,7 @@ pub struct TransferGrant {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UploadedFile {
+    pub attachment: Option<orchestration::Attachment>,
     pub path: String,
     pub size: u64,
     pub sha256: [u8; 32],

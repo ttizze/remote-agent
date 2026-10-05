@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, sync::Arc};
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(uniffi::Record))]
 pub struct Draft {
+    pub attachments: Vec<DraftAttachment>,
     pub text: String,
     pub instance_id: String,
     pub model: String,
@@ -15,6 +16,15 @@ pub struct Draft {
     pub interaction_mode: String,
 }
 impl Draft {
+    pub fn attachment_refs(&self) -> Result<Vec<Attachment>, String> {
+        let result = self
+            .attachments
+            .iter()
+            .map(DraftAttachment::reference)
+            .collect::<Result<Vec<_>, _>>()?;
+        orchestration::attachments::validate(&result)?;
+        Ok(result)
+    }
     pub fn selection(&self) -> Result<ModelSelection, String> {
         if self.model.trim().is_empty() {
             return Err("Select a model".into());
@@ -37,6 +47,61 @@ impl Draft {
             model: self.model.clone(),
             options,
         })
+    }
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(uniffi::Record))]
+pub struct DraftAttachment {
+    pub id: String,
+    pub remote_id: Option<String>,
+    pub name: String,
+    pub mime_type: String,
+    pub kind: String,
+    pub size_bytes: u64,
+    pub local_path: String,
+    pub status: String,
+    pub error: Option<String>,
+}
+impl DraftAttachment {
+    pub fn metadata(&self) -> Attachment {
+        Attachment {
+            id: self.remote_id.clone().unwrap_or_else(|| self.id.clone()),
+            kind: if self.kind == "image" {
+                AttachmentKind::Image
+            } else {
+                AttachmentKind::File
+            },
+            name: self.name.clone(),
+            mime_type: self.mime_type.clone(),
+            size_bytes: self.size_bytes,
+        }
+    }
+    pub fn reference(&self) -> Result<Attachment, String> {
+        if self.status != "ready" {
+            return Err("Wait for attachments to upload, or retry failed uploads.".into());
+        }
+        self.remote_id
+            .as_ref()
+            .ok_or("Attachment has not uploaded")?;
+        Ok(self.metadata())
+    }
+    pub fn from_remote(a: &Attachment) -> Self {
+        Self {
+            id: a.id.clone(),
+            remote_id: Some(a.id.clone()),
+            name: a.name.clone(),
+            mime_type: a.mime_type.clone(),
+            kind: if a.kind == AttachmentKind::Image {
+                "image"
+            } else {
+                "file"
+            }
+            .into(),
+            size_bytes: a.size_bytes,
+            local_path: String::new(),
+            status: "ready".into(),
+            error: None,
+        }
     }
 }
 
@@ -109,7 +174,7 @@ impl Snapshot {
     pub fn draft_pending(&self) -> bool {
         let draft = self.current_draft();
         self.pending_commands.iter().any(|command| self.selected_thread.as_ref() == Some(&command.thread_id) && match &command.body {
-            CommandBody::MessageDispatch(message) => self.editing_run.is_none() && (message.text == draft.text || message.source_plan_ref.as_ref().is_some_and(|r| self.selected_thread.as_ref() == Some(&r.thread_id))),
+            CommandBody::MessageDispatch(message) => self.editing_run.is_none() && (message.text == draft.text && draft.attachment_refs().is_ok_and(|a|a==message.attachments) || message.source_plan_ref.as_ref().is_some_and(|r| self.selected_thread.as_ref() == Some(&r.thread_id))),
             CommandBody::QueuedRunEdit { run_id, text, .. } => self.editing_run.as_ref() == Some(run_id) && *text == draft.text,
             _ => false,
         }) || self.pending_launches.iter().any(|launch| launch.input.source_plan_ref.as_ref().is_some_and(|r| self.selected_thread.as_ref() == Some(&r.thread_id))
@@ -145,6 +210,7 @@ impl Snapshot {
                     .find(|s| &s.thread.id == id)
             }) {
                 Draft {
+                    attachments: vec![],
                     text: String::new(),
                     instance_id: thread.thread.provider_instance_id.to_string(),
                     model: thread.thread.model_selection.model.clone(),
@@ -349,6 +415,18 @@ pub enum Intent {
     EditDraft {
         text: String,
         base_text: Option<String>,
+    },
+    AttachFile {
+        path: String,
+        name: String,
+        mime_type: String,
+        draft_key: String,
+    },
+    RetryAttachment {
+        id: String,
+    },
+    RemoveAttachment {
+        id: String,
     },
     Send {
         behavior: SendBehavior,

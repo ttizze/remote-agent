@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.22"
 tempfile = "3"
 scopeguard = "1.2"
 orchestration = { path = "../orchestration", features = ["adapter"] }

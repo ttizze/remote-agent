@@ -102,4 +102,16 @@ extension BexAppViewModel {
             return target
         }
     }
+
+    func downloadAttachment(_ id: String, _ name: String) async throws -> URL {
+        guard let owner = store else { throw URLError(.notConnectedToInternet) }
+        let host = selectedProfileId
+        return try await inTemporaryDirectory { directory in
+            let target = directory.appendingPathComponent(URL(fileURLWithPath: name).lastPathComponent)
+            try await owner.downloadAttachment(id: id, destination: target.path)
+            guard selectedProfileId == host else { throw CancellationError() }
+            try Task.checkCancellation()
+            return target
+        }
+    }
 }

@@ -32,7 +32,11 @@ struct ThreadScreen: View {
                             ProgressView().frame(maxWidth: .infinity)
                         }
                         ForEach(conversation.rows, id: \.id) { row in
-                            ConversationRow(perform: { model.perform($0) }, row: row).equatable().id(row.id)
+                            ConversationRow(
+                                perform: { model.perform($0) },
+                                downloadAttachment: model.downloadAttachment,
+                                row: row
+                            ).equatable().id(row.id)
                         }
                         Color.clear.frame(height: 1).id("conversation-bottom")
                     }

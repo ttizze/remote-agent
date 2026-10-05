@@ -460,6 +460,13 @@ internal class AndroidAppModel(private val context: Context) : ViewModel() {
         if (host != profileId) throw CancellationException("Host changed")
     }
 
+    suspend fun downloadAttachment(id: String, destination: String) {
+        val store = owner ?: error("Host not connected")
+        val host = profileId
+        store.downloadAttachment(id, destination)
+        if (host != profileId) throw CancellationException("Host changed")
+    }
+
     suspend fun upload(source: String, directory: String, name: String): String {
         val store = owner ?: error("Host not connected")
         val host = profileId

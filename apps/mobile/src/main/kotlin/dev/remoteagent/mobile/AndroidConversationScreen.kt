@@ -263,6 +263,7 @@ internal fun TimelineCard(model: AndroidAppModel, row: TimelineRow) {
                     if (row.title.isNotEmpty())
                         Text(row.title, style = MaterialTheme.typography.labelSmall, color = T3.color("textMuted"))
                     androidx.compose.foundation.text.selection.SelectionContainer { Text(row.text) }
+                    if (row.attachments.isNotEmpty()) ConversationAttachmentStrip(model, row.attachments)
                 }
             }
         RowKind.ASSISTANT ->
@@ -393,6 +394,8 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit, agents: ()
             border = androidx.compose.foundation.BorderStroke(1.dp, T3.color("border")),
         ) {
             Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (draft.attachments.isNotEmpty())
+                    ConversationAttachmentStrip(model, draft.attachments, editing = true)
                 androidx.compose.foundation.text.BasicTextField(
                     model.composerText,
                     model::editDraft,
@@ -410,6 +413,7 @@ private fun ThreadComposer(model: AndroidAppModel, queue: () -> Unit, agents: ()
                     },
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    ComposerAttachmentButton(model)
                     Box(Modifier.weight(1f)) {
                         TextButton(onClick = { modelMenu = true }, contentPadding = PaddingValues()) {
                             ProviderIcon(composer.providerKind, Modifier.size(13.dp))
@@ -548,14 +552,15 @@ private fun QueueSheet(model: AndroidAppModel, dismiss: () -> Unit) {
                     Text(row.text, maxLines = 5)
                     Text(row.model, style = MaterialTheme.typography.labelSmall, color = T3.color("textMuted"))
                     Row {
-                        if (row.canEdit) TextButton(
-                            onClick = {
-                                model.perform(Intent.Queue(QueueAction.Edit(row.runId)))
-                                dismiss()
+                        if (row.canEdit)
+                            TextButton(
+                                onClick = {
+                                    model.perform(Intent.Queue(QueueAction.Edit(row.runId)))
+                                    dismiss()
+                                }
+                            ) {
+                                Text("Edit")
                             }
-                        ) {
-                            Text("Edit")
-                        }
                         if (row.canSteer)
                             TextButton(onClick = { model.perform(Intent.Queue(QueueAction.Steer(row.runId))) }) {
                                 Text("Steer")

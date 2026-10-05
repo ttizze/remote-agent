@@ -67,6 +67,7 @@ enum OwnerEvent {
     ),
     Dictation(String, CancellationToken),
     Transfer(FileTransfer, oneshot::Sender<Result<String, PeerError>>),
+    AttachmentFinished(u64, String, String, Result<Attachment, PeerError>),
     Performance(crate::diagnostics::ConnectionPerformance),
     Resume {
         endpoint: transport::Endpoint,
@@ -75,6 +76,10 @@ enum OwnerEvent {
     },
 }
 enum FileTransfer {
+    AttachmentDownload {
+        id: String,
+        destination: String,
+    },
     Download {
         source: String,
         destination: String,
@@ -183,6 +188,15 @@ fn command(thread_id: ThreadId, body: CommandBody) -> Command {
 }
 
 impl Store {
+    pub async fn download_attachment(
+        &self,
+        id: String,
+        destination: String,
+    ) -> Result<(), PeerError> {
+        self.transfer(FileTransfer::AttachmentDownload { id, destination })
+            .await
+            .map(|_| ())
+    }
     pub async fn download_file(
         &self,
         source: String,
@@ -456,28 +470,40 @@ impl Owner {
                             .messages
                             .iter()
                             .find(|m| m.id == run.user_message_id)
-                            .map(|m| m.text.as_str())
+                            .map(|m| (m.text.as_str(), m.attachments.as_slice()))
                             .or_else(|| {
                                 projection
                                     .turn_items
                                     .iter()
                                     .find_map(|item| match &item.body {
                                         TurnItemBody::UserMessage {
-                                            message_id, text, ..
+                                            message_id,
+                                            text,
+                                            attachments,
+                                            ..
                                         } if *message_id == run.user_message_id => {
-                                            Some(text.as_str())
+                                            Some((text.as_str(), attachments.as_slice()))
                                         }
                                         _ => None,
                                     })
                             })
                     })
                 });
-                if let Some(text) = restored {
+                if let Some((text, attachments)) = restored {
                     let mut draft = self.state.draft_for_thread(&command.thread_id);
                     if !draft.text.is_empty() && !text.is_empty() {
                         draft.text.push_str("\n\n");
                     }
                     draft.text.push_str(text);
+                    for a in attachments {
+                        if !draft
+                            .attachments
+                            .iter()
+                            .any(|old| old.remote_id.as_deref() == Some(a.id.as_str()))
+                        {
+                            draft.attachments.push(DraftAttachment::from_remote(a));
+                        }
+                    }
                     self.state
                         .drafts
                         .insert(command.thread_id.to_string(), draft);
@@ -492,6 +518,51 @@ impl Owner {
     fn publish(&mut self) {
         self.state.revision += 1;
         self.snapshots.send_replace(Arc::new(self.state.clone()));
+    }
+    fn begin_attachment(&mut self, key: String, id: String) -> Result<(), PeerError> {
+        let network = self
+            .network
+            .as_mut()
+            .filter(|_| self.state.connected)
+            .ok_or_else(|| invalid("Connect to the Host to upload attachments"))?;
+        let attachment = self
+            .state
+            .drafts
+            .get_mut(&key)
+            .and_then(|d| d.attachments.iter_mut().find(|a| a.id == id))
+            .ok_or_else(|| invalid("Attachment is unavailable"))?;
+        attachment.status = "uploading".into();
+        attachment.error = None;
+        let source = attachment.local_path.clone();
+        let name = attachment.name.clone();
+        let mime = attachment.mime_type.clone();
+        let peer = network.peer.clone();
+        let session = network.session.clone();
+        let sender = self.sender.clone();
+        let epoch = self.epoch;
+        network.tasks.retain(|t| !t.is_finished());
+        network
+            .tasks
+            .push(AbortOnDropHandle::new(tokio::spawn(async move {
+                let result = agent_transport::transfers::upload_attachment(
+                    &peer,
+                    || async { session.open_stream().await.map_err(std::io::Error::other) },
+                    std::path::Path::new(&source),
+                    &name,
+                    &mime,
+                )
+                .await
+                .map_err(invalid)
+                .and_then(|result| {
+                    result
+                        .attachment
+                        .ok_or_else(|| invalid("Host did not return an attachment"))
+                });
+                let _ = sender
+                    .send(OwnerEvent::AttachmentFinished(epoch, key, id, result))
+                    .await;
+            })));
+        Ok(())
     }
     fn visit_selected(&mut self) {
         let Some(id) = self.state.selected_thread.clone() else {
@@ -744,10 +815,6 @@ impl Owner {
                 }
                 for launch in self.state.pending_launches.clone() {
                     let thread = launch.create.thread_id.clone();
-                    let draft = Draft {
-                        text: launch.input.text.clone(),
-                        ..self.state.default_draft.clone()
-                    };
                     let key = format!(
                         "new:{}",
                         match &launch.create.body {
@@ -755,6 +822,27 @@ impl Owner {
                             _ => "bex:chats",
                         }
                     );
+                    let draft = Draft {
+                        text: launch.input.text.clone(),
+                        attachments: launch
+                            .input
+                            .attachments
+                            .iter()
+                            .map(|remote| {
+                                self.state
+                                    .drafts
+                                    .get(&key)
+                                    .and_then(|d| {
+                                        d.attachments
+                                            .iter()
+                                            .find(|a| a.remote_id.as_ref() == Some(&remote.id))
+                                    })
+                                    .cloned()
+                                    .unwrap_or_else(|| DraftAttachment::from_remote(remote))
+                            })
+                            .collect(),
+                        ..self.state.default_draft.clone()
+                    };
                     let _ = self.job(
                         Call::LaunchThread(Box::new(launch)),
                         None,
@@ -789,10 +877,48 @@ impl Owner {
                 self.reconcile_rollbacks();
                 self.visit_selected();
             }
+            OwnerEvent::AttachmentFinished(epoch, key, id, result) if epoch == self.epoch => {
+                if let Some(a) = self
+                    .state
+                    .drafts
+                    .get_mut(&key)
+                    .and_then(|d| d.attachments.iter_mut().find(|a| a.id == id))
+                {
+                    match result {
+                        Ok(remote) => {
+                            a.remote_id = Some(remote.id);
+                            a.kind = if remote.kind == AttachmentKind::Image {
+                                "image"
+                            } else {
+                                "file"
+                            }
+                            .into();
+                            a.mime_type = remote.mime_type;
+                            a.size_bytes = remote.size_bytes;
+                            a.status = "ready".into();
+                            a.error = None;
+                        }
+                        Err(error) => {
+                            a.status = "failed".into();
+                            a.error = Some(crate::presentation::error::error_message(
+                                &error.to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
             OwnerEvent::Notification(epoch, notification) if epoch == self.epoch => {
                 self.notification(notification)
             }
             OwnerEvent::Disconnected(epoch, error) if epoch == self.epoch => {
+                for draft in self.state.drafts.values_mut() {
+                    for a in &mut draft.attachments {
+                        if a.status == "uploading" {
+                            a.status = "failed".into();
+                            a.error = Some("Upload interrupted. Retry to continue.".into());
+                        }
+                    }
+                }
                 self.state.connected = false;
                 self.state.error = Some(error);
                 self.state.shell_synchronized = false;
@@ -845,6 +971,14 @@ impl Owner {
                 return false;
             }
             OwnerEvent::Close(complete) => {
+                for draft in self.state.drafts.values_mut() {
+                    for a in &mut draft.attachments {
+                        if a.status == "uploading" {
+                            a.status = "failed".into();
+                            a.error = Some("Upload interrupted. Retry to continue.".into());
+                        }
+                    }
+                }
                 if let Some(network) = self.network.take() {
                     tokio::spawn(async move {
                         let peer = network.peer.clone();
@@ -909,6 +1043,21 @@ impl Owner {
                                 session.open_stream().await.map_err(std::io::Error::other)
                             };
                             let result = match transfer {
+                                FileTransfer::AttachmentDownload { id, destination } => {
+                                    match peer.request::<String>(&Call::AttachmentPath(id)).await {
+                                        Ok(source) => agent_transport::transfers::download_file(
+                                            &peer,
+                                            open,
+                                            std::path::Path::new(&source),
+                                            std::path::Path::new(&destination),
+                                        )
+                                        .await
+                                        .map(|_| destination),
+                                        Err(error) => Err(
+                                            agent_transport::transfers::TransferError::Peer(error),
+                                        ),
+                                    }
+                                }
                                 FileTransfer::Download {
                                     source,
                                     destination,
@@ -1231,6 +1380,69 @@ impl Owner {
                     None
                 }
             }
+            Intent::AttachFile {
+                path,
+                name,
+                mime_type,
+                draft_key,
+            } => {
+                let metadata = std::fs::metadata(&path).map_err(invalid)?;
+                if !metadata.is_file() {
+                    return Err(invalid("Choose a regular file"));
+                }
+                let id = id("attachment");
+                let mime_type = mime_type.to_ascii_lowercase();
+                let kind = if orchestration::attachments::native_image(&mime_type) {
+                    "image"
+                } else {
+                    "file"
+                };
+                let key = draft_key;
+                if key != self.state.draft_key() && !self.state.drafts.contains_key(&key) {
+                    return Err(invalid("The attachment draft is no longer available"));
+                }
+                let mut draft = self
+                    .state
+                    .drafts
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| self.state.current_draft());
+                let a = DraftAttachment {
+                    id: id.clone(),
+                    remote_id: None,
+                    name,
+                    mime_type,
+                    kind: kind.into(),
+                    size_bytes: metadata.len(),
+                    local_path: path,
+                    status: "failed".into(),
+                    error: Some("Connect to upload".into()),
+                };
+                let mut refs: Vec<_> = draft
+                    .attachments
+                    .iter()
+                    .map(DraftAttachment::metadata)
+                    .collect();
+                refs.push(a.metadata());
+                orchestration::attachments::validate(&refs).map_err(invalid)?;
+                draft.attachments.push(a);
+                self.state.drafts.insert(key.clone(), draft);
+                if self.state.connected {
+                    self.begin_attachment(key, id)?;
+                }
+                None
+            }
+            Intent::RetryAttachment { id } => {
+                self.begin_attachment(self.state.draft_key(), id)?;
+                None
+            }
+            Intent::RemoveAttachment { id } => {
+                let key = self.state.draft_key();
+                if let Some(draft) = self.state.drafts.get_mut(&key) {
+                    draft.attachments.retain(|a| a.id != id);
+                }
+                None
+            }
             Intent::EditDraft { text, base_text } => {
                 let mut draft = self.state.current_draft();
                 draft.text = text;
@@ -1259,7 +1471,9 @@ impl Owner {
                     return self.prepare(Intent::PlanFollowUp { new_thread: false });
                 }
                 let slash = self.state.current_draft().text.trim().to_ascii_lowercase();
-                if matches!(slash.as_str(), "/plan" | "/default") {
+                if matches!(slash.as_str(), "/plan" | "/default")
+                    && self.state.current_draft().attachments.is_empty()
+                {
                     let interaction_mode = if slash == "/plan" {
                         InteractionMode::Plan
                     } else {
@@ -1550,7 +1764,7 @@ impl Owner {
                             .iter()
                             .find(|r| r.id == id && r.status == RunStatus::Queued)
                             .ok_or_else(|| invalid("Queued run is unavailable"))?;
-                        let text = projection
+                        let message = projection
                             .messages
                             .iter()
                             .find(|m| m.id == run.user_message_id)
@@ -1560,10 +1774,14 @@ impl Owner {
                                     m.delegated_completion.is_some(),
                                 )
                             })
-                            .map(|m| m.text.clone())
                             .ok_or_else(|| invalid("Notifications cannot be edited"))?;
                         let mut draft = self.state.current_draft();
-                        draft.text = text;
+                        draft.text = message.text.clone();
+                        draft.attachments = message
+                            .attachments
+                            .iter()
+                            .map(DraftAttachment::from_remote)
+                            .collect();
                         self.state.editing_run = Some(id);
                         let draft_key = self.state.draft_key();
                         self.state.drafts.insert(draft_key, draft);
@@ -1581,7 +1799,7 @@ impl Owner {
                                 .ok_or_else(|| invalid("No queued message is being edited"))?,
                             text: draft.text.clone(),
                             context: None,
-                            attachments: None,
+                            attachments: Some(draft.attachment_refs().map_err(invalid)?),
                         });
                         sent = Some((self.state.draft_key(), draft));
                     }
@@ -1930,10 +2148,9 @@ impl Owner {
         } = result;
         let mutation = mutation_thread(&call);
         let edit_accepted = sent.as_ref().is_some_and(|(key, draft)| {
-            self.state
-                .drafts
-                .get(key)
-                .is_none_or(|current| current.text == draft.text)
+            self.state.drafts.get(key).is_none_or(|current| {
+                current.text == draft.text && current.attachments == draft.attachments
+            })
         });
         let should_navigate = sent
             .as_ref()
@@ -2047,6 +2264,11 @@ impl Owner {
                             && draft.text == input.text
                         {
                             draft.text.clear();
+                            draft.attachments.retain(|a| {
+                                a.remote_id.as_ref().is_none_or(|id| {
+                                    !input.attachments.iter().any(|sent| &sent.id == id)
+                                })
+                            });
                         }
                         if let Some((key, draft)) = sent {
                             if !matches!(
@@ -2056,22 +2278,31 @@ impl Owner {
                                         | CommandBody::ThreadMergeBack { .. },
                                     ..
                                 })
-                            ) && self
-                                .state
-                                .drafts
-                                .get(&key)
-                                .is_none_or(|current| current.text == draft.text)
-                            {
+                            ) {
                                 if matches!(
                                     &call,
                                     Call::DispatchCommand(Command {
                                         body: CommandBody::QueuedRunEdit { .. },
                                         ..
                                     })
-                                ) {
+                                ) && edit_accepted
+                                {
                                     self.state.drafts.remove(&key);
                                 } else {
-                                    self.state.drafts.entry(key).or_insert(draft).text.clear();
+                                    let current = self
+                                        .state
+                                        .drafts
+                                        .entry(key)
+                                        .or_insert_with(|| draft.clone());
+                                    *current = crate::commands::acknowledge_draft(
+                                        current,
+                                        &draft.text,
+                                        &draft
+                                            .attachments
+                                            .iter()
+                                            .map(|a| a.id.clone())
+                                            .collect::<Vec<_>>(),
+                                    );
                                 }
                             }
                             if let Call::DispatchCommand(Command {
@@ -2884,6 +3115,80 @@ mod tests {
         });
         assert_eq!(owner.state.editing_run, Some(run));
         assert_eq!(owner.state.current_draft().text, "newer queue edit");
+    }
+    #[test]
+    fn receipts_clear_only_sent_attachments_and_queue_edit_restores_them() {
+        let mut owner = owner(queued_state());
+        let remote = Attachment {
+            id: "pending:one".into(),
+            kind: AttachmentKind::File,
+            name: "one.txt".into(),
+            mime_type: "text/plain".into(),
+            size_bytes: 4,
+        };
+        let mut draft = owner.state.current_draft();
+        draft.text = "send".into();
+        draft.attachments = vec![DraftAttachment::from_remote(&remote)];
+        let key = owner.state.draft_key();
+        owner.state.drafts.insert(key.clone(), draft);
+        let (call, sent, launched) = owner
+            .prepare(Intent::Send {
+                behavior: SendBehavior::Default,
+            })
+            .unwrap();
+        let additional = DraftAttachment::from_remote(&Attachment {
+            id: "pending:two".into(),
+            name: "two.txt".into(),
+            ..remote.clone()
+        });
+        let current = owner.state.drafts.get_mut(&key).unwrap();
+        current.text = "new text".into();
+        current.attachments.push(additional.clone());
+        owner.finished(JobResult {
+            call: call.unwrap(),
+            sent,
+            launched,
+            result: Ok(Reply::Receipt(rpc::DispatchReceipt {
+                thread_id: owner.state.selected_thread.clone().unwrap(),
+                sequence: 2,
+                replayed: false,
+            })),
+            complete: None,
+        });
+        assert_eq!(owner.state.current_draft().text, "new text");
+        assert_eq!(owner.state.current_draft().attachments, vec![additional]);
+        let thread = owner.state.selected_thread.clone().unwrap();
+        let projection =
+            Arc::make_mut(&mut owner.state.threads.get_mut(&thread).unwrap().projection);
+        let queued = projection
+            .runs
+            .iter()
+            .find(|r| r.status == RunStatus::Queued)
+            .unwrap()
+            .clone();
+        projection
+            .messages
+            .iter_mut()
+            .find(|m| m.id == queued.user_message_id)
+            .unwrap()
+            .attachments = vec![remote.clone()];
+        owner
+            .prepare(Intent::Queue {
+                action: QueueAction::Edit {
+                    run_id: queued.id.to_string(),
+                },
+            })
+            .unwrap();
+        assert_eq!(
+            owner.state.current_draft().attachment_refs().unwrap(),
+            vec![remote]
+        );
+        owner
+            .prepare(Intent::Queue {
+                action: QueueAction::CancelEdit,
+            })
+            .unwrap();
+        assert_eq!(owner.state.current_draft().text, "new text");
     }
     #[test]
     fn awaiting_message_cannot_be_submitted_twice() {

@@ -8180,6 +8180,7 @@ name = "provider-adapters"
 version = "0.1.0"
 dependencies = [
  "agent-transport",
+ "base64 0.22.1",
  "bex-process",
  "codex-app-server",
  "orchestration",

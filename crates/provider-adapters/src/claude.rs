@@ -287,13 +287,21 @@ impl ClaudeAdapter {
         effect: &EffectBody,
         projection: &ThreadProjection,
         cwd: &Path,
+        attachments_dir: &Path,
         tool_servers: Option<Value>,
         credentials_home: &Path,
     ) -> Result<(), AdapterError> {
         match effect {
             EffectBody::Start { run_id } => {
-                self.start(projection, run_id, cwd, tool_servers, credentials_home)
-                    .await
+                self.start(
+                    projection,
+                    run_id,
+                    cwd,
+                    attachments_dir,
+                    tool_servers,
+                    credentials_home,
+                )
+                .await
             }
             EffectBody::Steer {
                 run_id, message_id, ..
@@ -307,19 +315,26 @@ impl ClaudeAdapter {
                 send_prompt(
                     &handle,
                     run_id,
-                    user_frame(&handle.native_session, message, true),
+                    user_frame(&handle.native_session, message, true, attachments_dir).await?,
                     true,
                 )
                 .await
             }
             EffectBody::Interrupt { run_id, .. } => {
                 let handle = self.for_run(projection, run_id).await?;
-                {
+                let owns_background = {
                     let mut state = handle.state.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.terminal {
+                    let background = state.native_agents.as_ref().is_some_and(|a| a.is_live());
+                    if state.terminal && !background {
                         return Ok(());
                     }
                     state.interrupted = true;
+                    background
+                };
+                if owns_background {
+                    let _ = handle.stop.send(true);
+                    wait_done(&handle).await?;
+                    return Ok(());
                 }
                 handle.input.send(ProcessInput::Frame(json!({"type":"control_request","request_id":"interrupt","request":{"subtype":"interrupt"}}))).await.map_err(error)?;
                 let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -458,6 +473,7 @@ impl ClaudeAdapter {
         projection: &ThreadProjection,
         run_id: &RunId,
         cwd: &Path,
+        attachments_dir: &Path,
         tool_servers: Option<Value>,
         credentials_home: &Path,
     ) -> Result<(), AdapterError> {
@@ -720,8 +736,15 @@ impl ClaudeAdapter {
         {
             if resume || native_fork {
                 let fresh = crate::portable_fallback(&self.output, projection, &run).await?;
-                return Box::pin(self.start(&fresh, run_id, cwd, tool_servers, credentials_home))
-                    .await;
+                return Box::pin(self.start(
+                    &fresh,
+                    run_id,
+                    cwd,
+                    attachments_dir,
+                    tool_servers,
+                    credentials_home,
+                ))
+                .await;
             }
             return Err(initial);
         }
@@ -769,7 +792,7 @@ impl ClaudeAdapter {
         send_prompt(
             &handle,
             run_id,
-            user_frame(&handle.native_session, &message, false),
+            user_frame(&handle.native_session, &message, false, attachments_dir).await?,
             false,
         )
         .await
@@ -940,12 +963,17 @@ pub async fn query_control(
     });
     result?
 }
-fn user_frame(native: &str, message: &ConversationMessage, steer: bool) -> Value {
-    let mut frame = json!({"type":"user","uuid":uuid::Uuid::new_v4().to_string(),"session_id":native,"message":{"role":"user","content":[{"type":"text","text":message.text}]},"parent_tool_use_id":null});
+async fn user_frame(
+    native: &str,
+    message: &ConversationMessage,
+    steer: bool,
+    attachments_dir: &Path,
+) -> Result<Value, AdapterError> {
+    let mut frame = json!({"type":"user","uuid":uuid::Uuid::new_v4().to_string(),"session_id":native,"message":{"role":"user","content":crate::attachments::claude_content(&message.text,&message.attachments,attachments_dir).await?},"parent_tool_use_id":null});
     if steer {
         frame["priority"] = json!("now");
     }
-    frame
+    Ok(frame)
 }
 #[expect(
     clippy::too_many_arguments,
@@ -1318,6 +1346,80 @@ mod tests {
                 .len(),
             1
         );
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_after_root_return_terminates_owned_native_background_process() {
+        let directory = tempfile::tempdir().unwrap();
+        let (output, _batches) = mpsc::channel(32);
+        let adapter = ClaudeAdapter::new(
+            ClaudeConfig {
+                program: "/bin/sh".into(),
+                config_home: directory.path().into(),
+            },
+            output.clone(),
+        );
+        let projection = crate::normalize::tests::projection(Driver::Claude);
+        let mut state = crate::normalize::tests::state(Driver::Claude);
+        state.native_agents = Some(Box::new(crate::native_agents::NativeAgents::new(
+            projection.thread.clone(),
+        )));
+        state = normalize::claude(state, &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"task-tool","name":"Agent","input":{"prompt":"background work","description":"Background"}}]}}), &now()).state;
+        state = normalize::claude(state, &json!({"type":"system","subtype":"task_started","task_id":"background","tool_use_id":"task-tool"}), &now()).state;
+        assert!(state.native_agents.as_ref().unwrap().is_live());
+        state.terminal = true;
+        let provider = state.provider_thread.id.clone();
+        let run = state.run.id.clone();
+        let turn = state.turn.id.clone();
+        let model = state.run.model_selection.clone();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("cat >/dev/null")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        let permit = adapter.capacity.clone().try_acquire_owned().unwrap();
+        let handle = spawn(
+            command,
+            None,
+            state,
+            uuid::Uuid::new_v4().to_string(),
+            permit,
+            output,
+            directory.path(),
+            directory.path(),
+            RuntimeMode::FullAccess,
+            InteractionMode::Default,
+            model,
+        )
+        .unwrap();
+        adapter
+            .processes
+            .lock()
+            .await
+            .insert(provider, handle.clone());
+        adapter
+            .execute(
+                &EffectBody::Interrupt {
+                    run_id: run,
+                    provider_turn_id: turn,
+                },
+                &projection,
+                directory.path(),
+                directory.path(),
+                None,
+                directory.path(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            handle
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .interrupted
+        );
+        assert_eq!(adapter.capacity.available_permits(), 8);
     }
     #[cfg(unix)]
     #[tokio::test]

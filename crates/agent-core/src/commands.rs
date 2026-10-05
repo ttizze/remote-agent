@@ -85,7 +85,7 @@ pub fn message(
     dispatch_mode: DispatchMode,
     source: CreationSource,
 ) -> Result<MessageDispatch, String> {
-    if draft.text.trim().is_empty() {
+    if draft.text.trim().is_empty() && draft.attachments.is_empty() {
         return Err("Enter a message".into());
     }
     Ok(MessageDispatch {
@@ -97,11 +97,19 @@ pub fn message(
         message_id,
         text: draft.text.clone(),
         context: None,
-        attachments: vec![],
+        attachments: draft.attachment_refs()?,
         model_selection: Some(draft.selection()?),
         delivery_intent: None,
         dispatch_mode,
     })
+}
+pub fn acknowledge_draft(current: &Draft, sent_text: &str, sent_ids: &[String]) -> Draft {
+    let mut draft = current.clone();
+    if draft.text == sent_text {
+        draft.text.clear();
+    }
+    draft.attachments.retain(|a| !sent_ids.contains(&a.id));
+    draft
 }
 
 pub fn plan_follow_up(
@@ -117,6 +125,24 @@ pub fn plan_follow_up(
         )
     } else {
         (draft_text.trim().into(), InteractionMode::Plan, false)
+    }
+}
+
+pub fn attachment_mime(name: &str) -> &'static str {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "txt" | "md" | "rs" | "swift" | "kt" => "text/plain",
+        _ => "application/octet-stream",
     }
 }
 
