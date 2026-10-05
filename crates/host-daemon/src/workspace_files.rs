@@ -62,6 +62,33 @@ impl WorkspaceFiles {
         }
     }
 
+    pub(crate) fn thread_attachment_directory(&self, thread_id: &str) -> PathBuf {
+        self.upload_directory
+            .join("chat")
+            .join(hash(thread_id.as_bytes()))
+    }
+
+    pub(crate) async fn cleanup_thread_attachments(&self, thread_id: &str) -> Result<()> {
+        let files = self.clone();
+        let thread_id = thread_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _lock = files.writes.lock().unwrap_or_else(|e| e.into_inner());
+            let parent = files.upload_directory.join("chat");
+            if parent.try_exists()? && fs::symlink_metadata(&parent)?.file_type().is_symlink() {
+                return Err(anyhow!("attachment storage must not be a symlink"));
+            }
+            let directory = files.thread_attachment_directory(&thread_id);
+            match fs::symlink_metadata(&directory) {
+                Ok(metadata) if metadata.file_type().is_symlink() => fs::remove_file(directory)?,
+                Ok(_) => fs::remove_dir_all(directory)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            Ok(())
+        })
+        .await?
+    }
+
     pub(crate) async fn request(&self, session: SessionId, request: Call) -> Result<Body> {
         let files = self.clone();
         tokio::task::spawn_blocking(move || files.dispatch(session, request)).await?
@@ -483,6 +510,39 @@ mod tests {
         fs::remove_file(&source).unwrap();
         fs::create_dir(&source).unwrap();
         assert!(files.dispatch(2, request()).is_err());
+    }
+
+    #[tokio::test]
+    async fn attachment_cleanup_is_idempotent_and_keeps_other_thread_assets() {
+        let directory = tempfile::tempdir().unwrap();
+        let files = WorkspaceFiles::new(directory.path().into());
+        let own = files.thread_attachment_directory("thread/../../outside");
+        let other = files.thread_attachment_directory("other");
+        for path in [&own, &other] {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("image.png"), b"image").unwrap();
+        }
+        files
+            .cleanup_thread_attachments("thread/../../outside")
+            .await
+            .unwrap();
+        files
+            .cleanup_thread_attachments("thread/../../outside")
+            .await
+            .unwrap();
+        assert!(!own.exists());
+        assert!(other.join("image.png").exists());
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            fs::write(outside.path().join("keep"), b"keep").unwrap();
+            std::os::unix::fs::symlink(outside.path(), &own).unwrap();
+            files
+                .cleanup_thread_attachments("thread/../../outside")
+                .await
+                .unwrap();
+            assert!(outside.path().join("keep").exists());
+        }
     }
 
     #[tokio::test]

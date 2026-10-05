@@ -1808,6 +1808,10 @@ impl ProviderAdapter for HostResources {
             return Ok(vec![]);
         }
         if matches!(effect.body, EffectBody::AttachmentCleanup) {
+            self.files
+                .cleanup_thread_attachments(effect.thread_id.as_str())
+                .await
+                .map_err(adapter_error)?;
             return Ok(vec![]);
         }
         let driver = match &effect.body {
