@@ -381,15 +381,28 @@ async fn template(
     result
 }
 
+struct CaseSetup<'a> {
+    simulator: &'a str,
+    boot: bool,
+    add_media: bool,
+    prepare_browser: bool,
+}
+
 async fn run_case(
-    tests: Vec<String>,
+    test: String,
     target: PathBuf,
     source: PathBuf,
-    simulator: &str,
+    setup: CaseSetup<'_>,
     prefix: PathBuf,
     without_codex: bool,
     cancel: watch::Receiver<bool>,
 ) -> Result<WorkerResult> {
+    let CaseSetup {
+        simulator,
+        boot,
+        add_media,
+        prepare_browser,
+    } = setup;
     let started = Instant::now();
     let label = prefix
         .file_name()
@@ -421,11 +434,7 @@ async fn run_case(
         .stdin(std::process::Stdio::null())
         .stdout(host_log.try_clone()?)
         .stderr(host_log);
-    if std::env::var("CI").as_deref() == Ok("true")
-        && tests
-            .iter()
-            .any(|test| test == "testSimulatorBrowserIsSeparateFromConversationAndPreservesPage")
-    {
+    if prepare_browser {
         command.arg("--prepare-browser");
     }
     let mut host = Child::spawn(command)?;
@@ -436,8 +445,18 @@ async fn run_case(
                 if Instant::now() >= deadline { return Err(format!("{label}: UI fixture timed out").into()); }
                 tokio::select! { _ = tokio::time::sleep(Duration::from_millis(100)) => {}, _ = supervision::cancelled(cancel.clone()) => return Err(supervision::interrupted()) }
             }
-            let mut preparation = vec![("install", args![vec; "xcrun", "simctl", "install", simulator, products.join("Debug-iphonesimulator/Bex.app")])];
-            if tests.iter().any(|test| test == "testSimulatorOpensOnlyTheTappedImageAndSavesIt") {
+            // Start the isolated Host before the first Simulator boot. The
+            // Browser case also prepares Chrome while its Simulator is stopped.
+            let mut preparation = Vec::new();
+            if boot {
+                preparation.push(("boot", args![vec; "xcrun", "simctl", "boot", simulator]));
+                preparation.push(("bootstatus", args![vec; "xcrun", "simctl", "bootstatus", simulator, "-b"]));
+            }
+            if add_media {
+                preparation.push(("addmedia", args![vec; "xcrun", "simctl", "addmedia", simulator, "apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png", prefix.parent().ok_or("missing test records")?.join("attachment-video.mov")]));
+            }
+            preparation.push(("install", args![vec; "xcrun", "simctl", "install", simulator, products.join("Debug-iphonesimulator/Bex.app")]));
+            if test == "testSimulatorOpensOnlyTheTappedImageAndSavesIt" {
                 preparation.push(("photos-add permission", args![vec; "xcrun", "simctl", "privacy", simulator, "grant", "photos-add", "com.ttizze.b-codex"]));
             }
             for (phase, arguments) in preparation {
@@ -445,7 +464,7 @@ async fn run_case(
                 supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT).await
                     .map_err(|error| format!("{label}: {phase} failed: {error}"))?;
             }
-            if tests.iter().any(|test| test == "testSimulatorCanAttachDownloadAndPrepareAIEdit") {
+            if test == "testSimulatorCanAttachDownloadAndPrepareAIEdit" {
                 let container = supervision::run(&args!["xcrun", "simctl", "get_app_container", simulator, "com.ttizze.b-codex", "data"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
                 let documents = Path::new(std::str::from_utf8(&container.stdout)?.trim()).join("Documents");
                 fs::create_dir_all(&documents)?;
@@ -455,7 +474,7 @@ async fn run_case(
             let probe = std::env::current_exe()?;
             configure_run(Plist::from_file(&source)?, &pairing_url, probe.to_str().ok_or("non-UTF-8 terminal probe path")?)?.to_file_xml(&run)?;
             let mut arguments = args![vec; "xcodebuild", "-xctestrun", &run, "-destination", format!("platform=iOS Simulator,id={simulator}"), "-parallel-testing-enabled", "NO", "-collect-test-diagnostics", "on-failure", "-resultBundlePath", &bundle];
-            arguments.extend(tests.iter().map(|test| format!("-only-testing:BexUITests/BexLaunchUITests/{test}").into()));
+            arguments.push(format!("-only-testing:BexUITests/BexLaunchUITests/{test}").into());
             arguments.push("test-without-building".into());
             let setup_seconds = started.elapsed().as_secs_f64();
             println!("{label}: Simulator and Host ready in {setup_seconds:.2}s");
@@ -478,10 +497,10 @@ async fn run_case(
             let summary = supervision::run(&args!["xcrun", "xcresulttool", "get", "test-results", "summary", "--path", &bundle, "--format", "json"], &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
             let summary: Value = serde_json::from_slice(&summary.stdout)?;
             fs::write(prefix.with_extension("summary.json"), format!("{}\n", serde_json::to_string_pretty(&summary)?))?;
-            check_summary(&summary, tests.len())?;
+            check_summary(&summary, 1)?;
             status?;
-            println!("{label}: {} passed; records: {}", tests.len(), bundle.display());
-            Ok(WorkerResult { tests, seconds: started.elapsed().as_secs_f64(), setup_seconds, bundle })
+            println!("{label}: {test} passed; records: {}", bundle.display());
+            Ok(WorkerResult { tests: vec![test], seconds: started.elapsed().as_secs_f64(), setup_seconds, bundle })
         }.await;
     // Every case stops its Host before the worker resets the app.
     let shutdown = host.stop(true, Duration::from_secs(10)).await;
@@ -534,33 +553,68 @@ async fn worker(
     let log = File::create(prefix.with_extension("setup.log"))?;
     let result = async {
         let create = match simulator_source {
-            SimulatorSource::Template(template) => args![vec; "xcrun", "simctl", "clone", template, &name],
-            SimulatorSource::Runtime(runtime) => args![vec; "xcrun", "simctl", "create", &name, SIMULATOR_DEVICE_TYPE, runtime],
+            SimulatorSource::Template(template) => {
+                args![vec; "xcrun", "simctl", "clone", template, &name]
+            }
+            SimulatorSource::Runtime(runtime) => {
+                args![vec; "xcrun", "simctl", "create", &name, SIMULATOR_DEVICE_TYPE, runtime]
+            }
         };
-        let simulator = supervision::run(&create, &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
+        let simulator =
+            supervision::run(&create, &cwd, Io::Capture, &cancel, SETUP_TIMEOUT).await?;
         let simulator = std::str::from_utf8(&simulator.stdout)?.trim();
-        let mut preparation = vec![
-            ("boot", args![vec; "xcrun", "simctl", "boot", simulator]),
-            ("bootstatus", args![vec; "xcrun", "simctl", "bootstatus", simulator, "-b"]),
-        ];
-        if needs_media_fixtures(&tests) {
-            preparation.push(("addmedia", args![vec; "xcrun", "simctl", "addmedia", simulator, "apps/mobile/iosApp/Bex/Assets.xcassets/AppIcon.appiconset/AppIcon.png", records.join("attachment-video.mov")]));
-        }
-        for (phase, arguments) in preparation {
-            println!("{label}: {phase}");
-            supervision::run(&arguments, &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT).await
-                .map_err(|error| format!("{label}: {phase} failed: {error}"))?;
-        }
+        let media = needs_media_fixtures(&tests);
         let mut results = Vec::new();
         for (case, test) in tests.into_iter().enumerate() {
+            let browser = std::env::var("CI").as_deref() == Ok("true")
+                && test == "testSimulatorBrowserIsSeparateFromConversationAndPreservesPage";
             if case > 0 {
-                supervision::run(&args!["xcrun", "simctl", "uninstall", simulator, "com.ttizze.b-codex"], &cwd, Io::Log(&log), &cancel, SETUP_TIMEOUT).await?;
+                supervision::run(
+                    &args![
+                        "xcrun",
+                        "simctl",
+                        "uninstall",
+                        simulator,
+                        "com.ttizze.b-codex"
+                    ],
+                    &cwd,
+                    Io::Log(&log),
+                    &cancel,
+                    SETUP_TIMEOUT,
+                )
+                .await?;
+                if browser {
+                    supervision::run(
+                        &args!["xcrun", "simctl", "shutdown", simulator],
+                        &cwd,
+                        Io::Log(&log),
+                        &cancel,
+                        SETUP_TIMEOUT,
+                    )
+                    .await?;
+                }
             }
-            results.push(run_case(vec![test], target.clone(), source.clone(), simulator,
-                records.join(format!("{label}-case-{}", case + 1)), without_codex, cancel.clone()).await?);
+            results.push(
+                run_case(
+                    test,
+                    target.clone(),
+                    source.clone(),
+                    CaseSetup {
+                        simulator,
+                        boot: case == 0 || browser,
+                        add_media: case == 0 && media,
+                        prepare_browser: browser,
+                    },
+                    records.join(format!("{label}-case-{}", case + 1)),
+                    without_codex,
+                    cancel.clone(),
+                )
+                .await?,
+            );
         }
         Result::<Vec<WorkerResult>>::Ok(results)
-    }.await;
+    }
+    .await;
     // Cleanup ignores cancellation and recovers the uniquely named Simulator,
     // including a create/clone cancelled before it returned its ID.
     let cleanup = delete_devices(&name, &cwd, &log).await;
