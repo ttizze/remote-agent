@@ -100,3 +100,18 @@ Implement/Refine と新しい thread での実装を提供し、source plan を�
 /default を使い、desktop 専用の実装ボタンは追加しない。
 
 変更 crate の180単体/property test、全 target clippy と fmt が通過（既存2件 skip）。
+
+## M1 レビュー修正
+
+b52a2be1 に対する87件を aacd3737 以降の現行コードと照合し、
+関連するまとまりごとに修正と回帰テストを commit した。
+[PR55_REVIEW.md](PR55_REVIEW.md) に各指摘の対応・不採用の理由・検証を記録する。
+SQLite/Tokio runtime は Host feature に限定し、前回の共有 runtime 許可を置き換えた。
+残存 integration targets、store_session、Swiftlint/detekt/native unit tests を戻した。
+
+実装・テスト08b882ecで全 unit-tests 306件と agent-peer の5群、
+workspace/agent-peer clippy・fmt、actionlint が通過（外部・手動5件 skip）。
+Swift unit tests 2件、Android JVM unit tests 3件と各 native lint、
+iOS/Android build も通過。初回全 target 実行に手動 WebKit probe が一度混入した
+点と、その後の ignored 修正は対応表に記録した。Simulator UI/実 provider E2E、
+CI 待ちは実施していない。M2 の残りと M3 は中断し、レビュー後の再開指示を待つ。
