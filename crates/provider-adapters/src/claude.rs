@@ -53,7 +53,7 @@ impl PromptGate {
         self.held.clear();
     }
     fn route(&mut self, frame: Value) -> Vec<Value> {
-        let Some(uuid) = self.prompt.as_deref().filter(|_| !self.confirmed) else {
+        let Some(uuid) = self.prompt.as_deref() else {
             return vec![frame];
         };
         let echoed: Vec<&str> = if let Some(array) = frame["user_message_uuids"].as_array() {
@@ -61,6 +61,15 @@ impl PromptGate {
         } else {
             frame["user_message_uuid"].as_str().into_iter().collect()
         };
+        if self.confirmed {
+            if frame["type"] == "result"
+                && (!echoed.is_empty() && !echoed.contains(&uuid)
+                    || !frame["origin"].is_null() && frame["origin"]["kind"] != "human")
+            {
+                return vec![];
+            }
+            return vec![frame];
+        }
         if echoed.contains(&uuid) {
             if matches!(self.mode, EchoMode::Unknown | EchoMode::Acknowledged) {
                 self.mode = if frame["type"] != "result" && self.frames_before_echo == 0 {
@@ -1067,6 +1076,14 @@ mod tests {
         );
         assert_eq!(released.len(), 2);
         assert_eq!(released[0]["message"]["content"], "current output");
+        assert!(
+            gate.route(json!({"type":"result","user_message_uuid":"first"}))
+                .is_empty()
+        );
+        assert!(
+            gate.route(json!({"type":"result","origin":{"kind":"task_notification"}}))
+                .is_empty()
+        );
         assert_eq!(
             gate.route(json!({"type":"result","user_message_uuid":"second"}))
                 .len(),
