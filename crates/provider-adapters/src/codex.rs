@@ -668,29 +668,39 @@ async fn pump(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut buffer = crate::stream_buffer::DeltaBuffer::default();
+    let mut last_processed_sequence = 0;
     let mut flush = tokio::time::interval(crate::stream_buffer::WINDOW);
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
-            changed = shutdown.changed() => { if changed.is_err() || *shutdown.borrow() { break; } }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    tracing::info!(target: "bex", operation="orchestration.codex.closed", message=%format_args!("cause=shutdown last_processed_sequence={last_processed_sequence} shutdown_requested=true"));
+                    break;
+                }
+            }
             _ = flush.tick() => { if let (Some(adapter), Some(frame)) = (adapter.upgrade(), buffer.flush()) { ingest_frame(&adapter, frame).await; } }
             event = events.recv() => {
                 let Some(adapter) = adapter.upgrade() else { break; };
                 match event {
-                    Ok(PeerEvent::Message(message)) => match serde_json::from_str::<Value>(&message.value) {
-                        Ok(value) => for frame in buffer.push(value) { ingest_frame(&adapter, frame).await; },
-                        Err(error) => tracing::error!(operation="orchestration.codex.decode", message=%error),
+                    Ok(PeerEvent::Message(message)) => {
+                        match serde_json::from_str::<Value>(&message.value) {
+                            Ok(value) => for frame in buffer.push(value) { ingest_frame(&adapter, frame).await; },
+                            Err(_) => tracing::error!(target: "bex", operation="orchestration.codex.decode", message="cause=invalid_json"),
+                        }
+                        last_processed_sequence = message.sequence;
                     },
-                    Ok(PeerEvent::Response { .. }) => {},
+                    Ok(PeerEvent::Response { sequence }) => { last_processed_sequence = sequence; },
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                         let _ = buffer.flush();
-                        tracing::warn!(operation="orchestration.codex.lag", skipped=count);
+                        tracing::warn!(target: "bex", operation="orchestration.codex.lag", message=%format_args!("cause=event_stream_lagged last_processed_sequence={last_processed_sequence} missed_events={count}"));
                         let natives: Vec<_> = adapter.states.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
                         for native in natives { let _ = adapter.disconnected(&native, "Codex notification stream lost events").await; }
                     }
                     result => {
                         if let Some(frame) = buffer.flush() { ingest_frame(&adapter, frame).await; }
                         let message = match result { Ok(PeerEvent::Closed(message)) => message, Err(error) => error.to_string(), _ => unreachable!() };
+                        tracing::error!(target: "bex", operation="orchestration.codex.closed", message=%format_args!("cause=peer_closed last_processed_sequence={last_processed_sequence} shutdown_requested=false"));
                         let natives: Vec<_> = adapter.states.lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
                         for native in natives { let _ = adapter.disconnected(&native, &message).await; }
                         break;
@@ -702,11 +712,13 @@ async fn pump(
 }
 async fn ingest_frame(adapter: &CodexAdapter, value: Value) {
     let method = value["method"].as_str().unwrap_or("");
-    if let Err(error) = adapter
+    if adapter
         .handle(method, &value["params"], value.get("id"))
         .await
+        .is_err()
     {
-        tracing::error!(operation="orchestration.codex.ingest", message=%error);
+        // Provider method/error strings can contain conversation content.
+        tracing::error!(target: "bex", operation="orchestration.codex.ingest", message="cause=event_processing_failed");
     }
 }
 
@@ -715,9 +727,16 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     #[tokio::test]
-    async fn notification_pump_survives_lag_and_delivers_a_later_turn() {
+    async fn notification_pump_recovers_and_records_causes_without_conversation_payloads() {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
+        agent_transport::diagnostics::initialize(
+            directory.path(),
+            agent_transport::diagnostics::Component::Host,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .unwrap();
+        let log = directory.path().join("logs/host.jsonl");
         let program = directory.path().join("fixture-provider");
         std::fs::write(&program, "#!/bin/sh\nread -r initialize\nprintf '%s\\n' '{\"id\":1,\"result\":{\"userAgent\":\"fixture\",\"codexHome\":\"/tmp\"}}'\ncat >/dev/null\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -740,7 +759,7 @@ mod tests {
         });
         let (events, incoming) = tokio::sync::broadcast::channel(2);
         for _ in 0..10 {
-            events.send(PeerEvent::Response { sequence: 0 }).unwrap();
+            events.send(PeerEvent::Message(agent_transport::peer::Reply { sequence: 0, value: json!({"method":"fixture/ignored", "params":{"text":"PRIVATE_CONVERSATION_SENTINEL"}}).to_string().into() })).unwrap();
         }
         let task = tokio::spawn(pump(Arc::downgrade(&adapter), incoming, receiver));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -755,8 +774,64 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(batch.events.iter().any(|event| matches!(&event.payload, EventPayload::MessageUpdated(message) if message.text == "after lag")));
+        drop(batches);
+        events.send(PeerEvent::Message(agent_transport::peer::Reply { sequence: 2, value: json!({"method":"item/agentMessage/delta","params":{"threadId":"native","itemId":"text","delta":"PRIVATE_CONVERSATION_SENTINEL"}}).to_string().into() })).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("orchestration.codex.ingest")
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !task.is_finished(),
+            "a processing error must not stop the pump"
+        );
         adapter.shutdown.send(true).unwrap();
         task.await.unwrap();
+        // An independently closed stream must report a different terminal cause.
+        let (_shutdown, receiver) = watch::channel(false);
+        let (events, incoming) = tokio::sync::broadcast::channel(2);
+        let task = tokio::spawn(pump(Arc::downgrade(&adapter), incoming, receiver));
+        events
+            .send(PeerEvent::Closed("PRIVATE_CONVERSATION_SENTINEL".into()))
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let lines = std::fs::read_to_string(log).unwrap();
+        assert!(!lines.contains("PRIVATE_CONVERSATION_SENTINEL"));
+        let records: Vec<Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        for (operation, cause, level) in [
+            (
+                "orchestration.codex.lag",
+                "cause=event_stream_lagged",
+                "warn",
+            ),
+            (
+                "orchestration.codex.ingest",
+                "cause=event_processing_failed",
+                "error",
+            ),
+            ("orchestration.codex.closed", "cause=shutdown", "info"),
+            ("orchestration.codex.closed", "cause=peer_closed", "error"),
+        ] {
+            assert!(
+                records.iter().any(|record| record["operation"] == operation
+                    && record["level"] == level
+                    && record["message"].as_str().unwrap().contains(cause)),
+                "missing {cause}: {lines}"
+            );
+        }
+        assert!(lines.contains("last_processed_sequence=2 shutdown_requested=true"));
+        assert!(lines.contains("missed_events=8"));
         server.shutdown().await.unwrap();
     }
     #[test]
