@@ -68,6 +68,32 @@ pub fn relative_time(timestamp_ms: i64, now_ms: i64) -> String {
     format!("{}d", hours / 24)
 }
 
+/// Desktop age label: "just now", "5m ago", "3h ago", "2d ago".
+pub fn relative_time_label(timestamp_ms: i64, now_ms: i64) -> String {
+    let seconds = (now_ms - timestamp_ms) / 1000;
+    if seconds < 60 {
+        return "just now".into();
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m ago");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("{hours}h ago");
+    }
+    format!("{}d ago", hours / 24)
+}
+
+/// The desktop row form of `relative_time_label`: "now", "5m", "3h", "2d".
+pub fn compact_relative_time_label(timestamp_ms: i64, now_ms: i64) -> String {
+    let label = relative_time_label(timestamp_ms, now_ms);
+    match label.strip_suffix(" ago") {
+        Some(age) => age.into(),
+        None => "now".into(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod fixtures {
     use chrono::{DateTime, Local, NaiveDate};
@@ -100,6 +126,18 @@ mod tests {
         assert_eq!(relative_time(now - 5 * 60_000, now), "5m");
         assert_eq!(relative_time(now - 3 * 3_600_000, now), "3h");
         assert_eq!(relative_time(now - 2 * 86_400_000, now), "2d");
+    }
+
+    #[test]
+    fn desktop_age_labels_say_just_now_under_a_minute_and_drop_ago_in_rows() {
+        let now = 10 * 86_400_000;
+        assert_eq!(relative_time_label(now + 5_000, now), "just now");
+        assert_eq!(relative_time_label(now - 59_000, now), "just now");
+        assert_eq!(relative_time_label(now - 5 * 60_000, now), "5m ago");
+        assert_eq!(relative_time_label(now - 3 * 3_600_000, now), "3h ago");
+        assert_eq!(relative_time_label(now - 2 * 86_400_000, now), "2d ago");
+        assert_eq!(compact_relative_time_label(now - 1_000, now), "now");
+        assert_eq!(compact_relative_time_label(now - 5 * 60_000, now), "5m");
     }
 
     #[test]
