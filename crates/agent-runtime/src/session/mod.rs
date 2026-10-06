@@ -173,6 +173,8 @@ pub struct SessionOptions {
     /// Background work keeps an idle session at most this long.
     pub max_idle_pin: Duration,
     pub reply_timeout: Duration,
+    /// T3 waits this long for a stopped Claude turn before closing its query.
+    pub interrupt_timeout: Duration,
     pub close_grace: Duration,
     /// A frame the provider does not accept on stdin within this ends the session.
     pub write_timeout: Duration,
@@ -183,6 +185,7 @@ impl Default for SessionOptions {
             idle_timeout: Duration::from_secs(30 * 60),
             max_idle_pin: Duration::from_secs(4 * 60 * 60),
             reply_timeout: Duration::from_secs(60),
+            interrupt_timeout: Duration::from_secs(10),
             close_grace: Duration::from_secs(5),
             write_timeout: Duration::from_secs(30),
         }
@@ -623,10 +626,11 @@ impl SessionManager {
     ) {
         let command = command.clone();
         let interrupted = self
-            .request_reply(
+            .request_reply_within(
                 entry,
                 Request::new(thread, move |p| p.claude()?.command(&command, "", &[]))
                     .events_to(attempt),
+                self.options.interrupt_timeout,
             )
             .await;
         if let Err(message) = interrupted {
@@ -859,7 +863,18 @@ impl SessionManager {
     /// unloads its native thread and stays up for other threads until idle.
     /// Terminal detaches revoke the thread's credentials even without a process.
     pub async fn detach(&self, thread: &ThreadId, revoke_credentials: bool) {
-        for entry in self.entries(|_| true) {
+        self.detach_instance(thread, None, revoke_credentials).await;
+    }
+
+    /// `detach` for one provider instance, as T3 releases the previous
+    /// instance's session after a provider switch.
+    pub async fn detach_instance(
+        &self,
+        thread: &ThreadId,
+        instance: Option<&str>,
+        revoke_credentials: bool,
+    ) {
+        for entry in self.entries(|slot| instance.is_none_or(|i| slot.instance() == i)) {
             if !entry.attached(thread) {
                 continue;
             }
@@ -877,7 +892,7 @@ impl SessionManager {
             }
         }
         if revoke_credentials {
-            for entry in self.entries(|_| true) {
+            for entry in self.entries(|slot| instance.is_none_or(|i| slot.instance() == i)) {
                 entry
                     .members
                     .lock()
@@ -885,7 +900,7 @@ impl SessionManager {
                     .recorded
                     .remove(thread);
             }
-            self.host.revoke_credentials(thread, None);
+            self.host.revoke_credentials(thread, instance);
         }
     }
 
@@ -1283,6 +1298,16 @@ impl SessionManager {
     }
 
     async fn request_reply(&self, entry: &Entry, request: Request) -> Result<Value, String> {
+        self.request_reply_within(entry, request, self.options.reply_timeout)
+            .await
+    }
+
+    async fn request_reply_within(
+        &self,
+        entry: &Entry,
+        request: Request,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let mut ran = self
             .send(entry, request.expect(Expect::Replies))
             .await
@@ -1290,7 +1315,7 @@ impl SessionManager {
         let Some(reply) = ran.replies.pop() else {
             return Err("no request was sent".into());
         };
-        self.wait(reply).await
+        self.wait_within(reply, timeout).await
     }
 
     async fn request_completion(
@@ -1309,8 +1334,16 @@ impl SessionManager {
     }
 
     async fn wait<T>(&self, receiver: oneshot::Receiver<Result<T, String>>) -> Result<T, String> {
+        self.wait_within(receiver, self.options.reply_timeout).await
+    }
+
+    async fn wait_within<T>(
+        &self,
+        receiver: oneshot::Receiver<Result<T, String>>,
+        timeout: Duration,
+    ) -> Result<T, String> {
         self.awaiting.fetch_add(1, Ordering::SeqCst);
-        let waited = tokio::time::timeout(self.options.reply_timeout, receiver).await;
+        let waited = tokio::time::timeout(timeout, receiver).await;
         self.awaiting.fetch_sub(1, Ordering::SeqCst);
         match waited {
             Err(_) => Err("The provider did not reply in time.".into()),

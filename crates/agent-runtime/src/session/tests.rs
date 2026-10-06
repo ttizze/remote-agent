@@ -329,6 +329,7 @@ fn options(idle: u64, pin: u64) -> SessionOptions {
         idle_timeout: Duration::from_millis(idle),
         max_idle_pin: Duration::from_millis(pin),
         reply_timeout: Duration::from_secs(5),
+        interrupt_timeout: Duration::from_secs(5),
         close_grace: Duration::from_millis(200),
         write_timeout: Duration::from_secs(5),
     }
@@ -1083,10 +1084,10 @@ async fn commits_a_reply_before_writing_the_next_frame() {
     assert_eq!(*observed.lock().unwrap(), Some(true));
 }
 
-/// A frame's events reach the owning actor in order, and a stale process's
-/// frames are never read once it is replaced.
+// T3 ClaudeAdapterV2 openQuery: a live query is reused only for the same
+// policy and selection; a new model or mode replaces it with a resume.
 #[tokio::test(flavor = "multi_thread")]
-async fn claude_reuses_its_process_after_aligning_model_and_mode() {
+async fn claude_replaces_its_process_for_another_model_or_mode() {
     let rig = rig(SessionOptions::default(), 5);
     rig.host.respond(claude_replies);
     let id = thread("thread-claude-reuse");
@@ -1122,26 +1123,23 @@ async fn claude_reuses_its_process_after_aligning_model_and_mode() {
         },
     )
     .await;
+    let before = process.written().len();
     rig.send(&id, "second", DispatchMode::StartImmediately)
         .await;
     rig.drain().await;
-    assert_eq!(rig.host.spawned(), 1);
-    let kinds: Vec<_> = process.written()[2..]
-        .iter()
-        .map(|frame| {
-            frame["request"]["subtype"]
-                .as_str()
-                .or(frame["type"].as_str())
-                .unwrap()
-                .to_owned()
-        })
-        .collect();
-    assert_eq!(kinds, ["set_model", "set_permission_mode", "user"]);
-    assert_eq!(
-        process.written()[2]["request"]["model"],
-        "claude-opus-4-6[1m]"
+    assert_eq!(rig.host.spawned(), 2);
+    assert!(process.exited());
+    assert!(
+        claude_kinds(&process.written()[before..])
+            .iter()
+            .all(|kind| kind != "user")
     );
-    assert_eq!(process.written()[3]["request"]["mode"], "acceptEdits");
+    let replacement = rig.host.process(1);
+    let launch = replacement.request.claude.clone().unwrap();
+    assert_eq!(launch.native_session.as_deref(), Some(session.as_str()));
+    assert_eq!(launch.model, "claude-opus-4-6[1m]");
+    assert_eq!(launch.policy.permission_mode, "acceptEdits");
+    assert_eq!(claude_kinds(&replacement.written()), ["initialize", "user"]);
 }
 
 /// A rejection settles the waiter of its own request id, not another request
@@ -1477,6 +1475,8 @@ async fn a_claude_native_fork_copies_the_transcript_through_the_head() {
     assert_ne!(forked, session);
     let copy = rig.host.transcripts.lock().unwrap()[&forked].clone();
     assert!(copy.contains("\"a-1\"") || copy.contains("done"));
+    // T3 forkThread closes the source's live query before reading its transcript.
+    assert!(process.exited());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1990,10 +1990,10 @@ async fn a_first_codex_compaction_starts_a_native_thread() {
     );
 }
 
-// The architecture requires the configuration reply before Start: a rejected
-// set_model is not the process's model, so the next Start aligns again.
+// A model change the live process rejected is not its selection; as in T3, the
+// next turn on another selection replaces the process.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rejected_claude_model_change_is_aligned_again_before_the_next_turn() {
+async fn a_rejected_claude_model_change_replaces_the_process_for_the_next_turn() {
     let rig = rig(SessionOptions::default(), 5);
     rig.host.respond(|frame| {
         if frame["request"]["subtype"] == "set_model" {
@@ -2033,14 +2033,13 @@ async fn a_rejected_claude_model_change_is_aligned_again_before_the_next_turn() 
     process.emit(json!({"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","session_id":session,"uuid":"r-1"}));
     rig.until_status(&id, RunStatus::Completed).await;
     rig.host.respond(claude_replies);
-    let before = process.written().len();
     rig.send(&id, "second", DispatchMode::StartImmediately)
         .await;
     rig.drain().await;
-    assert_eq!(rig.host.spawned(), 1);
+    assert_eq!(rig.host.spawned(), 2);
     assert_eq!(
-        claude_kinds(&process.written()[before..]),
-        ["set_model", "user"]
+        rig.host.process(1).request.claude.clone().unwrap().model,
+        "claude-opus-4-6[1m]"
     );
 }
 
