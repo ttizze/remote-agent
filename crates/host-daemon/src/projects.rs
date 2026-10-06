@@ -1,4 +1,4 @@
-use agent_protocol::models::Project;
+use agent_protocol::models::{Project, ProjectScript};
 use anyhow::Context;
 use std::{
     io,
@@ -64,9 +64,41 @@ impl ProjectStore {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.into()),
             roots: vec![agent_protocol::models::ProjectRoot { path: path.into() }],
+            scripts: vec![],
         });
+        self.save(&projects).await?;
+        Ok(id)
+    }
+    /// Applies a project update (T3 `project.update`). A `rootless` project, which
+    /// is not registered, keeps its settings in an entry without roots.
+    pub(crate) async fn update(
+        &self,
+        id: &str,
+        scripts: Option<Vec<ProjectScript>>,
+        rootless: bool,
+    ) -> anyhow::Result<()> {
+        let scripts = scripts.map(valid_scripts).transpose()?;
+        let _registration = self.registration.lock().await;
+        let mut projects = self.load().await?;
+        let index = match projects.iter().position(|project| project.id == id) {
+            Some(index) => index,
+            None if rootless => {
+                projects.push(Project {
+                    id: id.into(),
+                    ..Project::default()
+                });
+                projects.len() - 1
+            }
+            None => anyhow::bail!("project {id} is not registered"),
+        };
+        if let Some(scripts) = scripts {
+            projects[index].scripts = scripts;
+        }
+        self.save(&projects).await
+    }
+    async fn save(&self, projects: &[Project]) -> anyhow::Result<()> {
         let file = self.path.with_file_name("projects.json");
-        let bytes = serde_json::to_vec(&projects)?;
+        let bytes = serde_json::to_vec(projects)?;
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             if let Some(parent) = file.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -77,9 +109,35 @@ impl ProjectStore {
             })?;
             Ok(())
         })
-        .await??;
-        Ok(id)
+        .await?
     }
+}
+
+/// Trims the scripts' text fields and rejects empty ones (T3 `TrimmedNonEmptyString`).
+fn valid_scripts(scripts: Vec<ProjectScript>) -> anyhow::Result<Vec<ProjectScript>> {
+    let required = |value: String, field: &str| {
+        let value = value.trim();
+        anyhow::ensure!(
+            !value.is_empty(),
+            "project script {field} must not be empty"
+        );
+        Ok(value.to_owned())
+    };
+    scripts
+        .into_iter()
+        .map(|script| {
+            Ok(ProjectScript {
+                id: required(script.id, "id")?,
+                name: required(script.name, "name")?,
+                command: required(script.command, "command")?,
+                preview_url: script
+                    .preview_url
+                    .map(|url| required(url, "preview URL"))
+                    .transpose()?,
+                ..script
+            })
+        })
+        .collect()
 }
 
 /// Words of a thread's first message for its folder name. Only [a-z0-9] reaches a
@@ -164,6 +222,60 @@ mod tests {
         assert_eq!(projects[0].name, "project");
         assert_eq!(projects[0].roots[0].path, project.to_str().unwrap());
         assert!(store.register(Path::new("relative")).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn updates_store_trimmed_scripts_and_keep_omitted_fields() {
+        use agent_protocol::models::ProjectScriptIcon;
+        let script = |command: &str| ProjectScript {
+            id: " setup ".into(),
+            name: " Setup ".into(),
+            command: command.into(),
+            icon: ProjectScriptIcon::Configure,
+            run_on_worktree_create: true,
+            run_async: Some(false),
+            preview_url: None,
+            auto_open_preview: None,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(directory.path()).unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let store = ProjectStore::new(root.join("worktrees.json"));
+        let id = store.register(&project).await.unwrap();
+
+        store
+            .update(&id, Some(vec![script(" vp install ")]), false)
+            .await
+            .unwrap();
+        store.update(&id, None, false).await.unwrap();
+        let scripts = &store.load().await.unwrap()[0].scripts;
+        assert_eq!(
+            (
+                scripts[0].id.as_str(),
+                scripts[0].name.as_str(),
+                scripts[0].command.as_str()
+            ),
+            ("setup", "Setup", "vp install")
+        );
+        assert!(
+            store
+                .update(&id, Some(vec![script(" ")]), false)
+                .await
+                .is_err()
+        );
+        assert!(store.update("missing", Some(vec![]), false).await.is_err());
+        assert_eq!(store.load().await.unwrap()[0].scripts.len(), 1);
+
+        // An unregistered project keeps its settings in an entry without roots.
+        store
+            .update("chats", Some(vec![script("vp install")]), true)
+            .await
+            .unwrap();
+        let projects = store.load().await.unwrap();
+        assert_eq!(projects.len(), 2);
+        assert!(projects[1].roots.is_empty());
+        assert_eq!(projects[1].scripts[0].command, "vp install");
     }
 
     const DATE: &str = "2026-10-06";

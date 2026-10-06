@@ -420,6 +420,18 @@ impl HostRpcService {
                     }
                     id.into()
                 }
+                Call::UpdateProject(params) => {
+                    resources
+                        .shared
+                        .projects
+                        .update(&params.project_id, params.scripts.clone())
+                        .await
+                        .map_err(|error| Failure::new("project_update_failed", error))?;
+                    if let Ok(conversation) = self.conversation() {
+                        conversation.project_updated(&params.project_id).await;
+                    }
+                    agent_protocol::models::Empty {}.into()
+                }
                 Call::ListProjects(_) => self.projects().await?.into(),
                 Call::ListAccounts(_)
                 | Call::SelectAccount(_)
@@ -670,16 +682,13 @@ impl HostRpcService {
     }
 
     async fn projects(&self) -> Result<Vec<agent_protocol::models::Project>, Failure> {
-        Ok(self
-            .inner
-            .resources
-            .shared
-            .projects
+        let catalog = &self.inner.resources.shared.projects;
+        Ok(catalog
             .refresh()
             .await
             .map_err(|error| Failure::new("project_state_unavailable", error))?
             .into_iter()
-            .map(crate::conversation::wire_project)
+            .map(|project| catalog.wire(project))
             .collect())
     }
     async fn models(&self, params: &op::ListModels) -> Result<op::ModelPage, Failure> {

@@ -20,6 +20,27 @@ struct Project {
     pub id: String,
     pub name: String,
     pub roots: Vec<ProjectRoot>,
+    pub scripts: Vec<ProjectScript>,
+}
+#[uniffi::remote(Record)]
+struct ProjectScript {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub icon: ProjectScriptIcon,
+    pub run_on_worktree_create: bool,
+    pub run_async: Option<bool>,
+    pub preview_url: Option<String>,
+    pub auto_open_preview: Option<bool>,
+}
+#[uniffi::remote(Enum)]
+enum ProjectScriptIcon {
+    Play,
+    Test,
+    Lint,
+    Configure,
+    Build,
+    Debug,
 }
 #[uniffi::remote(Record)]
 struct ProjectRoot {

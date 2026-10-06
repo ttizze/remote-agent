@@ -212,6 +212,15 @@ pub struct AddProject {
     pub cwd: String,
 }
 
+/// T3 `project.update`; omitted fields stay unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProject {
+    pub project_id: String,
+    #[serde(default)]
+    pub scripts: Option<Vec<crate::models::ProjectScript>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartTerminal {
     #[serde(rename = "processHandle")]

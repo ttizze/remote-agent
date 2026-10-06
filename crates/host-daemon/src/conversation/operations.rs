@@ -6,13 +6,15 @@ use crate::{
     ProjectStore, terminals::Terminals, workspace_files::WorkspaceFiles, worktrees::Worktrees,
 };
 use agent_domain::{AttachmentKind, CheckpointFile, ThreadId};
+use agent_protocol::models::{Project, ProjectRoot, ProjectScript};
 use agent_runtime::{
-    CreatedWorktree, HostOperations, HostProject, PreparedRestore, TextGenerationRequest,
-    WorktreeRequest,
+    CreatedWorktree, HostOperations, HostProject, PreparedRestore, SetupRequest,
+    TextGenerationRequest, WorktreeRequest,
 };
 use futures_util::future::BoxFuture;
 use serde_json::Value;
 use std::{
+    collections::HashMap,
     io,
     path::{Path, PathBuf},
     process::Stdio,
@@ -28,6 +30,7 @@ pub(crate) const CHATS_PROJECT: &str = "chats";
 pub(crate) struct ProjectCatalog {
     store: ProjectStore,
     projects: RwLock<Vec<HostProject>>,
+    scripts: RwLock<HashMap<String, Vec<ProjectScript>>>,
     chats: tokio::sync::OnceCell<bool>,
 }
 
@@ -36,6 +39,7 @@ impl ProjectCatalog {
         Self {
             store,
             projects: RwLock::new(vec![]),
+            scripts: RwLock::default(),
             chats: tokio::sync::OnceCell::new(),
         }
     }
@@ -59,13 +63,47 @@ impl ProjectCatalog {
             .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
+    pub(crate) fn scripts(&self, project: &str) -> Vec<ProjectScript> {
+        self.scripts
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(project)
+            .cloned()
+            .unwrap_or_default()
+    }
+    /// Applies a project update and rereads the projects. The chats project is not
+    /// registered, so its settings are stored on their own.
+    pub(crate) async fn update(
+        &self,
+        project: &str,
+        scripts: Option<Vec<ProjectScript>>,
+    ) -> anyhow::Result<()> {
+        let rootless = project == CHATS_PROJECT && self.chats_root().await.is_some();
+        self.store.update(project, scripts, rootless).await?;
+        self.refresh().await?;
+        Ok(())
+    }
+    /// The project as clients see it.
+    pub(crate) fn wire(&self, project: HostProject) -> Project {
+        Project {
+            scripts: self.scripts(&project.id),
+            id: project.id,
+            name: project.name,
+            roots: vec![ProjectRoot { path: project.root }],
+        }
+    }
     /// Rereads the registered projects; the first root is the project's root.
     pub(crate) async fn refresh(&self) -> anyhow::Result<Vec<HostProject>> {
         let chats = self.chats_root().await;
-        let mut projects: Vec<HostProject> = self
-            .store
-            .load()
-            .await?
+        let stored = self.store.load().await?;
+        *self
+            .scripts
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = stored
+            .iter()
+            .map(|project| (project.id.clone(), project.scripts.clone()))
+            .collect();
+        let mut projects: Vec<HostProject> = stored
             .into_iter()
             .filter_map(|project| {
                 Some(HostProject {
@@ -270,6 +308,7 @@ pub(crate) struct HostIo {
     pub(crate) worktrees: Arc<Worktrees>,
     pub(crate) files: WorkspaceFiles,
     pub(crate) terminals: Arc<Terminals>,
+    pub(crate) setups: super::setup::SetupScripts,
     pub(crate) text: TextGenerator,
 }
 
@@ -423,8 +462,29 @@ impl HostOperations for HostIo {
     ) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move { self.files.delete_claimed(paths).await.map_err(error) })
     }
+    /// T3 runs the project's setup script in a terminal of the thread; this Host runs
+    /// it as a process of the thread that its terminal cleanup stops.
+    fn run_setup(&self, request: SetupRequest) -> BoxFuture<'_, Result<(), String>> {
+        Box::pin(async move {
+            let scripts = self.projects.scripts(&request.project);
+            let Some(script) = super::setup::setup_script(&scripts) else {
+                return Ok(());
+            };
+            let wait = request.observe_completion && script.run_async == Some(false);
+            self.setups
+                .run(
+                    &request.thread,
+                    script,
+                    &request.project_root,
+                    &request.cwd,
+                    wait,
+                )
+                .await
+        })
+    }
     fn cleanup_terminals(&self, thread: ThreadId) -> BoxFuture<'_, Result<(), String>> {
         Box::pin(async move {
+            self.setups.stop(&thread).await;
             self.terminals
                 .cleanup_handle(&agent_protocol::operations::thread_terminal_handle(
                     thread.as_str(),

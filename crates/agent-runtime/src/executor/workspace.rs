@@ -102,6 +102,7 @@ pub async fn prepare_workspace(
         .map_or(WorkspaceStrategy::Root { branch: None }, |record| {
             record.strategy.clone()
         });
+    let observe_completion = matches!(strategy, WorkspaceStrategy::Worktree { .. });
     let workspace = match (&record, strategy) {
         (Some(record), _) if record.worktree_path.is_some() => {
             let path = record.worktree_path.clone().unwrap_or_default();
@@ -236,6 +237,7 @@ pub async fn prepare_workspace(
             project: current.project.clone(),
             project_root: project.root,
             cwd: workspace.cwd,
+            observe_completion,
         })
         .await
         .map_err(failed(LaunchOperation::RunSetupScript))?;

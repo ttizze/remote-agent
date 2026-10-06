@@ -71,6 +71,7 @@ fn project(id: &str) -> Project {
         roots: vec![crate::models::ProjectRoot {
             path: format!("/work/{id}"),
         }],
+        scripts: vec![],
     }
 }
 

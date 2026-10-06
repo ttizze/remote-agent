@@ -528,6 +528,101 @@ async fn a_chat_launched_at_the_root_runs_in_a_folder_of_its_own() {
     host.conversation.shutdown().await;
 }
 
+// ThreadLaunchService.ts and ProjectSetupScriptRunner.ts: a worktree launch runs the
+// project's setup script in the new worktree; a failing one the agent waits for
+// fails the preparation with its exit code.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_worktree_launch_runs_the_projects_setup_script() {
+    use agent_protocol::models::{Empty, Project, ProjectScript, ProjectScriptIcon};
+    let host = host().await;
+    let set_setup = |command: &str| {
+        Call::UpdateProject(agent_protocol::operations::UpdateProject {
+            project_id: host.project.clone(),
+            scripts: Some(vec![ProjectScript {
+                id: " setup ".into(),
+                name: "Setup".into(),
+                command: command.into(),
+                icon: ProjectScriptIcon::Configure,
+                run_on_worktree_create: true,
+                run_async: Some(false),
+                preview_url: None,
+                auto_open_preview: None,
+            }]),
+        })
+    };
+    let launch_in_worktree = |id: &str| {
+        let mut call = launch(&host, id, "Set up");
+        if let Call::Launch(launch) = &mut call {
+            launch.workspace = wire::WorkspaceStrategy::Worktree {
+                base_ref: "HEAD".into(),
+                branch: None,
+                start_from_origin: false,
+            };
+        }
+        call
+    };
+    let prepared = |state: &State| {
+        state
+            .runs
+            .first()
+            .is_some_and(|run| run.status != RunStatus::Preparing)
+    };
+
+    let _: Empty = host
+        .call(set_setup("touch \"$T3CODE_WORKTREE_PATH/setup-ran\""))
+        .await
+        .unwrap();
+    let projects: Vec<Project> = host.call(Call::ListProjects(Empty {})).await.unwrap();
+    assert_eq!(projects[0].scripts[0].id, "setup");
+    let shell = host
+        .reply(Call::ShellStream(wire::SubscribeShell {
+            after_sequence: None,
+            request_completion_marker: false,
+            location: wire::ShellLocation::Active,
+        }))
+        .await;
+    let Response::Success {
+        result: wire::ShellUpdate::Snapshot(snapshot),
+    } = protocol::decode::<Response<wire::ShellUpdate>>(&shell.initial).unwrap()
+    else {
+        panic!("a snapshot opens the shell stream");
+    };
+    assert_eq!(snapshot.projects[0].scripts, projects[0].scripts);
+    let launched: wire::Launched = host.call(launch_in_worktree("setup-ok")).await.unwrap();
+    let (mut folded, mut updates) = subscribe(&host, &launched.thread_id, None).await;
+    until(&mut folded, &mut updates, prepared).await;
+    let workspace = folded
+        .state
+        .thread
+        .as_ref()
+        .unwrap()
+        .workspace
+        .clone()
+        .unwrap();
+    assert_ne!(std::path::Path::new(&workspace.cwd), host.project_root);
+    assert!(
+        std::path::Path::new(&workspace.cwd)
+            .join("setup-ran")
+            .is_file()
+    );
+
+    let _: Empty = host.call(set_setup("exit 1")).await.unwrap();
+    let launched: wire::Launched = host.call(launch_in_worktree("setup-fail")).await.unwrap();
+    let (mut folded, mut updates) = subscribe(&host, &launched.thread_id, None).await;
+    until(&mut folded, &mut updates, prepared).await;
+    assert_eq!(folded.state.runs[0].status, RunStatus::Failed);
+    let error = folded.state.items.iter().find_map(|item| match &item.kind {
+        ItemKind::Error { message, .. } => Some(message.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        error.as_deref(),
+        Some("Workspace preparation failed during run setup script: Setup script exited with 1.")
+    );
+    host.conversation.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_turn_cut_by_shutdown_is_settled_when_the_host_starts_again() {
     let unfinished: &'static str = SIMPLE

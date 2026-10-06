@@ -5,13 +5,13 @@ mod operations;
 mod rpc;
 mod sessions;
 mod title_links;
+mod setup;
 pub mod tools;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) use operations::{HostIo, ProjectCatalog, TextGenerator};
-pub(crate) use rpc::project as wire_project;
 pub(crate) use sessions::{
     BrowserConfig, ProviderHost, ProviderPrograms, Spawner, SupervisedSpawner,
 };
@@ -94,6 +94,7 @@ impl Conversation {
             worktrees: resources.worktrees.clone(),
             files: resources.files.clone(),
             terminals: resources.terminals.clone(),
+            setups: Default::default(),
             text: TextGenerator {
                 codex: config.programs.codex.clone(),
                 codex_home: config.programs.codex_home.clone(),
@@ -126,6 +127,13 @@ impl Conversation {
     /// Stops effects and provider processes; unfinished threads record the shutdown.
     pub(crate) async fn shutdown(&self) {
         self.runtime.shutdown().await;
+    }
+
+    /// A project's settings changed: shell subscribers see the update.
+    pub(crate) async fn project_updated(&self, project: &str) {
+        if let Err(error) = self.runtime.project_changed(project).await {
+            tracing::warn!(operation = "conversation.projects", message = %error);
+        }
     }
 
     /// A project was registered: shell subscribers see it and its recent sessions

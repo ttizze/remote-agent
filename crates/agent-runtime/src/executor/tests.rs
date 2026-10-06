@@ -25,6 +25,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 pub(crate) type Hook<I, O> = Arc<dyn Fn(I) -> BoxFuture<'static, O> + Send + Sync>;
+/// Claims a folder for a thread, by project, thread and text.
+type FolderHook = Hook<(String, ThreadId, String), Result<Option<String>, String>>;
 
 /// Host operations recorded in order, with scriptable outcomes.
 pub(crate) struct FakeOps {
@@ -41,9 +43,7 @@ pub(crate) struct FakeOps {
     pub(crate) real_files: AtomicBool,
     pub(crate) worktree: Mutex<Option<Hook<WorktreeRequest, Result<CreatedWorktree, String>>>>,
     pub(crate) setup: Mutex<Option<Hook<SetupRequest, Result<(), String>>>>,
-    /// Folders claimed for threads, by project, thread and text.
-    pub(crate) folder:
-        Mutex<Option<Hook<(String, ThreadId, String), Result<Option<String>, String>>>>,
+    pub(crate) folder: Mutex<Option<FolderHook>>,
     pub(crate) on_restore: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     pub(crate) on_real_path: Mutex<Option<Hook<String, ()>>>,
     /// Record each read of the restart-continuation setting.

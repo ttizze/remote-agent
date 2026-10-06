@@ -316,7 +316,8 @@ fn fetch_failure_detail(stderr: &str) -> Option<&'static str> {
         .lines()
         .map(|line| line.trim().to_ascii_lowercase())
         .collect();
-    let checks: [(&dyn Fn(&str) -> bool, &'static str); 4] = [
+    type Check<'a> = (&'a dyn Fn(&str) -> bool, &'static str);
+    let checks: [Check; 4] = [
         (
             &authentication,
             "Git could not authenticate with the remote. Check Git credentials or SSH access on the server, then retry.",
@@ -499,7 +500,7 @@ fn checkout_parent(state: &State, root: &Path, original: &Path) -> Result<PathBu
     let parent = if state.settings.worktree_directory.is_empty() {
         let exclude = PathBuf::from(
             crate::git::text(
-                &root,
+                root,
                 &[
                     "rev-parse",
                     "--path-format=absolute",

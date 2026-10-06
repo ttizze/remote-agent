@@ -442,6 +442,43 @@ async fn a_retry_reuses_a_recorded_worktree() {
     assert_eq!(retried.thread.as_ref().unwrap().workspace, Some(workspace));
 }
 
+// ThreadLaunchService.ts: only a launch that creates a worktree, or a retry that
+// reuses one, observes the setup's completion.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_worktree_launches_wait_for_their_setup() {
+    let rig = rig();
+    let requests = Arc::new(std::sync::Mutex::new(vec![]));
+    let recorded = requests.clone();
+    *rig.ops.setup.lock().unwrap() = Some(Arc::new(move |request: crate::SetupRequest| {
+        recorded
+            .lock()
+            .unwrap()
+            .push((request.cwd, request.observe_completion));
+        Box::pin(async { Ok(()) })
+    }));
+    for (index, workspace) in [root(), worktree_strategy()].into_iter().enumerate() {
+        launch_on(
+            &rig,
+            request(
+                &format!("command:launch:observe:{index}"),
+                Some(&format!("thread:launch:observe:{index}")),
+                Some("Set up"),
+                workspace,
+            ),
+        )
+        .await
+        .unwrap();
+        rig.drain().await;
+    }
+    assert_eq!(
+        *requests.lock().unwrap(),
+        [
+            ("/repo".to_owned(), false),
+            ("/repo-worktrees/feature".to_owned(), true)
+        ]
+    );
+}
+
 // "runs a Scratch thread launched at the root in its own folder"
 #[tokio::test(flavor = "multi_thread")]
 async fn runs_a_chat_thread_launched_at_the_root_in_its_own_folder() {

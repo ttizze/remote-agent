@@ -1,7 +1,7 @@
 //! Conversation RPCs: protocol records in, runtime calls, typed errors out.
 //! Streams answer with their first update and stay open with the rest.
 use super::{
-    Conversation,
+    Conversation, ProjectCatalog,
     diff::{DiffUnavailable, diff_refs},
 };
 use crate::checkpoints::DiffFormat;
@@ -10,13 +10,11 @@ use agent_domain::{Attachment, Command, MessageAuthor, MessageContext, Reply, Th
 use agent_protocol::{
     conversation as wire,
     conversation::{ConversationError, FACTS_FRAME_BUDGET, fact_updates},
-    models::{Project, ProjectRoot},
     protocol::{self, Body, Call, MAX_FRAME_BYTES, Response},
 };
 use agent_runtime::{
-    HostProject, ImportError, InitialMessage, LaunchFailure, LaunchThread, QueryError,
-    RuntimeError, ShellSubscribe, ThreadSnapshot, ThreadSubscribe, WorkspaceStrategy,
-    launch_thread_id,
+    ImportError, InitialMessage, LaunchFailure, LaunchThread, QueryError, RuntimeError,
+    ShellSubscribe, ThreadSnapshot, ThreadSubscribe, WorkspaceStrategy, launch_thread_id,
 };
 use serde::Serialize;
 use std::{collections::VecDeque, path::Path};
@@ -34,14 +32,6 @@ fn committed(committed: agent_runtime::Committed) -> wire::Committed {
         thread_sequence: committed.thread_seq,
         sequence: committed.global_seq,
         replayed: committed.replayed,
-    }
-}
-
-pub(crate) fn project(project: HostProject) -> Project {
-    Project {
-        id: project.id,
-        name: project.name,
-        roots: vec![ProjectRoot { path: project.root }],
     }
 }
 
@@ -80,12 +70,16 @@ fn thread_updates(update: agent_runtime::ThreadUpdate) -> Vec<wire::ThreadUpdate
     }
 }
 
-fn shell_update(update: agent_runtime::ShellUpdate) -> wire::ShellUpdate {
+fn shell_update(update: agent_runtime::ShellUpdate, catalog: &ProjectCatalog) -> wire::ShellUpdate {
     use agent_runtime::ShellUpdate as Shell;
     match update {
         Shell::Snapshot(value) => wire::ShellUpdate::Snapshot(wire::ShellSnapshot {
             snapshot_sequence: value.snapshot_seq,
-            projects: value.projects.into_iter().map(project).collect(),
+            projects: value
+                .projects
+                .into_iter()
+                .map(|p| catalog.wire(p))
+                .collect(),
             threads: value
                 .threads
                 .into_iter()
@@ -105,7 +99,7 @@ fn shell_update(update: agent_runtime::ShellUpdate) -> wire::ShellUpdate {
             project: value,
         } => wire::ShellUpdate::ProjectUpdated {
             sequence,
-            project: project(value),
+            project: catalog.wire(value),
         },
         Shell::ProjectRemoved { sequence, project } => wire::ShellUpdate::ProjectRemoved {
             sequence,
@@ -113,7 +107,7 @@ fn shell_update(update: agent_runtime::ShellUpdate) -> wire::ShellUpdate {
         },
         Shell::Projects { sequence, projects } => wire::ShellUpdate::Projects {
             sequence,
-            projects: projects.into_iter().map(project).collect(),
+            projects: projects.into_iter().map(|p| catalog.wire(p)).collect(),
         },
         Shell::Synchronized => wire::ShellUpdate::Synchronized,
     }
@@ -454,19 +448,20 @@ impl Conversation {
             .updates
             .recv()
             .await
-            .map(shell_update)
+            .map(|update| shell_update(update, &self.resources.projects))
             .ok_or_else(|| unavailable("the shell stream closed"))?;
         let updates = std::sync::Arc::new(tokio::sync::Mutex::new(Some(subscription.updates)));
+        let catalog = self.resources.projects.clone();
         Ok(stream(
             VecDeque::from([first]),
             wire::ShellUpdate::Synchronized,
             move || {
-                let updates = updates.clone();
+                let (updates, catalog) = (updates.clone(), catalog.clone());
                 Box::pin(async move {
                     let mut updates = updates.lock().await;
                     let receiver = updates.as_mut()?;
                     match receiver.recv().await {
-                        Some(update) => Some(vec![shell_update(update)]),
+                        Some(update) => Some(vec![shell_update(update, &catalog)]),
                         None => overflowed(updates.take()?)
                             .then(|| vec![wire::ShellUpdate::Failed(live_buffer_full())]),
                     }

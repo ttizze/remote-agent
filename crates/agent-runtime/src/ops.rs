@@ -30,13 +30,16 @@ pub struct CreatedWorktree {
     pub branch: Option<String>,
 }
 
-/// The project's setup for a thread's workspace, run before its first turn.
+/// The project's setup for a thread's workspace, started before its first turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupRequest {
     pub thread: ThreadId,
     pub project: String,
     pub project_root: String,
     pub cwd: String,
+    /// Set for a launch that creates a worktree: a setup that is not asynchronous
+    /// is awaited and fails the preparation with its exit code (T3 `observeCompletion`).
+    pub observe_completion: bool,
 }
 
 /// Conversation settings for one project, with project overrides applied (T3

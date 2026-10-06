@@ -42,6 +42,36 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub roots: Vec<ProjectRoot>,
+    #[serde(default)]
+    pub scripts: Vec<ProjectScript>,
+}
+/// A project action (T3 `ProjectScript`). The first one that runs on worktree
+/// creation is the project's setup script.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectScript {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub icon: ProjectScriptIcon,
+    pub run_on_worktree_create: bool,
+    /// The agent starts while the setup runs unless this is `false`.
+    #[serde(rename = "async", default)]
+    pub run_async: Option<bool>,
+    #[serde(default)]
+    pub preview_url: Option<String>,
+    #[serde(default)]
+    pub auto_open_preview: Option<bool>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectScriptIcon {
+    Play,
+    Test,
+    Lint,
+    Configure,
+    Build,
+    Debug,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectRoot {
