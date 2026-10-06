@@ -30,6 +30,7 @@ struct Fake {
     projects: Mutex<Vec<HostProject>>,
     launches: Mutex<Vec<LaunchThread>>,
     claims: Mutex<Vec<(ThreadId, Vec<Attachment>)>>,
+    named: Mutex<Vec<String>>,
     created: Mutex<Vec<CreatedProject>>,
 }
 impl Fake {
@@ -258,6 +259,21 @@ impl Orchestration for Fake {
             root: root.to_string_lossy().into_owned(),
         };
         Box::pin(async move { Ok(project) })
+    }
+    /// Starts `project:named` in `/projects/pinball-stats`, whose commit fails.
+    fn create_named_project(
+        &self,
+        title: String,
+    ) -> BoxFuture<'_, Result<(HostProject, Option<String>), super::backend::NamedProjectFailure>>
+    {
+        self.named.lock().unwrap().push(title.clone());
+        let project = HostProject {
+            id: "project:named".into(),
+            name: title,
+            root: "/projects/pinball-stats".into(),
+        };
+        let commit_error = Some("Git has no name or email on this machine.".to_owned());
+        Box::pin(async move { Ok((project, commit_error)) })
     }
 }
 
@@ -1670,6 +1686,7 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
     )
     .await;
     assert_eq!(blank["_tag"], "AiError");
+    // A path takes a default model, which a create does not record.
     let unkept = call(
         &tools,
         "source-thread",
@@ -1677,8 +1694,18 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
         json!({"title":"Modelled","workspaceRoot":"/work/modelled","defaultModelSelection":{"instanceId":"codex","model":"gpt-5"}}),
     )
     .await;
-    assert_eq!(code(&unkept), "invalid_request");
-    assert_eq!(fake.created.lock().unwrap().len(), 2);
+    assert_eq!(unkept["workspaceRoot"], "/work/modelled");
+    assert_eq!(unkept["defaultModelSelection"], Value::Null);
+    assert_eq!(fake.created.lock().unwrap().len(), 3);
+    let malformed = call(
+        &tools,
+        "source-thread",
+        "project_create",
+        json!({"title":"Modelled","workspaceRoot":"/work/malformed","defaultModelSelection":{"instanceId":" ","model":"gpt-5"}}),
+    )
+    .await;
+    assert_eq!(malformed["_tag"], "AiError");
+    assert_eq!(fake.created.lock().unwrap().len(), 3);
     for extra in [
         json!({"scripts":[]}),
         json!({"defaultModelSelection":{"instanceId":"codex","model":"gpt-5"}}),
@@ -1691,7 +1718,56 @@ async fn creates_projects_from_a_path_and_rejects_fields_it_cannot_apply() {
         let rejected = call(&tools, "source-thread", "project_create", input).await;
         assert_eq!(code(&rejected), "invalid_request");
     }
-    assert_eq!(fake.created.lock().unwrap().len(), 2);
+    assert_eq!(fake.created.lock().unwrap().len(), 3);
+    assert!(fake.named.lock().unwrap().is_empty());
+}
+
+// project/handlers.test.ts "starts a project from just a title when
+// workspaceRoot is omitted".
+#[tokio::test]
+async fn starts_a_project_from_just_a_title_when_workspace_root_is_omitted() {
+    let fake = Arc::new(Fake::default());
+    fake.put(active_state("source-thread", "codex"));
+    let tools = tools(&fake);
+    let handle = |input: Value| call(&tools, "source-thread", "project_create", input);
+
+    let result = handle(json!({"title":"Pinball Stats"})).await;
+    assert_eq!(result["id"], "project:named");
+    assert_eq!(result["workspaceRoot"], "/projects/pinball-stats");
+    assert_eq!(
+        result["commitError"],
+        "Git has no name or email on this machine."
+    );
+    assert_eq!(*fake.named.lock().unwrap(), ["Pinball Stats"]);
+
+    // A path still registers that folder, and never makes a named project.
+    handle(json!({"title":"Existing","workspaceRoot":"/work/existing"})).await;
+    assert_eq!(
+        fake.created
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(root, ..)| root.clone())
+            .collect::<Vec<_>>(),
+        [PathBuf::from("/work/existing")]
+    );
+
+    // Fields this mode cannot apply are rejected, not dropped.
+    for extra in [
+        json!({"scripts":[]}),
+        json!({"defaultModelSelection":{"instanceId":"codex","model":"gpt-5"}}),
+        json!({"defaultModelSelection":null}),
+        json!({"createWorkspaceRootIfMissing":true}),
+    ] {
+        let mut input = json!({"title":"Configured"});
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let rejected = handle(input).await;
+        assert_eq!(code(&rejected), "invalid_request");
+    }
+    assert_eq!(*fake.named.lock().unwrap(), ["Pinball Stats"]);
 }
 
 #[tokio::test]

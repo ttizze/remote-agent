@@ -4709,6 +4709,7 @@ dependencies = [
  "futures-io",
  "futures-util",
  "icu_collator",
+ "icu_normalizer",
  "orchestration",
  "proptest",
  "regex",

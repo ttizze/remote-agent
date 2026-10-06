@@ -1,5 +1,5 @@
 //! The project toolkit: thread launch and the registered projects.
-use super::backend::ProjectFailure;
+use super::backend::{NamedProjectFailure, ProjectFailure};
 use super::orchestrator::{parse_interaction_mode, parse_runtime_mode};
 use super::thread::{SelectionInput, model_selection_json};
 use super::{
@@ -108,8 +108,28 @@ struct CreateInput {
     title: String,
     workspace_root: Option<String>,
     create_workspace_root_if_missing: Option<bool>,
+    /// Present even when null, which a title-only create also rejects.
+    #[serde(default, deserialize_with = "present")]
     default_model_selection: Option<Value>,
     scripts: Option<Vec<ProjectScript>>,
+}
+fn present<'de, D: serde::Deserializer<'de>>(input: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(input).map(Some)
+}
+/// A model selection, or null. Project creation records no default model, so
+/// it is only validated.
+fn default_model_selection(value: &Value) -> Result<(), ToolError> {
+    if value.is_null() {
+        return Ok(());
+    }
+    let selection: SelectionInput =
+        serde_json::from_value(value.clone()).map_err(|error| invalid(error.to_string()))?;
+    super::trimmed("instanceId", &selection.instance_id, None)?;
+    super::trimmed("model", &selection.model, None)?;
+    if let Some(options) = &selection.options {
+        super::orchestrator::option_selections(options)?;
+    }
+    Ok(())
 }
 
 fn workspace_strategy(value: Option<&Value>) -> Result<WorkspaceStrategy, ToolError> {
@@ -296,6 +316,9 @@ impl AgentTools {
             .as_deref()
             .map(|root| super::trimmed("workspaceRoot", root, None))
             .transpose()?;
+        if let Some(selection) = &input.default_model_selection {
+            default_model_selection(selection)?;
+        }
         let caller_state = self.read_mutation_caller(scope).await?;
         let caller = caller_state.thread.as_ref().expect("loaded");
         if caller.archived_at.is_some()
@@ -317,17 +340,22 @@ impl AgentTools {
                     "A project started from its title takes only a title.",
                 ));
             }
-            return Err(failure(
-                "orchestration_error",
-                "This Host cannot start a project from just its title.",
-            ));
+            let (project, commit_error) =
+                self.backend
+                    .create_named_project(title)
+                    .await
+                    .map_err(|error| match error {
+                        NamedProjectFailure::Named(error) => {
+                            failure("orchestration_error", error.message())
+                        }
+                        NamedProjectFailure::Unavailable => unavailable(),
+                    })?;
+            let mut created = project_json(&project, self.backend.project_scripts(&project.id));
+            if let Some(commit_error) = commit_error {
+                created["commitError"] = json!(commit_error);
+            }
+            return Ok(created);
         };
-        if input.default_model_selection.is_some() {
-            return Err(failure(
-                "invalid_request",
-                "This Host does not keep a project default model selection.",
-            ));
-        }
         let scripts = crate::projects::valid_scripts(input.scripts.unwrap_or_default())
             .map_err(|error| invalid(error.to_string()))?;
         let project = self

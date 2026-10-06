@@ -2,6 +2,7 @@
 //! the live provider catalog.
 use super::ModelCatalog;
 use crate::conversation::ProjectCatalog;
+use crate::projects::NamedProjectError;
 use crate::workspace_files::WorkspaceFiles;
 use agent_domain::{Attachment, Command, CommandId, Reply, State, ThreadId, ThreadShell};
 use agent_protocol::{
@@ -59,6 +60,13 @@ pub(crate) enum ProjectFailure {
     Operation(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NamedProjectFailure {
+    Named(NamedProjectError),
+    /// The created project could not be read back.
+    Unavailable,
+}
+
 pub(crate) trait Orchestration: Send + Sync {
     /// A thread's committed state; a thread never created has no `thread`.
     fn state(&self, thread: &ThreadId) -> BoxFuture<'_, Result<Arc<State>, String>>;
@@ -95,6 +103,12 @@ pub(crate) trait Orchestration: Send + Sync {
         create_missing: bool,
         scripts: Vec<ProjectScript>,
     ) -> BoxFuture<'_, Result<HostProject, ProjectFailure>>;
+    /// Starts a project from just its title in a new repository of its own; the
+    /// project, and why its first commit failed if it did.
+    fn create_named_project(
+        &self,
+        title: String,
+    ) -> BoxFuture<'_, Result<(HostProject, Option<String>), NamedProjectFailure>>;
 }
 
 /// The runtime, project catalog and model catalog this Host serves.
@@ -271,6 +285,29 @@ impl Orchestration for HostOrchestration {
                 .into_iter()
                 .find(|project| project.id == id)
                 .ok_or_else(|| ProjectFailure::Operation("The project was not registered.".into()))
+        })
+    }
+
+    fn create_named_project(
+        &self,
+        title: String,
+    ) -> BoxFuture<'_, Result<(HostProject, Option<String>), NamedProjectFailure>> {
+        Box::pin(async move {
+            let created = crate::projects::create_named_project(
+                self.projects.store(),
+                &title,
+                &crate::projects::Git::default(),
+            )
+            .await
+            .map_err(NamedProjectFailure::Named)?;
+            crate::conversation::project_added(&self.runtime, &self.projects, &created.id).await;
+            let project = self
+                .projects
+                .list()
+                .into_iter()
+                .find(|project| project.id == created.id)
+                .ok_or(NamedProjectFailure::Unavailable)?;
+            Ok((project, created.commit_error))
         })
     }
 }
