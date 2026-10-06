@@ -1251,6 +1251,13 @@ impl CodexProtocol {
                             )
                         }
                     };
+                    // T3 reads the process-wide snapshot for each usage-limit
+                    // failure, including a thread that attached after it arrived.
+                    if class == "usage_limit" && self.rate_limits.is_some() {
+                        events.push(ProviderEvent::RateLimits {
+                            resets_at: usage_limit_reset(self.rate_limits.as_ref()),
+                        });
+                    }
                     events.push(ProviderEvent::ItemFinished {
                         key: format!("terminal-failure:{turn_id}"),
                         kind: ProviderItem::Error {

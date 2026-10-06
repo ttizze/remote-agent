@@ -2479,6 +2479,33 @@ async fn shared_rate_limits_reach_every_thread_and_fill_a_stopped_turns_reset() 
     assert_eq!(rig.run_status(&b).await, RunStatus::Running);
 }
 
+// T3 CodexAdapterV2 turn.terminal: a usage-limit failure takes its reset from
+// the app-server's snapshot even for a thread that attached after it arrived.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thread_attaching_after_the_rate_limit_snapshot_still_gets_its_reset() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (
+        thread("thread-late-limits-a"),
+        thread("thread-late-limits-b"),
+    );
+    rig.shared_turn(&a).await;
+    let process = rig.host.process(0);
+    process.emit(json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":100,"resetsAt":2000000000}}}}));
+    rig.until("a records the snapshot", async || {
+        rig.state(&a).await.rate_limit_resets.get("codex") == Some(&Some(2_000_000_000))
+    })
+    .await;
+    let (native_b, turn_b) = rig.shared_turn(&b).await;
+    process.emit(json!({"method":"turn/completed","params":{"threadId":native_b,"turn":{"id":turn_b,"status":"failed","error":{"message":"Usage limit reached.","codexErrorInfo":"usageLimitExceeded"}}}}));
+    rig.until_status(&b, RunStatus::Failed).await;
+    assert!(rig.state(&b).await.items.iter().any(|item| matches!(
+        &item.kind,
+        ItemKind::Error { class: Some(class), reset_at: Some(reset), .. }
+            if class == "usage_limit" && reset.millis() == 2_000_000_000_000
+    )));
+}
+
 // T3 ProviderSessionManager: the shared session is busy while any thread's
 // turn runs, and is released once every thread is idle.
 #[tokio::test(flavor = "multi_thread")]
