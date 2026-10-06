@@ -7,6 +7,7 @@ fn rollback(s: &mut State, key: &str, checkpoint: &CheckpointId) -> Step {
         Command::Rollback {
             checkpoint: checkpoint.clone(),
             restore_files: false,
+            restore_refusal: None,
         },
     )
 }
@@ -136,4 +137,72 @@ fn rollback_fails_when_the_selection_left_the_active_provider() {
         )
     );
     assert_eq!(s.runs[1].status, RunStatus::Completed);
+}
+
+// T3 Orchestrator.ts dispatchCheckpointRollback: a file restore the Host found
+// unsafe is rejected at admission, after the target checks; a rewind without
+// files ignores it.
+#[test]
+fn a_restore_the_host_refused_is_rejected_at_admission() {
+    let refusal = "File restore requires an isolated worktree.";
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp = checkpoint(&mut s, &first, &a, "cp-first");
+    let refused = |restore_files: bool, checkpoint: &CheckpointId| Command::Rollback {
+        checkpoint: checkpoint.clone(),
+        restore_files,
+        restore_refusal: Some(refusal.into()),
+    };
+    let missing = CheckpointId::new("missing").unwrap();
+    assert_eq!(
+        command(&mut s, "missing", refused(true, &missing)).reply,
+        Reply::Rejected {
+            reason: "checkpoint-not-found".into()
+        }
+    );
+    let step = command(&mut s, "refused", refused(true, &cp));
+    assert_eq!(
+        step.reply,
+        Reply::Rejected {
+            reason: refusal.into()
+        }
+    );
+    assert!(step.facts.is_empty() && step.effects.is_empty());
+    assert!(s.rollback.is_none());
+    let step = command(&mut s, "conversation", refused(false, &cp));
+    assert_eq!(step.reply, Reply::Accepted);
+    assert!(matches!(
+        &step.effects[0].body,
+        EffectBody::Rollback { restore: None, .. }
+    ));
+}
+
+// A resent rollback returns its first result whatever the Host resolves again.
+#[test]
+fn the_host_refusal_is_not_part_of_the_rollback_identity() {
+    let mut s = state();
+    let (first, a) = running(&mut s, "first");
+    finish(&mut s, &a);
+    let cp = checkpoint(&mut s, &first, &a, "cp-first");
+    let rollback = |restore_refusal: Option<&str>| Command::Rollback {
+        checkpoint: cp.clone(),
+        restore_files: true,
+        restore_refusal: restore_refusal.map(Into::into),
+    };
+    let first = command(&mut s, "rollback", rollback(Some("shared")));
+    let replay = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "rollback".into(),
+            input: Input::Command {
+                id: CommandId::new("rollback").unwrap(),
+                command: Box::new(rollback(None)),
+                receipt: first.receipt.clone(),
+            },
+        },
+    );
+    assert_eq!(replay.reply, first.reply);
+    assert_eq!(replay.receipt, first.receipt);
 }

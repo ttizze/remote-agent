@@ -283,6 +283,7 @@ async fn does_not_capture_a_stopped_run_that_a_rollback_already_discarded() {
             Command::Rollback {
                 checkpoint: checkpoint_id(&scope.id, 1),
                 restore_files: false,
+                restore_refusal: None,
             },
             CommandOrigin::Client,
         )

@@ -303,6 +303,7 @@ fn a_fork_inherits_rolled_back_runs_through_its_boundary() {
         Command::Rollback {
             checkpoint: cp,
             restore_files: false,
+            restore_refusal: None,
         },
     );
     result(

@@ -40,6 +40,8 @@ fn rollback_calls(ops: &FakeOps) -> Vec<String> {
         .collect()
 }
 
+/// A rollback the state machine accepts without the Host's admission check, as
+/// when the workspace becomes shared after admission.
 async fn rollback(
     rig: &Rig,
     thread: &ThreadId,
@@ -52,9 +54,50 @@ async fn rollback(
         Command::Rollback {
             checkpoint: checkpoint_id(&scope.id, ordinal),
             restore_files,
+            restore_refusal: None,
         },
     )
     .await
+}
+
+/// A client's rollback, admitted as `Runtime::dispatch` admits it.
+async fn admitted_rollback(
+    rig: &Rig,
+    thread: &ThreadId,
+    scope: &CheckpointScope,
+    ordinal: u64,
+    restore_files: bool,
+) -> Reply {
+    let command = with_restore_refusal(
+        &rig.context,
+        thread,
+        Command::Rollback {
+            checkpoint: checkpoint_id(&scope.id, ordinal),
+            restore_files,
+            restore_refusal: None,
+        },
+    )
+    .await
+    .unwrap();
+    rig.command(thread, command).await
+}
+
+fn shared_rejection() -> Reply {
+    Reply::Rejected {
+        reason: SHARED_WORKSPACE_RESTORE_MESSAGE.into(),
+    }
+}
+
+/// The error of the rollback effect's last attempt.
+async fn rollback_error(rig: &Rig, thread: &ThreadId) -> Option<String> {
+    let id = thread.clone();
+    rig.store
+        .blocking(move |store| store.outbox(&id))
+        .await
+        .unwrap()
+        .into_iter()
+        .rfind(|row| row.kind == "Rollback")
+        .and_then(|row| row.last_error)
 }
 
 fn rolled_back(state: &State) -> Vec<u64> {
@@ -86,7 +129,10 @@ async fn rewinds_safely() {
         (true, Shared::Historical, 0),
         (false, Shared::None, 1),
     ] {
-        let rig = rig();
+        let rig = rig_with(RigOptions {
+            max_attempts: 1,
+            ..RigOptions::default()
+        });
         rig.ops
             .projects
             .lock()
@@ -128,18 +174,33 @@ async fn rewinds_safely() {
         }
         rig.ops.log.lock().unwrap().clear();
 
-        assert_eq!(
-            rollback(&rig, &id, &scope, target, restore_files).await,
-            Reply::Accepted
-        );
-        rig.drain().await;
-
-        let state = rig.state(&id).await;
         let case = format!("{restore_files} {shared:?} {target}");
-        assert!(state.rollback.is_none(), "{case}");
         if restore_files && shared != Shared::None {
+            // T3 Orchestrator rejects it at admission.
+            assert_eq!(
+                admitted_rollback(&rig, &id, &scope, target, restore_files).await,
+                shared_rejection(),
+                "{case}"
+            );
+            let state = rig.state(&id).await;
+            assert!(state.rollback.is_none(), "{case}");
+            assert_eq!(state.rollback_failure, None, "{case}");
+            // CheckpointRollbackService fails with "shared-workspace" and the
+            // worker reports its fixed message.
+            assert_eq!(
+                rollback(&rig, &id, &scope, target, restore_files).await,
+                Reply::Accepted
+            );
+            rig.drain().await;
+            let state = rig.state(&id).await;
+            assert!(state.rollback.is_none(), "{case}");
             assert_eq!(
                 state.rollback_failure.as_deref(),
+                Some(ROLLBACK_FAILED_MESSAGE),
+                "{case}"
+            );
+            assert_eq!(
+                rollback_error(&rig, &id).await.as_deref(),
                 Some(SHARED_WORKSPACE_RESTORE_MESSAGE),
                 "{case}"
             );
@@ -147,6 +208,14 @@ async fn rewinds_safely() {
             assert!(rolled_back(&state).is_empty(), "{case}");
             continue;
         }
+        assert_eq!(
+            admitted_rollback(&rig, &id, &scope, target, restore_files).await,
+            Reply::Accepted
+        );
+        rig.drain().await;
+
+        let state = rig.state(&id).await;
+        assert!(state.rollback.is_none(), "{case}");
         assert_eq!(state.rollback_failure, None, "{case}");
         assert_eq!(
             rollback_calls(&rig.ops),
@@ -334,7 +403,10 @@ async fn preserves_overlapping_workspace_files() {
             _ => {}
         }
         let text = |path: &std::path::Path| path.to_string_lossy().into_owned();
-        let rig = rig();
+        let rig = rig_with(RigOptions {
+            max_attempts: 1,
+            ..RigOptions::default()
+        });
         rig.ops.real_files.store(true, Ordering::SeqCst);
         *rig.ops.projects.lock().unwrap() = vec![project("project", &text(&parent))];
         rig.host.respond(revert_replies(rig.ops.clone(), false));
@@ -414,20 +486,36 @@ async fn preserves_overlapping_workspace_files() {
         rig.ops.log.lock().unwrap().clear();
 
         let restore_files = owner != Owner::Conversation;
-        assert_eq!(
-            rollback(&rig, &id, &scope, 0, restore_files).await,
-            Reply::Accepted
-        );
-        rig.drain().await;
-
-        let state = rig.state(&id).await;
         let rejected = !matches!(
             owner,
             Owner::Sibling | Owner::StoppedProvider | Owner::SharedProvider | Owner::Conversation
         );
+        assert_eq!(
+            admitted_rollback(&rig, &id, &scope, 0, restore_files).await,
+            if rejected {
+                shared_rejection()
+            } else {
+                Reply::Accepted
+            },
+            "{owner:?}"
+        );
+        if rejected {
+            assert_eq!(
+                rollback(&rig, &id, &scope, 0, restore_files).await,
+                Reply::Accepted
+            );
+        }
+        rig.drain().await;
+
+        let state = rig.state(&id).await;
         if rejected {
             assert_eq!(
                 state.rollback_failure.as_deref(),
+                Some(ROLLBACK_FAILED_MESSAGE),
+                "{owner:?}"
+            );
+            assert_eq!(
+                rollback_error(&rig, &id).await.as_deref(),
                 Some(SHARED_WORKSPACE_RESTORE_MESSAGE),
                 "{owner:?}"
             );
@@ -453,14 +541,17 @@ async fn preserves_overlapping_workspace_files() {
 }
 
 /// A thread in `/wt` with two completed runs, the files of both and a rollback to
-/// the first run's checkpoint accepted.
+/// the first run's checkpoint admitted.
 async fn rolled_back_once(rig: &Rig, id: &ThreadId) -> CheckpointScope {
     rig.host.respond(revert_replies(rig.ops.clone(), false));
     let scope = rig.scoped(id, worktree("/wt")).await;
     rig.completed_run(id, "first", "turn-1").await;
     rig.completed_run(id, "second", "turn-2").await;
     rig.ops.log.lock().unwrap().clear();
-    assert_eq!(rollback(rig, id, &scope, 1, true).await, Reply::Accepted);
+    assert_eq!(
+        admitted_rollback(rig, id, &scope, 1, true).await,
+        Reply::Accepted
+    );
     scope
 }
 
@@ -661,4 +752,42 @@ async fn a_launch_into_the_restored_worktree_waits_for_the_restore() {
         .collect();
     assert_eq!(calls, ["prepare", "provider", "commit", "launched"]);
     assert_eq!(rig.state(&id).await.rollback_failure, None);
+}
+
+// T3 checks isolation again in CheckpointRollbackService, and EffectWorker.ts
+// reports ROLLBACK_FAILED_MESSAGE only once the retries are spent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workspace_shared_after_admission_fails_the_rollback_after_its_retries() {
+    let rig = rig();
+    let id = tid("rewind-shared-later");
+    rolled_back_once(&rig, &id).await;
+    let other = tid("rewind-shared-later-other");
+    rig.create_in(&other, "project", Some(worktree("/wt")))
+        .await;
+
+    rig.drain().await;
+    let state = rig.state(&id).await;
+    assert!(state.rollback.is_some());
+    assert_eq!(state.rollback_failure, None);
+    for _ in 0..5 {
+        rig.clock.advance(30_000);
+        rig.drain().await;
+    }
+    let state = rig.state(&id).await;
+    assert!(state.rollback.is_none());
+    assert_eq!(
+        state.rollback_failure.as_deref(),
+        Some(ROLLBACK_FAILED_MESSAGE)
+    );
+    assert_eq!(
+        rollback_error(&rig, &id).await.as_deref(),
+        Some(SHARED_WORKSPACE_RESTORE_MESSAGE)
+    );
+    assert!(
+        rig.outbox_kinds(&id)
+            .await
+            .contains(&("Rollback".to_owned(), crate::EffectStatus::Failed))
+    );
+    assert!(rollback_calls(&rig.ops).is_empty());
+    assert!(rolled_back(&state).is_empty());
 }

@@ -3212,6 +3212,7 @@ impl Decision {
             Rollback {
                 checkpoint,
                 restore_files,
+                restore_refusal,
             } => {
                 if self.state.active_run().is_some()
                     || self.state.tasks.iter().any(|t| !t.status.terminal())
@@ -3236,6 +3237,10 @@ impl Decision {
                 };
                 if cp.status != CheckpointStatus::Ready {
                     return reject("checkpoint-not-ready");
+                }
+                // T3 Orchestrator checks restore isolation at admission too.
+                if *restore_files && let Some(refusal) = restore_refusal {
+                    return reject(refusal);
                 }
                 if cp.run_ordinal > 0 {
                     let target = self
@@ -6351,6 +6356,25 @@ fn preparation_kind(title: &str, exit_code: Option<i64>) -> ItemKind {
         title: Some(title.into()),
     }
 }
+/// What the Host fills in before dispatch is not part of a command's identity, so
+/// a resent command returns its first result.
+fn command_fingerprint(command: &Command) -> String {
+    let encode =
+        |command: &Command| serde_json::to_string(command).expect("domain commands serialize");
+    if let Command::Rollback {
+        checkpoint,
+        restore_files,
+        restore_refusal: Some(_),
+    } = command
+    {
+        return encode(&Command::Rollback {
+            checkpoint: checkpoint.clone(),
+            restore_files: *restore_files,
+            restore_refusal: None,
+        });
+    }
+    encode(command)
+}
 fn reject(reason: &str) -> Reply {
     Reply::Rejected {
         reason: reason.into(),
@@ -6486,8 +6510,7 @@ impl ThreadMachine {
                 command,
                 receipt: existing,
             } => {
-                let fingerprint =
-                    serde_json::to_string(command).expect("domain commands serialize");
+                let fingerprint = command_fingerprint(command);
                 if let Some(existing) = existing {
                     if existing.command == *id && existing.fingerprint == fingerprint {
                         return Step {

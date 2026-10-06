@@ -1,9 +1,11 @@
 use super::checkpoint::{SHARED_WORKSPACE_RESTORE_MESSAGE, restore_isolated};
 use super::{ExecutorContext, retry};
-use crate::{Durability, EffectError, EffectHandler, EffectJob, ExecError, PreparedRestore};
+use crate::{
+    Durability, EffectError, EffectHandler, EffectJob, ExecError, PreparedRestore, RuntimeError,
+};
 use agent_domain::{
-    CheckpointScope, CommandId, Effect, EffectBody, EffectResult, Input, Reply, RestoreFiles,
-    State, ThreadId,
+    CheckpointScope, CheckpointStatus, Command, CommandId, Effect, EffectBody, EffectResult, Input,
+    Reply, RestoreFiles, State, ThreadId,
 };
 use futures_util::future::BoxFuture;
 
@@ -70,11 +72,12 @@ impl EffectHandler for Rollback {
                     let Some(scope) = &scope else {
                         return failed(ROLLBACK_FAILED_MESSAGE);
                     };
+                    // T3 fails the attempt; the last one reports ROLLBACK_FAILED_MESSAGE.
                     if !restore_isolated(context, &job.thread, &state, &scope.cwd)
                         .await
                         .map_err(retry)?
                     {
-                        return failed(SHARED_WORKSPACE_RESTORE_MESSAGE);
+                        return Err(retry(SHARED_WORKSPACE_RESTORE_MESSAGE));
                     }
                     Some(
                         context
@@ -200,6 +203,47 @@ impl Rollback {
         }
         Ok(())
     }
+}
+
+/// Fills in why a client's file-restoring rollback cannot restore files now, which
+/// the thread's state machine rejects at admission (T3 `dispatchCheckpointRollback`
+/// checks `isCheckpointRestoreIsolated` before accepting the command).
+pub(crate) async fn with_restore_refusal(
+    context: &ExecutorContext,
+    thread: &ThreadId,
+    command: Command,
+) -> Result<Command, RuntimeError> {
+    let Command::Rollback {
+        checkpoint,
+        restore_files,
+        ..
+    } = command
+    else {
+        return Ok(command);
+    };
+    let mut restore_refusal = None;
+    if restore_files {
+        let state = context.registry.state(thread).await?;
+        if let Some(scope) = state
+            .checkpoints
+            .iter()
+            .find(|candidate| {
+                candidate.id == checkpoint && candidate.status == CheckpointStatus::Ready
+            })
+            .and_then(|candidate| candidate.scope.as_ref())
+        {
+            restore_refusal = match restore_isolated(context, thread, &state, &scope.cwd).await {
+                Ok(true) => None,
+                Ok(false) => Some(SHARED_WORKSPACE_RESTORE_MESSAGE.to_owned()),
+                Err(error) => Some(error),
+            };
+        }
+    }
+    Ok(Command::Rollback {
+        checkpoint,
+        restore_files,
+        restore_refusal,
+    })
 }
 
 /// Puts the original files back after a failure before the rollback was recorded.

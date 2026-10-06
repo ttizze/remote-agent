@@ -950,6 +950,9 @@ pub enum Command {
     Rollback {
         checkpoint: CheckpointId,
         restore_files: bool,
+        /// Filled by the Host: why the checkpoint's files cannot be restored now
+        /// (another thread shares the workspace). Not part of the command's identity.
+        restore_refusal: Option<String>,
     },
     Fork {
         target: ThreadId,

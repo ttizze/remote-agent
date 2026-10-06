@@ -600,6 +600,7 @@ impl Replay {
                     Command::Rollback {
                         checkpoint,
                         restore_files: false,
+                        restore_refusal: None,
                     },
                 )
                 .await,

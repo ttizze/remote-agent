@@ -634,6 +634,7 @@ fn rollback_is_absolute_blocks_run_operations_and_preserves_new_metadata() {
         Command::Rollback {
             checkpoint: cp,
             restore_files: true,
+            restore_refusal: None,
         },
     );
     for (key, c) in [
@@ -644,6 +645,7 @@ fn rollback_is_absolute_blocks_run_operations_and_preserves_new_metadata() {
             Command::Rollback {
                 checkpoint: CheckpointId::new("cp-first").unwrap(),
                 restore_files: false,
+                restore_refusal: None,
             },
         ),
     ] {
@@ -1956,6 +1958,7 @@ fn failed_capture_settles_the_run_and_stopped_capture_keeps_its_terminal_status(
             Command::Rollback {
                 checkpoint: CheckpointId::new("missing-cp").unwrap(),
                 restore_files: false,
+                restore_refusal: None,
             },
         )
         .reply,
@@ -1997,6 +2000,7 @@ fn rollback_discards_pending_captures_and_invalidates_later_checkpoints() {
         Command::Rollback {
             checkpoint: cp,
             restore_files: true,
+            restore_refusal: None,
         },
     );
     let [effect] = rollback.effects.as_slice() else {
@@ -2038,6 +2042,7 @@ fn rollback_discards_pending_captures_and_invalidates_later_checkpoints() {
             Command::Rollback {
                 checkpoint: later,
                 restore_files: true,
+                restore_refusal: None,
             },
         )
         .reply,
@@ -2061,6 +2066,7 @@ fn rollback_without_provider_rewind_or_file_restore_still_reports_one_result() {
         Command::Rollback {
             checkpoint: cp,
             restore_files: false,
+            restore_refusal: None,
         },
     );
     assert!(matches!(
@@ -2731,6 +2737,7 @@ fn first_scoped_capture_requires_a_baseline_and_late_capture_uses_its_original_s
         Command::Rollback {
             checkpoint: CheckpointId::new("initial").unwrap(),
             restore_files: true,
+            restore_refusal: None,
         },
     );
     assert!(rollback.effects.iter().any(|effect|matches!(&effect.body,EffectBody::Rollback {restore:Some(RestoreFiles {scope:Some(scope),file_ref,..}),..} if scope.cwd=="/workspace/one" && file_ref=="before")));
@@ -2839,6 +2846,7 @@ fn interrupt_failure_keeps_the_root_and_children_live_until_provider_confirmatio
             Command::Rollback {
                 checkpoint: cp,
                 restore_files: true,
+                restore_refusal: None,
             }
         )
         .reply,
@@ -2858,6 +2866,7 @@ fn provider_selection_and_runtime_changes_are_blocked_during_rollback() {
         Command::Rollback {
             checkpoint: cp,
             restore_files: false,
+            restore_refusal: None,
         },
     );
     for (i, change) in [
@@ -5288,6 +5297,7 @@ fn a_failed_rollback_resets_only_the_native_sessions_it_may_have_rewound() {
             Command::Rollback {
                 checkpoint: cp,
                 restore_files: true,
+                restore_refusal: None,
             },
         );
         let rollback = CommandId::new("rollback").unwrap();

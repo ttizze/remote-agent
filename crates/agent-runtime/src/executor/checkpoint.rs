@@ -441,6 +441,7 @@ pub(crate) async fn restore_isolated(
             .and_then(|workspace| workspace.worktree_path.clone())
         {
             Some(worktree) => paths.push(worktree),
+            // T3 includes deleted projects; the Host never unregisters one.
             None => match ops.project(&other.project) {
                 Some(project) => paths.push(project.root),
                 None => return Ok(false),

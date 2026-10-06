@@ -327,6 +327,8 @@ impl Runtime {
         let _admitted = self.admit().await?;
         let command = self.checked_attachments(&id, command).await?;
         let command = self.with_host_context(&id, &thread, command).await?;
+        let command =
+            crate::executor::with_restore_refusal(&self.executors, &thread, command).await?;
         self.registry()
             .dispatch(&thread, id, command, CommandOrigin::Client)
             .await
