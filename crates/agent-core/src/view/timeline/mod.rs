@@ -16,6 +16,7 @@ pub mod mobile_inspector;
 pub mod mobile_presentation;
 pub mod mobile_work_log;
 pub mod pending;
+pub mod plan_card;
 pub mod rows;
 pub mod splice;
 pub mod timing;
