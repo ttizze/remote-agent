@@ -1069,6 +1069,56 @@ async fn queues_a_handoff_policy_when_the_catalog_differs() {
     assert_eq!(policies, 1);
 }
 
+struct Windows;
+impl HandoffCatalog for Windows {
+    fn policy(&self, selection: &ModelSelection) -> Option<HandoffValue> {
+        Some(HandoffValue {
+            model_window: Some(if selection.model == "wide" {
+                1_000_000
+            } else {
+                200_000
+            }),
+            token_cap: 16_000,
+        })
+    }
+}
+
+// T3 ProviderTurnStartService reads the selected run's model window before
+// budgeting delivery, so a message that selects another window starts with it.
+#[tokio::test]
+async fn a_run_starts_with_the_model_window_its_message_selects() {
+    let mut h = harness();
+    h.context.handoff = Arc::new(Windows);
+    let id = thread("thread:window");
+    let handle = created(&h.context, &id).await;
+    let Command::Send(mut message) = send("wide") else {
+        unreachable!()
+    };
+    message.selection = Some(ModelSelection {
+        model: "wide".into(),
+        ..selection()
+    });
+    let sent = handle
+        .dispatch(
+            command_id("wide"),
+            Command::Send(message),
+            CommandOrigin::Client,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(sent.reply, Reply::Run(_)));
+    let facts: Vec<_> = stored_facts(&h.context, &id)
+        .into_iter()
+        .map(|stored| stored.fact)
+        .collect();
+    let started = facts
+        .iter()
+        .position(|fact| matches!(fact.body, FactBody::RunStarted { .. }))
+        .unwrap();
+    let before = fold(&State::default(), &facts[..started]).unwrap();
+    assert_eq!(before.context_windows.get("codex"), Some(&1_000_000));
+}
+
 struct Pinned(Mutex<bool>);
 impl Residency for Pinned {
     fn pinned(&self, _: &ThreadId) -> bool {
