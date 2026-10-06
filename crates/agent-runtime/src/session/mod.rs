@@ -73,6 +73,8 @@ pub(crate) struct Members {
     /// Threads whose MCP credentials the process holds until it is gone.
     recorded: BTreeSet<ThreadId>,
     closed: bool,
+    /// A selected managed account the process has not signed in with yet.
+    account_pending: bool,
 }
 
 /// What the Host needs to configure or launch a provider for one thread.
@@ -958,31 +960,36 @@ impl SessionManager {
 
     /// Signs the instance's live Codex app-server in with the selected managed
     /// account, as the Host's single app-server did when an account was selected.
+    /// Until that succeeds the app-server signs in again before its next use.
     pub async fn apply_codex_account(&self, instance: &str) -> Result<(), String> {
-        let Some(entry) = self.entry(&Slot::Shared(instance.to_owned())) else {
-            return Ok(());
-        };
-        let Some(params) = self.host.codex_account(instance.to_owned()).await? else {
-            return Ok(());
-        };
-        let thread = {
-            let members = entry.members.lock().expect("session members");
-            members
-                .attached
-                .keys()
-                .chain(&members.recorded)
-                .next()
-                .cloned()
-        };
-        let Some(thread) = thread else {
-            return Ok(());
-        };
-        self.request_reply(
-            &entry,
-            Request::new(&thread, move |p| Ok(frames(vec![p.codex()?.login(params)]))),
-        )
-        .await
-        .map(|_| ())
+        let slot = Slot::Shared(instance.to_owned());
+        self.opening
+            .with_lock(slot.clone(), async {
+                let Some(entry) = self.entry(&slot) else {
+                    return Ok(());
+                };
+                let thread = {
+                    let mut members = entry.members.lock().expect("session members");
+                    members.account_pending = true;
+                    members
+                        .attached
+                        .keys()
+                        .chain(&members.recorded)
+                        .next()
+                        .cloned()
+                };
+                let Some(thread) = thread else {
+                    return Ok(());
+                };
+                self.codex_sign_in(&entry, &thread).await?;
+                entry
+                    .members
+                    .lock()
+                    .expect("session members")
+                    .account_pending = false;
+                Ok(())
+            })
+            .await
     }
 
     /// Host shutdown: recovery decides what the runs become, so no session

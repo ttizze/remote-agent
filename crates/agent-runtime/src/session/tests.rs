@@ -2718,6 +2718,61 @@ async fn a_new_app_server_signs_in_with_the_managed_account_and_refreshes_its_to
     );
 }
 
+// A managed account the live app-server rejected is reported and signed in
+// again before the app-server's next use, instead of running as the old one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_account_selection_fails_and_signs_in_before_the_next_turn() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let first = json!({"type":"chatgptAuthTokens","accessToken":"first","chatgptAccountId":"account-1","chatgptPlanType":"pro"});
+    *rig.host.codex_login.lock().unwrap() = Some(first);
+    let id = thread("thread-account-switch");
+    let (native, turn) = rig.shared_turn(&id).await;
+    let process = rig.host.process(0);
+    complete(&process, &native, &turn, "done");
+    rig.until_status(&id, RunStatus::Completed).await;
+    let second = json!({"type":"chatgptAuthTokens","accessToken":"second","chatgptAccountId":"account-2","chatgptPlanType":"pro"});
+    *rig.host.codex_login.lock().unwrap() = Some(second.clone());
+    rig.host.respond(|frame| {
+        if frame["method"] == "account/login/start" {
+            return vec![
+                json!({"id":frame["id"],"error":{"code":-32000,"message":"login refused"}}),
+            ];
+        }
+        shared_replies(frame)
+    });
+    assert!(rig.sessions.apply_codex_account("codex").await.is_err());
+    rig.host.respond(shared_replies);
+    let starts = written_methods(&process, "turn/start").len();
+    rig.send(&id, "again", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    rig.until("the next turn starts", async || {
+        written_methods(&process, "turn/start").len() > starts
+    })
+    .await;
+    let methods: Vec<_> = process
+        .written()
+        .iter()
+        .filter_map(|frame| frame["method"].as_str().map(str::to_owned))
+        .collect();
+    let last_login = methods
+        .iter()
+        .rposition(|method| method == "account/login/start")
+        .unwrap();
+    let last_start = methods
+        .iter()
+        .rposition(|method| method == "turn/start")
+        .unwrap();
+    assert!(last_login < last_start);
+    assert_eq!(
+        written_methods(&process, "account/login/start")
+            .last()
+            .unwrap()["params"],
+        second
+    );
+    assert_eq!(written_methods(&process, "account/login/start").len(), 3);
+}
+
 // T3 ClaudeAdapterV2 query options: the app's MCP tools are pre-approved after
 // the policy's own allowed tools, the workspace and attachments are added
 // directories, and the runtime and orchestration instructions are appended to

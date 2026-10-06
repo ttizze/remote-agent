@@ -56,6 +56,21 @@ impl SessionManager {
         self.opening
             .with_lock(slot.clone(), async {
                 if let Some(entry) = self.entry(&slot) {
+                    let pending = entry
+                        .members
+                        .lock()
+                        .expect("session members")
+                        .account_pending;
+                    if pending {
+                        self.codex_sign_in(&entry, &target.key.thread)
+                            .await
+                            .map_err(ExecError::Retry)?;
+                        entry
+                            .members
+                            .lock()
+                            .expect("session members")
+                            .account_pending = false;
+                    }
                     return Ok(entry);
                 }
                 let entry = self.spawn(target, None).await?;
@@ -84,7 +99,11 @@ impl SessionManager {
     }
 
     /// T3 resolveRuntime: a new app-server runs as the selected managed account.
-    async fn codex_sign_in(&self, entry: &Entry, thread: &ThreadId) -> Result<(), String> {
+    pub(super) async fn codex_sign_in(
+        &self,
+        entry: &Entry,
+        thread: &ThreadId,
+    ) -> Result<(), String> {
         let Some(params) = self
             .host
             .codex_account(entry.slot.instance().to_owned())
