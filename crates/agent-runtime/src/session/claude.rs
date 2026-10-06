@@ -1,5 +1,8 @@
 use super::*;
 
+/// T3 ClaudeBackgroundWorkBlocksQueryReplacementError.
+pub(crate) const BACKGROUND_BLOCKS_REPLACEMENT: &str = "Claude is still running background agents or commands, and this model or setting change would end them. Wait for them to finish, or press Stop, then send the message again.";
+
 pub(crate) struct ClaudeProcess {
     pub(super) launch: ClaudeLaunch,
     pub(crate) native: Option<String>,
@@ -38,18 +41,44 @@ impl SessionManager {
             .await
             .map_err(ExecError::Retry)?;
         let new_session = native.is_none().then(|| self.host.session_uuid(attempt));
-        let launch = claude_launch(target, &settings, native.clone(), resume_at, new_session);
+        let launch = claude_launch(
+            target,
+            &settings,
+            native.clone(),
+            resume_at,
+            new_session.clone(),
+        );
         let entry = self
             .claude_session(target, state, attempt, command, &settings, launch)
             .await?;
+        if !self.still_current(&target.key.thread, attempt).await? {
+            return Ok(());
+        }
+        // The CLI writes a transcript for a new session once it has the prompt;
+        // binding first keeps an import from adopting that session.
+        if let Some(session) = new_session {
+            self.provider_event(
+                &target.key.thread,
+                attempt,
+                ProviderEvent::SessionReady {
+                    native_thread: session,
+                },
+            )
+            .await
+            .map_err(|error| ExecError::Retry(error.to_string()))?;
+        }
         self.bind(attempt, &entry);
-        let (command, images) = (command.clone(), images.to_vec());
+        let (command, images, skills) = (command.clone(), images.to_vec(), settings.skills);
         let operation = operation(&command);
         let sent = self
             .send(
                 &entry,
-                Request::new(move |p| p.claude()?.command(&command, &prompt, &images))
-                    .owner(attempt),
+                Request::new(move |p| {
+                    let claude = p.claude()?;
+                    claude.set_skills(skills);
+                    claude.command(&command, &prompt, &images)
+                })
+                .owner(attempt),
             )
             .await;
         settle_sent(sent, attempt, operation, None).map(|_| ())
@@ -81,6 +110,28 @@ impl SessionManager {
                             "respawning a Claude session that could not be reconfigured");
                     }
                 }
+            }
+            // Background agents and shells live in the process; replacing it for the
+            // same native session would end them (T3 refuses until they finish or Stop).
+            let same_session = launch.native_session.is_some()
+                && entry.claude.as_ref().is_some_and(|process| {
+                    process.lock().expect("claude process").native == launch.native_session
+                });
+            if same_session
+                && holds_background(
+                    &*self.state(&target.key.thread).await?,
+                    &self.entry_attempts(&entry),
+                )
+            {
+                return Err(ExecError::Settle(Box::new(EffectResult::ProviderFailed {
+                    attempt: attempt.clone(),
+                    operation: operation(command).unwrap_or(ProviderOperation::Start),
+                    message: BACKGROUND_BLOCKS_REPLACEMENT.into(),
+                    message_id: None,
+                    turn_completed: false,
+                    session_lost: false,
+                }))
+                .into());
             }
             self.close_entry(&entry, true, false).await;
         }
@@ -227,12 +278,15 @@ impl SessionManager {
         routes
     }
 
+    /// The fork's session is reserved on the source thread before its transcript
+    /// exists, so an import never adopts it; `None` once the fork is no longer pending.
     pub(super) async fn fork_claude(
         &self,
         target: &LaunchTarget,
         effect_id: &str,
+        command: &CommandId,
         provider: &ProviderCommand,
-    ) -> Result<String, ForkError> {
+    ) -> Result<Option<String>, ForkError> {
         let directive = ClaudeProtocol::default()
             .command(provider, "", &[])
             .map_err(|error| ForkError::Rejected(error.to_string()))?
@@ -263,11 +317,24 @@ impl SessionManager {
             now.as_str(),
         )
         .map_err(|error| ForkError::Rejected(error.to_string()))?;
+        let reserved = self
+            .input(
+                &target.key.thread,
+                agent_domain::Input::NativeForkReserved {
+                    command: command.clone(),
+                    native_thread: forked.session_id.clone(),
+                },
+            )
+            .await
+            .map_err(|error| ForkError::Retry(error.to_string()))?;
+        if reserved != Reply::Accepted {
+            return Ok(None);
+        }
         self.host
             .write_claude_session(target.clone(), forked.session_id.clone(), forked.transcript)
             .await
             .map_err(|error| ForkError::Retry(error.to_string()))?;
-        Ok(forked.session_id)
+        Ok(Some(forked.session_id))
     }
 }
 

@@ -1,5 +1,6 @@
 use super::{
-    ProcessControl, SessionError, SessionKey, SessionManager, SessionOptions, claude::ClaudeProcess,
+    ProcessControl, ProviderProcess, SessionError, SessionKey, SessionManager, SessionOptions,
+    claude::ClaudeProcess,
 };
 use crate::{ActorRegistry, RuntimeError};
 use agent_domain::{
@@ -10,11 +11,18 @@ use agent_providers::{
     ClaudeProtocol, CodexProtocol, Completion, ProtocolError, Translation, read_frame, write_frame,
 };
 use serde_json::Value;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
+
+/// Commits to the owning actor are retried this many times before the session fails.
+const COMMIT_ATTEMPTS: u32 = 8;
+const COMMIT_BACKOFF: Duration = Duration::from_millis(50);
+const COMMIT_BACKOFF_CAP: Duration = Duration::from_secs(1);
 
 pub(crate) enum Protocol {
     Codex(CodexProtocol),
@@ -39,6 +47,13 @@ impl Protocol {
             Self::Claude(protocol) => protocol.receive(frame),
         }
     }
+    /// Claude attributes a preceding turn in the state machine, so only Codex waits.
+    fn turn_in_flight(&self) -> bool {
+        match self {
+            Self::Codex(protocol) => protocol.turn_in_flight(),
+            Self::Claude(_) => false,
+        }
+    }
 }
 
 pub(crate) type Op = Box<dyn FnOnce(&mut Protocol) -> Result<Translation, ProtocolError> + Send>;
@@ -46,6 +61,7 @@ pub(crate) type ReplyWait = oneshot::Receiver<Result<Value, String>>;
 /// Request id and the caller waiting for its reply.
 pub(crate) type ReplyWaiter = (String, oneshot::Sender<Result<Value, String>>);
 pub(crate) type CompletionWait = oneshot::Receiver<Result<Completion, String>>;
+type Written = oneshot::Sender<Result<(), String>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Expect {
@@ -73,9 +89,16 @@ pub(crate) struct Run {
 pub(crate) struct Ran {
     pub(crate) replies: Vec<ReplyWait>,
     pub(crate) completion: Option<CompletionWait>,
+    /// Resolves once the run's frames are on the provider's stdin.
+    pub(crate) written: Option<oneshot::Receiver<Result<(), String>>>,
 }
 pub(crate) enum Mail {
     Run(Run),
+    /// Answered once no root turn of another attempt is in flight.
+    Settled {
+        attempt: RunAttemptId,
+        done: oneshot::Sender<()>,
+    },
     Close {
         report: bool,
         revoke: bool,
@@ -83,10 +106,22 @@ pub(crate) enum Mail {
     },
 }
 
+/// The attempt (and steering message) a sent request belongs to.
+struct Sent {
+    attempt: RunAttemptId,
+    steer: Option<MessageId>,
+}
+
+struct Outgoing {
+    frames: Vec<Value>,
+    written: Option<Written>,
+}
+
 enum Event {
     Mail(Option<Mail>),
     Frame(std::io::Result<Option<Value>>),
     Stderr(std::io::Result<usize>),
+    WriteFailed(String),
     Idle,
 }
 enum Exit {
@@ -98,34 +133,93 @@ enum Exit {
     Eof,
     Idle,
     Abandoned,
+    Failed(String),
 }
 
 pub(crate) struct Task {
-    pub(crate) key: SessionKey,
-    pub(crate) generation: u64,
-    pub(crate) manager: Weak<SessionManager>,
-    pub(crate) registry: Arc<ActorRegistry>,
-    pub(crate) options: SessionOptions,
-    pub(crate) protocol: Protocol,
-    pub(crate) claude: Option<Arc<Mutex<ClaudeProcess>>>,
-    pub(crate) mail: mpsc::UnboundedReceiver<Mail>,
-    pub(crate) input: Box<dyn AsyncWrite + Send + Unpin>,
-    pub(crate) output: BufReader<Box<dyn AsyncRead + Send + Unpin>>,
-    pub(crate) stderr: Option<Box<dyn AsyncRead + Send + Unpin>>,
-    pub(crate) control: Box<dyn ProcessControl>,
-    pub(crate) line: Vec<u8>,
-    pub(crate) owner: Option<RunAttemptId>,
-    pub(crate) handshake: bool,
-    pub(crate) attempts: HashSet<RunAttemptId>,
-    pub(crate) replies: Vec<ReplyWaiter>,
-    pub(crate) completion: Option<oneshot::Sender<Result<Completion, String>>>,
-    pub(crate) steers: VecDeque<Option<MessageId>>,
-    pub(crate) deadline: Instant,
-    pub(crate) pinned_since: Option<Instant>,
-    pub(crate) stderr_tail: String,
+    key: SessionKey,
+    generation: u64,
+    manager: Weak<SessionManager>,
+    registry: Arc<ActorRegistry>,
+    options: SessionOptions,
+    protocol: Protocol,
+    claude: Option<Arc<Mutex<ClaudeProcess>>>,
+    mail: mpsc::UnboundedReceiver<Mail>,
+    outgoing: mpsc::UnboundedSender<Outgoing>,
+    writer: JoinHandle<()>,
+    write_failed: Option<oneshot::Receiver<String>>,
+    output: BufReader<Box<dyn AsyncRead + Send + Unpin>>,
+    stderr: Option<Box<dyn AsyncRead + Send + Unpin>>,
+    control: Box<dyn ProcessControl>,
+    line: Vec<u8>,
+    owner: Option<RunAttemptId>,
+    handshake: bool,
+    /// Every attempt that ran on this process, oldest first.
+    attempts: Vec<RunAttemptId>,
+    sent: HashMap<String, Sent>,
+    /// Retained background work key or tool -> the attempt that started it.
+    background: HashMap<String, RunAttemptId>,
+    replies: Vec<ReplyWaiter>,
+    completion: Option<oneshot::Sender<Result<Completion, String>>>,
+    settled: Vec<oneshot::Sender<()>>,
+    deadline: Instant,
+    pinned_since: Option<Instant>,
+    stderr_tail: String,
+    failure: Option<String>,
 }
 
 impl Task {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        key: SessionKey,
+        generation: u64,
+        manager: Weak<SessionManager>,
+        registry: Arc<ActorRegistry>,
+        options: SessionOptions,
+        protocol: Protocol,
+        claude: Option<Arc<Mutex<ClaudeProcess>>>,
+        mail: mpsc::UnboundedReceiver<Mail>,
+        process: ProviderProcess,
+    ) -> Self {
+        let (outgoing, queue) = mpsc::unbounded_channel();
+        let (failed, write_failed) = oneshot::channel();
+        let writer = tokio::spawn(write_frames(
+            process.input,
+            queue,
+            options.write_timeout,
+            failed,
+        ));
+        Self {
+            key,
+            generation,
+            manager,
+            registry,
+            deadline: Instant::now() + options.idle_timeout,
+            options,
+            protocol,
+            claude,
+            mail,
+            outgoing,
+            writer,
+            write_failed: Some(write_failed),
+            output: BufReader::new(process.output),
+            stderr: Some(process.stderr),
+            control: process.control,
+            line: Vec::new(),
+            owner: None,
+            handshake: false,
+            attempts: Vec::new(),
+            sent: HashMap::new(),
+            background: HashMap::new(),
+            replies: Vec::new(),
+            completion: None,
+            settled: Vec::new(),
+            pinned_since: None,
+            stderr_tail: String::new(),
+            failure: None,
+        }
+    }
+
     pub(crate) async fn run(mut self) {
         let mut chunk = [0u8; 4096];
         let exit = loop {
@@ -135,6 +229,7 @@ impl Task {
                 mail = self.mail.recv() => Event::Mail(mail),
                 frame = read_frame(&mut self.output, &mut self.line) => Event::Frame(frame),
                 read = read_stderr(stderr, &mut chunk) => Event::Stderr(read),
+                failed = write_failure(self.write_failed.as_mut()) => Event::WriteFailed(failed),
                 () = tokio::time::sleep_until(deadline) => Event::Idle,
             };
             match event {
@@ -142,6 +237,14 @@ impl Task {
                 Event::Mail(Some(Mail::Run(run))) => {
                     self.touch();
                     self.run_op(run).await;
+                }
+                Event::Mail(Some(Mail::Settled { attempt, done })) => {
+                    if self.owner.as_ref() == Some(&attempt) {
+                        let _ = done.send(());
+                    } else {
+                        self.settled.push(done);
+                        self.release_settled();
+                    }
                 }
                 Event::Mail(Some(Mail::Close {
                     report,
@@ -154,9 +257,10 @@ impl Task {
                         done: Some(done),
                     };
                 }
+                // Inbound traffic never postpones idle release or the pin cap.
                 Event::Frame(Ok(Some(frame))) => {
-                    self.touch();
                     self.frame(frame).await;
+                    self.release_settled();
                 }
                 Event::Frame(Ok(None)) => break Exit::Eof,
                 Event::Frame(Err(error)) if error.kind() == std::io::ErrorKind::InvalidData => {
@@ -169,11 +273,15 @@ impl Task {
                 }
                 Event::Stderr(Ok(0)) | Event::Stderr(Err(_)) => self.stderr = None,
                 Event::Stderr(Ok(read)) => self.keep_stderr(&chunk[..read]),
+                Event::WriteFailed(error) => break Exit::Failed(error),
                 Event::Idle => {
                     if self.idle_due().await {
                         break Exit::Idle;
                     }
                 }
+            }
+            if let Some(error) = self.failure.take() {
+                break Exit::Failed(error);
             }
         };
         self.finish(exit).await;
@@ -181,6 +289,14 @@ impl Task {
 
     fn touch(&mut self) {
         self.deadline = Instant::now() + self.options.idle_timeout;
+    }
+
+    fn release_settled(&mut self) {
+        if !self.protocol.turn_in_flight() {
+            for waiter in self.settled.drain(..) {
+                let _ = waiter.send(());
+            }
+        }
     }
 
     fn keep_stderr(&mut self, bytes: &[u8]) {
@@ -196,6 +312,12 @@ impl Task {
         }
     }
 
+    fn remember(&mut self, attempt: &RunAttemptId) {
+        if !self.attempts.contains(attempt) {
+            self.attempts.push(attempt.clone());
+        }
+    }
+
     async fn run_op(&mut self, run: Run) {
         let Run {
             owner,
@@ -208,11 +330,11 @@ impl Task {
         } = run;
         self.handshake |= handshake;
         if let Some(owner) = owner {
-            self.attempts.insert(owner.clone());
+            self.remember(&owner);
             self.owner = Some(owner);
         }
         if let Some(attempt) = &events_to {
-            self.attempts.insert(attempt.clone());
+            self.remember(attempt);
         }
         let mut translation = match op(&mut self.protocol) {
             Ok(translation) => translation,
@@ -221,9 +343,11 @@ impl Task {
                 return;
             }
         };
+        let (written, wait_written) = oneshot::channel();
         let mut ran = Ran {
             replies: vec![],
             completion: None,
+            written: Some(wait_written),
         };
         match expect {
             Expect::Written => {}
@@ -251,20 +375,21 @@ impl Task {
                 ran.completion = Some(receiver);
             }
         }
-        if steer.is_some()
-            && matches!(self.protocol, Protocol::Codex(_))
-            && !translation.outbound.is_empty()
-        {
-            self.steers.push_back(steer);
-        }
-        let result = self.deliver(translation, events_to).await;
+        let attempt = events_to.or_else(|| self.owner.clone());
+        let result = self
+            .deliver(translation, attempt, steer, Some(written))
+            .await;
         let _ = done.send(result.map(|()| ran));
     }
 
     async fn frame(&mut self, frame: Value) {
+        self.observe_frame(&frame);
+        let attempt = reply_id(&frame)
+            .and_then(|id| self.sent.get(&id))
+            .map(|sent| sent.attempt.clone());
         match self.protocol.receive(&frame) {
             Ok(translation) => {
-                if let Err(error) = self.deliver(translation, None).await {
+                if let Err(error) = self.deliver(translation, attempt, None, None).await {
                     tracing::warn!(thread = %self.key.thread, %error, "provider frame was not fully handled");
                 }
             }
@@ -272,12 +397,16 @@ impl Task {
         }
     }
 
-    /// Commits each event, then writes outbound frames, then resolves replies:
-    /// a native reply's facts are durable before the next outbound frame.
+    /// Commits each event to the attempt that owns it, then writes outbound
+    /// frames, then resolves replies: a native reply's facts are durable before
+    /// the next outbound frame. A failed commit fails the session rather than
+    /// leaving the translator ahead of the thread.
     async fn deliver(
         &mut self,
         translation: Translation,
-        events_to: Option<RunAttemptId>,
+        attempt: Option<RunAttemptId>,
+        steer: Option<MessageId>,
+        written: Option<Written>,
     ) -> Result<(), SessionError> {
         let Translation {
             events,
@@ -286,29 +415,57 @@ impl Task {
             completion,
             ..
         } = translation;
-        if !events.is_empty() {
-            match events_to.or_else(|| self.owner.clone()) {
-                Some(attempt) => {
-                    for event in events {
-                        self.observe(&event);
-                        self.provider(&attempt, event).await?;
-                    }
+        let default = attempt.or_else(|| self.owner.clone());
+        let mut carried = None;
+        for event in events {
+            let owner = match event_key(&event).and_then(|key| self.background.get(key)) {
+                Some(owner) => {
+                    carried = Some(owner.clone());
+                    Some(owner.clone())
                 }
-                None => {
-                    tracing::debug!(thread = %self.key.thread, count = events.len(),
-                        "dropping provider events of a session without a turn");
+                None if matches!(event, ProviderEvent::Wake { .. }) && carried.is_some() => {
+                    carried.clone()
+                }
+                None => default.clone(),
+            };
+            let Some(owner) = owner else {
+                tracing::debug!(thread = %self.key.thread,
+                    "dropping a provider event of a session without a turn");
+                continue;
+            };
+            self.observe(&event);
+            self.retain(&event, &owner);
+            if let Err(error) = self.commit(&owner, event).await {
+                self.failure = Some(format!("Provider output could not be recorded: {error}"));
+                return Err(error.into());
+            }
+        }
+        if let Some(attempt) = &default {
+            for frame in &outbound {
+                if let Some(id) = request(frame) {
+                    self.sent.insert(
+                        id,
+                        Sent {
+                            attempt: attempt.clone(),
+                            steer: steer.clone(),
+                        },
+                    );
                 }
             }
         }
-        for frame in &outbound {
-            write_frame(&mut self.input, frame)
-                .await
-                .map_err(|error| SessionError::Io(error.to_string()))?;
+        if outbound.is_empty() {
+            if let Some(written) = written {
+                let _ = written.send(Ok(()));
+            }
+        } else if let Err(rejected) = self.outgoing.send(Outgoing {
+            frames: outbound,
+            written,
+        }) && let Some(written) = rejected.0.written
+        {
+            let _ = written.send(Err("The provider session closed.".into()));
         }
         for reply in replies {
-            if reply.operation == "turn/steer" {
-                self.steers.pop_front();
-            }
+            self.sent.remove(&reply.request);
             if let Some(index) = self.replies.iter().position(|(id, _)| *id == reply.request) {
                 let (_, waiter) = self.replies.remove(index);
                 self.handshake = false;
@@ -321,6 +478,22 @@ impl Task {
             let _ = waiter.send(Ok(completion));
         }
         Ok(())
+    }
+
+    /// Background work keeps the attempt that started it.
+    fn retain(&mut self, event: &ProviderEvent, attempt: &RunAttemptId) {
+        if let ProviderEvent::BackgroundTask {
+            key, tool, status, ..
+        } = event
+        {
+            if status.is_some_and(|status| status.terminal()) {
+                self.background.remove(key);
+                self.background.remove(tool);
+            } else {
+                self.background.insert(key.clone(), attempt.clone());
+                self.background.insert(tool.clone(), attempt.clone());
+            }
+        }
     }
 
     fn observe(&self, event: &ProviderEvent) {
@@ -340,6 +513,17 @@ impl Task {
         }
     }
 
+    /// The CLI reports the permission mode it switched to itself (plan mode).
+    fn observe_frame(&self, frame: &Value) {
+        if let Some(claude) = &self.claude
+            && frame["type"] == "system"
+            && matches!(frame["subtype"].as_str(), Some("init" | "status"))
+            && let Some(mode) = frame["permissionMode"].as_str()
+        {
+            claude.lock().expect("claude process").permission_mode = mode.into();
+        }
+    }
+
     async fn protocol_error(&mut self, error: ProtocolError) {
         match error {
             ProtocolError::Remote {
@@ -348,6 +532,7 @@ impl Task {
                 message,
                 turn_completed,
             } => {
+                let sent = request.as_ref().and_then(|id| self.sent.remove(id));
                 if let Some(index) = self
                     .replies
                     .iter()
@@ -363,28 +548,27 @@ impl Task {
                     let _ = waiter.send(Err(message));
                     return;
                 }
-                let message_id = if operation == "turn/steer" {
-                    self.steers.pop_front().flatten()
-                } else {
-                    None
-                };
                 let Some((operation, session_lost)) = failed_operation(&operation) else {
                     tracing::warn!(thread = %self.key.thread, %operation, %message,
                         "provider rejected an operation nobody waits for");
                     return;
                 };
-                let Some(attempt) = self.owner.clone() else {
+                let (attempt, message_id) = match sent {
+                    Some(sent) => (Some(sent.attempt), sent.steer),
+                    None => (self.owner.clone(), None),
+                };
+                let Some(attempt) = attempt else {
                     return;
                 };
                 let failed = Input::Effect(EffectResult::ProviderFailed {
                     attempt,
                     operation,
                     message,
-                    message_id,
+                    message_id: message_id.filter(|_| operation == ProviderOperation::Steer),
                     turn_completed,
                     session_lost,
                 });
-                if let Err(error) = self.input(failed).await {
+                if let Err(error) = self.retrying(|task| task.input(failed.clone())).await {
                     tracing::warn!(thread = %self.key.thread, %error, "could not record a provider failure");
                 }
             }
@@ -399,29 +583,57 @@ impl Task {
         }
     }
 
-    async fn provider(
+    async fn commit(
         &mut self,
         attempt: &RunAttemptId,
         event: ProviderEvent,
     ) -> Result<(), RuntimeError> {
-        let mut retried = false;
+        self.retrying(|task| task.provider(attempt.clone(), event.clone()))
+            .await
+    }
+
+    /// Retries a store failure with backoff; the step is pure, so a retry
+    /// commits the same facts.
+    async fn retrying<F, Fut>(&mut self, mut attempt: F) -> Result<(), RuntimeError>
+    where
+        F: FnMut(&Self) -> Fut,
+        Fut: Future<Output = Result<(), RuntimeError>>,
+    {
+        let mut delay = COMMIT_BACKOFF;
+        let mut tries = 1;
         loop {
-            let actor = self.registry.get_or_load(&self.key.thread).await?;
-            match actor.provider(attempt.clone(), event.clone()).await {
-                Err(RuntimeError::ActorStopped) if !retried => retried = true,
-                result => return result.map(|_| ()),
+            match attempt(self).await {
+                Err(error @ (RuntimeError::Store(_) | RuntimeError::ActorStopped))
+                    if tries < COMMIT_ATTEMPTS =>
+                {
+                    tracing::warn!(thread = %self.key.thread, %error, tries,
+                        "retrying a provider commit");
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(COMMIT_BACKOFF_CAP);
+                    tries += 1;
+                }
+                result => return result,
             }
         }
     }
 
-    async fn input(&mut self, input: Input) -> Result<(), RuntimeError> {
-        let mut retried = false;
-        loop {
-            let actor = self.registry.get_or_load(&self.key.thread).await?;
-            match actor.input(input.clone()).await {
-                Err(RuntimeError::ActorStopped) if !retried => retried = true,
-                result => return result.map(|_| ()),
-            }
+    fn provider(
+        &self,
+        attempt: RunAttemptId,
+        event: ProviderEvent,
+    ) -> impl Future<Output = Result<(), RuntimeError>> + use<> {
+        let (registry, thread) = (self.registry.clone(), self.key.thread.clone());
+        async move {
+            let actor = registry.get_or_load(&thread).await?;
+            actor.provider(attempt, event).await.map(|_| ())
+        }
+    }
+
+    fn input(&self, input: Input) -> impl Future<Output = Result<(), RuntimeError>> + use<> {
+        let (registry, thread) = (self.registry.clone(), self.key.thread.clone());
+        async move {
+            let actor = registry.get_or_load(&thread).await?;
+            actor.input(input).await.map(|_| ())
         }
     }
 
@@ -454,7 +666,8 @@ impl Task {
                 let now = Instant::now();
                 let since = *self.pinned_since.get_or_insert(now);
                 if now.duration_since(since) < self.options.max_idle_pin {
-                    self.touch();
+                    self.deadline =
+                        (now + self.options.idle_timeout).min(since + self.options.max_idle_pin);
                     false
                 } else {
                     tracing::warn!(thread = %self.key.thread, instance = %self.key.instance,
@@ -466,9 +679,15 @@ impl Task {
         }
     }
 
+    /// Closes stdin (a blocked write is abandoned), then waits a bounded time
+    /// for the process to exit before killing it.
     async fn stop(&mut self) {
-        self.input = Box::new(tokio::io::sink());
-        if tokio::time::timeout(self.options.close_grace, self.control.wait())
+        let grace = self.options.close_grace;
+        self.outgoing = mpsc::unbounded_channel().0;
+        if tokio::time::timeout(grace, &mut self.writer).await.is_err() {
+            self.writer.abort();
+        }
+        if tokio::time::timeout(grace, self.control.wait())
             .await
             .is_err()
         {
@@ -494,7 +713,14 @@ impl Task {
                 self.stop().await;
                 (false, None, false, None)
             }
+            Exit::Failed(error) => {
+                tracing::warn!(thread = %self.key.thread, instance = %self.key.instance, %error,
+                    "closing a provider session that cannot continue");
+                self.stop().await;
+                (true, Some(error), false, None)
+            }
             Exit::Eof => {
+                self.writer.abort();
                 let success =
                     match tokio::time::timeout(self.options.close_grace, self.control.wait()).await
                     {
@@ -522,14 +748,28 @@ impl Task {
         if let Some(waiter) = self.completion.take() {
             let _ = waiter.send(Err("The provider session closed.".into()));
         }
-        if report
-            && !self.handshake
-            && let Some(owner) = self.owner.clone()
-            && let Err(error) = self
-                .provider(&owner, ProviderEvent::SessionClosed { error })
-                .await
-        {
-            tracing::warn!(thread = %self.key.thread, %error, "could not record a closed provider session");
+        self.settled.clear();
+        if report {
+            // Every attempt that still owns work on this process learns it is gone;
+            // the owner last, and not while its handshake reports the exit itself.
+            let owner = self.owner.clone();
+            let mut closed: Vec<_> = self
+                .attempts
+                .iter()
+                .filter(|attempt| Some(*attempt) != owner.as_ref())
+                .cloned()
+                .collect();
+            if !self.handshake {
+                closed.extend(owner);
+            }
+            for attempt in closed {
+                let event = ProviderEvent::SessionClosed {
+                    error: error.clone(),
+                };
+                if let Err(error) = self.commit(&attempt, event).await {
+                    tracing::warn!(thread = %self.key.thread, %error, "could not record a closed provider session");
+                }
+            }
         }
         if let Some(manager) = self.manager.upgrade() {
             manager.closed(&self.key, self.generation, revoke);
@@ -537,6 +777,47 @@ impl Task {
         if let Some(done) = done {
             let _ = done.send(());
         }
+    }
+}
+
+/// Owns the provider's stdin so a provider that stops reading never blocks the
+/// task that reads its output. A write that does not finish in time, or fails,
+/// ends the session.
+async fn write_frames(
+    mut input: Box<dyn AsyncWrite + Send + Unpin>,
+    mut queue: mpsc::UnboundedReceiver<Outgoing>,
+    timeout: Duration,
+    failed: oneshot::Sender<String>,
+) {
+    while let Some(Outgoing { frames, written }) = queue.recv().await {
+        let mut result = Ok(());
+        for frame in &frames {
+            result = match tokio::time::timeout(timeout, write_frame(&mut input, frame)).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(format!("provider stdin failed: {error}")),
+                Err(_) => Err("The provider stopped reading its input.".to_owned()),
+            };
+            if result.is_err() {
+                break;
+            }
+        }
+        if let Some(written) = written {
+            let _ = written.send(result.clone());
+        }
+        if let Err(error) = result {
+            let _ = failed.send(error);
+            return;
+        }
+    }
+}
+
+async fn write_failure(failed: Option<&mut oneshot::Receiver<String>>) -> String {
+    match failed {
+        Some(failed) => match failed.await {
+            Ok(error) => error,
+            Err(_) => std::future::pending().await,
+        },
+        None => std::future::pending().await,
     }
 }
 
@@ -558,6 +839,27 @@ fn request(frame: &Value) -> Option<String> {
     }
     frame.get("method")?;
     Some(frame.get("id")?.to_string())
+}
+
+/// The id of the request an inbound frame answers.
+fn reply_id(frame: &Value) -> Option<String> {
+    if frame["type"] == "control_response" {
+        return Some(frame["response"]["request_id"].as_str()?.to_owned());
+    }
+    if frame.get("method").is_some() {
+        return None;
+    }
+    Some(frame.get("id")?.to_string())
+}
+
+fn event_key(event: &ProviderEvent) -> Option<&str> {
+    match event {
+        ProviderEvent::ItemStarted { key, .. }
+        | ProviderEvent::ItemFinished { key, .. }
+        | ProviderEvent::TextDelta { key, .. }
+        | ProviderEvent::BackgroundTask { key, .. } => Some(key),
+        _ => None,
+    }
 }
 
 fn completion_operation(operation: &str) -> bool {
@@ -594,11 +896,7 @@ pub(crate) enum Activity {
     Idle,
 }
 
-pub(crate) fn activity(
-    state: &State,
-    instance: &str,
-    attempts: &HashSet<RunAttemptId>,
-) -> Activity {
+pub(crate) fn activity(state: &State, instance: &str, attempts: &[RunAttemptId]) -> Activity {
     let running = state
         .active_run()
         .is_some_and(|run| run.selection.instance == instance);
@@ -608,17 +906,21 @@ pub(crate) fn activity(
     if running || asking {
         return Activity::Busy;
     }
-    let background = state
+    if holds_background(state, attempts) {
+        Activity::Pinned
+    } else {
+        Activity::Idle
+    }
+}
+
+/// Background commands or native tasks that run inside the process of these attempts.
+pub(crate) fn holds_background(state: &State, attempts: &[RunAttemptId]) -> bool {
+    state
         .background_work
         .values()
         .any(|work| attempts.contains(&work.attempt))
         || state
             .tasks
             .iter()
-            .any(|task| !task.status.terminal() && attempts.contains(&task.attempt));
-    if background {
-        Activity::Pinned
-    } else {
-        Activity::Idle
-    }
+            .any(|task| !task.status.terminal() && attempts.contains(&task.attempt))
 }

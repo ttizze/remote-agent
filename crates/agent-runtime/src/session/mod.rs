@@ -11,8 +11,8 @@ pub use process::*;
 use crate::{ActorRegistry, KeyedSerial, Residency, RuntimeError};
 use agent_domain::{
     Attachment, AttachmentKind, AttemptStatus, CommandId, Driver, EffectResult, InteractionMode,
-    ModelSelection, NativeBinding, ProviderCommand, ProviderEvent, ProviderOperation, RunAttemptId,
-    RuntimeMode, State, ThreadId, Workspace,
+    ModelSelection, NativeBinding, ProviderCommand, ProviderEvent, ProviderOperation, Reply,
+    RunAttemptId, RunStatus, RuntimeMode, State, ThreadId, Workspace,
 };
 use agent_providers::{
     ClaudeLaunch, ClaudeProtocol, Completion, PreparedImage, ProcessDirective, ProtocolError,
@@ -23,12 +23,12 @@ use claude::ClaudeProcess;
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use task::{Expect, Mail, Op, Protocol, Ran, Run, Task};
+use task::{Expect, Mail, Op, Protocol, Ran, Run, Task, holds_background};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -120,6 +120,8 @@ pub struct SessionOptions {
     pub max_idle_pin: Duration,
     pub reply_timeout: Duration,
     pub close_grace: Duration,
+    /// A frame the provider does not accept on stdin within this ends the session.
+    pub write_timeout: Duration,
 }
 impl Default for SessionOptions {
     fn default() -> Self {
@@ -128,6 +130,7 @@ impl Default for SessionOptions {
             max_idle_pin: Duration::from_secs(4 * 60 * 60),
             reply_timeout: Duration::from_secs(60),
             close_grace: Duration::from_secs(5),
+            write_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -413,15 +416,24 @@ impl SessionManager {
             return Err(completed("The provider session is no longer running."));
         };
         let images = self.images(thread, command).await?;
-        let prompt = if entry.claude.is_some() {
-            self.host.prompt_uuid(effect_id)
+        let (prompt, skills) = if entry.claude.is_some() {
+            let target = start_target(&state, thread, attempt, command)?;
+            let settings = self
+                .host
+                .claude_settings(target)
+                .await
+                .map_err(ExecError::Retry)?;
+            (self.host.prompt_uuid(effect_id), settings.skills)
         } else {
-            String::new()
+            (String::new(), vec![])
         };
         let command = command.clone();
         let mut request = Request::new(move |p| match p {
             Protocol::Codex(codex) => codex.command(&command, &WireContext::default(), &images),
-            Protocol::Claude(claude) => claude.command(&command, &prompt, &images),
+            Protocol::Claude(claude) => {
+                claude.set_skills(skills);
+                claude.command(&command, &prompt, &images)
+            }
         })
         .events_to(attempt);
         request.steer = Some(message.clone());
@@ -456,6 +468,10 @@ impl SessionManager {
         let Some(entry) = self.route(attempt) else {
             return closed().await;
         };
+        if entry.claude.is_some() {
+            self.stop_claude(&entry, attempt, command).await;
+            return Ok(());
+        }
         let command = command.clone();
         let sent = self
             .send(
@@ -476,6 +492,22 @@ impl SessionManager {
                 None,
             )),
         }
+    }
+
+    /// T3 ClaudeAdapterV2 interruptTurn: interrupt, then close the process, which
+    /// also ends its background shells; the closure terminalizes the attempt.
+    async fn stop_claude(&self, entry: &Entry, attempt: &RunAttemptId, command: &ProviderCommand) {
+        let command = command.clone();
+        let interrupted = self
+            .request_reply(
+                entry,
+                Request::new(move |p| p.claude()?.command(&command, "", &[])).events_to(attempt),
+            )
+            .await;
+        if let Err(message) = interrupted {
+            tracing::debug!(thread = %entry.key.thread, %message, "Claude did not acknowledge the interrupt");
+        }
+        self.close_entry(entry, true, false).await;
     }
 
     async fn respond(
@@ -531,35 +563,50 @@ impl SessionManager {
             return Ok(());
         };
         let forwarded = command.clone();
-        let sent = self
-            .send(
+        let replied = self
+            .request_reply(
                 &entry,
                 Request::new(move |p| p.claude()?.command(&forwarded, "", &[])).events_to(attempt),
             )
             .await;
-        match sent {
-            Err(SessionError::Gone) => Ok(()),
-            Ok(_) => {
-                let mut process = process.lock().expect("claude process");
-                match command {
-                    ProviderCommand::SetModel { selection } => {
-                        process.model = claude_model_options(selection).model;
-                    }
-                    ProviderCommand::SetRuntimeMode {
-                        runtime_mode,
-                        interaction_mode,
-                    } => {
-                        process.permission_mode = agent_providers::claude_permission_mode(
-                            *runtime_mode,
-                            *interaction_mode,
-                        )
-                        .into();
-                    }
-                    _ => {}
-                }
-                Ok(())
+        // Only an accepted change is the process's value; otherwise the next
+        // Start cannot know it and aligns again.
+        let applied = |value: String| {
+            if replied.is_ok() {
+                value
+            } else {
+                String::new()
             }
-            sent => unwrap_failure(settle_sent(sent, attempt, operation(command), None)),
+        };
+        {
+            let mut process = process.lock().expect("claude process");
+            match command {
+                ProviderCommand::SetModel { selection } => {
+                    process.model = applied(claude_model_options(selection).model);
+                }
+                ProviderCommand::SetRuntimeMode {
+                    runtime_mode,
+                    interaction_mode,
+                } => {
+                    process.permission_mode = applied(
+                        agent_providers::claude_permission_mode(*runtime_mode, *interaction_mode)
+                            .into(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        match replied {
+            Ok(_) => Ok(()),
+            Err(_) if self.route(attempt).is_none() => Ok(()),
+            Err(message) => Err(ExecError::Settle(Box::new(EffectResult::ProviderFailed {
+                attempt: attempt.clone(),
+                operation: operation(command).unwrap_or(ProviderOperation::SetModel),
+                message,
+                message_id: None,
+                turn_completed: false,
+                session_lost: false,
+            }))),
         }
     }
 
@@ -661,11 +708,15 @@ impl SessionManager {
             Err(error) => return Err(error),
         };
         let forked = match target.selection.driver {
-            Driver::Claude => self.fork_claude(&target, effect_id, provider).await,
-            Driver::Codex => self.fork_codex(&target, provider).await,
+            Driver::Claude => {
+                self.fork_claude(&target, effect_id, command, provider)
+                    .await
+            }
+            Driver::Codex => self.fork_codex(&target, provider).await.map(Some),
         };
         match forked {
-            Ok(native_thread) => Ok(Some(EffectResult::NativeForked {
+            Ok(None) => Ok(None),
+            Ok(Some(native_thread)) => Ok(Some(EffectResult::NativeForked {
                 command: command.clone(),
                 native_thread,
             })),
@@ -726,6 +777,54 @@ impl SessionManager {
             .cloned()
     }
 
+    /// The attempts whose work runs in this entry's process.
+    fn entry_attempts(&self, entry: &Entry) -> Vec<RunAttemptId> {
+        self.table
+            .lock()
+            .expect("session table")
+            .routes
+            .iter()
+            .filter(|(_, (key, generation))| *key == entry.key && *generation == entry.generation)
+            .map(|(attempt, _)| attempt.clone())
+            .collect()
+    }
+
+    /// T3 ProviderTurnStartService: after any preparation, the attempt must
+    /// still be the run's current one right before its turn is sent.
+    async fn still_current(
+        &self,
+        thread: &ThreadId,
+        attempt: &RunAttemptId,
+    ) -> Result<bool, ExecError> {
+        let state = self.state(thread).await?;
+        Ok(!attempt_finished(&state, attempt)
+            && state.runs.iter().any(|run| {
+                run.attempt.as_ref() == Some(attempt)
+                    && matches!(run.status, RunStatus::Starting | RunStatus::Running)
+            }))
+    }
+
+    /// Waits (bounded, as T3 interruptAndAwaitTerminal) until the previous root
+    /// turn on the process ends, so its late events stay with its own attempt.
+    async fn settled(&self, entry: &Entry, attempt: &RunAttemptId) -> Result<(), Failure> {
+        let (done, settled) = oneshot::channel();
+        entry
+            .mail
+            .send(Mail::Settled {
+                attempt: attempt.clone(),
+                done,
+            })
+            .map_err(|_| Failure::Gone)?;
+        match tokio::time::timeout(self.options.reply_timeout, settled).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(Failure::Gone),
+            Err(_) => Err(ExecError::Retry(
+                "The previous provider turn did not finish before the next one started.".into(),
+            )
+            .into()),
+        }
+    }
+
     fn bind(&self, attempt: &RunAttemptId, entry: &Entry) {
         self.table
             .lock()
@@ -780,30 +879,17 @@ impl SessionManager {
             Driver::Codex => Protocol::Codex(Default::default()),
             Driver::Claude => Protocol::Claude(Default::default()),
         };
-        let task = Task {
-            key: target.key.clone(),
-            generation: entry.generation,
-            manager: self.me.clone(),
-            registry: self.registry.clone(),
-            options: self.options.clone(),
+        let task = Task::new(
+            target.key.clone(),
+            entry.generation,
+            self.me.clone(),
+            self.registry.clone(),
+            self.options.clone(),
             protocol,
             claude,
-            mail: receiver,
-            input: process.input,
-            output: tokio::io::BufReader::new(process.output),
-            stderr: Some(process.stderr),
-            control: process.control,
-            line: Vec::new(),
-            owner: None,
-            handshake: false,
-            attempts: HashSet::new(),
-            replies: Vec::new(),
-            completion: None,
-            steers: VecDeque::new(),
-            deadline: tokio::time::Instant::now() + self.options.idle_timeout,
-            pinned_since: None,
-            stderr_tail: String::new(),
-        };
+            receiver,
+            process,
+        );
         let (manager, key, generation) = (self.me.clone(), target.key.clone(), entry.generation);
         tokio::spawn(async move {
             if let Err(panic) = std::panic::AssertUnwindSafe(task.run())
@@ -861,6 +947,7 @@ impl SessionManager {
         }
     }
 
+    /// Runs the request in the session task and waits until its frames are written.
     async fn send(&self, entry: &Entry, request: Request) -> Result<Ran, SessionError> {
         let (done, ran) = oneshot::channel();
         entry
@@ -875,7 +962,15 @@ impl SessionManager {
                 done,
             }))
             .map_err(|_| SessionError::Gone)?;
-        ran.await.map_err(|_| SessionError::Gone)?
+        let mut ran = ran.await.map_err(|_| SessionError::Gone)??;
+        if let Some(written) = ran.written.take() {
+            match written.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(SessionError::Io(error)),
+                Err(_) => return Err(SessionError::Gone),
+            }
+        }
+        Ok(ran)
     }
 
     async fn request_reply(&self, entry: &Entry, request: Request) -> Result<Value, String> {
@@ -948,13 +1043,13 @@ impl SessionManager {
         &self,
         thread: &ThreadId,
         input: agent_domain::Input,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Reply, RuntimeError> {
         let mut retried = false;
         loop {
             let actor = self.registry.get_or_load(thread).await?;
             match actor.input(input.clone()).await {
                 Err(RuntimeError::ActorStopped) if !retried => retried = true,
-                result => return result.map(|_| ()),
+                result => return result.map(|committed| committed.reply),
             }
         }
     }
