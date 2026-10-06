@@ -835,10 +835,21 @@ impl Decision {
         }
     }
     /// Executes the oldest requested rollback against the current state. One
-    /// that fails at once hands over to the next; once none remains, the run
-    /// that waited for them starts.
+    /// that fails at once hands over to the next. The run that waited for the
+    /// rollbacks starts once none requested before it remains, so the start
+    /// effect precedes the rollbacks requested after it.
     fn next_rollback(&mut self) {
-        while let Some(pending) = self.state.rollbacks.first().cloned() {
+        loop {
+            let waiting = self.state.run_awaiting_rollback().map(|run| run.id.clone());
+            let Some(pending) = self.state.rollbacks.first().cloned() else {
+                if let Some(run) = waiting {
+                    self.start_run(&run);
+                }
+                return;
+            };
+            if let Some(run) = waiting.filter(|run| pending.after_start.as_ref() == Some(run)) {
+                self.start_run(&run);
+            }
             match self.rollback_effect(&pending) {
                 Ok(effect) => {
                     self.effect(None, effect);
@@ -849,14 +860,6 @@ impl Decision {
                     message,
                 }),
             }
-        }
-        if let Some(run) = self
-            .state
-            .active_run()
-            .filter(|run| run.status == RunStatus::Starting && run.started_at.is_none())
-            .map(|run| run.id.clone())
-        {
-            self.start_run(&run);
         }
     }
     fn rollback_effect(&self, pending: &PendingRollback) -> Result<EffectBody, String> {
@@ -1995,9 +1998,10 @@ impl Decision {
             }
         }
         // Commands are accepted while rollbacks run: further rollbacks run in
-        // order, new messages wait behind them, and each rollback checks the
-        // active provider when it executes. Their results carry only the
-        // rollback identity and never overwrite metadata.
+        // order, new messages wait behind them, a rollback requested while a
+        // message waits runs after that message starts, and each rollback
+        // checks the active provider when it executes. Their results carry
+        // only the rollback identity and never overwrite metadata.
         if !self.state.rollbacks.is_empty()
             && matches!(
                 command,
@@ -3485,7 +3489,14 @@ impl Decision {
                 restore_files,
                 restore_refusal,
             } => {
-                if self.state.active_run().is_some()
+                // A run waiting for earlier rollbacks does not block another
+                // one, which executes after that run starts.
+                let after_start = self
+                    .state
+                    .run_awaiting_rollback()
+                    .filter(|_| !self.state.rollbacks.is_empty())
+                    .map(|run| run.id.clone());
+                if (self.state.active_run().is_some() && after_start.is_none())
                     || self.state.tasks.iter().any(|t| !t.status.terminal())
                 {
                     return reject("provider-work-active");
@@ -3535,6 +3546,7 @@ impl Decision {
                     command: id.clone(),
                     checkpoint: checkpoint.clone(),
                     restore_files: *restore_files,
+                    after_start,
                 });
                 if self.state.rollbacks.len() == 1 {
                     self.next_rollback();

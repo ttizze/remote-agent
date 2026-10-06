@@ -615,6 +615,9 @@ pub struct PendingRollback {
     pub command: CommandId,
     pub checkpoint: CheckpointId,
     pub restore_files: bool,
+    /// The run that was waiting for earlier rollbacks when this one was
+    /// requested; it starts before this rollback executes.
+    pub after_start: Option<RunId>,
     /// Provider instances whose native history the rollback may already have
     /// rewound; a failed rollback resets their native sessions.
     pub rewinding: BTreeSet<String>,
@@ -722,6 +725,12 @@ impl State {
             .iter()
             .filter(|r| r.status.blocking())
             .max_by_key(|r| r.ordinal)
+    }
+    /// The starting run that waits for the requested rollbacks before it
+    /// starts.
+    pub fn run_awaiting_rollback(&self) -> Option<&Run> {
+        self.active_run()
+            .filter(|run| run.status == RunStatus::Starting && run.started_at.is_none())
     }
     pub fn queued_runs(&self) -> Vec<&Run> {
         let mut runs: Vec<_> = self
