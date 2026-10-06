@@ -1,5 +1,60 @@
 use super::*;
 
+// T3 Orchestrator.ts dispatchQueuedMessagePromoteToSteer / dispatchSteerIntoRun:
+// native maintenance never joins a running turn and a maintenance turn takes
+// no steering.
+#[test]
+fn promoting_to_steer_keeps_maintenance_separate() {
+    let mut s = state();
+    let (active, _) = running(&mut s, "work");
+    let compact = queued(&mut s, "/compact");
+    let promote = |s: &mut State, key: &str, queued: &RunId, active: &RunId| {
+        command(
+            s,
+            key,
+            Command::PromoteToSteer {
+                queued: queued.clone(),
+                active: active.clone(),
+            },
+        )
+        .reply
+    };
+    assert_eq!(
+        promote(&mut s, "promote-compact", &compact, &active),
+        Reply::Rejected {
+            reason: "maintenance-must-run-separately".into()
+        }
+    );
+    let mut busy = state();
+    let maintenance = {
+        let Reply::Run(run) = command(
+            &mut busy,
+            "/compact",
+            send_message("/compact", DispatchMode::StartImmediately),
+        )
+        .reply
+        else {
+            panic!()
+        };
+        let attempt = busy.runs[0].attempt.clone().unwrap();
+        provider(
+            &mut busy,
+            "started",
+            &attempt,
+            ProviderEvent::TurnStarted { native_turn: None },
+        );
+        run
+    };
+    let follow_up = queued(&mut busy, "follow-up");
+    assert_eq!(
+        promote(&mut busy, "promote", &follow_up, &maintenance),
+        Reply::Rejected {
+            reason: "maintenance-in-progress".into()
+        }
+    );
+    assert_eq!(busy.runs[1].status, RunStatus::Queued);
+}
+
 fn wake(s: &mut State, attempt: &RunAttemptId, key: &str) -> RunId {
     provider(
         s,

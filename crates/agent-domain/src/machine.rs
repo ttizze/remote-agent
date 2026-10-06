@@ -3010,18 +3010,7 @@ impl Decision {
                 {
                     return reject("thread-not-active");
                 }
-                if self.automatic_run(queued) {
-                    return reject("automatic-delivery-not-promotable");
-                }
-                let Some(target) = self
-                    .state
-                    .runs
-                    .iter()
-                    .find(|r| &r.id == active && r.status == RunStatus::Running)
-                    .cloned()
-                else {
-                    return reject("run-not-active");
-                };
+                // T3 dispatchQueuedMessagePromoteToSteer and dispatchSteerIntoRun.
                 let Some(run) = self
                     .state
                     .runs
@@ -3031,6 +3020,9 @@ impl Decision {
                 else {
                     return reject("queued-run-not-found");
                 };
+                if self.automatic_run(queued) {
+                    return reject("automatic-delivery-not-promotable");
+                }
                 let m = self
                     .state
                     .messages
@@ -3038,6 +3030,27 @@ impl Decision {
                     .find(|m| m.id == run.message)
                     .unwrap()
                     .clone();
+                if maintenance(&m.text, &m.attachments).is_some() {
+                    return reject("maintenance-must-run-separately");
+                }
+                let Some(target) = self.state.runs.iter().find(|r| &r.id == active).cloned() else {
+                    return reject("run-not-active");
+                };
+                if self
+                    .state
+                    .message(&target.message)
+                    .is_some_and(|m| maintenance(&m.text, &m.attachments).is_some())
+                {
+                    return reject("maintenance-in-progress");
+                }
+                if target.status != RunStatus::Running {
+                    return reject("run-not-active");
+                }
+                if self.state.thread.as_ref().unwrap().selection.instance
+                    != target.selection.instance
+                {
+                    return reject("steering-provider-mismatch");
+                }
                 self.fact(FactBody::RunFinished {
                     id: queued.clone(),
                     status: RunStatus::Cancelled,
