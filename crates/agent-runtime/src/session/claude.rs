@@ -6,7 +6,6 @@ pub(crate) const BACKGROUND_BLOCKS_REPLACEMENT: &str = "Claude is still running 
 pub(crate) struct ClaudeProcess {
     pub(super) launch: ClaudeLaunch,
     pub(crate) native: Option<String>,
-    pub(super) model: String,
     pub(super) permission_mode: String,
 }
 
@@ -73,7 +72,7 @@ impl SessionManager {
         let sent = self
             .send(
                 &entry,
-                Request::new(move |p| {
+                Request::new(&target.key.thread, move |p| {
                     let claude = p.claude()?;
                     claude.set_skills(skills);
                     claude.command(&command, &prompt, &images)
@@ -95,7 +94,7 @@ impl SessionManager {
         settings: &ClaudeSettings,
         launch: ClaudeLaunch,
     ) -> Result<Entry, Failure> {
-        if let Some(entry) = self.entry(&target.key) {
+        if let Some(entry) = self.entry(&Slot::Thread(target.key.clone())) {
             let reusable = entry.claude.as_ref().is_some_and(|process| {
                 let process = process.lock().expect("claude process");
                 launch.native_session.is_some()
@@ -103,13 +102,10 @@ impl SessionManager {
                     && compatible(&process.launch, &launch)
             });
             if reusable {
-                match self.align(&entry, &launch).await {
-                    Ok(()) => return Ok(entry),
-                    Err(message) => {
-                        tracing::warn!(thread = %target.key.thread, %message,
-                            "respawning a Claude session that could not be reconfigured");
-                    }
-                }
+                self.restore_mode(&entry, &target.key.thread, &launch)
+                    .await
+                    .map_err(ExecError::Retry)?;
+                return Ok(entry);
             }
             // Background agents and shells live in the process; replacing it for the
             // same native session would end them (T3 refuses until they finish or Stop).
@@ -133,7 +129,7 @@ impl SessionManager {
                 }))
                 .into());
             }
-            self.close_entry(&entry, true, false).await;
+            self.close_entry(&entry, true).await;
         }
         let resumed = launch.native_session.is_some();
         let entry = self.spawn(target, Some(launch)).await?;
@@ -142,7 +138,7 @@ impl SessionManager {
         let initialized = self
             .request_reply(
                 &entry,
-                Request::new(move |p| {
+                Request::new(&target.key.thread, move |p| {
                     let claude = p.claude()?;
                     claude.set_skills(skills);
                     Ok(frames(vec![claude.control.initialize(&prompt)]))
@@ -152,7 +148,7 @@ impl SessionManager {
             )
             .await;
         if let Err(message) = initialized {
-            self.close_entry(&entry, false, false).await;
+            self.close_entry(&entry, false).await;
             return Err(if resumed {
                 ExecError::Settle(Box::new(EffectResult::ProviderFailed {
                     attempt: attempt.clone(),
@@ -177,7 +173,7 @@ impl SessionManager {
         let routes = self.task_routes(state).await;
         self.send(
             &entry,
-            Request::new(move |p| {
+            Request::new(&target.key.thread, move |p| {
                 let claude = p.claude()?;
                 for (task, tool, parent, agent) in &routes {
                     claude.restore_task_route(task, tool, parent.as_deref(), *agent);
@@ -193,36 +189,27 @@ impl SessionManager {
         Ok(entry)
     }
 
-    pub(super) async fn align(&self, entry: &Entry, launch: &ClaudeLaunch) -> Result<(), String> {
+    /// T3 openQuery: Claude can switch its own mode (EnterPlanMode), so the
+    /// reused process is put back in the thread's mode before the next prompt.
+    pub(super) async fn restore_mode(
+        &self,
+        entry: &Entry,
+        thread: &ThreadId,
+        launch: &ClaudeLaunch,
+    ) -> Result<(), String> {
         let Some(process) = &entry.claude else {
             return Ok(());
         };
-        let (model, mode) = {
+        let mode = {
             let process = process.lock().expect("claude process");
-            (
-                (process.model != launch.model).then(|| launch.model.clone()),
-                (process.permission_mode != launch.policy.permission_mode)
-                    .then(|| launch.policy.permission_mode.clone()),
-            )
+            (process.permission_mode != launch.policy.permission_mode)
+                .then(|| launch.policy.permission_mode.clone())
         };
-        if let Some(model) = model {
-            let payload = json!({ "model": model });
-            self.request_reply(
-                entry,
-                Request::new(move |p| {
-                    Ok(frames(vec![
-                        p.claude()?.control.request("set_model", payload),
-                    ]))
-                }),
-            )
-            .await?;
-            process.lock().expect("claude process").model = model;
-        }
         if let Some(mode) = mode {
             let payload = json!({ "mode": mode });
             self.request_reply(
                 entry,
-                Request::new(move |p| {
+                Request::new(thread, move |p| {
                     Ok(frames(vec![
                         p.claude()?.control.request("set_permission_mode", payload),
                     ]))
@@ -278,10 +265,12 @@ impl SessionManager {
         routes
     }
 
-    /// The fork's session is reserved on the source thread before its transcript
-    /// exists, so an import never adopts it; `None` once the fork is no longer pending.
+    /// Copies the source's transcript into a session reserved by the consuming
+    /// child before it exists, so an import never adopts it; `None` once the
+    /// attempt no longer awaits the fork.
     pub(super) async fn fork_claude(
         &self,
+        source: &LaunchTarget,
         target: &LaunchTarget,
         effect_id: &str,
         attempt: &RunAttemptId,
@@ -298,9 +287,15 @@ impl SessionManager {
         else {
             return Err(ForkError::Rejected("not a native fork".into()));
         };
+        self.keys
+            .with_lock(
+                source.key.clone(),
+                self.close_fork_source(&source.key, &native_thread),
+            )
+            .await?;
         let source = self
             .host
-            .read_claude_session(target.clone(), native_thread.clone())
+            .read_claude_session(source.clone(), native_thread.clone())
             .await
             .map_err(|error| ForkError::Retry(error.to_string()))?;
         let mut serial = 0;
@@ -338,7 +333,39 @@ impl SessionManager {
     }
 }
 
-fn claude_launch(
+impl SessionManager {
+    /// T3 forkThread: no fork while a turn of the source runs, and the source's
+    /// live process closes before its transcript is read.
+    async fn close_fork_source(
+        &self,
+        source: &SessionKey,
+        native_thread: &str,
+    ) -> Result<(), ForkError> {
+        let state = self
+            .state(&source.thread)
+            .await
+            .map_err(|error| ForkError::Retry(format!("{error:?}")))?;
+        if let Some(run) = state.runs.iter().find(|run| {
+            run.selection.instance == source.instance
+                && matches!(run.status, RunStatus::Starting | RunStatus::Running)
+        }) {
+            return Err(ForkError::Rejected(format!(
+                "Cannot fork Claude provider thread {native_thread} while provider turn {} is active.",
+                run.id
+            )));
+        }
+        if let Some(entry) = self.entry(&Slot::Thread(source.clone()))
+            && entry.claude.as_ref().is_some_and(|process| {
+                process.lock().expect("claude process").native.as_deref() == Some(native_thread)
+            })
+        {
+            self.close_entry(&entry, true).await;
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn claude_launch(
     target: &LaunchTarget,
     settings: &ClaudeSettings,
     native_session: Option<String>,
@@ -351,15 +378,25 @@ fn claude_launch(
         merged.extend(model.clone());
     }
     let settings_value = (merged != json!({})).then_some(merged);
+    let mut policy = claude_runtime_query_policy(
+        target.runtime_mode,
+        target.interaction_mode,
+        settings.approval_policy.as_deref(),
+        settings.sandbox_kind.as_deref(),
+        settings.read_only_allows_global_reads,
+    );
+    if !settings.mcp_servers.is_empty() && !settings.mcp_allowed_tools.is_empty() {
+        let mut allowed = policy.allowed_tools.take().unwrap_or_default();
+        for tool in &settings.mcp_allowed_tools {
+            if !allowed.contains(tool) {
+                allowed.push(tool.clone());
+            }
+        }
+        policy.allowed_tools = Some(allowed);
+    }
     ClaudeLaunch {
         model: options.model,
-        policy: claude_runtime_query_policy(
-            target.runtime_mode,
-            target.interaction_mode,
-            settings.approval_policy.as_deref(),
-            settings.sandbox_kind.as_deref(),
-            settings.read_only_allows_global_reads,
-        ),
+        policy,
         resume_at: resume_at.filter(|_| native_session.is_some()),
         native_session,
         new_session,
@@ -373,14 +410,13 @@ fn claude_launch(
     }
 }
 
-/// Launch flags that a live process cannot change.
+/// T3 reuses a live query only for the same query policy and model selection;
+/// any other launch replaces the process.
 fn compatible(current: &ClaudeLaunch, wanted: &ClaudeLaunch) -> bool {
-    let fixed = |launch: &ClaudeLaunch| {
+    let key = |launch: &ClaudeLaunch| {
         (
-            launch.policy.tools.clone(),
-            launch.policy.allowed_tools.clone(),
-            launch.policy.allow_dangerously_skip_permissions,
-            launch.policy.install_permission_callback,
+            launch.model.clone(),
+            launch.policy.clone(),
             launch.additional_directories.clone(),
             launch.effort.clone(),
             launch.disallowed_tools.clone(),
@@ -389,5 +425,5 @@ fn compatible(current: &ClaudeLaunch, wanted: &ClaudeLaunch) -> bool {
             launch.extra_args.clone(),
         )
     };
-    fixed(current) == fixed(wanted)
+    key(current) == key(wanted)
 }

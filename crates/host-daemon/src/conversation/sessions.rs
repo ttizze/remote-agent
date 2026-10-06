@@ -1,16 +1,20 @@
 //! Provider processes for the runtime's sessions: Codex app-server and Claude CLI
 //! launches under the process supervisor, their MCP tools, images and transcripts.
-use super::{ClaudeCredentials, ProjectCatalog, tools::ToolBridge};
+use super::{ClaudeCredentials, CodexCredentials, ProjectCatalog, tools::ToolBridge};
 use crate::claude::control::ClaudeProgram;
+use crate::claude::skills::user_invocable_skills;
 use crate::{workspace_files::WorkspaceFiles, worktrees::Worktrees};
 use agent_domain::{Attachment, AttachmentKind, Driver, Json, ThreadId};
-use agent_providers::{PreparedImage, WireContext, claude_project_key};
+use agent_providers::{
+    CLAUDE_MCP_TOOL_TIMEOUT_MS, PreparedImage, WireContext, claude_append_system_prompt,
+    claude_project_key, codex_additional_context, codex_developer_instructions,
+};
 use agent_runtime::{
     ClaudeSettings, LaunchTarget, ProviderProcess, Runtime, SessionHost, SessionKey, SpawnRequest,
 };
 use base64::Engine as _;
 use futures_util::future::BoxFuture;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     io,
@@ -59,6 +63,7 @@ impl Spawner for SupervisedSpawner {
 pub(crate) struct ProviderPrograms {
     pub(crate) codex: Option<PathBuf>,
     pub(crate) codex_home: Option<PathBuf>,
+    pub(crate) codex_accounts: Option<Arc<dyn CodexCredentials>>,
     pub(crate) claude: Option<(ClaudeProgram, Arc<dyn ClaudeCredentials>)>,
 }
 
@@ -199,10 +204,29 @@ impl SessionHost for ProviderHost {
         Box::pin(async move {
             let cwd = self.cwd(&target).await?;
             let servers = self.mcp_servers(&target.key)?;
+            let omit_service_tier = match &self.programs.codex_accounts {
+                Some(accounts) => accounts.shares_tokens().await,
+                None => false,
+            };
+            // T3 buildCodexTurnStartParams with the app's MCP tools attached.
+            let effort = target
+                .selection
+                .options
+                .get("reasoningEffort")
+                .map_or("medium", String::as_str);
             Ok(WireContext {
                 cwd: cwd.to_string_lossy().into_owned(),
                 client_name: "remote_agent_host".into(),
                 client_version: env!("CARGO_PKG_VERSION").into(),
+                omit_service_tier,
+                developer_instructions: Some(
+                    codex_developer_instructions(target.interaction_mode).to_owned(),
+                ),
+                additional_context: Some(Json(codex_additional_context(
+                    &target.selection.model,
+                    effort,
+                    servers.contains_key("browser"),
+                ))),
                 thread_config: BTreeMap::from([(
                     "mcp_servers".to_owned(),
                     Json(Value::Object(servers.into_iter().collect())),
@@ -217,9 +241,33 @@ impl SessionHost for ProviderHost {
         target: LaunchTarget,
     ) -> BoxFuture<'_, Result<ClaudeSettings, String>> {
         Box::pin(async move {
-            self.claude()?;
+            let config = self.claude()?.0.config_home.clone();
+            let cwd = self.cwd(&target).await?;
+            // T3 claudeMcpQueryOverrides: the app's tools are pre-approved, and
+            // a waiting tool may block for up to an hour.
+            let mut mcp_servers = self.mcp_servers(&target.key)?;
+            for server in mcp_servers.values_mut() {
+                server["timeout"] = json!(CLAUDE_MCP_TOOL_TIMEOUT_MS);
+            }
+            let mcp_allowed_tools = mcp_servers
+                .keys()
+                .map(|name| format!("mcp__{name}__*"))
+                .collect();
+            let skills = {
+                let cwd = cwd.clone();
+                tokio::task::spawn_blocking(move || user_invocable_skills(&config, Some(&cwd)))
+                    .await
+                    .map_err(|error| error.to_string())?
+            };
             Ok(ClaudeSettings {
-                mcp_servers: self.mcp_servers(&target.key)?,
+                mcp_servers,
+                mcp_allowed_tools,
+                append_system_prompt: claude_append_system_prompt(true),
+                additional_directories: vec![
+                    cwd.to_string_lossy().into_owned(),
+                    self.files.attachment_root().to_string_lossy().into_owned(),
+                ],
+                skills,
                 ..ClaudeSettings::default()
             })
         })
@@ -280,9 +328,29 @@ impl SessionHost for ProviderHost {
         })
     }
 
-    fn released(&self, key: &SessionKey, revoke_credentials: bool) {
-        if revoke_credentials {
-            self.tools.revoke(&key.thread, &key.instance);
-        }
+    fn revoke_credentials(&self, thread: &ThreadId, instance: Option<&str>) {
+        self.tools.revoke(thread, instance);
+    }
+
+    fn codex_account(&self, _instance: String) -> BoxFuture<'_, Result<Option<Value>, String>> {
+        Box::pin(async move {
+            match &self.programs.codex_accounts {
+                Some(accounts) => accounts.login().await,
+                None => Ok(None),
+            }
+        })
+    }
+
+    fn refresh_codex_account(
+        &self,
+        _instance: String,
+        previous_account: Option<String>,
+    ) -> BoxFuture<'_, Result<Value, String>> {
+        Box::pin(async move {
+            match &self.programs.codex_accounts {
+                Some(accounts) => accounts.refresh(previous_account).await,
+                None => Err("Select an account before refreshing credentials".into()),
+            }
+        })
     }
 }

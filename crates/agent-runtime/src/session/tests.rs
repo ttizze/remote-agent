@@ -53,6 +53,36 @@ pub(crate) struct Rig {
 }
 
 pub(crate) fn rig(options: SessionOptions, max_attempts: u32) -> Rig {
+    rig_handlers(options, max_attempts, |sessions, registry, _| {
+        with_session_handlers(EffectHandlers::default(), sessions)
+            .with("SendToThread", Arc::new(Forward(registry.clone())))
+    })
+}
+
+/// A rig whose every effect runs through the runtime executors with fake Host
+/// operations, as the Host runs them.
+pub(crate) fn runtime_rig(options: SessionOptions, max_attempts: u32) -> Rig {
+    rig_handlers(options, max_attempts, |sessions, registry, store| {
+        crate::with_runtime_handlers(
+            EffectHandlers::default(),
+            &crate::ExecutorContext {
+                store: store.clone(),
+                registry: registry.clone(),
+                sessions: sessions.clone(),
+                ops: Arc::new(crate::executor::tests::Ops(
+                    crate::executor::tests::FakeOps::new(),
+                )),
+                workspaces: Arc::default(),
+            },
+        )
+    })
+}
+
+fn rig_handlers(
+    options: SessionOptions,
+    max_attempts: u32,
+    handlers: impl FnOnce(&Arc<SessionManager>, &Arc<ActorRegistry>, &Store) -> EffectHandlers,
+) -> Rig {
     let (dir, store) = temp_store();
     let clock = Arc::new(ManualClock::new(&at()));
     let live = LiveSessions::default();
@@ -62,8 +92,7 @@ pub(crate) fn rig(options: SessionOptions, max_attempts: u32) -> Rig {
     let registry = ActorRegistry::new(context);
     let host = FakeHost::new();
     let sessions = SessionManager::new(registry.clone(), host.clone(), options, live);
-    let handlers = with_session_handlers(EffectHandlers::default(), &sessions)
-        .with("SendToThread", Arc::new(Forward(registry.clone())));
+    let handlers = handlers(&sessions, &registry, &store);
     let outbox = SqliteOutbox::new(store.clone(), clock.clone());
     let worker = Arc::new(EffectWorker::new(
         outbox,
@@ -107,8 +136,13 @@ pub(crate) fn codex_replies(frame: &Value) -> Vec<Value> {
     let id = frame["id"].clone();
     match frame["method"].as_str() {
         Some("initialize") => vec![json!({"id":id,"result":{}})],
-        Some("thread/start") => {
+        // A process's first thread is `native-thread`; later threads of a
+        // shared app-server are told apart by their request id.
+        Some("thread/start") if id == 2 => {
             vec![json!({"id":id,"result":{"thread":{"id":"native-thread"}}})]
+        }
+        Some("thread/start") => {
+            vec![json!({"id":id,"result":{"thread":{"id":format!("native-thread-{id}")}}})]
         }
         Some("thread/resume") => {
             vec![json!({"id":id,"result":{"thread":{"id":frame["params"]["threadId"]}}})]
@@ -244,22 +278,33 @@ impl Rig {
     }
     /// A Codex thread whose first turn is running on a live session.
     async fn codex_turn(&self, id: &ThreadId) -> RunAttemptId {
+        self.codex_turn_on(id, "codex").await
+    }
+    async fn codex_turn_on(&self, id: &ThreadId, instance: &str) -> RunAttemptId {
         self.host.respond(codex_replies);
-        self.create(
-            id,
-            selection(Driver::Codex, "gpt-6-luna"),
-            RuntimeMode::FullAccess,
-        )
-        .await;
+        let mut selection = selection(Driver::Codex, "gpt-6-luna");
+        selection.instance = instance.into();
+        self.create(id, selection, RuntimeMode::FullAccess).await;
+        let started = |process: &fake::FakeProcess| {
+            process
+                .written()
+                .iter()
+                .filter(|frame| frame["method"] == "turn/start")
+                .count()
+        };
+        let before = self.host.last().map_or(0, |process| started(&process));
+        let spawned = self.host.spawned();
         self.send(id, "hello", DispatchMode::StartImmediately).await;
         self.drain().await;
         let attempt = self.attempt(id).await;
         self.until("turn accepted", async || {
             self.host.last().is_some_and(|process| {
-                process
-                    .written()
-                    .iter()
-                    .any(|frame| frame["method"] == "turn/start")
+                started(&process)
+                    > if self.host.spawned() == spawned {
+                        before
+                    } else {
+                        0
+                    }
             })
         })
         .await;
@@ -281,11 +326,35 @@ impl Rig {
     }
 }
 
+/// A live Claude process of `thread` opened in `cwd`, for tests outside the
+/// session module.
+pub(crate) async fn live_claude_process(sessions: &SessionManager, thread: &ThreadId, cwd: &str) {
+    let target = LaunchTarget {
+        key: SessionKey {
+            thread: thread.clone(),
+            instance: "claude".into(),
+        },
+        selection: selection(Driver::Claude, "claude-sonnet-4-6"),
+        runtime_mode: RuntimeMode::FullAccess,
+        interaction_mode: InteractionMode::Default,
+        workspace: Some(agent_domain::Workspace {
+            cwd: cwd.into(),
+            worktree_path: Some(cwd.into()),
+            branch: None,
+        }),
+    };
+    let launch = claude::claude_launch(&target, &ClaudeSettings::default(), None, None, None);
+    let Ok(_) = sessions.spawn(&target, Some(launch)).await else {
+        panic!("the fake Claude process opens");
+    };
+}
+
 fn options(idle: u64, pin: u64) -> SessionOptions {
     SessionOptions {
         idle_timeout: Duration::from_millis(idle),
         max_idle_pin: Duration::from_millis(pin),
         reply_timeout: Duration::from_secs(5),
+        interrupt_timeout: Duration::from_secs(5),
         close_grace: Duration::from_millis(200),
         write_timeout: Duration::from_secs(5),
     }
@@ -295,23 +364,12 @@ fn options(idle: u64, pin: u64) -> SessionOptions {
 fn control_failures_name_their_own_provider_operation() {
     use task::failed_operation;
     assert_eq!(
-        failed_operation("set_model"),
-        Some((ProviderOperation::SetModel, false))
-    );
-    assert_eq!(
         failed_operation("set_permission_mode"),
-        Some((ProviderOperation::SetRuntimeMode, false))
+        Some((ProviderOperation::Start, false))
     );
     assert_eq!(
         failed_operation("thread/resume"),
         Some((ProviderOperation::Start, true))
-    );
-    assert_eq!(
-        operation(&ProviderCommand::SetRuntimeMode {
-            runtime_mode: RuntimeMode::Auto,
-            interaction_mode: InteractionMode::Default,
-        }),
-        Some(ProviderOperation::SetRuntimeMode)
     );
 }
 
@@ -348,13 +406,6 @@ fn registered_kinds_are_the_outbox_kinds_of_the_effects() {
         },
         ProviderCommand::Compact {
             native_thread: None,
-        },
-        ProviderCommand::SetModel {
-            selection: selection.clone(),
-        },
-        ProviderCommand::SetRuntimeMode {
-            runtime_mode: RuntimeMode::FullAccess,
-            interaction_mode: InteractionMode::Default,
         },
     ];
     let kinds: Vec<_> = commands
@@ -439,9 +490,10 @@ async fn opens_independent_sessions_concurrently() {
         })
     });
     let (a, b) = (thread("thread-concurrent-a"), thread("thread-concurrent-b"));
-    for id in [&a, &b] {
-        rig.create(id, selection(Driver::Codex, "gpt"), RuntimeMode::FullAccess)
-            .await;
+    for (id, instance) in [(&a, "codex"), (&b, "codex-work")] {
+        let mut selection = selection(Driver::Codex, "gpt");
+        selection.instance = instance.into();
+        rig.create(id, selection, RuntimeMode::FullAccess).await;
         rig.send(id, "hello", DispatchMode::StartImmediately).await;
     }
     let (first, second) = (
@@ -501,23 +553,30 @@ async fn opens_a_duplicate_session_only_once() {
     assert_eq!(rig.host.spawned(), 1);
 }
 
-// "closes every live session for a provider instance".
+// "closes every live session for a provider instance": both threads share the
+// instance's app-server, and closing it releases both credentials.
 #[tokio::test(flavor = "multi_thread")]
 async fn closes_every_live_session_for_a_provider_instance() {
     let rig = rig(SessionOptions::default(), 5);
     let (a, b) = (thread("thread-logout-a"), thread("thread-logout-b"));
     rig.codex_turn(&a).await;
     rig.codex_turn(&b).await;
+    assert_eq!(rig.host.spawned(), 1);
+    assert_eq!(rig.sessions.sessions().len(), 2);
     rig.sessions.close_instance("codex").await;
     assert!(rig.sessions.sessions().is_empty());
-    assert!(rig.host.process(0).exited() && rig.host.process(1).exited());
-    let released: Vec<_> = rig
+    assert!(rig.host.process(0).exited());
+    let mut revoked: Vec<_> = rig
         .host
         .logged()
         .into_iter()
-        .filter(|entry| entry.starts_with("released:"))
+        .filter(|entry| entry.starts_with("revoked:"))
         .collect();
-    assert_eq!(released.len(), 2);
+    revoked.sort();
+    assert_eq!(
+        revoked,
+        [format!("revoked:{a}:codex"), format!("revoked:{b}:codex")]
+    );
 }
 
 // "releases live sessions when its layer shuts down": recovery, not the
@@ -544,7 +603,7 @@ async fn a_stopped_provider_commits_its_last_frames_then_releases_the_session() 
     rig.host.process(0).exit(true);
     rig.gone(&id).await;
     assert_eq!(rig.run_status(&id).await, RunStatus::Completed);
-    assert!(rig.host.logged().contains(&format!("released:{id}:false")));
+    assert!(rig.host.logged().contains(&format!("revoked:{id}:codex")));
 }
 
 // "issues MCP credentials before opening and revokes them on close" and
@@ -558,7 +617,18 @@ async fn configures_before_spawning_and_revokes_credentials_on_detach() {
     assert_eq!(&log[..2], [format!("context:{id}"), format!("spawn:{id}")]);
     rig.sessions.detach(&id, true).await;
     assert!(rig.sessions.sessions().is_empty());
-    assert!(rig.host.logged().contains(&format!("released:{id}:true")));
+    assert!(rig.host.logged().contains(&format!("revoked:{id}:*")));
+}
+
+// "terminal detach revokes credentials even when no session is live" (#18).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_detach_revokes_credentials_without_a_live_process() {
+    let rig = rig(SessionOptions::default(), 5);
+    let id = thread("thread-credentials-idle");
+    rig.sessions.detach(&id, true).await;
+    assert_eq!(rig.host.logged(), [format!("revoked:{id}:*")]);
+    rig.sessions.detach(&id, false).await;
+    assert_eq!(rig.host.logged().len(), 1);
 }
 
 // "releases idle sessions without sweeping all sessions" and "keeps active
@@ -568,7 +638,7 @@ async fn releases_an_idle_session_only_after_its_turn_terminates() {
     let rig = rig(options(150, 60_000), 5);
     let (id, other) = (thread("thread-idle"), thread("thread-busy"));
     rig.codex_turn(&id).await;
-    rig.codex_turn(&other).await;
+    rig.codex_turn_on(&other, "codex-work").await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(rig.sessions.sessions().len(), 2);
     rig.finish_codex_turn(0);
@@ -579,7 +649,7 @@ async fn releases_an_idle_session_only_after_its_turn_terminates() {
         rig.sessions.sessions(),
         [SessionKey {
             thread: other.clone(),
-            instance: "codex".into()
+            instance: "codex-work".into()
         }]
     );
 }
@@ -651,7 +721,7 @@ async fn a_replacement_session_keeps_its_own_lifetime() {
     let id = thread("thread-replacement");
     let attempt = rig.codex_turn(&id).await;
     background_work(&rig, &id, &attempt, None).await;
-    rig.sessions.detach(&id, false).await;
+    rig.sessions.close_instance("codex").await;
     rig.until_status(&id, RunStatus::Failed).await;
     rig.send(&id, "again", DispatchMode::StartImmediately).await;
     rig.drain().await;
@@ -1022,10 +1092,10 @@ async fn commits_a_reply_before_writing_the_next_frame() {
     assert_eq!(*observed.lock().unwrap(), Some(true));
 }
 
-/// A frame's events reach the owning actor in order, and a stale process's
-/// frames are never read once it is replaced.
+// T3 ClaudeAdapterV2 openQuery: a live query is reused only for the same
+// policy and selection; a new model or mode replaces it with a resume.
 #[tokio::test(flavor = "multi_thread")]
-async fn claude_reuses_its_process_after_aligning_model_and_mode() {
+async fn claude_replaces_its_process_for_another_model_or_mode() {
     let rig = rig(SessionOptions::default(), 5);
     rig.host.respond(claude_replies);
     let id = thread("thread-claude-reuse");
@@ -1047,8 +1117,8 @@ async fn claude_reuses_its_process_after_aligning_model_and_mode() {
     process.emit(json!({"type":"assistant","uuid":"a-1","session_id":session,"message":{"id":"m-1","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"done"}]}}));
     process.emit(json!({"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","session_id":session,"uuid":"r-1"}));
     rig.until_status(&id, RunStatus::Completed).await;
-    // A runtime mode change detaches a Claude session (T3); the interaction
-    // mode applies on the next turn.
+    // Runtime mode changes detach Claude (T3), so this changes the
+    // interaction mode; both apply when the next turn starts.
     rig.command(
         &id,
         Command::InteractionMode {
@@ -1063,26 +1133,24 @@ async fn claude_reuses_its_process_after_aligning_model_and_mode() {
         },
     )
     .await;
+    assert!(!process.exited());
+    let before = process.written().len();
     rig.send(&id, "second", DispatchMode::StartImmediately)
         .await;
     rig.drain().await;
-    assert_eq!(rig.host.spawned(), 1);
-    let kinds: Vec<_> = process.written()[2..]
-        .iter()
-        .map(|frame| {
-            frame["request"]["subtype"]
-                .as_str()
-                .or(frame["type"].as_str())
-                .unwrap()
-                .to_owned()
-        })
-        .collect();
-    assert_eq!(kinds, ["set_model", "set_permission_mode", "user"]);
-    assert_eq!(
-        process.written()[2]["request"]["model"],
-        "claude-opus-4-6[1m]"
+    assert_eq!(rig.host.spawned(), 2);
+    assert!(process.exited());
+    assert!(
+        claude_kinds(&process.written()[before..])
+            .iter()
+            .all(|kind| kind != "user")
     );
-    assert_eq!(process.written()[3]["request"]["mode"], "plan");
+    let replacement = rig.host.process(1);
+    let launch = replacement.request.claude.clone().unwrap();
+    assert_eq!(launch.native_session.as_deref(), Some(session.as_str()));
+    assert_eq!(launch.model, "claude-opus-4-6[1m]");
+    assert_eq!(launch.policy.permission_mode, "plan");
+    assert_eq!(claude_kinds(&replacement.written()), ["initialize", "user"]);
 }
 
 /// A rejection settles the waiter of its own request id, not another request
@@ -1091,7 +1159,7 @@ async fn claude_reuses_its_process_after_aligning_model_and_mode() {
 async fn a_rejected_request_settles_only_the_waiter_of_its_id() {
     let rig = rig(SessionOptions::default(), 5);
     rig.host.respond(|frame| {
-        if frame["request"]["subtype"] == "set_model" {
+        if frame["request"]["subtype"] == "set_permission_mode" {
             return vec![];
         }
         claude_replies(frame)
@@ -1105,42 +1173,46 @@ async fn a_rejected_request_settles_only_the_waiter_of_its_id() {
     .await;
     rig.send(&id, "first", DispatchMode::StartImmediately).await;
     rig.drain().await;
-    let entry = rig.sessions.entry(&rig.sessions.sessions()[0]).unwrap();
-    let set_model = |model: &'static str| {
-        Request::new(move |p| {
+    let entry = rig
+        .sessions
+        .entry(&Slot::Thread(rig.sessions.sessions()[0].clone()))
+        .unwrap();
+    let owner = id.clone();
+    let set_mode = move |mode: &'static str| {
+        Request::new(&owner, move |p| {
             Ok(frames(vec![
                 p.claude()?
                     .control
-                    .request("set_model", json!({ "model": model })),
+                    .request("set_permission_mode", json!({ "mode": mode })),
             ]))
         })
     };
     rig.sessions
-        .send(&entry, set_model("unawaited"))
+        .send(&entry, set_mode("default"))
         .await
         .unwrap();
     let awaited = tokio::spawn({
         let (sessions, entry) = (rig.sessions.clone(), entry.clone());
-        async move { sessions.request_reply(&entry, set_model("awaited")).await }
+        async move { sessions.request_reply(&entry, set_mode("plan")).await }
     });
     let process = rig.host.process(0);
     let requests = || {
         process
             .written()
             .into_iter()
-            .filter(|frame| frame["request"]["subtype"] == "set_model")
+            .filter(|frame| frame["request"]["subtype"] == "set_permission_mode")
             .map(|frame| frame["request_id"].clone())
             .collect::<Vec<_>>()
     };
     rig.until("both requests written", async || requests().len() == 2)
         .await;
     let ids = requests();
-    process.emit(json!({"type":"control_response","response":{"subtype":"error","request_id":ids[0],"error":"model rejected"}}));
-    process.emit(json!({"type":"control_response","response":{"subtype":"success","request_id":ids[1],"response":{"model":"awaited"}}}));
-    assert_eq!(awaited.await.unwrap(), Ok(json!({"model":"awaited"})));
+    process.emit(json!({"type":"control_response","response":{"subtype":"error","request_id":ids[0],"error":"mode rejected"}}));
+    process.emit(json!({"type":"control_response","response":{"subtype":"success","request_id":ids[1],"response":{"mode":"plan"}}}));
+    assert_eq!(awaited.await.unwrap(), Ok(json!({"mode":"plan"})));
     rig.until("rejection recorded on the run", async || {
         rig.state(&id).await.items.iter().any(|item| {
-            matches!(&item.kind, ItemKind::Error { message, .. } if message == "model rejected")
+            matches!(&item.kind, ItemKind::Error { message, .. } if message == "mode rejected")
         })
     })
     .await;
@@ -1164,6 +1236,7 @@ async fn claude_respawns_when_launch_flags_change_and_ignores_the_old_process() 
     old.emit(json!({"type":"system","subtype":"init","session_id":session,"uuid":"init-1"}));
     old.emit(json!({"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","session_id":session,"uuid":"r-1"}));
     rig.until_status(&id, RunStatus::Completed).await;
+    // T3 detaches the Claude session when the runtime mode changes.
     rig.command(
         &id,
         Command::RuntimeMode {
@@ -1171,11 +1244,12 @@ async fn claude_respawns_when_launch_flags_change_and_ignores_the_old_process() 
         },
     )
     .await;
+    rig.drain().await;
+    assert!(old.exited());
     rig.send(&id, "second", DispatchMode::StartImmediately)
         .await;
     rig.drain().await;
     assert_eq!(rig.host.spawned(), 2);
-    assert!(old.exited());
     let launch = rig.host.process(1).request.claude.clone().unwrap();
     assert_eq!(launch.native_session.as_deref(), Some(session.as_str()));
     assert!(launch.policy.install_permission_callback);
@@ -1423,6 +1497,8 @@ async fn a_claude_native_fork_copies_the_transcript_through_the_head() {
     assert_ne!(forked, session);
     let copy = rig.host.transcripts.lock().unwrap()[&forked].clone();
     assert!(copy.contains("\"a-1\"") || copy.contains("done"));
+    // T3 forkThread closes the source's live query before reading its transcript.
+    assert!(process.exited());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1730,7 +1806,7 @@ async fn a_blocked_stdin_write_keeps_output_and_close_handled() {
     .await;
     process.emit(json!({"method":"turn/started","params":{"threadId":"native-thread","turn":{"id":"native-turn"}}}));
     rig.until_status(&id, RunStatus::Running).await;
-    tokio::time::timeout(Duration::from_secs(2), rig.sessions.detach(&id, false))
+    tokio::time::timeout(Duration::from_secs(2), rig.sessions.close_instance("codex"))
         .await
         .expect("close is handled while a write is blocked");
     assert!(process.exited());
@@ -1760,10 +1836,16 @@ async fn a_write_the_provider_never_accepts_fails_the_session() {
     rig.drain().await;
     rig.gone(&id).await;
     rig.until_status(&id, RunStatus::Failed).await;
-    assert!(rig.state(&id).await.items.iter().any(|item| matches!(
-        &item.kind,
-        ItemKind::Error { message, .. } if message == "The provider stopped reading its input."
-    )));
+    let state = rig.state(&id).await;
+    assert!(
+        state.items.iter().any(|item| matches!(
+            &item.kind,
+            ItemKind::Error { message, .. } if message == "The provider stopped reading its input."
+        )),
+        "{:?} {:?}",
+        state.items,
+        rig.host.logged()
+    );
 }
 
 // ClaudeAdapterV2.ts:7297 and :7328: Stop interrupts and then closes the
@@ -1930,20 +2012,13 @@ async fn a_first_codex_compaction_starts_a_native_thread() {
     );
 }
 
-// The architecture requires the configuration reply before Start: a rejected
-// set_model is not the process's model, so the next Start aligns again.
+// T3 applies a model selection from the next turn: the running query gets no
+// set_model, and the next turn on the new selection replaces the process.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_rejected_claude_model_change_is_aligned_again_before_the_next_turn() {
+async fn a_claude_model_change_during_a_turn_applies_from_the_next_turn() {
     let rig = rig(SessionOptions::default(), 5);
-    rig.host.respond(|frame| {
-        if frame["request"]["subtype"] == "set_model" {
-            return vec![
-                json!({"type":"control_response","response":{"subtype":"error","request_id":frame["request_id"],"error":"model rejected"}}),
-            ];
-        }
-        claude_replies(frame)
-    });
-    let id = thread("thread-claude-model-rejected");
+    rig.host.respond(claude_replies);
+    let id = thread("thread-claude-model-next-turn");
     rig.create(
         &id,
         selection(Driver::Claude, "claude-sonnet-4-6"),
@@ -1956,6 +2031,7 @@ async fn a_rejected_claude_model_change_is_aligned_again_before_the_next_turn() 
     let session = process.request.claude.clone().unwrap().new_session.unwrap();
     process.emit(json!({"type":"system","subtype":"init","session_id":session,"uuid":"init-1"}));
     rig.until_status(&id, RunStatus::Running).await;
+    let before = process.written().len();
     rig.command(
         &id,
         Command::SelectModel {
@@ -1964,24 +2040,20 @@ async fn a_rejected_claude_model_change_is_aligned_again_before_the_next_turn() 
     )
     .await;
     rig.drain().await;
-    rig.until("rejection recorded", async || {
-        rig.state(&id).await.items.iter().any(|item| {
-            matches!(&item.kind, ItemKind::Error { message, .. } if message == "model rejected")
-        })
-    })
-    .await;
+    assert_eq!(process.written().len(), before);
+    assert!(!process.exited());
     process.emit(json!({"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","session_id":session,"uuid":"r-1"}));
     rig.until_status(&id, RunStatus::Completed).await;
-    rig.host.respond(claude_replies);
-    let before = process.written().len();
+    let state = rig.state(&id).await;
+    assert_eq!(state.runs[0].selection.model, "claude-sonnet-4-6");
     rig.send(&id, "second", DispatchMode::StartImmediately)
         .await;
     rig.drain().await;
-    assert_eq!(rig.host.spawned(), 1);
-    assert_eq!(
-        claude_kinds(&process.written()[before..]),
-        ["set_model", "user"]
-    );
+    assert_eq!(rig.host.spawned(), 2);
+    assert!(process.exited());
+    let launch = rig.host.process(1).request.claude.clone().unwrap();
+    assert_eq!(launch.model, "claude-opus-4-6[1m]");
+    assert_eq!(launch.native_session.as_deref(), Some(session.as_str()));
 }
 
 // ClaudeAdapterV2.ts:7063 and :6930: the CLI switches its own mode (plan mode);
@@ -2012,10 +2084,10 @@ async fn a_claude_mode_the_cli_reports_is_restored_before_the_next_prompt() {
     assert_eq!(written[0]["request"]["mode"], mode);
 }
 
-// ClaudeAdapterV2.ts:6940: a launch change that needs a new process is refused
+// ClaudeAdapterV2.ts:6940: a new selection that needs a new process is refused
 // while the live process runs background work.
 #[tokio::test(flavor = "multi_thread")]
-async fn claude_keeps_a_process_with_background_work_when_launch_flags_change() {
+async fn claude_keeps_a_process_with_background_work_when_the_selection_changes() {
     let rig = rig(SessionOptions::default(), 5);
     rig.host.respond(claude_replies);
     let id = thread("thread-claude-background-blocks");
@@ -2024,8 +2096,8 @@ async fn claude_keeps_a_process_with_background_work_when_launch_flags_change() 
     background_work(&rig, &id, &attempt, None).await;
     rig.command(
         &id,
-        Command::RuntimeMode {
-            mode: RuntimeMode::ApprovalRequired,
+        Command::SelectModel {
+            selection: selection(Driver::Claude, "claude-opus-4-6"),
         },
     )
     .await;
@@ -2246,5 +2318,329 @@ async fn a_claude_fork_reserves_its_session_before_writing_the_transcript() {
             .await
             .native_sessions
             .contains_key("claude")
+    );
+}
+
+/// Replies with native ids derived from the request id, as a shared app-server
+/// serving several threads.
+fn shared_replies(frame: &Value) -> Vec<Value> {
+    let id = frame["id"].clone();
+    match frame["method"].as_str() {
+        Some("initialize" | "account/login/start" | "thread/unsubscribe" | "turn/interrupt") => {
+            vec![json!({"id":id,"result":{}})]
+        }
+        Some("thread/start") => {
+            vec![json!({"id":id,"result":{"thread":{"id":format!("native-{id}")}}})]
+        }
+        Some("turn/start") => {
+            vec![json!({"id":id,"result":{"turn":{"id":format!("turn-{id}")}}})]
+        }
+        _ => vec![],
+    }
+}
+
+impl Rig {
+    /// Starts a Codex turn on the shared app-server; its native thread and turn.
+    async fn shared_turn(&self, id: &ThreadId) -> (String, String) {
+        self.create(
+            id,
+            selection(Driver::Codex, "gpt-6-luna"),
+            RuntimeMode::FullAccess,
+        )
+        .await;
+        let starts = || {
+            self.host
+                .last()
+                .map_or(vec![], |process| written_methods(&process, "turn/start"))
+        };
+        let before = starts().len();
+        self.send(id, "hello", DispatchMode::StartImmediately).await;
+        self.drain().await;
+        self.until("turn started", async || starts().len() > before)
+            .await;
+        let start = starts().pop().unwrap();
+        let thread = start["params"]["threadId"].as_str().unwrap().to_owned();
+        let turn = format!("turn-{}", start["id"]);
+        self.host
+            .process(0)
+            .emit(json!({"method":"turn/started","params":{"threadId":thread,"turn":{"id":turn}}}));
+        self.until_status(id, RunStatus::Running).await;
+        (thread, turn)
+    }
+}
+
+fn complete(process: &fake::FakeProcess, thread: &str, turn: &str, text: &str) {
+    process.emit(json!({"method":"item/completed","params":{"threadId":thread,"turnId":turn,"item":{"type":"agentMessage","id":format!("reply-{turn}"),"text":text,"phase":"final_answer"}}}));
+    process.emit(json!({"method":"turn/completed","params":{"threadId":thread,"turn":{"id":turn,"status":"completed"}}}));
+}
+
+fn replies(state: &State) -> Vec<String> {
+    state
+        .items
+        .iter()
+        .filter(|item| matches!(item.kind, ItemKind::AssistantMessage { .. }))
+        .map(|item| item.text.clone())
+        .collect()
+}
+
+// T3 Orchestrator providerSessionIdFor: Codex supports several provider threads
+// per session, so an instance's threads share one app-server and JSON-RPC id
+// space; each native thread's output reaches its own thread.
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_threads_share_one_app_server_and_keep_their_own_output() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (thread("thread-shared-a"), thread("thread-shared-b"));
+    let (native_a, turn_a) = rig.shared_turn(&a).await;
+    let (native_b, turn_b) = rig.shared_turn(&b).await;
+    assert_ne!(native_a, native_b);
+    assert_eq!(rig.host.spawned(), 1);
+    let process = rig.host.process(0);
+    assert_eq!(written_methods(&process, "initialize").len(), 1);
+    let ids: Vec<u64> = process
+        .written()
+        .iter()
+        .filter_map(|frame| frame["id"].as_u64())
+        .collect();
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "{ids:?}");
+    complete(&process, &native_b, &turn_b, "reply for b");
+    rig.until_status(&b, RunStatus::Completed).await;
+    assert_eq!(replies(&*rig.state(&b).await), ["reply for b"]);
+    assert_eq!(rig.run_status(&a).await, RunStatus::Running);
+    assert!(replies(&*rig.state(&a).await).is_empty());
+    rig.command(&a, Command::Stop).await;
+    rig.drain().await;
+    let interrupts = written_methods(&process, "turn/interrupt");
+    assert_eq!(interrupts.len(), 1);
+    assert_eq!(interrupts[0]["params"]["threadId"], native_a.as_str());
+    assert_eq!(interrupts[0]["params"]["turnId"], turn_a.as_str());
+    complete(&process, &native_a, &turn_a, "reply for a");
+    rig.until("a settles", async || rig.run_status(&a).await.terminal())
+        .await;
+    assert_eq!(replies(&*rig.state(&b).await), ["reply for b"]);
+}
+
+// T3 ProviderSwitchService: selecting another instance releases the thread's
+// session of the previous one; the shared app-server keeps the other thread.
+#[tokio::test(flavor = "multi_thread")]
+async fn switching_provider_releases_only_that_threads_previous_session() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (thread("thread-switch-a"), thread("thread-switch-b"));
+    let (native_a, turn_a) = rig.shared_turn(&a).await;
+    rig.shared_turn(&b).await;
+    let process = rig.host.process(0);
+    complete(&process, &native_a, &turn_a, "done");
+    rig.until_status(&a, RunStatus::Completed).await;
+    rig.command(
+        &a,
+        Command::SelectModel {
+            selection: selection(Driver::Claude, "claude-sonnet-4-6"),
+        },
+    )
+    .await;
+    rig.drain().await;
+    rig.until("a is released", async || {
+        rig.sessions.sessions().iter().all(|key| key.thread != a)
+    })
+    .await;
+    let unsubscribed = written_methods(&process, "thread/unsubscribe");
+    assert_eq!(unsubscribed.len(), 1);
+    assert_eq!(unsubscribed[0]["params"]["threadId"], native_a.as_str());
+    assert!(!process.exited());
+    assert!(rig.sessions.sessions().iter().any(|key| key.thread == b));
+    assert_eq!(rig.run_status(&b).await, RunStatus::Running);
+}
+
+// T3 CodexAdapterV2 account/rateLimits/updated: the app-server's account
+// snapshot reaches every thread it serves, and fills the reset of a turn a
+// usage limit already stopped.
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_rate_limits_reach_every_thread_and_fill_a_stopped_turns_reset() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (thread("thread-limits-a"), thread("thread-limits-b"));
+    let (native_a, turn_a) = rig.shared_turn(&a).await;
+    rig.shared_turn(&b).await;
+    let process = rig.host.process(0);
+    process.emit(json!({"method":"turn/completed","params":{"threadId":native_a,"turn":{"id":turn_a,"status":"failed","error":{"message":"Usage limit reached.","codexErrorInfo":"usageLimitExceeded"}}}}));
+    rig.until_status(&a, RunStatus::Failed).await;
+    process.emit(json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":100,"resetsAt":2000000000}}}}));
+    rig.until("b records the snapshot", async || {
+        rig.state(&b).await.rate_limit_resets.get("codex") == Some(&Some(2_000_000_000))
+    })
+    .await;
+    let state = rig.state(&a).await;
+    assert!(state.items.iter().any(|item| matches!(
+        &item.kind,
+        ItemKind::Error { class: Some(class), reset_at: Some(reset), .. }
+            if class == "usage_limit" && reset.millis() == 2_000_000_000_000
+    )));
+    assert_eq!(rig.run_status(&b).await, RunStatus::Running);
+}
+
+// T3 ProviderSessionManager: the shared session is busy while any thread's
+// turn runs, and is released once every thread is idle.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shared_app_server_stays_while_any_thread_runs() {
+    let rig = rig(options(150, 60_000), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (
+        thread("thread-shared-idle-a"),
+        thread("thread-shared-idle-b"),
+    );
+    let (native_a, turn_a) = rig.shared_turn(&a).await;
+    let (native_b, turn_b) = rig.shared_turn(&b).await;
+    let process = rig.host.process(0);
+    complete(&process, &native_a, &turn_a, "done");
+    rig.until_status(&a, RunStatus::Completed).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!process.exited());
+    assert_eq!(rig.sessions.sessions().len(), 2);
+    complete(&process, &native_b, &turn_b, "done");
+    rig.gone(&b).await;
+    assert!(process.exited());
+    assert!(rig.sessions.sessions().is_empty());
+}
+
+// T3 ProviderSessionManager.detach for a multi-thread session: the thread's
+// running turn is interrupted and its native thread unloaded, while the
+// app-server keeps serving the other thread. Only a terminal detach revokes.
+#[tokio::test(flavor = "multi_thread")]
+async fn detaching_from_the_shared_app_server_interrupts_and_unloads_only_that_thread() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let (a, b) = (thread("thread-detach-a"), thread("thread-detach-b"));
+    let (native_a, turn_a) = rig.shared_turn(&a).await;
+    rig.shared_turn(&b).await;
+    let process = rig.host.process(0);
+    rig.sessions.detach(&a, false).await;
+    let interrupts = written_methods(&process, "turn/interrupt");
+    assert_eq!(interrupts.len(), 1);
+    assert_eq!(interrupts[0]["params"]["threadId"], native_a.as_str());
+    assert_eq!(interrupts[0]["params"]["turnId"], turn_a.as_str());
+    let unloads = written_methods(&process, "thread/unsubscribe");
+    assert_eq!(unloads.len(), 1);
+    assert_eq!(unloads[0]["params"]["threadId"], native_a.as_str());
+    assert!(!process.exited());
+    assert_eq!(
+        rig.sessions.sessions(),
+        [SessionKey {
+            thread: b.clone(),
+            instance: "codex".into()
+        }]
+    );
+    assert!(
+        !rig.host
+            .logged()
+            .iter()
+            .any(|entry| entry.starts_with("revoked:"))
+    );
+    rig.sessions.detach(&b, true).await;
+    assert!(rig.host.logged().contains(&format!("revoked:{b}:*")));
+    assert!(rig.sessions.sessions().is_empty());
+}
+
+// T3 CodexAdapterV2 resolveRuntime: a new app-server runs as the selected
+// managed account, and its token refreshes are answered from that account.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_app_server_signs_in_with_the_managed_account_and_refreshes_its_token() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(shared_replies);
+    let login = json!({"type":"chatgptAuthTokens","accessToken":"token","chatgptAccountId":"account-1","chatgptPlanType":"pro"});
+    *rig.host.codex_login.lock().unwrap() = Some(login.clone());
+    let id = thread("thread-managed-account");
+    rig.shared_turn(&id).await;
+    let process = rig.host.process(0);
+    let methods: Vec<_> = process
+        .written()
+        .iter()
+        .filter_map(|frame| frame["method"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        methods[..4],
+        [
+            "initialize",
+            "initialized",
+            "account/login/start",
+            "thread/start"
+        ]
+    );
+    assert_eq!(
+        written_methods(&process, "account/login/start")[0]["params"],
+        login
+    );
+    process.emit(json!({"id":"refresh-1","method":"account/chatgptAuthTokens/refresh","params":{"reason":"unauthorized","previousAccountId":"account-1"}}));
+    rig.until("refresh answered", async || {
+        process
+            .written()
+            .iter()
+            .any(|frame| frame["id"] == "refresh-1")
+    })
+    .await;
+    let answer = process
+        .written()
+        .into_iter()
+        .find(|frame| frame["id"] == "refresh-1")
+        .unwrap();
+    assert_eq!(answer["result"]["accessToken"], "fresh");
+    assert!(
+        rig.host
+            .logged()
+            .contains(&"refresh:codex:Some(\"account-1\")".to_owned())
+    );
+}
+
+// T3 ClaudeAdapterV2 query options: the app's MCP tools are pre-approved after
+// the policy's own allowed tools, the workspace and attachments are added
+// directories, and the runtime and orchestration instructions are appended to
+// the system prompt.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claude_launch_pre_approves_the_app_tools_and_appends_the_instructions() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(claude_replies);
+    *rig.host.claude.lock().unwrap() = ClaudeSettings {
+        mcp_servers: BTreeMap::from([(
+            "orchestration".to_owned(),
+            json!({"command":"agent","timeout":agent_providers::CLAUDE_MCP_TOOL_TIMEOUT_MS}),
+        )]),
+        mcp_allowed_tools: vec!["mcp__orchestration__*".into()],
+        additional_directories: vec!["/workspace".into(), "/attachments".into()],
+        append_system_prompt: agent_providers::claude_append_system_prompt(true),
+        ..ClaudeSettings::default()
+    };
+    let id = thread("thread-claude-launch-settings");
+    let process = rig.claude_turn(&id, RuntimeMode::ApprovalRequired).await;
+    let args = process.request.claude.clone().unwrap().args();
+    let value = |name: &str| {
+        args.iter()
+            .position(|arg| arg == &format!("--{name}"))
+            .map(|index| args[index + 1].clone())
+    };
+    assert_eq!(
+        value("allowedTools").as_deref(),
+        Some("mcp__orchestration__*")
+    );
+    assert_eq!(
+        args.iter()
+            .enumerate()
+            .filter(|(_, arg)| *arg == "--add-dir")
+            .map(|(index, _)| args[index + 1].as_str())
+            .collect::<Vec<_>>(),
+        ["/workspace", "/attachments"]
+    );
+    let config: Value = serde_json::from_str(&value("mcp-config").unwrap()).unwrap();
+    assert_eq!(
+        config["mcpServers"]["orchestration"]["timeout"],
+        65 * 60 * 1000
+    );
+    let initialize = process
+        .written()
+        .into_iter()
+        .find(|frame| frame["request"]["subtype"] == "initialize")
+        .unwrap();
+    assert_eq!(
+        initialize["request"]["appendSystemPrompt"],
+        agent_providers::claude_append_system_prompt(true)
     );
 }

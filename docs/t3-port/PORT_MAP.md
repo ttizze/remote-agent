@@ -1114,9 +1114,9 @@ Provider replay は `agent-providers/src/replay.rs` から翻訳層・状態機�
 
 `CheckpointCaptureService.ts` の scope・baseline 境界は domain の明示的 input/effect/result に移した。初回 scoped capture が waiting となること、不足 baseline で保存を確定しないこと、同じ保存の再送を無視すること、scope 変更後の結果と restore effect が元の cwd/ref を保つことを検証した。Git の materialize/capture、共有 scope の他 actor の稼働確認は段階 3 に属する。
 
-`provider/CodexThreadRevert.test.ts` のページ越し境界と循環 cursor の失敗を、保存済みの絶対 head を入力する protocol テストに移植した。削除境界 `boundary` とエラー文言の期待値を維持し、同じ effect の再送で追加の削除が起きないことも確認する。件数を数える内部 helper は新設計には不要。
+`provider/CodexThreadRevert.test.ts` のページ越し境界と循環 cursor の失敗を、件数を入力する translator の `rollback` テスト（`rollback_finds_the_revert_boundary_across_pages_of_newest_first_turns`、`rollback_rejects_repeated_cursors_instead_of_reverting_incomplete_history`）に移植した。ページの limit 3 → 1、削除境界 `boundary`、エラー文言の期待値を維持する。件数は session が checkpoint の head より後のターンから数える（T3 countTerminalTurnsAfterBoundary）。
 
-`ThreadFork.integration.test.ts` と `ThreadMergeBack.integration.test.ts` の native / prior-turn / continue / sibling / fork-local rollback、および Codex の rollback / after-restart / stopped-turn の transcript を `agent-providers/src/replay/graph.rs` に追加した。複数 actor への saga command、固定した fork 履歴、native fork の配送結果、rollback の可視項目、兄弟ごとの delta と source の recall を原本の文言・境界で検証する。fork の内部イベント表の順序は、固定 command の確定→native 成功→子 command の順序へ読み替える。
+`ThreadFork.integration.test.ts` と `ThreadMergeBack.integration.test.ts` の native / prior-turn / continue / sibling / fork-local rollback、および Codex の rollback / after-restart / stopped-turn の transcript を runtime の replay harness（`agent-runtime/src/session/tests/replay.rs`）で厳密に再生する。複数 actor への saga command、固定した fork 履歴、native fork の配送結果、rollback の可視項目、兄弟ごとの delta と source の recall を原本の文言・境界で検証する。fork の内部イベント表の順序は、固定 command の確定→native 成功→子 command の順序へ読み替える。
 
 `provider_thread_resume`、`plan_questions`、`subagent_continue`、`tool_call_read_only`、`tool_call_workspace_never`（両 provider）、`turn_interrupt_restart`、`claude_background_task_after_root`、`claude_compact_after_resume_wake`、`claude_subagent_resume_after_restart` の projection 期待値を replay に追加した。質問 ID `schema_preference`、元の返信、再開した子の会話と 3 command、2 run の compaction 帰属を保持する。休眠・再起動の実プロセス／SQLite 境界は段階 3 で接続する。
 
@@ -1128,7 +1128,7 @@ R3 O6/O8/O9/O13 の再発検証を追加した。control RPC の失敗は run/at
 
 `Orchestrator.ts` の provider switch と queued dispatch の coveredRuns / lastDeliveredRunForProviderThread は dispatch 時の handoff 決定に移した。provider を戻した場合は既知の native history を再送せず、その後の run だけを配送する。選択後に戻しただけでは transfer を作らず、queued run の昇格時の selection で差分を固定する。
 
-`CodexAdapterV2.test.ts` の runtime mode 4 種、explicit approval/sandbox、per-turn effort/serviceTier、plan/default collaboration と thread config を wire のテストへ移植した。instructions と認証済み MCP config の生成・可用性は段階 3 の Host が所有し、翻訳層には値を明示的に渡す。新設計の rollback resume でも固定版の cwd/model/tools config を保つ。
+`CodexAdapterV2.test.ts` の runtime mode 4 種、explicit approval/sandbox、per-turn effort/serviceTier、plan/default collaboration と thread config を wire のテストへ移植した。認証済み MCP config の生成・可用性は Host が所有し、翻訳層には値を明示的に渡す。指示文は `agent-providers/src/instructions.rs` に T3 の文面のまま移植した。新設計の rollback resume でも固定版の cwd/model/tools config を保つ。
 
 `RestartBackgroundNote.test.ts` の provider switch、completion 時刻での順序、同じ label の異なる ID、steer の旧 attempt による配送確認、未受領の chained continuation、ラベル・件数の bounds を `agent-domain/src/recovery.rs` と状態機械テストへ移植した。ID がなかった旧形式の kind + label fallback だけは対象外：未公開製品の現行形式だけを保持する規則に従う。
 
@@ -1160,7 +1160,7 @@ R3 O6/O8/O9/O13 の再発検証を追加した。control RPC の失敗は run/at
 | SDK `forkSession` | `claude_fork::tests`。境界までの main chain、progress を飛ばした親子関係、新 session ID への付け替え、fork title、境界が見つからない場合のエラー、project key。 |
 | wire の encoding | `wire_encodings_round_trip_state_facts_commands_and_effects`、`wire_encodings_round_trip_imports_titles_rollbacks_and_workspaces`（JSON と Postcard）。 |
 
-graph replay（fork / rollback / merge back / delegated_task_status）は記録プロセスの複数 native thread を種にする従来の方式のまま、境界の command を検証する。外部 frame の完全一致の比較は単一 session の transcript に限る。
+graph replay（fork / rollback / merge back / delegated_task_status）も、単一 session の transcript と同じく外部 frame の完全一致で比較する（下の「provider session の T3 化」）。
 
 ### 段階 3: effect の実行・復旧・launch（2026-10-06）
 
@@ -1173,7 +1173,7 @@ graph replay（fork / rollback / merge back / delegated_task_status）は記録�
 | `CheckpointScopeOwnership.test.ts` | `a_later_run_reuses_the_scope_baselines`。 |
 | `RunFinalizationService.test.ts`（保存後の refresh） | `captures_a_finished_turn_after_its_thread_start_baseline` の `run_finalized` 通知。 |
 | `CheckpointRollbackService.test.ts` | `executor::tests::rollback::rejects_a_non_ready_checkpoint_before_any_provider_or_file_work`、`rewinds_safely`（7 ケース）、`a_provider_that_cannot_rewind_fails_the_rollback_and_puts_the_files_back`、symlink の archived thread は `preserves_overlapping_workspace_files` の aliased worktree。追加で `a_rollback_without_a_native_session_resets_nothing_and_still_finishes`。 |
-| `CheckpointRestoreSafety.test.ts` | `preserves_overlapping_workspace_files`（nested、ancestor、archived-nested、aliased-nested、project、provider、scope、sibling、stopped-provider、conversation）。実ファイルと実パスで確認する。 |
+| `CheckpointRestoreSafety.test.ts` | `preserves_overlapping_workspace_files`（nested、ancestor、archived-nested、aliased-nested、project、provider、scope、sibling、stopped-provider、errored-provider、shared-provider、conversation）。実ファイルと実パスで確認する。 |
 | `ThreadDeletion.test.ts` | domain の `deletion_cancels_pending_requests_and_releases_thread_resources` と、`executor::tests::cleanup::deletion_cleans_up_terminals_and_attachments_of_the_thread`、`terminals_stay_open_while_another_thread_works_in_the_directory`、`archiving_detaches_and_cleans_up_terminals_but_keeps_attachments`。 |
 | `ThreadTitleRegenerationService.test.ts` | `title::tests`（formatThreadTitleContext の 4 件）と `executor::tests::title::*`（arm と解除、新しい要求による無効化、会話の要約からの再生成、fallback・同じタイトル・失敗、最初の発言がない場合、最初のタイトルの再試行 success / exhausted / stale）。 |
 | `textGeneration/ThreadTitleContext.test.ts`、`TextGenerationPrompts.test.ts`（title と sanitize）、`TextGeneration.test.ts`（リンクの文脈）、`ThreadTitleLinks.test.ts`（純粋な部分）、各 provider の sanitize | `title::tests`。 |
@@ -1183,13 +1183,12 @@ graph replay（fork / rollback / merge back / delegated_task_status）は記録�
 | `ProviderRuntimeRecoveryService.test.ts:1276` | domain の `a_delegated_child_reports_recovery_cancellation_or_its_continuation_result` と `recovered_native_children_reject_old_output_and_remain_provider_owned`。 |
 | `EffectWorker.test.ts:162`（turn がない interrupt） | `session::tests::a_stop_without_a_live_session_closes_the_attempt`。 |
 | `EffectWorker.test.ts:761` | `executor::tests::send::settles_a_delegated_child_once_its_restart_continuation_fails_for_good`。継続の設定の置換は `delivers_with_the_effect_command_id_and_the_current_continuation_setting`。 |
-| `CodexAdapterV2` の resume 拒否・compact の resume、`ProviderSessionManager` の応答照合 | `agent-providers` と `session::tests` の追加テスト（rejected resume / start の operation、新しいプロセスでの compact、別の `set_model` の待ちを解決しない拒否、`SetRuntimeMode` の対応）。 |
+| `CodexAdapterV2` の resume 拒否・compact の resume、`ProviderSessionManager` の応答照合 | `agent-providers` と `session::tests` の追加テスト（rejected resume / start の operation、新しいプロセスでの compact、別の request の待ちを解決しない拒否）。 |
 
 対象外にしたもの:
 
 - `CheckpointService.test.ts` の interrupt、`ThreadTitleRegenerationService.test.ts` の interrupted: Effect fiber の割込みを確かめる。本設計では実行中の effect は未確定のまま残り、再起動で再実行される。
 - `CheckpointCaptureService.test.ts` の delegatedCompletion の上書きと履歴を読まない確認: T3 の projection store の内部形を確かめる。保存結果は actor の状態から決める。
-- `CheckpointRestoreSafety.test.ts` の shared-provider: session は thread ごとで、複数 thread が共有しない。errored-provider は provider と同じく生きているプロセスとして扱う。
 - `ThreadLaunchService.test.ts` の branch 名の生成と rename（M3）、scratch folder、setup の取消、非同期 setup、`reuseExistingThread`、自動化・送信元の属性、import した native session（`Command::Import` で取り込む）、attachment の取り込み（RPC の責務）、記録前に失敗した worktree の削除（部分的な checkout の削除は Host の `create_worktree` が行う。runtime は記録に失敗した worktree を削除する）。
 - `ProviderRuntimeRecoveryService.test.ts:522`（取り消すしかない waiting run）: 保存の失敗は結果として run を確定するので、保存を待ったまま残る run は生じない。
 - `EffectWorker.test.ts:728`（置換 session の restart）: restart は domain が attempt を superseded にし、Start は独立した effect になるため複合 effect がない。
@@ -1206,7 +1205,7 @@ graph replay（fork / rollback / merge back / delegated_task_status）は記録�
 | `runtimeLayer.test.ts:3767`（開始前の interrupt）、`RunExecutionService.ts` の結果文言 | `tests::preparation::interrupts_a_pending_provider_start`、`a_confirmed_stop_records_the_default_request_and_result_messages`。provider の interrupt effect は進行中の Start を取り消す本設計の仕組みなので、「effect がない」の確認だけは持ち込まない。 |
 | `Orchestrator.ts` の defer_start と prepared-run.*、`ThreadLaunchService.test.ts:375, 1302, 1468` | `tests::preparation::*` と `launch::tests` の準備行の確認（running、Preparing worktree、Starting setup script、failed、retry 後の completed と cancelled）。 |
 | `Orchestrator.ts:2311`（thread mutation の guard）、`ThreadDeletion.ts`、`runtimeLayer.test.ts:3981`（mark unread） | `tests::thread::*`、`unread_uses_the_last_run_and_needs_its_completion`。 |
-| `ProviderSessionTransitionPolicy.ts`、`ProviderSwitchService.ts`、`Orchestrator.ts:3301` | `tests::selection::*`。 |
+| `ProviderSessionTransitionPolicy.ts`、`ProviderSwitchService.ts`、`Orchestrator.ts:3301` | `tests::selection::*`、session の `switching_provider_releases_only_that_threads_previous_session`、`claude_respawns_when_launch_flags_change_and_ignores_the_old_process`（runtime mode の変更で切り離す）。 |
 | `CheckpointRollbackService.ts:145`、`Orchestrator.ts:8393` | `tests::rollback::*`、`executor::tests::rollback::a_failed_rewind_resets_only_the_active_native_session`。 |
 | `Orchestrator.ts:3354, 5361`、`ProviderTurnStartService.ts:605`、`ProjectionStore.ts:1213`、`ThreadForkService.ts` | `tests::fork::*`、`session::tests` の fork 3 件（子の最初の発言で fork する）、graph replay。 |
 | `Orchestrator.ts:3442, 4694`（merge back） | `merge_back_waits_for_a_direct_turn_on_any_provider`。 |
@@ -1215,7 +1214,7 @@ graph replay（fork / rollback / merge back / delegated_task_status）は記録�
 | `runtimeLayer.test.ts:4100, 4282`（手動と自動の継続） | `tests::recovery::*`。`invalid-snooze`（不正な日付）は型で表せず、`replacement` は失敗項目の class を直接書き換える操作が domain の入力にないため対象外。 |
 | `ThreadSettlementService.test.ts`（候補、queued turn start、非活動） | `settlement::tests`。pull request の状態による判定は Host が pull request を持たないため対象外。 |
 | `runtimeLayer.test.ts:1773`（auto-settle）、`Orchestrator.ts:2361`（metadata.update）、`:4606`（sourcePlanRef） | `tests::metadata::*`。 |
-| `codexUsageLimits.test.ts`（merge と reset） | `agent-providers` の `codex::rate_limit_tests`。 |
+| `codexUsageLimits.test.ts`（merge と reset）、`CodexAdapterV2.ts` の account/rateLimits/updated | `agent-providers` の `codex::rate_limit_tests`、`session::tests::shared_rate_limits_reach_every_thread_and_fill_a_stopped_turns_reset`。 |
 | contracts `chatAttachment.ts` | `attachments_follow_the_reference_schemas_and_image_budget`。添付 ID の文字種は Host の `chat:` 形式と合わないため確かめない。 |
 
 ### 段階 3: Host への接続（2026-10-06）
@@ -1233,6 +1232,22 @@ graph replay（fork / rollback / merge back / delegated_task_status）は記録�
 | `mcp/OrchestratorMcpToolkit` の読み取りと委任の前提 | `agent_tools_read_a_thread_of_their_own_project`、`conversation::tools::tests`。 |
 
 従来の Host のテストのうち旧 store を前提にしたもの（旧 service の subscription・launch・restore・terminal cleanup）は、同じ挙動を runtime の executor テストと上の結合テストで確かめるため削除した。
+
+### provider session の T3 化（2026-10-06）
+
+Codex の app-server を instance ごとに共有し、起動設定・アカウント・Claude のプロセス再利用を T3 に合わせた。期待値は T3 のまま。
+
+| T3 の原本 | 新設計の検証 |
+| --- | --- |
+| `Orchestrator.ts` providerSessionIdFor、`IdAllocator.ts` の共有 session、`CodexAdapterV2.ts`（複数 thread） | translator の `one_app_server_routes_each_native_thread_to_its_own_route`、`a_shared_translator_loads_threads_per_route`、session の `codex_threads_share_one_app_server_and_keep_their_own_output`。 |
+| `ProviderSessionManager.test.ts` の busy / idle / pin と detach | `a_shared_app_server_stays_while_any_thread_runs`、`detaching_from_the_shared_app_server_interrupts_and_unloads_only_that_thread`、`a_terminal_detach_revokes_credentials_without_a_live_process`。既存の「独立した session」「instance の session を閉じる」「idle の解放」は instance を分けるか共有 session のまま期待値を確認する。 |
+| `CodexAdapterV2.ts` resolveRuntime（管理アカウント）と token 更新 | `a_new_app_server_signs_in_with_the_managed_account_and_refreshes_its_token`。 |
+| `ThreadFork.integration.test.ts`、`ThreadMergeBack.integration.test.ts`、`CheckpointRollbackService` の replay、`mcp/OrchestratorMcpToolkit.integration.test.ts`（delegated_task_status） | graph transcript 18 本を runtime の harness で外部 frame の完全一致まで比較する（`native_fork_replays_…`、`rollback_replays_…`、`merge_back_replays_…`、`delegated_task_status_replay_…`）。注入した履歴の検証は T3 の `CodexHistoryReplayHarness` と同じ。 |
+| `provider/RuntimeInstructions.test.ts`、`provider/CodexDeveloperInstructions.test.ts` | `instructions::tests`。「T3 Code」を中立の表現にした文言だけを読み替える。 |
+| `ClaudeAdapterV2.ts` makeClaudeQueryOptions・claudeMcpQueryOverrides | `a_claude_launch_pre_approves_the_app_tools_and_appends_the_instructions`。 |
+| `provider/Drivers/ClaudeSkills.test.ts`（discovery、優先順位、malformed、colon を含む説明、YAML 1.1 の boolean、skillOverrides、repository root の設定） | `skills::tests` と `claude::skills::tests`。frontmatter は T3 の YAML parser ではなく、Claude Code が使う key だけを読む。 |
+| `ClaudeAdapterV2.ts` openQuery（再利用と置き換え、background work による拒否）、forkThread | `claude_replaces_its_process_for_another_model_or_mode`、`a_claude_model_change_during_a_turn_applies_from_the_next_turn`、`claude_keeps_a_process_with_background_work_when_the_selection_changes`、`a_claude_native_fork_copies_the_transcript_through_the_head`（source のプロセスを閉じる）。 |
+| `ContextHandoffBudget.ts` handoffTokenCapConfig、`ClaudeAdapterV2.ts` getModelContextWindow | `the_provider_catalog_has_the_reference_handoff_limits`。 |
 
 ### 段階 1・2 の検証記録（2026-10-06）
 

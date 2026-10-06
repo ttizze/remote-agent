@@ -294,6 +294,8 @@ enum Owner {
     Scope,
     Sibling,
     StoppedProvider,
+    ErroredProvider,
+    SharedProvider,
     Conversation,
 }
 
@@ -312,6 +314,8 @@ async fn preserves_overlapping_workspace_files() {
         Owner::Scope,
         Owner::Sibling,
         Owner::StoppedProvider,
+        Owner::ErroredProvider,
+        Owner::SharedProvider,
         Owner::Conversation,
     ] {
         let temp = tempfile::tempdir().unwrap();
@@ -348,7 +352,10 @@ async fn preserves_overlapping_workspace_files() {
             Owner::Ancestor | Owner::Conversation => Some(worktree(&text(&parent))),
             Owner::Nested | Owner::ArchivedNested => Some(worktree(&text(&nested))),
             Owner::AliasedNested | Owner::AliasedWorktree => Some(worktree(&text(&alias))),
-            Owner::Provider | Owner::StoppedProvider => Some(worktree(&text(&nested))),
+            Owner::Provider
+            | Owner::StoppedProvider
+            | Owner::ErroredProvider
+            | Owner::SharedProvider => Some(worktree(&text(&nested))),
             Owner::Scope | Owner::Sibling => Some(worktree(&text(&sibling))),
         };
         rig.create(&other, other_workspace).await;
@@ -363,19 +370,32 @@ async fn preserves_overlapping_workspace_files() {
             )
             .await;
         }
-        if matches!(owner, Owner::Provider | Owner::StoppedProvider) {
-            // A live provider process keeps the directory it was opened in.
-            rig.sessions
-                .rollback(
-                    &other,
-                    "codex",
-                    &ProviderCommand::Rollback {
-                        native_thread: "native-other".into(),
-                        absolute_head: Some("turn-1".into()),
-                    },
-                )
-                .await
-                .unwrap();
+        if matches!(
+            owner,
+            Owner::Provider
+                | Owner::StoppedProvider
+                | Owner::ErroredProvider
+                | Owner::SharedProvider
+        ) {
+            // A thread's own live provider process keeps the directory it was
+            // opened in; the shared app-server runs each turn in its thread's
+            // workspace (an errored process is still live).
+            if owner == Owner::SharedProvider {
+                rig.sessions
+                    .rollback(
+                        &other,
+                        "codex",
+                        &ProviderCommand::Rollback {
+                            native_thread: "native-other".into(),
+                            absolute_head: Some("turn-1".into()),
+                        },
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                crate::session::tests::live_claude_process(&rig.sessions, &other, &text(&nested))
+                    .await;
+            }
             rig.input(
                 &other,
                 Input::Workspace {
@@ -403,7 +423,7 @@ async fn preserves_overlapping_workspace_files() {
         let state = rig.state(&id).await;
         let rejected = !matches!(
             owner,
-            Owner::Sibling | Owner::StoppedProvider | Owner::Conversation
+            Owner::Sibling | Owner::StoppedProvider | Owner::SharedProvider | Owner::Conversation
         );
         if rejected {
             assert_eq!(

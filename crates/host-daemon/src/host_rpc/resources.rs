@@ -39,6 +39,10 @@ impl CodexResources {
             .as_deref()
             .map_err(|error| Failure::new("provider_unavailable", error))
     }
+    /// No account is selected after a sign-out.
+    pub fn signed_out(&self) -> bool {
+        self.restoration_error.borrow().is_some()
+    }
     pub fn availability(&self) -> Result<(), Failure> {
         self.server()?;
         if let Some(error) = self.restoration_error.borrow().clone() {
@@ -135,6 +139,39 @@ impl CodexResources {
             model["model"] = serde_json::json!({"provider":"codex","id":id});
         }
         serde_json::from_value(native).map_err(Into::into)
+    }
+}
+impl crate::conversation::CodexCredentials for CodexResources {
+    fn login(&self) -> futures_util::future::BoxFuture<'_, Result<Option<Value>, String>> {
+        Box::pin(async move {
+            let mut accounts = self.accounts.lock().await;
+            match accounts.as_mut() {
+                Some(accounts) => accounts.session_login().await,
+                None => Ok(None),
+            }
+        })
+    }
+    fn shares_tokens(&self) -> futures_util::future::BoxFuture<'_, bool> {
+        Box::pin(async move {
+            self.accounts
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|accounts| accounts.shares_tokens())
+        })
+    }
+    fn refresh(
+        &self,
+        previous_account: Option<String>,
+    ) -> futures_util::future::BoxFuture<'_, Result<Value, String>> {
+        Box::pin(async move {
+            let mut accounts = self.accounts.lock().await;
+            let accounts = accounts
+                .as_mut()
+                .ok_or("Select an account before refreshing credentials")?;
+            let credentials = accounts.refresh(previous_account.as_deref()).await?;
+            serde_json::to_value(credentials).map_err(|error| error.to_string())
+        })
     }
 }
 #[async_trait::async_trait]

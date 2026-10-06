@@ -5,14 +5,12 @@ use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
 /// Provider effects tied to a live process; a Host restart cancels them.
-pub const PROCESS_BOUND_PROVIDER_KINDS: [&str; 7] = [
+pub const PROCESS_BOUND_PROVIDER_KINDS: [&str; 5] = [
     "Provider.Start",
     "Provider.Steer",
     "Provider.Interrupt",
     "Provider.Respond",
     "Provider.Compact",
-    "Provider.SetModel",
-    "Provider.SetRuntimeMode",
 ];
 pub const FORK_NATIVE_KIND: &str = "ForkNative";
 pub const DETACH_SESSIONS_KIND: &str = "DetachSessions";
@@ -94,14 +92,9 @@ impl EffectHandler for SessionEffects {
                     instance,
                     ..
                 } => {
-                    match instance {
-                        Some(instance) => {
-                            self.sessions
-                                .detach_instance(&job.thread, instance, *revoke_credentials)
-                                .await
-                        }
-                        None => self.sessions.detach(&job.thread, *revoke_credentials).await,
-                    }
+                    self.sessions
+                        .detach_instance(&job.thread, instance.as_deref(), *revoke_credentials)
+                        .await;
                     Ok(None)
                 }
                 other => {

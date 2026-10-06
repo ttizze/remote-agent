@@ -1006,6 +1006,49 @@ impl HandoffCatalog for Catalog {
     }
 }
 
+// T3 ContextHandoffBudget: the default token cap, and the window only the
+// Claude catalog knows (ClaudeAdapterV2 getModelContextWindow).
+#[test]
+fn the_provider_catalog_has_the_reference_handoff_limits() {
+    let selection = |driver, model: &str, window: Option<&str>| ModelSelection {
+        instance: format!("{driver:?}"),
+        driver,
+        model: model.into(),
+        options: window
+            .map(|window| ("contextWindow".to_owned(), window.to_owned()))
+            .into_iter()
+            .collect(),
+    };
+    let policy = |driver, model, window| {
+        crate::ProviderHandoffCatalog
+            .policy(&selection(driver, model, window))
+            .unwrap()
+    };
+    assert_eq!(
+        policy(agent_domain::Driver::Codex, "gpt-6-luna", None),
+        HandoffValue {
+            model_window: None,
+            token_cap: 16_000
+        }
+    );
+    assert_eq!(
+        policy(agent_domain::Driver::Claude, "claude-opus-4-8", None).model_window,
+        Some(1_000_000)
+    );
+    assert_eq!(
+        policy(agent_domain::Driver::Claude, "claude-sonnet-4-6", None).model_window,
+        Some(200_000)
+    );
+    assert_eq!(
+        policy(agent_domain::Driver::Claude, "claude-fable-5", Some("200k")).model_window,
+        Some(200_000)
+    );
+    assert_eq!(
+        policy(agent_domain::Driver::Claude, "claude-haiku-4-5", None).model_window,
+        None
+    );
+}
+
 #[tokio::test]
 async fn queues_a_handoff_policy_when_the_catalog_differs() {
     let mut h = harness();

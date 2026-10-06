@@ -1328,13 +1328,6 @@ pub enum ProviderCommand {
     Compact {
         native_thread: Option<String>,
     },
-    SetModel {
-        selection: ModelSelection,
-    },
-    SetRuntimeMode {
-        runtime_mode: RuntimeMode,
-        interaction_mode: InteractionMode,
-    },
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Effect {
@@ -1450,7 +1443,7 @@ pub enum EffectResult {
         reason: String,
     },
 }
-values! { ProviderOperation { Start, Steer, Interrupt, Respond, Compact, SetModel, SetRuntimeMode } }
+values! { ProviderOperation { Start, Steer, Interrupt, Respond, Compact } }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Input {
     RuntimeOpened {

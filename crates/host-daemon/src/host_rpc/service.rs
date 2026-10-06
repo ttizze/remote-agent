@@ -240,6 +240,7 @@ impl HostRpcService {
             });
         }
         let mut runtime = RuntimeConfig::new(settings.database.clone());
+        runtime.handoff = Arc::new(agent_runtime::ProviderHandoffCatalog);
         runtime.import = Some(ImportSettings {
             scan: ScanConfig {
                 homes,
@@ -263,6 +264,9 @@ impl HostRpcService {
                 programs: ProviderPrograms {
                     codex,
                     codex_home: settings.codex_home,
+                    codex_accounts: Some(
+                        resources.codex.clone() as Arc<dyn crate::conversation::CodexCredentials>
+                    ),
                     claude,
                 },
                 spawner: Arc::new(SupervisedSpawner),
@@ -610,7 +614,24 @@ impl HostRpcService {
             ),
             _ => return Err(Failure::new("invalid_params", "not an account request")),
         };
-        Ok(match self.identity(provider)?.account(command).await? {
+        let (select, logout) = (
+            matches!(command, Command::Select { .. }),
+            matches!(command, Command::Logout { .. }),
+        );
+        let reply = self.identity(provider)?.account(command).await?;
+        if provider == ProviderKind::Codex
+            && let Ok(conversation) = self.conversation()
+        {
+            let sessions = conversation.runtime.sessions();
+            if select && let Err(error) = sessions.apply_codex_account("codex").await {
+                tracing::warn!(operation = "conversation.codex_account", message = %error);
+            }
+            // T3 closes an instance's sessions when it signs out.
+            if logout && self.inner.resources.codex.signed_out() {
+                sessions.close_instance("codex").await;
+            }
+        }
+        Ok(match reply {
             AccountReply::Selection(value) => value.into(),
             AccountReply::Login(value) => value.into(),
             AccountReply::Status(value) => value.into(),

@@ -5546,10 +5546,14 @@ impl Decision {
                     return Reply::Ignored;
                 };
                 let source = transfer.native_source.clone().unwrap();
+                // A Claude fork's transcript ends at the head, so its first
+                // query resumes without one (T3 forkThread).
                 self.fact(FactBody::NativeSessionBound {
                     instance: run.selection.instance.clone(),
                     native_thread: native_thread.clone(),
-                    head: source.head,
+                    head: source
+                        .head
+                        .filter(|_| run.selection.driver != Driver::Claude),
                 });
                 self.fact(FactBody::TransferDeliveryChanged {
                     id: transfer.id.clone(),

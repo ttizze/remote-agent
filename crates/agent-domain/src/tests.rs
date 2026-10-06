@@ -2843,10 +2843,10 @@ fn provider_selection_and_runtime_changes_are_blocked_during_rollback() {
 
 proptest! {
     #[test]
-    fn failed_control_operations_never_release_a_running_native_turn(op in 0usize..5, failures in 1usize..12) {
+    fn failed_control_operations_never_release_a_running_native_turn(op in 0usize..3, failures in 1usize..12) {
         let mut s=state();
         let (_,attempt)=running(&mut s,"run");
-        let operation=[ProviderOperation::Steer,ProviderOperation::Interrupt,ProviderOperation::Respond,ProviderOperation::SetModel,ProviderOperation::SetRuntimeMode][op];
+        let operation=[ProviderOperation::Steer,ProviderOperation::Interrupt,ProviderOperation::Respond][op];
         for i in 0..failures {
             result(&mut s,&format!("failed-{i}"),EffectResult::ProviderFailed{attempt:attempt.clone(),operation,message:"RPC failed".into(),message_id:None,turn_completed:false,session_lost:false});
             prop_assert_eq!(s.runs[0].status,RunStatus::Running);

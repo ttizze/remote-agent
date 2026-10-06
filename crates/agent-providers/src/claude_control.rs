@@ -298,6 +298,9 @@ pub fn claude_request_kind(tool: &str) -> &'static str {
         _ => "command",
     }
 }
+/// T3 CLAUDE_T3_MCP_TOOL_TIMEOUT_MS: the app's wait tools block for up to an
+/// hour, so the budget sits just above it.
+pub const CLAUDE_MCP_TOOL_TIMEOUT_MS: u64 = 65 * 60 * 1_000;
 pub fn claude_permission_mode(runtime: RuntimeMode, interaction: InteractionMode) -> &'static str {
     if interaction == InteractionMode::Plan {
         return "plan";

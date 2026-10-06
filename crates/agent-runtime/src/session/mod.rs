@@ -1,4 +1,5 @@
-//! Provider processes, one per (thread, provider instance), driven by outbox effects.
+//! Provider processes driven by outbox effects: one Codex app-server per
+//! provider instance shared by its threads, and one Claude CLI per thread.
 mod claude;
 mod codex;
 mod effects;
@@ -12,7 +13,7 @@ use crate::{ActorRegistry, KeyedSerial, Residency, RuntimeError};
 use agent_domain::{
     Attachment, AttachmentKind, AttemptStatus, Driver, EffectResult, InteractionMode,
     ModelSelection, NativeBinding, ProviderCommand, ProviderEvent, ProviderOperation, Reply,
-    RunAttemptId, RunStatus, RuntimeMode, State, ThreadId, Workspace,
+    RunAttemptId, RunStatus, RuntimeMode, State, ThreadId, TransferKind, Workspace,
 };
 use agent_providers::{
     ClaudeLaunch, ClaudeProtocol, Completion, PreparedImage, ProcessDirective, ProtocolError,
@@ -23,7 +24,7 @@ use claude::ClaudeProcess;
 use futures_util::FutureExt;
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -31,10 +32,47 @@ use std::time::Duration;
 use task::{Expect, Mail, Op, Protocol, Ran, Run, Task, holds_background};
 use tokio::sync::{mpsc, oneshot};
 
+/// T3 bounds unloading a detached thread so a wedged provider cannot hold up
+/// the thread's next attach.
+const UNLOAD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A thread's use of a provider instance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionKey {
     pub thread: ThreadId,
     pub instance: String,
+}
+
+/// A provider process: the Codex app-server an instance shares across threads
+/// (T3 `supportsMultipleProviderThreadsPerSession`), or one thread's Claude CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum Slot {
+    Shared(String),
+    Thread(SessionKey),
+}
+impl Slot {
+    fn of(key: &SessionKey, driver: Driver) -> Self {
+        match driver {
+            Driver::Codex => Self::Shared(key.instance.clone()),
+            Driver::Claude => Self::Thread(key.clone()),
+        }
+    }
+    fn instance(&self) -> &str {
+        match self {
+            Self::Shared(instance) => instance,
+            Self::Thread(key) => &key.instance,
+        }
+    }
+}
+
+/// The threads a process serves and the credentials it was given.
+#[derive(Default)]
+pub(crate) struct Members {
+    /// Attached thread -> its working directory.
+    attached: BTreeMap<ThreadId, Option<String>>,
+    /// Threads whose MCP credentials the process holds until it is gone.
+    recorded: BTreeSet<ThreadId>,
+    closed: bool,
 }
 
 /// What the Host needs to configure or launch a provider for one thread.
@@ -56,6 +94,9 @@ pub struct ClaudeSettings {
     pub additional_directories: Vec<String>,
     pub disallowed_tools: Vec<String>,
     pub mcp_servers: BTreeMap<String, Value>,
+    /// Tools of the app's MCP servers the CLI runs without asking (T3
+    /// claudeMcpQueryOverrides), added to the policy's allowed tools.
+    pub mcp_allowed_tools: Vec<String>,
     pub settings: Option<Value>,
     pub extra_args: BTreeMap<String, Option<String>>,
     pub append_system_prompt: String,
@@ -95,8 +136,21 @@ pub trait SessionHost: Send + Sync {
         session: String,
         transcript: String,
     ) -> BoxFuture<'_, io::Result<()>>;
-    /// Called once a session's process is gone, for credential cleanup.
-    fn released(&self, _key: &SessionKey, _revoke_credentials: bool) {}
+    /// The thread's MCP credentials stop working; `None` revokes every instance's.
+    fn revoke_credentials(&self, _thread: &ThreadId, _instance: Option<&str>) {}
+    /// `account/login/start` parameters of the managed account a new Codex
+    /// app-server of the instance signs in with; `None` keeps its own login.
+    fn codex_account(&self, _instance: String) -> BoxFuture<'_, Result<Option<Value>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+    /// Answers the app-server's `account/chatgptAuthTokens/refresh`.
+    fn refresh_codex_account(
+        &self,
+        _instance: String,
+        _previous_account: Option<String>,
+    ) -> BoxFuture<'_, Result<Value, String>> {
+        Box::pin(async { Err("No managed Codex account is selected.".to_owned()) })
+    }
     fn prompt_uuid(&self, effect_id: &str) -> String {
         derived_uuid("prompt", effect_id)
     }
@@ -119,6 +173,8 @@ pub struct SessionOptions {
     /// Background work keeps an idle session at most this long.
     pub max_idle_pin: Duration,
     pub reply_timeout: Duration,
+    /// T3 waits this long for a stopped Claude turn before closing its query.
+    pub interrupt_timeout: Duration,
     pub close_grace: Duration,
     /// A frame the provider does not accept on stdin within this ends the session.
     pub write_timeout: Duration,
@@ -129,6 +185,7 @@ impl Default for SessionOptions {
             idle_timeout: Duration::from_secs(30 * 60),
             max_idle_pin: Duration::from_secs(4 * 60 * 60),
             reply_timeout: Duration::from_secs(60),
+            interrupt_timeout: Duration::from_secs(10),
             close_grace: Duration::from_secs(5),
             write_timeout: Duration::from_secs(30),
         }
@@ -197,22 +254,52 @@ impl From<ExecError> for Failure {
 
 #[derive(Clone)]
 struct Entry {
-    key: SessionKey,
+    slot: Slot,
     generation: u64,
-    cwd: Option<String>,
     mail: mpsc::UnboundedSender<Mail>,
     claude: Option<Arc<Mutex<ClaudeProcess>>>,
+    members: Arc<Mutex<Members>>,
+}
+impl Entry {
+    fn attached(&self, thread: &ThreadId) -> bool {
+        self.members
+            .lock()
+            .expect("session members")
+            .attached
+            .contains_key(thread)
+    }
 }
 
 #[derive(Default)]
 struct Table {
-    sessions: HashMap<SessionKey, Entry>,
-    /// Attempt -> the session (and process generation) that ran it.
-    routes: HashMap<RunAttemptId, (SessionKey, u64)>,
+    sessions: HashMap<Slot, Entry>,
+    /// Attempt -> the process (and its generation) that ran it.
+    routes: HashMap<RunAttemptId, (Slot, u64)>,
     generation: u64,
+    /// Credentials handed to a process being prepared must survive another
+    /// process's release (T3 MCP credential reservations).
+    reserved: HashMap<SessionKey, usize>,
+}
+
+/// Holds a thread's credentials while its process is prepared.
+struct Reservation<'a> {
+    manager: &'a SessionManager,
+    key: SessionKey,
+}
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        let mut table = self.manager.table.lock().expect("session table");
+        if let Some(count) = table.reserved.get_mut(&self.key) {
+            *count -= 1;
+            if *count == 0 {
+                table.reserved.remove(&self.key);
+            }
+        }
+    }
 }
 
 struct Request {
+    thread: ThreadId,
     owner: Option<RunAttemptId>,
     events_to: Option<RunAttemptId>,
     steer: Option<agent_domain::MessageId>,
@@ -222,9 +309,11 @@ struct Request {
 }
 impl Request {
     fn new(
+        thread: &ThreadId,
         op: impl FnOnce(&mut Protocol) -> Result<Translation, ProtocolError> + Send + 'static,
     ) -> Self {
         Self {
+            thread: thread.clone(),
             owner: None,
             events_to: None,
             steer: None,
@@ -251,6 +340,14 @@ impl Request {
     }
 }
 
+/// The wire context of a command that only needs its thread's route.
+fn route_context(thread: &ThreadId) -> WireContext {
+    WireContext {
+        route: thread.as_str().to_owned(),
+        ..WireContext::default()
+    }
+}
+
 fn frames(outbound: Vec<Value>) -> Translation {
     Translation {
         outbound,
@@ -267,6 +364,7 @@ pub struct SessionManager {
     live: LiveSessions,
     table: Mutex<Table>,
     keys: KeyedSerial<SessionKey>,
+    opening: KeyedSerial<Slot>,
     awaiting: AtomicUsize,
     me: Weak<SessionManager>,
 }
@@ -285,34 +383,56 @@ impl SessionManager {
             live,
             table: Mutex::new(Table::default()),
             keys: KeyedSerial::default(),
+            opening: KeyedSerial::default(),
             awaiting: AtomicUsize::new(0),
             me: me.clone(),
         })
     }
 
+    /// The threads attached to live provider processes.
     pub fn sessions(&self) -> Vec<SessionKey> {
         let mut keys: Vec<_> = self
-            .table
-            .lock()
-            .expect("session table")
-            .sessions
-            .keys()
-            .cloned()
+            .entries(|_| true)
+            .into_iter()
+            .flat_map(|entry| {
+                let instance = entry.slot.instance().to_owned();
+                let members = entry.members.lock().expect("session members");
+                members
+                    .attached
+                    .keys()
+                    .map(|thread| SessionKey {
+                        thread: thread.clone(),
+                        instance: instance.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
             .collect();
         keys.sort();
         keys
     }
 
-    /// The working directories of the thread's live provider processes.
+    /// The working directories of the thread's own live provider processes.
+    /// As in T3 CheckpointRestoreSafety, a shared app-server is left out: each
+    /// turn runs in its thread's workspace, which the caller already checks.
     pub fn session_cwds(&self, thread: &ThreadId) -> Vec<String> {
-        self.entries(|key| &key.thread == thread)
+        self.entries(|slot| matches!(slot, Slot::Thread(_)))
             .into_iter()
-            .filter_map(|entry| entry.cwd)
+            .filter_map(|entry| {
+                let members = entry.members.lock().expect("session members");
+                members.attached.get(thread).cloned().flatten()
+            })
             .collect()
     }
 
     pub fn is_live(&self, key: &SessionKey) -> bool {
-        self.entry(key).is_some()
+        self.entries(|slot| slot.instance() == key.instance)
+            .iter()
+            .any(|entry| entry.attached(&key.thread))
+    }
+
+    /// The process count, for tests and diagnostics.
+    pub fn processes(&self) -> usize {
+        self.table.lock().expect("session table").sessions.len()
     }
 
     /// Executions waiting for a provider reply or completion.
@@ -336,10 +456,7 @@ impl SessionManager {
             }
             ProviderCommand::Steer { .. } => self.steer(thread, effect_id, attempt, command).await,
             ProviderCommand::Interrupt { .. } => self.interrupt(thread, attempt, command).await,
-            ProviderCommand::Respond { .. } => self.respond(attempt, command).await,
-            ProviderCommand::SetModel { .. } | ProviderCommand::SetRuntimeMode { .. } => {
-                self.configure(attempt, command).await
-            }
+            ProviderCommand::Respond { .. } => self.respond(thread, attempt, command).await,
             ProviderCommand::Rollback { .. } | ProviderCommand::Fork { .. } => Err(
                 ExecError::Retry("rollback and fork run through their own effects".into()),
             ),
@@ -360,6 +477,7 @@ impl SessionManager {
             (target.selection.driver == Driver::Claude).then(|| self.host.prompt_uuid(effect_id));
         self.keys
             .with_lock(target.key.clone(), async {
+                let _reserved = self.reserve(&target.key);
                 for _ in 0..2 {
                     let started = match target.selection.driver {
                         Driver::Codex => self.start_codex(&target, attempt, command, &images).await,
@@ -428,8 +546,9 @@ impl SessionManager {
             (String::new(), vec![])
         };
         let command = command.clone();
-        let mut request = Request::new(move |p| match p {
-            Protocol::Codex(codex) => codex.command(&command, &WireContext::default(), &images),
+        let context = route_context(thread);
+        let mut request = Request::new(thread, move |p| match p {
+            Protocol::Codex(codex) => codex.command(&command, &context, &images),
             Protocol::Claude(claude) => {
                 claude.set_skills(skills);
                 claude.command(&command, &prompt, &images)
@@ -469,15 +588,16 @@ impl SessionManager {
             return closed().await;
         };
         if entry.claude.is_some() {
-            self.stop_claude(&entry, attempt, command).await;
+            self.stop_claude(&entry, thread, attempt, command).await;
             return Ok(());
         }
         let command = command.clone();
+        let context = route_context(thread);
         let sent = self
             .send(
                 &entry,
-                Request::new(move |p| match p {
-                    Protocol::Codex(codex) => codex.command(&command, &WireContext::default(), &[]),
+                Request::new(thread, move |p| match p {
+                    Protocol::Codex(codex) => codex.command(&command, &context, &[]),
                     Protocol::Claude(claude) => claude.command(&command, "", &[]),
                 })
                 .events_to(attempt),
@@ -496,22 +616,31 @@ impl SessionManager {
 
     /// T3 ClaudeAdapterV2 interruptTurn: interrupt, then close the process, which
     /// also ends its background shells; the closure terminalizes the attempt.
-    async fn stop_claude(&self, entry: &Entry, attempt: &RunAttemptId, command: &ProviderCommand) {
+    async fn stop_claude(
+        &self,
+        entry: &Entry,
+        thread: &ThreadId,
+        attempt: &RunAttemptId,
+        command: &ProviderCommand,
+    ) {
         let command = command.clone();
         let interrupted = self
-            .request_reply(
+            .request_reply_within(
                 entry,
-                Request::new(move |p| p.claude()?.command(&command, "", &[])).events_to(attempt),
+                Request::new(thread, move |p| p.claude()?.command(&command, "", &[]))
+                    .events_to(attempt),
+                self.options.interrupt_timeout,
             )
             .await;
         if let Err(message) = interrupted {
-            tracing::debug!(thread = %entry.key.thread, %message, "Claude did not acknowledge the interrupt");
+            tracing::debug!(%thread, %message, "Claude did not acknowledge the interrupt");
         }
-        self.close_entry(entry, true, false).await;
+        self.close_entry(entry, true).await;
     }
 
     async fn respond(
         &self,
+        thread: &ThreadId,
         attempt: &RunAttemptId,
         command: &ProviderCommand,
     ) -> Result<(), ExecError> {
@@ -529,11 +658,12 @@ impl SessionManager {
             return Err(gone());
         };
         let command = command.clone();
+        let context = route_context(thread);
         let sent = self
             .send(
                 &entry,
-                Request::new(move |p| match p {
-                    Protocol::Codex(codex) => codex.command(&command, &WireContext::default(), &[]),
+                Request::new(thread, move |p| match p {
+                    Protocol::Codex(codex) => codex.command(&command, &context, &[]),
                     Protocol::Claude(claude) => claude.command(&command, "", &[]),
                 })
                 .events_to(attempt),
@@ -547,66 +677,6 @@ impl SessionManager {
                 Some(ProviderOperation::Respond),
                 None,
             )),
-        }
-    }
-
-    /// Codex takes model and mode on each turn; a live Claude process is updated.
-    async fn configure(
-        &self,
-        attempt: &RunAttemptId,
-        command: &ProviderCommand,
-    ) -> Result<(), ExecError> {
-        let Some(entry) = self.route(attempt) else {
-            return Ok(());
-        };
-        let Some(process) = entry.claude.clone() else {
-            return Ok(());
-        };
-        let forwarded = command.clone();
-        let replied = self
-            .request_reply(
-                &entry,
-                Request::new(move |p| p.claude()?.command(&forwarded, "", &[])).events_to(attempt),
-            )
-            .await;
-        // Only an accepted change is the process's value; otherwise the next
-        // Start cannot know it and aligns again.
-        let applied = |value: String| {
-            if replied.is_ok() {
-                value
-            } else {
-                String::new()
-            }
-        };
-        {
-            let mut process = process.lock().expect("claude process");
-            match command {
-                ProviderCommand::SetModel { selection } => {
-                    process.model = applied(claude_model_options(selection).model);
-                }
-                ProviderCommand::SetRuntimeMode {
-                    runtime_mode,
-                    interaction_mode,
-                } => {
-                    process.permission_mode = applied(
-                        agent_providers::claude_permission_mode(*runtime_mode, *interaction_mode)
-                            .into(),
-                    );
-                }
-                _ => {}
-            }
-        }
-        match replied {
-            Ok(_) => Ok(()),
-            Err(_) if self.route(attempt).is_none() => Ok(()),
-            Err(message) => Err(ExecError::Settle(Box::new(EffectResult::ProviderFailed {
-                attempt: attempt.clone(),
-                operation: operation(command).unwrap_or(ProviderOperation::SetModel),
-                message,
-                message_id: None,
-                turn_completed: false,
-                session_lost: false,
-            }))),
         }
     }
 
@@ -635,8 +705,8 @@ impl SessionManager {
                         .command(command, "", &[])
                         .map_err(|error| ExecError::Retry(error.to_string()))?
                         .process;
-                    if let Some(entry) = self.entry(&key) {
-                        self.close_entry(&entry, true, false).await;
+                    if let Some(entry) = self.entry(&Slot::Thread(key.clone())) {
+                        self.close_entry(&entry, true).await;
                     }
                     return match directive {
                         Some(ProcessDirective::Resume {
@@ -650,23 +720,22 @@ impl SessionManager {
                         _ => Ok(None),
                     };
                 }
-                let context = self
-                    .host
-                    .codex_context(target.clone())
-                    .await
-                    .map_err(ExecError::Retry)?;
-                let entry = match self.codex_session(&target, &context).await {
-                    Ok(entry) => entry,
+                let _reserved = self.reserve(&key);
+                let (entry, context) = match self.codex_entry(&target).await {
+                    Ok(opened) => opened,
                     Err(Failure::Exec(error)) => return Err(error),
                     Err(Failure::Gone) => {
                         return Err(ExecError::Retry("The provider session closed.".into()));
                     }
                 };
-                let forwarded = command.clone();
+                let turns = turns_after(&state, native_thread, absolute_head.as_deref());
+                let native = native_thread.clone();
                 let completed = self
                     .request_completion(
                         &entry,
-                        Request::new(move |p| p.codex()?.command(&forwarded, &context, &[])),
+                        Request::new(thread, move |p| {
+                            Ok(p.codex()?.rollback(&native, turns, &context))
+                        }),
                     )
                     .await
                     .map_err(ExecError::Retry)?;
@@ -711,7 +780,21 @@ impl SessionManager {
         };
         let forked = match target.selection.driver {
             Driver::Claude => {
-                self.fork_claude(&target, effect_id, attempt, provider)
+                let Some(source) = state.transfers.iter().find(|transfer| {
+                    transfer.kind == TransferKind::Fork
+                        && !transfer.superseded
+                        && &transfer.target == thread
+                        && transfer.native_source.is_some()
+                }) else {
+                    return failed("The fork has no native source.".into());
+                };
+                let source_state = self.state(&source.source).await?;
+                let source = match instance_target(&source_state, &source.source, instance) {
+                    Ok(source) => source,
+                    Err(ExecError::Retry(message)) => return failed(message),
+                    Err(error) => return Err(error),
+                };
+                self.fork_claude(&source, &target, effect_id, attempt, provider)
                     .await
             }
             Driver::Codex => self.fork_codex(&target, provider).await.map(Some),
@@ -727,66 +810,170 @@ impl SessionManager {
         }
     }
 
-    /// Closes the thread's sessions, as for archive or delete.
+    /// Detaches the thread from its provider processes, as for archive, delete
+    /// or settle (T3 ProviderSessionManager.detach). A thread's own Claude
+    /// process closes; the shared Codex app-server interrupts the thread's turn,
+    /// unloads its native thread and stays up for other threads until idle.
+    /// Terminal detaches revoke the thread's credentials even without a process.
     pub async fn detach(&self, thread: &ThreadId, revoke_credentials: bool) {
-        for entry in self.entries(|key| &key.thread == thread) {
-            self.close_entry(&entry, true, revoke_credentials).await;
-        }
+        self.detach_instance(thread, None, revoke_credentials).await;
     }
 
-    /// Closes the thread's session of one provider instance.
+    /// `detach` for one provider instance, as T3 releases the previous
+    /// instance's session after a provider switch.
     pub async fn detach_instance(
         &self,
         thread: &ThreadId,
-        instance: &str,
+        instance: Option<&str>,
         revoke_credentials: bool,
     ) {
-        for entry in self.entries(|key| &key.thread == thread && key.instance == instance) {
-            self.close_entry(&entry, true, revoke_credentials).await;
+        for entry in self.entries(|slot| instance.is_none_or(|i| slot.instance() == i)) {
+            if !entry.attached(thread) {
+                continue;
+            }
+            match entry.slot.clone() {
+                Slot::Thread(_) => self.close_entry(&entry, true).await,
+                Slot::Shared(instance) => {
+                    let key = SessionKey {
+                        thread: thread.clone(),
+                        instance,
+                    };
+                    self.keys
+                        .with_lock(key, self.detach_shared(&entry, thread))
+                        .await
+                }
+            }
+        }
+        if revoke_credentials {
+            for entry in self.entries(|slot| instance.is_none_or(|i| slot.instance() == i)) {
+                entry
+                    .members
+                    .lock()
+                    .expect("session members")
+                    .recorded
+                    .remove(thread);
+            }
+            self.host.revoke_credentials(thread, instance);
         }
     }
 
-    /// Closes every session of a provider instance, as for sign-out.
-    pub async fn close_instance(&self, instance: &str) {
-        for entry in self.entries(|key| key.instance == instance) {
-            self.close_entry(&entry, true, false).await;
+    async fn detach_shared(&self, entry: &Entry, thread: &ThreadId) {
+        let route = thread.as_str().to_owned();
+        let interrupt = self.send(
+            entry,
+            Request::new(thread, move |p| {
+                Ok(p.codex()?.interrupt_active_turn(&route))
+            }),
+        );
+        match tokio::time::timeout(UNLOAD_TIMEOUT, interrupt).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%thread, %error, "could not interrupt a detached thread's turn");
+            }
+            Err(_) => tracing::warn!(%thread, "interrupting a detached thread timed out"),
         }
+        let detached = {
+            let mut members = entry.members.lock().expect("session members");
+            members.attached.remove(thread).is_some()
+        };
+        if detached {
+            self.live.remove(thread);
+        }
+        let route = thread.as_str().to_owned();
+        let unload = self.send(
+            entry,
+            Request::new(thread, move |p| Ok(p.codex()?.unload(&route))).expect(Expect::Replies),
+        );
+        match tokio::time::timeout(UNLOAD_TIMEOUT, async {
+            let mut ran = unload.await.map_err(|error| error.to_string())?;
+            match ran.replies.pop() {
+                Some(reply) => self.wait(reply).await.map(|_| ()),
+                None => Ok(()),
+            }
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%thread, %error, "could not unload a detached thread");
+            }
+            Err(_) => tracing::warn!(%thread, "unloading a detached thread timed out"),
+        }
+        let _ = entry.mail.send(Mail::Detach {
+            thread: thread.clone(),
+        });
+    }
+
+    /// Closes every process of a provider instance, as for sign-out.
+    pub async fn close_instance(&self, instance: &str) {
+        for entry in self.entries(|slot| slot.instance() == instance) {
+            self.close_entry(&entry, true).await;
+        }
+    }
+
+    /// Signs the instance's live Codex app-server in with the selected managed
+    /// account, as the Host's single app-server did when an account was selected.
+    pub async fn apply_codex_account(&self, instance: &str) -> Result<(), String> {
+        let Some(entry) = self.entry(&Slot::Shared(instance.to_owned())) else {
+            return Ok(());
+        };
+        let Some(params) = self.host.codex_account(instance.to_owned()).await? else {
+            return Ok(());
+        };
+        let thread = {
+            let members = entry.members.lock().expect("session members");
+            members
+                .attached
+                .keys()
+                .chain(&members.recorded)
+                .next()
+                .cloned()
+        };
+        let Some(thread) = thread else {
+            return Ok(());
+        };
+        self.request_reply(
+            &entry,
+            Request::new(&thread, move |p| Ok(frames(vec![p.codex()?.login(params)]))),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Host shutdown: recovery decides what the runs become, so no session
     /// closure is reported.
     pub async fn shutdown(&self) {
         for entry in self.entries(|_| true) {
-            self.close_entry(&entry, false, false).await;
+            self.close_entry(&entry, false).await;
         }
     }
 
-    fn entries(&self, filter: impl Fn(&SessionKey) -> bool) -> Vec<Entry> {
+    fn entries(&self, filter: impl Fn(&Slot) -> bool) -> Vec<Entry> {
         self.table
             .lock()
             .expect("session table")
             .sessions
             .values()
-            .filter(|entry| filter(&entry.key))
+            .filter(|entry| filter(&entry.slot))
             .cloned()
             .collect()
     }
 
-    fn entry(&self, key: &SessionKey) -> Option<Entry> {
+    fn entry(&self, slot: &Slot) -> Option<Entry> {
         self.table
             .lock()
             .expect("session table")
             .sessions
-            .get(key)
+            .get(slot)
             .cloned()
     }
 
     fn route(&self, attempt: &RunAttemptId) -> Option<Entry> {
         let table = self.table.lock().expect("session table");
-        let (key, generation) = table.routes.get(attempt)?;
+        let (slot, generation) = table.routes.get(attempt)?;
         table
             .sessions
-            .get(key)
+            .get(slot)
             .filter(|entry| entry.generation == *generation)
             .cloned()
     }
@@ -798,9 +985,43 @@ impl SessionManager {
             .expect("session table")
             .routes
             .iter()
-            .filter(|(_, (key, generation))| *key == entry.key && *generation == entry.generation)
+            .filter(|(_, (slot, generation))| {
+                *slot == entry.slot && *generation == entry.generation
+            })
             .map(|(attempt, _)| attempt.clone())
             .collect()
+    }
+
+    fn reserve(&self, key: &SessionKey) -> Reservation<'_> {
+        *self
+            .table
+            .lock()
+            .expect("session table")
+            .reserved
+            .entry(key.clone())
+            .or_default() += 1;
+        Reservation {
+            manager: self,
+            key: key.clone(),
+        }
+    }
+
+    /// The thread uses the process; `Gone` once the process is closing.
+    fn attach(&self, entry: &Entry, target: &LaunchTarget) -> Result<(), Failure> {
+        let thread = &target.key.thread;
+        let mut members = entry.members.lock().expect("session members");
+        if members.closed {
+            return Err(Failure::Gone);
+        }
+        members.recorded.insert(thread.clone());
+        let cwd = target
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.cwd.clone());
+        if members.attached.insert(thread.clone(), cwd).is_none() {
+            self.live.add(thread);
+        }
+        Ok(())
     }
 
     /// T3 ProviderTurnStartService: after any preparation, the attempt must
@@ -818,13 +1039,20 @@ impl SessionManager {
             }))
     }
 
-    /// Waits (bounded, as T3 interruptAndAwaitTerminal) until the previous root
-    /// turn on the process ends, so its late events stay with its own attempt.
-    async fn settled(&self, entry: &Entry, attempt: &RunAttemptId) -> Result<(), Failure> {
+    /// Waits (bounded, as T3 interruptAndAwaitTerminal) until the thread's
+    /// previous root turn on the process ends, so its late events stay with its
+    /// own attempt.
+    async fn settled(
+        &self,
+        entry: &Entry,
+        thread: &ThreadId,
+        attempt: &RunAttemptId,
+    ) -> Result<(), Failure> {
         let (done, settled) = oneshot::channel();
         entry
             .mail
             .send(Mail::Settled {
+                thread: thread.clone(),
                 attempt: attempt.clone(),
                 done,
             })
@@ -844,16 +1072,18 @@ impl SessionManager {
             .lock()
             .expect("session table")
             .routes
-            .insert(attempt.clone(), (entry.key.clone(), entry.generation));
+            .insert(attempt.clone(), (entry.slot.clone(), entry.generation));
     }
 
+    /// Starts the process for the target's slot; the target's thread is attached.
     async fn spawn(
         &self,
         target: &LaunchTarget,
         launch: Option<ClaudeLaunch>,
-    ) -> Result<Entry, ExecError> {
-        if let Some(stale) = self.entry(&target.key) {
-            self.close_entry(&stale, true, false).await;
+    ) -> Result<Entry, Failure> {
+        let slot = Slot::of(&target.key, target.selection.driver);
+        if let Some(stale) = self.entry(&slot) {
+            self.close_entry(&stale, true).await;
         }
         let process = self
             .host
@@ -867,97 +1097,128 @@ impl SessionManager {
         let claude = launch.map(|launch| {
             Arc::new(Mutex::new(ClaudeProcess {
                 native: launch.native_session.clone().or(launch.new_session.clone()),
-                model: launch.model.clone(),
                 permission_mode: launch.policy.permission_mode.clone(),
                 launch,
             }))
         });
+        let members = Arc::new(Mutex::new(Members::default()));
         let entry = {
             let mut table = self.table.lock().expect("session table");
             table.generation += 1;
             let entry = Entry {
-                key: target.key.clone(),
+                slot: slot.clone(),
                 generation: table.generation,
-                cwd: target
-                    .workspace
-                    .as_ref()
-                    .map(|workspace| workspace.cwd.clone()),
                 mail,
                 claude: claude.clone(),
+                members: members.clone(),
             };
-            table.sessions.insert(target.key.clone(), entry.clone());
+            table.sessions.insert(slot.clone(), entry.clone());
             entry
         };
-        self.live.add(&target.key.thread);
+        self.attach(&entry, target)?;
         let protocol = match target.selection.driver {
             Driver::Codex => Protocol::Codex(Default::default()),
             Driver::Claude => Protocol::Claude(Default::default()),
         };
         let task = Task::new(
-            target.key.clone(),
+            slot.clone(),
+            target.key.instance.clone(),
             entry.generation,
             self.me.clone(),
             self.registry.clone(),
             self.options.clone(),
             protocol,
             claude,
+            members.clone(),
             receiver,
             process,
         );
-        let (manager, key, generation) = (self.me.clone(), target.key.clone(), entry.generation);
+        let (manager, generation) = (self.me.clone(), entry.generation);
         tokio::spawn(async move {
             if let Err(panic) = std::panic::AssertUnwindSafe(task.run())
                 .catch_unwind()
                 .await
             {
-                tracing::error!(thread = %key.thread, instance = %key.instance, ?panic,
-                    "provider session task panicked");
+                tracing::error!(?slot, ?panic, "provider session task panicked");
                 if let Some(manager) = manager.upgrade() {
-                    manager.closed(&key, generation, false);
+                    manager.closed(&slot, generation, &members);
                 }
             }
         });
         Ok(entry)
     }
 
-    /// Called by a session task once its process is gone.
-    fn closed(&self, key: &SessionKey, generation: u64, revoke_credentials: bool) {
+    /// Called by a session task once its process is gone. Every credential the
+    /// process recorded is revoked unless another process holds it or a process
+    /// being prepared reserved it (T3 releaseEntry).
+    fn closed(&self, slot: &Slot, generation: u64, members: &Mutex<Members>) {
         {
             let mut table = self.table.lock().expect("session table");
             if table
                 .sessions
-                .get(key)
+                .get(slot)
                 .is_some_and(|entry| entry.generation == generation)
             {
-                table.sessions.remove(key);
+                table.sessions.remove(slot);
             }
             table
                 .routes
-                .retain(|_, (route, current)| !(route == key && *current == generation));
+                .retain(|_, (route, current)| !(route == slot && *current == generation));
         }
-        self.live.remove(&key.thread);
-        self.host.released(key, revoke_credentials);
+        let (attached, recorded) = {
+            let mut members = members.lock().expect("session members");
+            members.closed = true;
+            (
+                std::mem::take(&mut members.attached),
+                std::mem::take(&mut members.recorded),
+            )
+        };
+        for thread in attached.keys() {
+            self.live.remove(thread);
+        }
+        let instance = slot.instance();
+        for thread in recorded {
+            let key = SessionKey {
+                thread: thread.clone(),
+                instance: instance.to_owned(),
+            };
+            let held = self
+                .table
+                .lock()
+                .expect("session table")
+                .reserved
+                .contains_key(&key)
+                || self
+                    .entries(|other| other.instance() == instance)
+                    .iter()
+                    .any(|other| {
+                        other
+                            .members
+                            .lock()
+                            .expect("session members")
+                            .recorded
+                            .contains(&thread)
+                    });
+            if !held {
+                self.host.revoke_credentials(&thread, Some(instance));
+            }
+        }
     }
 
-    async fn close_entry(&self, entry: &Entry, report: bool, revoke: bool) {
+    async fn close_entry(&self, entry: &Entry, report: bool) {
         {
             let mut table = self.table.lock().expect("session table");
             if table
                 .sessions
-                .get(&entry.key)
+                .get(&entry.slot)
                 .is_some_and(|current| current.generation == entry.generation)
             {
-                table.sessions.remove(&entry.key);
+                table.sessions.remove(&entry.slot);
             }
         }
         let (done, closed) = oneshot::channel();
-        let sent = entry.mail.send(Mail::Close {
-            report,
-            revoke,
-            done,
-        });
-        if (sent.is_err() || closed.await.is_err()) && revoke {
-            self.host.released(&entry.key, true);
+        if entry.mail.send(Mail::Close { report, done }).is_ok() {
+            let _ = closed.await;
         }
     }
 
@@ -967,6 +1228,7 @@ impl SessionManager {
         entry
             .mail
             .send(Mail::Run(Run {
+                thread: request.thread,
                 owner: request.owner,
                 events_to: request.events_to,
                 steer: request.steer,
@@ -988,6 +1250,16 @@ impl SessionManager {
     }
 
     async fn request_reply(&self, entry: &Entry, request: Request) -> Result<Value, String> {
+        self.request_reply_within(entry, request, self.options.reply_timeout)
+            .await
+    }
+
+    async fn request_reply_within(
+        &self,
+        entry: &Entry,
+        request: Request,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         let mut ran = self
             .send(entry, request.expect(Expect::Replies))
             .await
@@ -995,7 +1267,7 @@ impl SessionManager {
         let Some(reply) = ran.replies.pop() else {
             return Err("no request was sent".into());
         };
-        self.wait(reply).await
+        self.wait_within(reply, timeout).await
     }
 
     async fn request_completion(
@@ -1014,8 +1286,16 @@ impl SessionManager {
     }
 
     async fn wait<T>(&self, receiver: oneshot::Receiver<Result<T, String>>) -> Result<T, String> {
+        self.wait_within(receiver, self.options.reply_timeout).await
+    }
+
+    async fn wait_within<T>(
+        &self,
+        receiver: oneshot::Receiver<Result<T, String>>,
+        timeout: Duration,
+    ) -> Result<T, String> {
         self.awaiting.fetch_add(1, Ordering::SeqCst);
-        let waited = tokio::time::timeout(self.options.reply_timeout, receiver).await;
+        let waited = tokio::time::timeout(timeout, receiver).await;
         self.awaiting.fetch_sub(1, Ordering::SeqCst);
         match waited {
             Err(_) => Err("The provider did not reply in time.".into()),
@@ -1098,8 +1378,6 @@ fn operation(command: &ProviderCommand) -> Option<ProviderOperation> {
         ProviderCommand::Interrupt { .. } => ProviderOperation::Interrupt,
         ProviderCommand::Respond { .. } => ProviderOperation::Respond,
         ProviderCommand::Compact { .. } => ProviderOperation::Compact,
-        ProviderCommand::SetModel { .. } => ProviderOperation::SetModel,
-        ProviderCommand::SetRuntimeMode { .. } => ProviderOperation::SetRuntimeMode,
         ProviderCommand::Rollback { .. } | ProviderCommand::Fork { .. } => return None,
     })
 }
@@ -1151,6 +1429,45 @@ fn unwrap_failure(result: Result<Ran, Failure>) -> Result<(), ExecError> {
         Ok(_) | Err(Failure::Gone) => Ok(()),
         Err(Failure::Exec(error)) => Err(error),
     }
+}
+
+/// T3 countTerminalTurnsAfterBoundary: the native thread's terminal turns after
+/// the one that ended at `head`. A head the thread's own turns do not hold (a
+/// fork's inherited boundary) or no head discards every turn of the thread.
+fn turns_after(state: &State, native_thread: &str, head: Option<&str>) -> u64 {
+    let turns: Vec<_> = state
+        .attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.native_thread.as_deref() == Some(native_thread)
+                && attempt.native_turn.is_some()
+                && state
+                    .runs
+                    .iter()
+                    .find(|run| run.id == attempt.run)
+                    .is_some_and(|run| run.status != RunStatus::RolledBack)
+        })
+        .collect();
+    let after = head
+        .and_then(|head| {
+            turns
+                .iter()
+                .position(|attempt| attempt.native_head.as_deref() == Some(head))
+        })
+        .map_or(0, |boundary| boundary + 1);
+    turns[after..]
+        .iter()
+        .filter(|attempt| {
+            matches!(
+                attempt.status,
+                AttemptStatus::Completed
+                    | AttemptStatus::Interrupted
+                    | AttemptStatus::Failed
+                    | AttemptStatus::Cancelled
+                    | AttemptStatus::Superseded
+            )
+        })
+        .count() as u64
 }
 
 pub(crate) fn attempt_finished(state: &State, attempt: &RunAttemptId) -> bool {

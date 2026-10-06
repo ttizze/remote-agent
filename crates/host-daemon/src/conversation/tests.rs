@@ -176,6 +176,7 @@ async fn host() -> Host {
             programs: ProviderPrograms {
                 codex: Some("/fixture/codex".into()),
                 codex_home: None,
+                codex_accounts: None,
                 claude: None,
             },
             spawner: spawner.clone(),
@@ -497,6 +498,7 @@ async fn a_turn_cut_by_shutdown_is_settled_when_the_host_starts_again() {
                 programs: ProviderPrograms {
                     codex: Some("/fixture/codex".into()),
                     codex_home: None,
+                    codex_accounts: None,
                     claude: None,
                 },
                 spawner,

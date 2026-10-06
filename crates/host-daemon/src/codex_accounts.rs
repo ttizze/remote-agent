@@ -452,7 +452,8 @@ impl Accounts {
         })
     }
 
-    async fn select(&mut self, primary: &CodexAppServer, id: &str) -> Result<(), String> {
+    /// `account/login/start` parameters of a saved account.
+    async fn login_params(&mut self, id: &str) -> Result<Value, String> {
         let entry = self
             .registry
             .accounts
@@ -462,7 +463,7 @@ impl Accounts {
         let api_key = entry.chatgpt_account_id.is_none();
         let helper = self.helper(id)?;
         let helper = helper.server().await?;
-        let params = if api_key {
+        Ok(if api_key {
             let AuthToken::ApiKey(key) = auth_token(helper, false).await? else {
                 return Err("CodexのAPIキー認証が見つかりません。".into());
             };
@@ -471,7 +472,33 @@ impl Accounts {
             let auth = credentials(helper, false).await?;
             json!({"type":"chatgptAuthTokens","accessToken":auth.token.as_str(),
                 "chatgptAccountId":auth.account_id,"chatgptPlanType":auth.plan})
-        };
+        })
+    }
+
+    /// The login a conversation app-server applies: the selected saved account,
+    /// or `None` for CODEX_HOME's own login. Fails while signed out.
+    pub(crate) async fn session_login(&mut self) -> Result<Option<Value>, String> {
+        if let Some(error) = self.restoration_error.borrow().clone() {
+            return Err(error);
+        }
+        match self.registry.selected_id.clone() {
+            Some(id) => self.login_params(&id).await.map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Whether conversation app-servers sign in with shared ChatGPT tokens.
+    pub(crate) fn shares_tokens(&self) -> bool {
+        self.registry.selected_id.as_ref().is_some_and(|id| {
+            self.registry
+                .accounts
+                .iter()
+                .any(|account| &account.id == id && account.chatgpt_account_id.is_some())
+        })
+    }
+
+    async fn select(&mut self, primary: &CodexAppServer, id: &str) -> Result<(), String> {
+        let params = self.login_params(id).await?;
         rpc(primary, "account/login/start", params).await?;
         self.registry.selected_id = Some(id.to_owned());
         self.registry.signed_out = false;

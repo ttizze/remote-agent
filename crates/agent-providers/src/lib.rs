@@ -7,6 +7,7 @@ mod claude_models;
 mod codex;
 mod codex_tools;
 mod elicitation;
+mod instructions;
 mod skills;
 mod stdio;
 use agent_domain::*;
@@ -18,6 +19,7 @@ pub use claude_models::*;
 pub use codex::*;
 use codex_tools::*;
 pub use elicitation::*;
+pub use instructions::*;
 use serde_json::Value;
 pub use skills::*;
 pub use stdio::*;
@@ -30,6 +32,8 @@ pub struct Translation {
     pub replies: Vec<NativeReply>,
     /// A native operation that finished without a turn event.
     pub completion: Option<Completion>,
+    /// The route (app thread) of a shared process the translation belongs to.
+    pub route: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum Completion {

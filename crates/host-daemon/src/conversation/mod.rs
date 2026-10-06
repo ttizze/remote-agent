@@ -32,6 +32,19 @@ pub(crate) trait ClaudeCredentials: Send + Sync {
     fn claude_home(&self) -> BoxFuture<'_, Result<PathBuf, String>>;
 }
 
+/// The managed Codex account conversation app-servers run as.
+pub(crate) trait CodexCredentials: Send + Sync {
+    /// `account/login/start` parameters, or `None` for CODEX_HOME's own login.
+    fn login(&self) -> BoxFuture<'_, Result<Option<serde_json::Value>, String>>;
+    /// Whether the login shares ChatGPT tokens, which do not accept service tiers.
+    fn shares_tokens(&self) -> BoxFuture<'_, bool>;
+    /// Answers `account/chatgptAuthTokens/refresh`.
+    fn refresh(
+        &self,
+        previous_account: Option<String>,
+    ) -> BoxFuture<'_, Result<serde_json::Value, String>>;
+}
+
 /// Host resources the conversation shares with the other RPCs.
 #[derive(Clone)]
 pub(crate) struct SharedResources {

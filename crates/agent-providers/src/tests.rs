@@ -311,17 +311,7 @@ fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume
         .outbound;
     assert_eq!(fork[0]["params"]["config"], expected);
     assert_eq!(fork[0]["params"]["model"], "gpt-5.4");
-    let revert = protocol
-        .command(
-            &ProviderCommand::Rollback {
-                native_thread: "resumed".into(),
-                absolute_head: Some("head".into()),
-            },
-            &context,
-            &[],
-        )
-        .unwrap()
-        .outbound;
+    let revert = protocol.rollback("resumed", 1, &context).outbound;
     let resume = protocol.receive(&json!({"id":revert[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"notLoaded"}}}})).unwrap();
     assert_eq!(resume.outbound[0]["params"]["config"], expected);
     assert_eq!(resume.outbound[0]["params"]["model"], "gpt-5.4");
@@ -494,28 +484,28 @@ fn codex_compact_without_a_native_thread_starts_one_first() {
 #[test]
 fn codex_reports_a_root_turn_in_flight_until_it_completes() {
     let mut protocol = CodexProtocol::default();
-    assert!(!protocol.turn_in_flight());
+    assert!(!protocol.turn_in_flight(""));
     let start = protocol
         .command(&codex_start(), &wire_context(), &[])
         .unwrap()
         .outbound;
-    assert!(protocol.turn_in_flight());
+    assert!(protocol.turn_in_flight(""));
     let turn = protocol
         .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
         .unwrap()
         .outbound;
-    assert!(protocol.turn_in_flight());
+    assert!(protocol.turn_in_flight(""));
     protocol
         .receive(&json!({"id":turn[0]["id"],"result":{"turn":{"id":"turn-1"}}}))
         .unwrap();
-    assert!(protocol.turn_in_flight());
+    assert!(protocol.turn_in_flight(""));
     protocol
         .receive(&json!({"method":"turn/started","params":{"threadId":"native-child","turn":{"id":"child-turn"}}}))
         .unwrap();
     protocol
         .receive(&json!({"method":"turn/completed","params":{"threadId":"native","turn":{"id":"turn-1","status":"interrupted"}}}))
         .unwrap();
-    assert!(!protocol.turn_in_flight());
+    assert!(!protocol.turn_in_flight(""));
 }
 #[test]
 fn codex_stop_before_thread_ready_cancels_prompt_and_the_next_prompt_can_start() {
@@ -987,99 +977,110 @@ fn mcp_metadata_trims_names_limits_utf16_and_accepts_only_web_icons() {
 }
 
 #[test]
-fn rollback_resolves_an_absolute_boundary_across_pages_and_is_safe_to_repeat() {
+fn rollback_finds_the_revert_boundary_across_pages_of_newest_first_turns() {
+    // T3 CodexThreadRevert.test.ts "finds the revert boundary across pages".
     let mut protocol = CodexProtocol::default();
-    let command = ProviderCommand::Rollback {
-        native_thread: "thread".into(),
-        absolute_head: Some("kept".into()),
-    };
     let read = protocol
-        .command(&command, &wire_context(), &[])
-        .unwrap()
+        .rollback("thread", 3, &wire_context())
         .outbound
         .remove(0);
+    assert_eq!(read["method"], "thread/read");
     assert_eq!(
         read["params"],
         json!({"threadId":"thread","includeTurns":false})
     );
-    let page = protocol.receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"notLoaded"}}}})).unwrap().outbound.remove(0);
-    assert_eq!(page["method"], "thread/resume");
+    let resume = protocol.receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"notLoaded"}}}})).unwrap().outbound.remove(0);
+    assert_eq!(resume["method"], "thread/resume");
     assert_eq!(
-        page["params"],
+        resume["params"],
         json!({"threadId":"thread","excludeTurns":true,"cwd":"/workspace","config":{"tools.update_plan.enabled":true}})
     );
     let page = protocol
-        .receive(&json!({"id":page["id"],"result":{"thread":{"id":"thread"}}}))
+        .receive(&json!({"id":resume["id"],"result":{"thread":{"id":"thread"}}}))
         .unwrap()
         .outbound
         .remove(0);
     assert_eq!(
         page["params"],
-        json!({"threadId":"thread","cursor":null,"limit":100,"sortDirection":"desc","itemsView":"summary"})
+        json!({"threadId":"thread","cursor":null,"limit":3,"sortDirection":"desc","itemsView":"summary"})
     );
     let next = protocol.receive(&json!({"id":page["id"],"result":{"data":[{"id":"newest"},{"id":"middle"}],"nextCursor":"older"}})).unwrap().outbound.remove(0);
-    assert_eq!(next["params"]["cursor"], "older");
-    let revert = protocol.receive(&json!({"id":next["id"],"result":{"data":[{"id":"boundary"},{"id":"kept"}],"nextCursor":null}})).unwrap().outbound.remove(0);
+    assert_eq!(
+        next["params"],
+        json!({"threadId":"thread","cursor":"older","limit":1,"sortDirection":"desc","itemsView":"summary"})
+    );
+    let revert = protocol
+        .receive(&json!({"id":next["id"],"result":{"data":[{"id":"boundary"}],"nextCursor":null}}))
+        .unwrap()
+        .outbound
+        .remove(0);
+    assert_eq!(revert["method"], "thread/revert");
     assert_eq!(
         revert["params"],
         json!({"threadId":"thread","beforeTurnId":"boundary"})
     );
-    protocol
-        .receive(&json!({"id":revert["id"],"result":{"thread":{"id":"thread"}}}))
-        .unwrap();
+    assert_eq!(
+        protocol
+            .receive(
+                &json!({"id":revert["id"],"error":{"code":-32603,"message":"boundary reached"}})
+            )
+            .unwrap_err(),
+        ProtocolError::Remote {
+            request: Some(revert["id"].to_string()),
+            operation: "thread/revert".into(),
+            message: "boundary reached".into(),
+            turn_completed: false,
+        }
+    );
+    // An empty history reads the thread instead of reverting.
     let read = protocol
-        .command(&command, &wire_context(), &[])
-        .unwrap()
+        .rollback("empty", 2, &wire_context())
         .outbound
         .remove(0);
     let page = protocol.receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}})).unwrap().outbound.remove(0);
-    assert!(
+    let reread = protocol
+        .receive(&json!({"id":page["id"],"result":{"data":[],"nextCursor":null}}))
+        .unwrap()
+        .outbound
+        .remove(0);
+    assert_eq!(reread["method"], "thread/read");
+    assert_eq!(
         protocol
-            .receive(&json!({"id":page["id"],"result":{"data":[{"id":"kept"}],"nextCursor":null}}))
+            .receive(&json!({"id":reread["id"],"result":{"thread":{"id":"empty"}}}))
             .unwrap()
-            .outbound
-            .is_empty()
+            .completion,
+        Some(Completion::RolledBack {
+            native_thread: "empty".into()
+        })
     );
 }
 
 #[test]
-fn rollback_rejects_repeated_cursors_and_missing_heads_without_reverting_partial_history() {
-    for missing in [false, true] {
-        let mut protocol = CodexProtocol::default();
-        let read = protocol
-            .command(
-                &ProviderCommand::Rollback {
-                    native_thread: "thread".into(),
-                    absolute_head: Some("kept".into()),
-                },
-                &wire_context(),
-                &[],
-            )
-            .unwrap()
-            .outbound
-            .remove(0);
-        let page = protocol
-            .receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated"}}}))
-            .unwrap()
-            .outbound
-            .remove(0);
-        let next = protocol
-            .receive(
-                &json!({"id":page["id"],"result":{"data":[{"id":"newest"}],"nextCursor":"again"}}),
-            )
-            .unwrap()
-            .outbound
-            .remove(0);
-        let error = protocol.receive(&json!({"id":next["id"],"result":{"data":[],"nextCursor":if missing {Value::Null} else {json!("again")}}})).unwrap_err();
-        assert_eq!(
-            error,
-            if missing {
-                ProtocolError::MissingBoundary("kept".into())
-            } else {
-                ProtocolError::Invalid("Thread history pagination repeated a cursor.".into())
-            }
-        );
-    }
+fn rollback_rejects_repeated_cursors_instead_of_reverting_incomplete_history() {
+    // T3 CodexThreadRevert.test.ts "rejects repeated cursors".
+    let mut protocol = CodexProtocol::default();
+    let read = protocol
+        .rollback("thread", 3, &wire_context())
+        .outbound
+        .remove(0);
+    let page = protocol
+        .receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated"}}}))
+        .unwrap()
+        .outbound
+        .remove(0);
+    let next = protocol
+        .receive(&json!({"id":page["id"],"result":{"data":[{"id":"newest"}],"nextCursor":"again"}}))
+        .unwrap()
+        .outbound
+        .remove(0);
+    assert_eq!(next["params"]["limit"], 2);
+    let error = protocol
+        .receive(&json!({"id":next["id"],"result":{"data":[],"nextCursor":"again"}}))
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ProtocolError::Invalid("Thread history pagination repeated a cursor.".into())
+    );
 }
 
 #[test]
@@ -1628,27 +1629,33 @@ fn native_rollback_and_fork_report_completion() {
             native_thread: "forked".into()
         })
     );
-    let read = codex
-        .command(
-            &ProviderCommand::Rollback {
-                native_thread: "root".into(),
-                absolute_head: Some("t1".into()),
-            },
-            &wire_context(),
-            &[],
-        )
-        .unwrap();
-    let page = codex
-        .receive(&json!({"id":read.outbound[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}}))
-        .unwrap();
-    let reached = codex
-        .receive(
-            &json!({"id":page.outbound[0]["id"],"result":{"data":[{"id":"t1"}],"nextCursor":null}}),
-        )
-        .unwrap();
+    // T3 rollbackThread: no turn to discard sends nothing.
+    let reached = codex.rollback("root", 0, &wire_context());
     assert!(reached.outbound.is_empty());
     assert_eq!(
         reached.completion,
+        Some(Completion::RolledBack {
+            native_thread: "root".into()
+        })
+    );
+    let read = codex.rollback("root", 1, &wire_context());
+    let page = codex
+        .receive(&json!({"id":read.outbound[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}}))
+        .unwrap();
+    let revert = codex
+        .receive(
+            &json!({"id":page.outbound[0]["id"],"result":{"data":[{"id":"t2"}],"nextCursor":"older"}}),
+        )
+        .unwrap();
+    assert_eq!(
+        revert.outbound[0]["params"],
+        json!({"threadId":"root","beforeTurnId":"t2"})
+    );
+    assert_eq!(
+        codex
+            .receive(&json!({"id":revert.outbound[0]["id"],"result":{"thread":{"id":"root"}}}))
+            .unwrap()
+            .completion,
         Some(Completion::RolledBack {
             native_thread: "root".into()
         })
@@ -1931,19 +1938,206 @@ fn claude_prompts_run_known_skills_and_request_ultrathink_effort() {
         sent["message"]["content"],
         json!([{"type":"text","text":"Ultrathink:\nplease"},{"type":"text","text":"/review this patch"}])
     );
-    let model = claude
+    let model = claude_model_options(&ModelSelection {
+        instance: "claude".into(),
+        driver: Driver::Claude,
+        model: "claude-fable-5".into(),
+        options: [("contextWindow".to_string(), "1m".to_string())].into(),
+    });
+    assert_eq!(model.model, "claude-fable-5[1m]");
+}
+
+fn routed(route: &str) -> WireContext {
+    WireContext {
+        route: route.into(),
+        ..wire_context()
+    }
+}
+/// Starts a turn of `route` on a shared translator; its native thread is `native`.
+fn shared_start(codex: &mut CodexProtocol, route: &str, native: &str, turn: &str) {
+    let start = codex
+        .command(&codex_start(), &routed(route), &[])
+        .unwrap()
+        .outbound;
+    let ready = codex
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":native}}}))
+        .unwrap();
+    assert_eq!(ready.route.as_deref(), Some(route));
+    codex
+        .receive(&json!({"id":ready.outbound[0]["id"],"result":{"turn":{"id":turn}}}))
+        .unwrap();
+}
+// T3 CodexAdapterV2 serves every provider thread of a session from one
+// app-server: native threads of different app threads share the id space and
+// each notification belongs to the route of its native thread.
+#[test]
+fn one_app_server_routes_each_native_thread_to_its_own_route() {
+    let mut codex = CodexProtocol::default();
+    shared_start(&mut codex, "thread-a", "native-a", "turn-a");
+    shared_start(&mut codex, "thread-b", "native-b", "turn-b");
+    let delta = notify(
+        &mut codex,
+        "item/agentMessage/delta",
+        json!({"threadId":"native-b","turnId":"turn-b","itemId":"m","delta":"hi"}),
+    );
+    assert_eq!(delta.route.as_deref(), Some("thread-b"));
+    assert!(matches!(
+        &delta.events[..],
+        [ProviderEvent::TextDelta { .. }]
+    ));
+    let spawn = notify(
+        &mut codex,
+        "item/started",
+        json!({"threadId":"native-a","turnId":"turn-a","item":{"type":"collabAgentToolCall","id":"spawn","tool":"spawnAgent","receiverThreadIds":["child-a"],"prompt":"look"}}),
+    );
+    assert_eq!(spawn.route.as_deref(), Some("thread-a"));
+    let child = notify(
+        &mut codex,
+        "item/agentMessage/delta",
+        json!({"threadId":"child-a","turnId":"child-turn","itemId":"c","delta":"x"}),
+    );
+    assert_eq!(child.route.as_deref(), Some("thread-a"));
+    assert!(matches!(&child.events[..], [ProviderEvent::Child { key, .. }] if key == "child-a"));
+    let unknown = notify(
+        &mut codex,
+        "item/agentMessage/delta",
+        json!({"threadId":"elsewhere","turnId":"t","itemId":"u","delta":"x"}),
+    );
+    assert_eq!(unknown.route, None);
+    let interrupt = codex
         .command(
-            &ProviderCommand::SetModel {
-                selection: ModelSelection {
-                    instance: "claude".into(),
-                    driver: Driver::Claude,
-                    model: "claude-fable-5".into(),
-                    options: [("contextWindow".to_string(), "1m".to_string())].into(),
-                },
+            &ProviderCommand::Interrupt {
+                native_thread: None,
+                native_turn: None,
             },
-            "",
+            &routed("thread-b"),
             &[],
         )
         .unwrap();
-    assert_eq!(model.outbound[0]["request"]["model"], "claude-fable-5[1m]");
+    assert_eq!(interrupt.outbound[0]["method"], "turn/interrupt");
+    assert_eq!(
+        interrupt.outbound[0]["params"],
+        json!({"threadId":"native-b","turnId":"turn-b"})
+    );
+    assert!(codex.turn_in_flight("thread-a") && codex.turn_in_flight("thread-b"));
+    notify(
+        &mut codex,
+        "turn/completed",
+        json!({"threadId":"native-b","turn":{"id":"turn-b","status":"interrupted"}}),
+    );
+    assert!(codex.turn_in_flight("thread-a") && !codex.turn_in_flight("thread-b"));
+}
+// T3 ProviderTurnStartService: a fork's thread is loaded for the child's first
+// turn, a thread loaded for another selection or policy is resumed again, and
+// a stop while starting suppresses only that route's prompt.
+#[test]
+fn a_shared_translator_loads_threads_per_route() {
+    let mut codex = CodexProtocol::default();
+    shared_start(&mut codex, "source", "native-source", "turn-source");
+    notify(
+        &mut codex,
+        "turn/completed",
+        json!({"threadId":"native-source","turn":{"id":"turn-source","status":"completed"}}),
+    );
+    let fork = codex
+        .command(
+            &ProviderCommand::Fork {
+                native_thread: "native-source".into(),
+                through_turn: Some("turn-source".into()),
+            },
+            &routed("source"),
+            &[],
+        )
+        .unwrap();
+    let forked = codex
+        .receive(&json!({"id":fork.outbound[0]["id"],"result":{"thread":{"id":"native-fork"}}}))
+        .unwrap();
+    assert_eq!(
+        forked.completion,
+        Some(Completion::Forked {
+            native_thread: "native-fork".into()
+        })
+    );
+    // Until the child claims it, the fork's thread belongs to no route.
+    let usage = notify(
+        &mut codex,
+        "thread/tokenUsage/updated",
+        json!({"threadId":"native-fork","turnId":"turn-source","tokenUsage":{"total":{},"last":{}}}),
+    );
+    assert_eq!(usage.route, None);
+    let mut child_start = codex_start();
+    if let ProviderCommand::Start { native_thread, .. } = &mut child_start {
+        *native_thread = Some("native-fork".into());
+    }
+    let child = codex.command(&child_start, &routed("fork"), &[]).unwrap();
+    assert_eq!(child.outbound[0]["method"], "turn/start");
+    assert_eq!(child.outbound[0]["params"]["threadId"], "native-fork");
+    let mut source_start = codex_start();
+    if let ProviderCommand::Start {
+        native_thread,
+        runtime_mode,
+        ..
+    } = &mut source_start
+    {
+        *native_thread = Some("native-source".into());
+        *runtime_mode = RuntimeMode::FullAccess;
+    }
+    let resumed = codex
+        .command(&source_start, &routed("source"), &[])
+        .unwrap();
+    assert_eq!(resumed.outbound[0]["method"], "thread/resume");
+    let other = codex
+        .command(&codex_start(), &routed("other"), &[])
+        .unwrap();
+    assert_eq!(other.outbound[0]["method"], "thread/start");
+    codex
+        .command(
+            &ProviderCommand::Interrupt {
+                native_thread: None,
+                native_turn: None,
+            },
+            &routed("other"),
+            &[],
+        )
+        .unwrap();
+    let source_ready = codex
+        .receive(
+            &json!({"id":resumed.outbound[0]["id"],"result":{"thread":{"id":"native-source"}}}),
+        )
+        .unwrap();
+    assert_eq!(source_ready.outbound[0]["method"], "turn/start");
+    let other_ready = codex
+        .receive(&json!({"id":other.outbound[0]["id"],"result":{"thread":{"id":"native-other"}}}))
+        .unwrap();
+    assert!(other_ready.outbound.is_empty());
+}
+// T3 restoreAdditionalContext: compaction drops client developer messages, so
+// the thread's additional context is injected again.
+#[test]
+fn a_compaction_restores_the_threads_additional_context() {
+    let mut codex = CodexProtocol::default();
+    let context = WireContext {
+        additional_context: Some(Json(
+            json!({"orchestration":{"kind":"application","value":"use the tools"}}),
+        )),
+        ..routed("thread")
+    };
+    let start = codex
+        .command(&codex_start(), &context, &[])
+        .unwrap()
+        .outbound;
+    codex
+        .receive(&json!({"id":start[0]["id"],"result":{"thread":{"id":"native"}}}))
+        .unwrap();
+    let compacted = notify(
+        &mut codex,
+        "item/completed",
+        json!({"threadId":"native","turnId":"turn","item":{"type":"contextCompaction","id":"compact"}}),
+    );
+    assert_eq!(compacted.outbound.len(), 1);
+    assert_eq!(compacted.outbound[0]["method"], "thread/inject_items");
+    assert_eq!(
+        compacted.outbound[0]["params"],
+        json!({"threadId":"native","items":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"<orchestration>use the tools</orchestration>"}]}]})
+    );
 }

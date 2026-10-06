@@ -135,12 +135,14 @@ impl ToolBridge {
         }))
     }
 
-    /// The session ended; its token stops working.
-    pub(crate) fn revoke(&self, thread: &ThreadId, instance: &str) {
+    /// The thread's tokens for the instance, or for every instance, stop working.
+    pub(crate) fn revoke(&self, thread: &ThreadId, instance: Option<&str>) {
         self.scopes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, scope| !(scope.thread == *thread && scope.instance == instance));
+            .retain(|_, scope| {
+                !(scope.thread == *thread && instance.is_none_or(|i| scope.instance == i))
+            });
     }
 
     #[cfg(test)]
@@ -1228,7 +1230,7 @@ mod tests {
             bridge(listener.address(), request("invalid".into())).await,
             Err("Invalid orchestration scope".into())
         );
-        listener.revoke(&thread, "codex");
+        listener.revoke(&thread, Some("codex"));
         assert_eq!(
             bridge(listener.address(), request(token)).await,
             Err("Invalid orchestration scope".into())

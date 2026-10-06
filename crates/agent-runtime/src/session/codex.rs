@@ -8,14 +8,10 @@ impl SessionManager {
         command: &ProviderCommand,
         images: &[PreparedImage],
     ) -> Result<(), Failure> {
-        let context = self
-            .host
-            .codex_context(target.clone())
-            .await
-            .map_err(ExecError::Retry)?;
-        let entry = self.codex_session(target, &context).await?;
-        self.settled(&entry, attempt).await?;
-        if !self.still_current(&target.key.thread, attempt).await? {
+        let thread = &target.key.thread;
+        let (entry, context) = self.codex_entry(target).await?;
+        self.settled(&entry, thread, attempt).await?;
+        if !self.still_current(thread, attempt).await? {
             return Ok(());
         }
         self.bind(attempt, &entry);
@@ -24,35 +20,85 @@ impl SessionManager {
         let sent = self
             .send(
                 &entry,
-                Request::new(move |p| p.codex()?.command(&command, &context, &images))
-                    .owner(attempt),
+                Request::new(thread, move |p| {
+                    p.codex()?.command(&command, &context, &images)
+                })
+                .owner(attempt),
             )
             .await;
         settle_sent(sent, attempt, operation, None).map(|_| ())
     }
 
-    pub(super) async fn codex_session(
+    /// The instance's shared app-server with the target's thread attached, and
+    /// the thread's wire context on it.
+    pub(super) async fn codex_entry(
+        &self,
+        target: &LaunchTarget,
+    ) -> Result<(Entry, WireContext), Failure> {
+        let mut context = self
+            .host
+            .codex_context(target.clone())
+            .await
+            .map_err(ExecError::Retry)?;
+        context.route = target.key.thread.as_str().to_owned();
+        let entry = self.codex_session(target, &context).await?;
+        self.attach(&entry, target)?;
+        Ok((entry, context))
+    }
+
+    /// Opens the instance's app-server once: initialize, then the managed account.
+    async fn codex_session(
         &self,
         target: &LaunchTarget,
         context: &WireContext,
     ) -> Result<Entry, Failure> {
-        if let Some(entry) = self.entry(&target.key) {
-            return Ok(entry);
-        }
-        let entry = self.spawn(target, None).await?;
-        let context = context.clone();
-        let initialized = self
-            .request_reply(
-                &entry,
-                Request::new(move |p| Ok(frames(vec![p.codex()?.initialize(&context)])))
-                    .handshake(),
-            )
-            .await;
-        if let Err(message) = initialized {
-            self.close_entry(&entry, false, false).await;
-            return Err(ExecError::Retry(format!("Codex did not initialize: {message}")).into());
-        }
-        Ok(entry)
+        let slot = Slot::Shared(target.key.instance.clone());
+        self.opening
+            .with_lock(slot.clone(), async {
+                if let Some(entry) = self.entry(&slot) {
+                    return Ok(entry);
+                }
+                let entry = self.spawn(target, None).await?;
+                let thread = &target.key.thread;
+                let context = context.clone();
+                let initialized = self
+                    .request_reply(
+                        &entry,
+                        Request::new(thread, move |p| {
+                            Ok(frames(vec![p.codex()?.initialize(&context)]))
+                        })
+                        .handshake(),
+                    )
+                    .await;
+                let signed_in = match initialized {
+                    Ok(_) => self.codex_sign_in(&entry, thread).await,
+                    Err(message) => Err(format!("Codex did not initialize: {message}")),
+                };
+                if let Err(message) = signed_in {
+                    self.close_entry(&entry, false).await;
+                    return Err(ExecError::Retry(message).into());
+                }
+                Ok(entry)
+            })
+            .await
+    }
+
+    /// T3 resolveRuntime: a new app-server runs as the selected managed account.
+    async fn codex_sign_in(&self, entry: &Entry, thread: &ThreadId) -> Result<(), String> {
+        let Some(params) = self
+            .host
+            .codex_account(entry.slot.instance().to_owned())
+            .await?
+        else {
+            return Ok(());
+        };
+        self.request_reply(
+            entry,
+            Request::new(thread, move |p| Ok(frames(vec![p.codex()?.login(params)]))),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|message| format!("Codex did not accept the selected account: {message}"))
     }
 
     pub(super) async fn fork_codex(
@@ -62,13 +108,9 @@ impl SessionManager {
     ) -> Result<String, ForkError> {
         self.keys
             .with_lock(target.key.clone(), async {
-                let context = self
-                    .host
-                    .codex_context(target.clone())
-                    .await
-                    .map_err(ForkError::Retry)?;
-                let entry = match self.codex_session(target, &context).await {
-                    Ok(entry) => entry,
+                let _reserved = self.reserve(&target.key);
+                let (entry, context) = match self.codex_entry(target).await {
+                    Ok(opened) => opened,
                     Err(Failure::Exec(ExecError::Retry(message))) => {
                         return Err(ForkError::Retry(message));
                     }
@@ -83,7 +125,9 @@ impl SessionManager {
                 match self
                     .request_completion(
                         &entry,
-                        Request::new(move |p| p.codex()?.command(&forwarded, &context, &[])),
+                        Request::new(&target.key.thread, move |p| {
+                            p.codex()?.command(&forwarded, &context, &[])
+                        }),
                     )
                     .await
                 {

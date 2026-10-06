@@ -130,17 +130,6 @@ impl ClaudeProtocol {
                 *decision,
                 answers.as_ref(),
             )?),
-            ProviderCommand::SetModel { selection } => result.outbound.push(self.control.request(
-                "set_model",
-                json!({"model":claude_model_options(selection).model}),
-            )),
-            ProviderCommand::SetRuntimeMode {
-                runtime_mode,
-                interaction_mode,
-            } => result.outbound.push(self.control.request(
-                "set_permission_mode",
-                json!({"mode":claude_permission_mode(*runtime_mode,*interaction_mode)}),
-            )),
             ProviderCommand::Compact { .. } => {
                 self.text_seen.remove("");
                 result.events.push(ProviderEvent::PromptOffered {

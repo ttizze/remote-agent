@@ -71,6 +71,23 @@ impl HandoffCatalog for NoHandoffCatalog {
     }
 }
 
+/// T3's handoff limits: the default 16k token cap, and the context window the
+/// bundled Claude catalog knows (T3 getModelContextWindow); Codex reports none.
+pub struct ProviderHandoffCatalog;
+impl HandoffCatalog for ProviderHandoffCatalog {
+    fn policy(&self, selection: &ModelSelection) -> Option<HandoffValue> {
+        Some(HandoffValue {
+            model_window: match selection.driver {
+                agent_domain::Driver::Claude => {
+                    agent_providers::claude_model_options(selection).model_window
+                }
+                agent_domain::Driver::Codex => None,
+            },
+            token_cap: agent_domain::DEFAULT_HANDOFF_TOKEN_CAP,
+        })
+    }
+}
+
 /// Keeps an actor loaded while Host-owned work (such as a provider session) depends on it.
 pub trait Residency: Send + Sync {
     fn pinned(&self, thread: &ThreadId) -> bool;
