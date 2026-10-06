@@ -52,6 +52,7 @@ pub struct TextGenerationRequest {
 }
 
 /// Restored checkpoint files staged in place while the originals are kept aside.
+/// Dropping it without `commit` or `undo` (a cancelled effect) puts the originals back.
 pub trait PreparedRestore: Send {
     /// Keeps the restored files and discards the originals.
     fn commit(self: Box<Self>) -> BoxFuture<'static, Result<(), String>>;
