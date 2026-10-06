@@ -93,43 +93,96 @@ pub struct ClaudeSkillFrontmatter {
     pub user_invocation_only: bool,
     pub user_invocable: bool,
 }
-/// The YAML 1.1 boolean spellings Claude Code accepts.
-fn frontmatter_boolean(value: &str) -> Option<bool> {
-    match value.trim().to_lowercase().as_str() {
-        "true" | "yes" | "on" | "y" | "1" => Some(true),
-        "false" | "no" | "off" | "n" | "0" => Some(false),
+/// Claude Code accepts the YAML 1.1 boolean spellings, which the YAML 1.2
+/// core schema leaves as strings and numbers (T3 parseFrontmatterBoolean).
+fn frontmatter_boolean(value: Option<&serde_yaml::Value>) -> Option<bool> {
+    match value? {
+        serde_yaml::Value::Bool(value) => Some(*value),
+        serde_yaml::Value::Number(number) => {
+            let number = number.as_f64()?;
+            if number == 1.0 {
+                Some(true)
+            } else if number == 0.0 {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        serde_yaml::Value::String(value) => match value.trim().to_lowercase().as_str() {
+            "true" | "yes" | "on" | "y" => Some(true),
+            "false" | "no" | "off" | "n" => Some(false),
+            _ => None,
+        },
+        serde_yaml::Value::Tagged(tagged) => frontmatter_boolean(Some(&tagged.value)),
         _ => None,
     }
 }
-/// A plain, quoted or flow scalar without its trailing comment; `None` when
-/// the CLI's YAML parser would reject it.
-fn frontmatter_scalar(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    if let Some(quote) = raw.chars().next().filter(|c| matches!(c, '"' | '\'')) {
-        let close = raw[1..].find(quote)? + 1;
-        let rest = raw[close + 1..].trim_start();
-        return (rest.is_empty() || rest.starts_with('#')).then(|| raw[1..close].to_owned());
+/// The text between the opening `---` line and the next `---` line, as T3's
+/// `^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)` captures it.
+fn frontmatter_block(contents: &str) -> Option<&str> {
+    let rest = contents
+        .strip_prefix("---\n")
+        .or_else(|| contents.strip_prefix("---\r\n"))?;
+    (0..rest.len()).find_map(|index| {
+        let tail = &rest[index..];
+        let tail = tail
+            .strip_prefix("\r\n")
+            .or_else(|| tail.strip_prefix('\n'))?;
+        let after = tail.strip_prefix("---")?;
+        (after.is_empty() || after.starts_with('\n') || after.starts_with("\r\n"))
+            .then(|| &rest[..index])
+    })
+}
+/// Claude Code accepts plain scalars containing `: `; T3 quotes only those
+/// and leaves comments and YAML structure to the full-document parser.
+fn quote_plain_colon_scalars(frontmatter: &str) -> String {
+    let mut repaired = String::with_capacity(frontmatter.len());
+    for line in frontmatter.split_inclusive('\n') {
+        let end = line.find(['\r', '\n']).unwrap_or(line.len());
+        let (text, ending) = line.split_at(end);
+        repaired.push_str(&quote_plain_colon_scalar(text).unwrap_or_else(|| text.to_owned()));
+        repaired.push_str(ending);
     }
-    if let Some(open) = raw.chars().next().filter(|c| matches!(c, '[' | '{')) {
-        let close = if open == '[' { ']' } else { '}' };
-        let mut depth = 0i32;
-        for (index, c) in raw.char_indices() {
-            if c == open {
-                depth += 1;
-            } else if c == close {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(raw[..=index].to_owned());
-                }
-            }
-        }
+    repaired
+}
+fn quote_plain_colon_scalar(line: &str) -> Option<String> {
+    let key = line
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .filter(|&end| end > 0 && line[end..].starts_with(':'))?;
+    let value_start = key
+        + 1
+        + line[key + 1..]
+            .find(|c: char| c != ' ' && c != '\t')
+            .unwrap_or(line.len() - key - 1);
+    let value = &line[value_start..];
+    let scalar = value
+        .char_indices()
+        .find(|&(index, c)| {
+            matches!(c, ' ' | '\t')
+                && value[index..]
+                    .trim_start_matches([' ', '\t'])
+                    .starts_with('#')
+        })
+        .map_or(value, |(index, _)| &value[..index]);
+    let indicator = scalar.starts_with([
+        '"', '\'', '[', ']', '{', '}', '|', '>', '&', '*', '!', '#', '%', '@', '`',
+    ]) || scalar.starts_with(['-', '?', ':'])
+        && scalar[1..]
+            .chars()
+            .next()
+            .is_none_or(|c| c == ' ' || c == '\t');
+    let colon = scalar
+        .char_indices()
+        .any(|(index, c)| c == ':' && scalar[index + 1..].starts_with([' ', '\t']));
+    if !colon || indicator {
         return None;
     }
-    let value = match raw.find(" #").or_else(|| raw.find("\t#")) {
-        Some(comment) => &raw[..comment],
-        None => raw,
-    };
-    Some(value.trim().to_owned())
+    Some(format!(
+        "{}{}{}",
+        &line[..value_start],
+        serde_json::Value::String(scalar.to_owned()),
+        &value[scalar.len()..]
+    ))
 }
 /// The skill's frontmatter; `None` when it is malformed, as Claude Code then
 /// does not load the skill. A file without frontmatter is an ordinary skill.
@@ -138,53 +191,27 @@ pub fn claude_skill_frontmatter(contents: &str) -> Option<ClaudeSkillFrontmatter
         user_invocation_only: false,
         user_invocable: true,
     };
-    let Some(rest) = contents
-        .strip_prefix("---\n")
-        .or_else(|| contents.strip_prefix("---\r\n"))
-    else {
+    let Some(frontmatter) = frontmatter_block(contents) else {
         return Some(parsed);
     };
-    let mut lines = vec![];
-    let mut closed = false;
-    for line in rest.split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if line == "---" {
-            closed = true;
-            break;
+    let document = serde_yaml::from_str::<serde_yaml::Value>(frontmatter)
+        .or_else(|_| serde_yaml::from_str(&quote_plain_colon_scalars(frontmatter)))
+        .ok()?;
+    let document = match document {
+        serde_yaml::Value::Tagged(tagged) => tagged.value,
+        document => document,
+    };
+    match &document {
+        serde_yaml::Value::Mapping(_) => {
+            parsed.user_invocation_only =
+                frontmatter_boolean(document.get("disable-model-invocation")) == Some(true);
+            parsed.user_invocable =
+                frontmatter_boolean(document.get("user-invocable")) != Some(false);
+            Some(parsed)
         }
-        lines.push(line);
+        serde_yaml::Value::Sequence(_) => Some(parsed),
+        _ => None,
     }
-    if !closed {
-        return Some(parsed);
-    }
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || line.starts_with([' ', '\t']) {
-            continue;
-        }
-        if trimmed.starts_with("- ") {
-            continue;
-        }
-        let (key, value) = line.split_once(':')?;
-        if key.is_empty()
-            || !key
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
-            return None;
-        }
-        let value = frontmatter_scalar(value)?;
-        match key {
-            "disable-model-invocation" => {
-                parsed.user_invocation_only |= frontmatter_boolean(&value) == Some(true);
-            }
-            "user-invocable" => {
-                parsed.user_invocable = frontmatter_boolean(&value) != Some(false);
-            }
-            _ => {}
-        }
-    }
-    Some(parsed)
 }
 /// A `skillOverrides` entry: `(enabled, user invocation only)`.
 pub type ClaudeSkillOverride = (bool, bool);
@@ -398,6 +425,67 @@ mod tests {
                     .user_invocable,
                 invocable
             );
+        }
+    }
+
+    // T3 parses the whole frontmatter as YAML, so quoted keys, tags and block
+    // scalars count, and what its parser rejects drops the skill.
+    #[test]
+    fn skill_frontmatter_is_read_as_a_yaml_document() {
+        let skill = |lines: &[&str]| claude_skill_frontmatter(&lines.join("\n"));
+        let not_invocable = Some(ClaudeSkillFrontmatter {
+            user_invocation_only: true,
+            user_invocable: false,
+        });
+        for (invocation, invocable) in [
+            (
+                "\"disable-model-invocation\": true",
+                "'user-invocable': false",
+            ),
+            (
+                "disable-model-invocation: !!bool true",
+                "user-invocable: !!bool false",
+            ),
+            (
+                "disable-model-invocation: \"yes\"",
+                "user-invocable: !!str off",
+            ),
+            ("{disable-model-invocation: on, user-invocable: n}", ""),
+        ] {
+            assert_eq!(
+                skill(&["---", invocation, invocable, "---", "body"]),
+                not_invocable,
+                "{invocation} {invocable}"
+            );
+        }
+        assert_eq!(
+            skill(&[
+                "---",
+                "description: |",
+                "  Runs: the deploy.",
+                "  user-invocable: false",
+                "user-invocable: false # hidden",
+                "---",
+            ]),
+            Some(ClaudeSkillFrontmatter {
+                user_invocation_only: false,
+                user_invocable: false
+            })
+        );
+        assert_eq!(
+            skill(&["---", "- listed", "---"]),
+            Some(ClaudeSkillFrontmatter {
+                user_invocation_only: false,
+                user_invocable: true
+            })
+        );
+        for malformed in [
+            &["---", "name: first", "name: second", "---"][..],
+            &["---", "", "---"],
+            &["---", "# only a comment", "---"],
+            &["---", "just text", "---"],
+        ] {
+            assert_eq!(skill(malformed), None, "{malformed:?}");
         }
     }
 
