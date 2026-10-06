@@ -33,17 +33,7 @@ const FILE_BODY_KEYS: [&str; 6] = [
 
 /// JavaScript `\s`, which `trim` and T3's summaries use.
 pub fn js_space(c: char) -> bool {
-    matches!(
-        c,
-        '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200A}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202F}'
-                | '\u{205F}'
-                | '\u{3000}'
-                | '\u{FEFF}'
-    )
+    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
 }
 
 fn utf16_len(text: &str) -> usize {

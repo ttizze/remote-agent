@@ -438,9 +438,7 @@ fn utf16_tail(text: &str, units: usize) -> &str {
 }
 
 /// JavaScript `\s` and `trim()` whitespace: Unicode White_Space without U+0085, plus U+FEFF.
-fn is_js_space(c: char) -> bool {
-    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
-}
+use crate::sync::js_space as is_js_space;
 
 fn js_trim(text: &str) -> &str {
     text.trim_matches(is_js_space)

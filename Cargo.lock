@@ -4710,6 +4710,7 @@ dependencies = [
  "icu_collator",
  "orchestration",
  "proptest",
+ "regex",
  "reqwest",
  "ring",
  "rustls",
@@ -4721,6 +4722,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
  "zeroize",
 ]

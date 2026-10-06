@@ -402,4 +402,10 @@ impl HostOperations for HostIo {
     ) -> BoxFuture<'_, Result<String, String>> {
         Box::pin(self.text.generate(request))
     }
+    fn title_link_context(&self, cwd: String, links: Vec<String>) -> BoxFuture<'_, Option<String>> {
+        Box::pin(async move {
+            super::title_links::title_link_context(&cwd, &links, &super::title_links::resolve_link)
+                .await
+        })
+    }
 }
