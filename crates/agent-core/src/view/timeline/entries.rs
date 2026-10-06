@@ -507,7 +507,7 @@ pub fn derive_timeline_entries(state: &State, input: &EntriesInput<'_>) -> Vec<T
                     markdown: state
                         .plans
                         .iter()
-                        .find(|candidate| &candidate.id == plan)
+                        .find(|candidate| &candidate.id == plan && !candidate.markdown.is_empty())
                         .map_or_else(|| item.text.clone(), |plan| plan.markdown.clone()),
                     status: plan_status(state, plan),
                     created_at: created_at.clone(),
@@ -612,3 +612,7 @@ pub fn revert_turn_counts(
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "entries_tests.rs"]
+mod tests;
