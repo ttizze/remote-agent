@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 fn valid(key: &str) -> bool {
     !key.is_empty() && key.bytes().all(|b| b.is_ascii_lowercase()) && !key.ends_with('a')
 }
-fn between(before: Option<&str>, after: Option<&str>) -> Option<String> {
+pub(crate) fn between(before: Option<&str>, after: Option<&str>) -> Option<String> {
     let mut a = before.unwrap_or("").as_bytes();
     let mut b = after.unwrap_or("").as_bytes();
     if before.is_some_and(|k| !valid(k))
@@ -43,7 +43,7 @@ fn between(before: Option<&str>, after: Option<&str>) -> Option<String> {
     }
     String::from_utf8(key).ok()
 }
-fn spread(count: usize) -> Vec<String> {
+pub(crate) fn spread(count: usize) -> Vec<String> {
     let mut width = 2;
     let mut space = 26_u128.pow(width);
     while space <= ((count as u128) + 1) * 2 {

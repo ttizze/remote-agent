@@ -140,6 +140,7 @@ dependencies = [
  "agent-domain",
  "agent-protocol",
  "agent-transport",
+ "chrono",
  "insta",
  "markdown",
  "proptest",
