@@ -2349,6 +2349,97 @@ async fn the_bridge_authenticates_its_scope_and_revoked_tokens_stop_working() {
     );
 }
 
+#[tokio::test]
+async fn the_largest_valid_thread_read_reaches_the_provider_session() {
+    let fake = Arc::new(Fake::default());
+    let mut state = thread_state("thread:caller");
+    state
+        .runs
+        .push(run("run:1", 1, RunStatus::Completed, "codex"));
+    // A control character takes the most bytes once escaped, and the text is
+    // escaped again inside the result's JSON text.
+    let text = "\u{1}".repeat(50_000);
+    for index in 0..100u64 {
+        let id = format!("message:{index}");
+        state
+            .messages
+            .push(message(&id, Some("run:1"), Role::User, &text));
+        state.items.push(item(
+            &format!("item:{index}"),
+            Some("run:1"),
+            index,
+            ItemKind::UserMessage {
+                message: MessageId::new(&id).unwrap(),
+            },
+            "",
+        ));
+    }
+    fake.put(state);
+    let tools = Arc::new(tools(&fake));
+    let listener = ToolBridge::bind().unwrap();
+    let thread = ThreadId::new("thread:caller").unwrap();
+    let config = listener.provider_config(&thread, "codex").unwrap();
+    let token = config["env"][TOKEN_ENV].as_str().unwrap().to_owned();
+    listener.serve(Arc::downgrade(&tools)).unwrap();
+    let (provider, session) = tokio::io::duplex(64 * 1024);
+    let (session_input, session_output) = tokio::io::split(session);
+    let session = tokio::spawn(serve_stdio(
+        listener.address(),
+        token,
+        session_input,
+        session_output,
+    ));
+    let (provider_input, provider_output) = tokio::io::split(provider);
+    let mut requests = JsonlWriter::new(provider_output);
+    requests
+        .write_line(
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"thread_read","arguments":{"threadId":"thread:caller","limit":100,"maxCharsPerItem":50_000}}})
+                .to_string(),
+        )
+        .await
+        .unwrap();
+    let line = JsonlReader::new(provider_input)
+        .read_line()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(line.len() > 6 * 1024 * 1024);
+    let response: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 1);
+    let result = &response["result"];
+    assert_eq!(result["isError"], false);
+    let items = result["structuredContent"]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 100);
+    assert!(
+        items
+            .iter()
+            .all(|item| item["text"] == text.as_str() && item["textTruncated"] == false)
+    );
+    assert_eq!(
+        result["content"][0]["text"].as_str().unwrap(),
+        result["structuredContent"].to_string()
+    );
+    drop(requests);
+    assert_eq!(session.await.unwrap(), Ok(()));
+}
+
+#[tokio::test]
+async fn a_result_beyond_the_framing_guard_is_answered_with_the_internal_tool_error() {
+    let (session, provider) = tokio::io::duplex(64 * 1024);
+    let mut output = JsonlWriter::with_max_message_bytes(session, 256);
+    answer(&mut output, &Ok(json!({"text": "x".repeat(1_000)}))).await;
+    drop(output);
+    let line = JsonlReader::new(provider)
+        .read_line()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Result<Value, String>>(&line).unwrap(),
+        Ok(error_content(INTERNAL_TOOL_ERROR))
+    );
+}
+
 #[test]
 fn stable_ids_scope_retries_to_the_session_and_encode_keys() {
     let parent = ThreadId::new("parent").unwrap();
