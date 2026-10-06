@@ -66,6 +66,11 @@ impl WorkspaceFiles {
         }
     }
 
+    /// Where every thread's attachments are kept.
+    pub(crate) fn attachment_root(&self) -> &Path {
+        &self.upload_directory
+    }
+
     pub(crate) fn thread_attachment_directory(&self, thread_id: &str) -> PathBuf {
         self.upload_directory
             .join("chat")

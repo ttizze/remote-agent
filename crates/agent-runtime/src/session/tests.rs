@@ -2501,3 +2501,57 @@ async fn a_new_app_server_signs_in_with_the_managed_account_and_refreshes_its_to
             .contains(&"refresh:codex:Some(\"account-1\")".to_owned())
     );
 }
+
+// T3 ClaudeAdapterV2 query options: the app's MCP tools are pre-approved after
+// the policy's own allowed tools, the workspace and attachments are added
+// directories, and the runtime and orchestration instructions are appended to
+// the system prompt.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claude_launch_pre_approves_the_app_tools_and_appends_the_instructions() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(claude_replies);
+    *rig.host.claude.lock().unwrap() = ClaudeSettings {
+        mcp_servers: BTreeMap::from([(
+            "orchestration".to_owned(),
+            json!({"command":"agent","timeout":agent_providers::CLAUDE_MCP_TOOL_TIMEOUT_MS}),
+        )]),
+        mcp_allowed_tools: vec!["mcp__orchestration__*".into()],
+        additional_directories: vec!["/workspace".into(), "/attachments".into()],
+        append_system_prompt: agent_providers::claude_append_system_prompt(true),
+        ..ClaudeSettings::default()
+    };
+    let id = thread("thread-claude-launch-settings");
+    let process = rig.claude_turn(&id, RuntimeMode::ApprovalRequired).await;
+    let args = process.request.claude.clone().unwrap().args();
+    let value = |name: &str| {
+        args.iter()
+            .position(|arg| arg == &format!("--{name}"))
+            .map(|index| args[index + 1].clone())
+    };
+    assert_eq!(
+        value("allowedTools").as_deref(),
+        Some("mcp__orchestration__*")
+    );
+    assert_eq!(
+        args.iter()
+            .enumerate()
+            .filter(|(_, arg)| *arg == "--add-dir")
+            .map(|(index, _)| args[index + 1].as_str())
+            .collect::<Vec<_>>(),
+        ["/workspace", "/attachments"]
+    );
+    let config: Value = serde_json::from_str(&value("mcp-config").unwrap()).unwrap();
+    assert_eq!(
+        config["mcpServers"]["orchestration"]["timeout"],
+        65 * 60 * 1000
+    );
+    let initialize = process
+        .written()
+        .into_iter()
+        .find(|frame| frame["request"]["subtype"] == "initialize")
+        .unwrap();
+    assert_eq!(
+        initialize["request"]["appendSystemPrompt"],
+        agent_providers::claude_append_system_prompt(true)
+    );
+}

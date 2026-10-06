@@ -356,15 +356,25 @@ fn claude_launch(
         merged.extend(model.clone());
     }
     let settings_value = (merged != json!({})).then_some(merged);
+    let mut policy = claude_runtime_query_policy(
+        target.runtime_mode,
+        target.interaction_mode,
+        settings.approval_policy.as_deref(),
+        settings.sandbox_kind.as_deref(),
+        settings.read_only_allows_global_reads,
+    );
+    if !settings.mcp_servers.is_empty() && !settings.mcp_allowed_tools.is_empty() {
+        let mut allowed = policy.allowed_tools.take().unwrap_or_default();
+        for tool in &settings.mcp_allowed_tools {
+            if !allowed.contains(tool) {
+                allowed.push(tool.clone());
+            }
+        }
+        policy.allowed_tools = Some(allowed);
+    }
     ClaudeLaunch {
         model: options.model,
-        policy: claude_runtime_query_policy(
-            target.runtime_mode,
-            target.interaction_mode,
-            settings.approval_policy.as_deref(),
-            settings.sandbox_kind.as_deref(),
-            settings.read_only_allows_global_reads,
-        ),
+        policy,
         resume_at: resume_at.filter(|_| native_session.is_some()),
         native_session,
         new_session,

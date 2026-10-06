@@ -87,6 +87,192 @@ pub fn claude_skill_dispatch(text: &str, skills: &[String]) -> Option<ClaudeSkil
     })
 }
 
+/// What a Claude skill's `SKILL.md` says about invoking it (T3 ClaudeSkills).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ClaudeSkillFrontmatter {
+    pub user_invocation_only: bool,
+    pub user_invocable: bool,
+}
+/// The YAML 1.1 boolean spellings Claude Code accepts.
+fn frontmatter_boolean(value: &str) -> Option<bool> {
+    match value.trim().to_lowercase().as_str() {
+        "true" | "yes" | "on" | "y" | "1" => Some(true),
+        "false" | "no" | "off" | "n" | "0" => Some(false),
+        _ => None,
+    }
+}
+/// A plain, quoted or flow scalar without its trailing comment; `None` when
+/// the CLI's YAML parser would reject it.
+fn frontmatter_scalar(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if let Some(quote) = raw.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+        let close = raw[1..].find(quote)? + 1;
+        let rest = raw[close + 1..].trim_start();
+        return (rest.is_empty() || rest.starts_with('#')).then(|| raw[1..close].to_owned());
+    }
+    if let Some(open) = raw.chars().next().filter(|c| matches!(c, '[' | '{')) {
+        let close = if open == '[' { ']' } else { '}' };
+        let mut depth = 0i32;
+        for (index, c) in raw.char_indices() {
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(raw[..=index].to_owned());
+                }
+            }
+        }
+        return None;
+    }
+    let value = match raw.find(" #").or_else(|| raw.find("\t#")) {
+        Some(comment) => &raw[..comment],
+        None => raw,
+    };
+    Some(value.trim().to_owned())
+}
+/// The skill's frontmatter; `None` when it is malformed, as Claude Code then
+/// does not load the skill. A file without frontmatter is an ordinary skill.
+pub fn claude_skill_frontmatter(contents: &str) -> Option<ClaudeSkillFrontmatter> {
+    let mut parsed = ClaudeSkillFrontmatter {
+        user_invocation_only: false,
+        user_invocable: true,
+    };
+    let Some(rest) = contents
+        .strip_prefix("---\n")
+        .or_else(|| contents.strip_prefix("---\r\n"))
+    else {
+        return Some(parsed);
+    };
+    let mut lines = vec![];
+    let mut closed = false;
+    for line in rest.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        lines.push(line);
+    }
+    if !closed {
+        return Some(parsed);
+    }
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || line.starts_with([' ', '\t']) {
+            continue;
+        }
+        if trimmed.starts_with("- ") {
+            continue;
+        }
+        let (key, value) = line.split_once(':')?;
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+        {
+            return None;
+        }
+        let value = frontmatter_scalar(value)?;
+        match key {
+            "disable-model-invocation" => {
+                parsed.user_invocation_only |= frontmatter_boolean(&value) == Some(true);
+            }
+            "user-invocable" => {
+                parsed.user_invocable = frontmatter_boolean(&value) != Some(false);
+            }
+            _ => {}
+        }
+    }
+    Some(parsed)
+}
+/// A `skillOverrides` entry: `(enabled, user invocation only)`.
+pub type ClaudeSkillOverride = (bool, bool);
+/// The `skillOverrides` of one Claude settings file. Settings files are
+/// hand-edited, so comments and trailing commas are accepted; one invalid
+/// value drops the whole map, as Claude Code does.
+pub fn claude_skill_overrides(contents: &str) -> Vec<(String, ClaudeSkillOverride)> {
+    let Ok(settings) = serde_json::from_str::<serde_json::Value>(&lenient_json(contents)) else {
+        return vec![];
+    };
+    let Some(overrides) = settings["skillOverrides"].as_object() else {
+        return vec![];
+    };
+    overrides
+        .iter()
+        .map(|(name, value)| {
+            let parsed = match value.as_str()? {
+                "off" => (false, false),
+                "user-invocable-only" => (true, true),
+                "on" | "name-only" => (true, false),
+                _ => return None,
+            };
+            Some((name.clone(), parsed))
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
+}
+/// JSON with `//` and `/* */` comments and trailing commas removed.
+fn lenient_json(text: &str) -> String {
+    let mut uncommented = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut string = false;
+    while let Some(c) = chars.next() {
+        if string {
+            uncommented.push(c);
+            if c == '\\' {
+                uncommented.extend(chars.next());
+            } else if c == '"' {
+                string = false;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('/', Some('/')) => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        uncommented.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut previous = ' ';
+                for c in chars.by_ref() {
+                    if previous == '*' && c == '/' {
+                        break;
+                    }
+                    previous = c;
+                }
+            }
+            _ => {
+                string = c == '"';
+                uncommented.push(c);
+            }
+        }
+    }
+    let mut output = String::with_capacity(uncommented.len());
+    let mut string = false;
+    let mut escaped = false;
+    for (index, c) in uncommented.char_indices() {
+        if string {
+            string = escaped || c != '"';
+            escaped = !escaped && c == '\\';
+        } else if c == '"' {
+            string = true;
+        } else if c == ','
+            && uncommented[index + 1..]
+                .trim_start()
+                .starts_with(['}', ']'])
+        {
+            continue;
+        }
+        output.push(c);
+    }
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +339,96 @@ mod tests {
         assert_eq!(
             claude_skill_dispatch("pay $20 $20k $100M $1e6 tomorrow", &amounts),
             None
+        );
+    }
+    // T3 ClaudeSkills.test.ts frontmatter cases.
+    #[test]
+    fn skill_frontmatter_reads_invocation_and_rejects_what_the_cli_rejects() {
+        let skill = |lines: &[&str]| claude_skill_frontmatter(&lines.join("\n"));
+        assert_eq!(
+            claude_skill_frontmatter("# Just a heading\n"),
+            Some(ClaudeSkillFrontmatter {
+                user_invocation_only: false,
+                user_invocable: true
+            })
+        );
+        for (description, comment) in [
+            (
+                "Browser automation + AI test authoring via kane-cli: run browser objectives, ...",
+                "",
+            ),
+            (
+                "Read C:\\skills\\guide#tag: continue with \"quoted\".",
+                " # trailing: comment",
+            ),
+        ] {
+            assert_eq!(
+                skill(&[
+                    "---",
+                    "name: frontmatter-alias",
+                    &format!("description: {description}{comment}"),
+                    "allowed-tools: [Read, Write]",
+                    "disable-model-invocation: yes",
+                    "user-invocable: no",
+                    "---",
+                ]),
+                Some(ClaudeSkillFrontmatter {
+                    user_invocation_only: true,
+                    user_invocable: false
+                })
+            );
+        }
+        for field in [
+            "name: [unclosed",
+            "allowed-tools: [Read, Write",
+            "name: \"unclosed: text",
+        ] {
+            assert_eq!(
+                skill(&["---", "description: Run: browser objectives.", field, "---"]),
+                None,
+                "{field}"
+            );
+        }
+        for (value, invocable) in [("no", false), ("off", false), ("0", false), ("yes", true)] {
+            assert_eq!(
+                skill(&["---", &format!("user-invocable: {value}"), "---"])
+                    .unwrap()
+                    .user_invocable,
+                invocable
+            );
+        }
+    }
+
+    // T3 ClaudeSkills.test.ts skillOverrides cases.
+    #[test]
+    fn skill_overrides_follow_the_cli() {
+        assert_eq!(
+            claude_skill_overrides(
+                r#"{ "skillOverrides": { "off-by-user": "off", "kept": "on" } }"#
+            ),
+            [
+                ("kept".to_owned(), (true, false)),
+                ("off-by-user".to_owned(), (false, false))
+            ]
+        );
+        assert_eq!(
+            claude_skill_overrides(
+                r#"{ "skillOverrides": { "ask-matt": "user-invocable-only" } }"#
+            ),
+            [("ask-matt".to_owned(), (true, true))]
+        );
+        assert!(claude_skill_overrides("{ not json").is_empty());
+        assert!(
+            claude_skill_overrides(
+                r#"{ "skillOverrides": { "unknown-mode": "some-future-mode", "boolean-false": false, "sibling-off": "off" } }"#
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            claude_skill_overrides(
+                "{\n  // hand edited\n  \"skillOverrides\": { \"x\": \"off\", /* note */ },\n}"
+            ),
+            [("x".to_owned(), (false, false))]
         );
     }
 }

@@ -94,6 +94,9 @@ pub struct ClaudeSettings {
     pub additional_directories: Vec<String>,
     pub disallowed_tools: Vec<String>,
     pub mcp_servers: BTreeMap<String, Value>,
+    /// Tools of the app's MCP servers the CLI runs without asking (T3
+    /// claudeMcpQueryOverrides), added to the policy's allowed tools.
+    pub mcp_allowed_tools: Vec<String>,
     pub settings: Option<Value>,
     pub extra_args: BTreeMap<String, Option<String>>,
     pub append_system_prompt: String,

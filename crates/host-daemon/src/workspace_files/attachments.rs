@@ -149,10 +149,6 @@ impl WorkspaceFiles {
         *last = Some(Instant::now());
         Ok(())
     }
-    #[cfg(test)]
-    pub(crate) fn attachment_root(&self) -> &Path {
-        &self.upload_directory
-    }
     pub(super) fn prepare_attachment_directory(&self, directory: &Path) -> Result<()> {
         let relative = directory.strip_prefix(&self.upload_directory)?;
         let mut path = self.upload_directory.to_path_buf();
