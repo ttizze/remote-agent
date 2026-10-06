@@ -268,3 +268,32 @@ fn a_message_can_implement_another_threads_plan() {
     );
     assert_eq!(source.plans[0].implemented_by, Some(run));
 }
+
+/// The project root the Host fills in on first dispatch is not part of the
+/// command's identity, so a resent command returns its first result.
+#[test]
+fn a_resent_update_without_the_host_filled_root_replays_its_result() {
+    let mut s = state();
+    let first = command(
+        &mut s,
+        "clear",
+        with(|c| {
+            set!(c, worktree_path, Some(None));
+            set!(c, project_root, Some("/project".into()));
+        }),
+    );
+    let replay = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "clear".into(),
+            input: Input::Command {
+                id: CommandId::new("clear").unwrap(),
+                command: Box::new(with(|c| set!(c, worktree_path, Some(None)))),
+                receipt: first.receipt.clone(),
+            },
+        },
+    );
+    assert_eq!(replay.reply, first.reply);
+    assert_eq!(replay.receipt, first.receipt);
+}

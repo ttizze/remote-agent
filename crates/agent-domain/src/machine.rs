@@ -6361,19 +6361,30 @@ fn preparation_kind(title: &str, exit_code: Option<i64>) -> ItemKind {
 fn command_fingerprint(command: &Command) -> String {
     let encode =
         |command: &Command| serde_json::to_string(command).expect("domain commands serialize");
-    if let Command::Rollback {
-        checkpoint,
-        restore_files,
-        restore_refusal: Some(_),
-    } = command
-    {
-        return encode(&Command::Rollback {
-            checkpoint: checkpoint.clone(),
-            restore_files: *restore_files,
-            restore_refusal: None,
-        });
+    let mut identity = match command {
+        Command::Rollback {
+            restore_refusal: Some(_),
+            ..
+        }
+        | Command::Send(SendMessage {
+            resolved_plan: Some(_),
+            ..
+        })
+        | Command::UpdateMetadata {
+            project_root: Some(_),
+            ..
+        } => command.clone(),
+        command => return encode(command),
+    };
+    match &mut identity {
+        Command::Rollback {
+            restore_refusal, ..
+        } => *restore_refusal = None,
+        Command::Send(message) => message.resolved_plan = None,
+        Command::UpdateMetadata { project_root, .. } => *project_root = None,
+        _ => {}
     }
-    encode(command)
+    encode(&identity)
 }
 fn reject(reason: &str) -> Reply {
     Reply::Rejected {
