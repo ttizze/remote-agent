@@ -662,3 +662,53 @@ async fn a_launch_into_the_restored_worktree_waits_for_the_restore() {
     assert_eq!(calls, ["prepare", "provider", "commit", "launched"]);
     assert_eq!(rig.state(&id).await.rollback_failure, None);
 }
+
+// T3 Orchestrator reads the fork source again at the child's first message
+// (CommandPolicy decideForkExecution): a source turn rolled back since the fork
+// is handed over as portable context instead of a native fork.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_whose_source_turn_was_rolled_back_starts_from_portable_context() {
+    let rig = rig();
+    rig.host.respond(revert_replies(rig.ops.clone(), false));
+    let id = tid("fork-rolled-back-parent");
+    let scope = rig.scoped(&id, worktree("/wt")).await;
+    rig.completed_run(&id, "first", "turn-1").await;
+    let second = rig.completed_run(&id, "second", "turn-2").await;
+    let child = tid("fork-rolled-back-child");
+    let forked = rig
+        .command(
+            &id,
+            Command::Fork {
+                target: child.clone(),
+                source: agent_domain::SourcePoint::Run(second),
+                title: None,
+            },
+        )
+        .await;
+    assert_eq!(forked, Reply::Thread(child.clone()));
+    rig.drain().await;
+    assert!(rig.state(&child).await.transfers[0].native_source.is_some());
+    assert_eq!(rollback(&rig, &id, &scope, 1, false).await, Reply::Accepted);
+    rig.drain().await;
+    assert_eq!(rolled_back(&*rig.state(&id).await), [2]);
+    rig.send(&child, "child", "child").await;
+    rig.drain().await;
+    let forks = (0..rig.host.spawned())
+        .flat_map(|index| rig.host.process(index).written())
+        .filter(|frame| frame["method"] == "thread/fork")
+        .count();
+    assert_eq!(forks, 0);
+    let state = rig.state(&child).await;
+    assert_ne!(state.runs[0].status, RunStatus::Failed);
+    let transfer = state
+        .transfers
+        .iter()
+        .find(|transfer| !transfer.superseded)
+        .unwrap();
+    assert!(transfer.native_source.is_none());
+    assert!(
+        transfer.delivery.as_ref().is_some_and(
+            |delivery| delivery.status != agent_domain::ContextDeliveryStatus::NativeFork
+        )
+    );
+}

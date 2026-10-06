@@ -774,6 +774,24 @@ impl SessionManager {
                 message,
             }))
         };
+        // T3 reads the source run again at the first message: one rolled back
+        // since the fork no longer has its native boundary.
+        if let Some(transfer) = state.transfers.iter().find(|transfer| {
+            transfer.kind == TransferKind::Fork
+                && !transfer.superseded
+                && &transfer.target == thread
+                && transfer.native_source.is_some()
+        }) {
+            let source = self.state(&transfer.source).await?;
+            if !source.runs.iter().any(|run| {
+                run.ordinal == transfer.boundary
+                    && matches!(run.status, RunStatus::Completed | RunStatus::Waiting)
+            }) {
+                return Ok(Some(EffectResult::ForkSourceChanged {
+                    attempt: attempt.clone(),
+                }));
+            }
+        }
         let target = match instance_target(&state, thread, instance) {
             Ok(target) => target,
             Err(ExecError::Retry(message)) => return failed(message),

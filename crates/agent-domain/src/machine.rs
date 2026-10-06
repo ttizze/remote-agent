@@ -5611,6 +5611,27 @@ impl Decision {
                 self.dispatch_start(&run.id, attempt, true);
                 return Reply::Accepted;
             }
+            // T3 decideForkExecution: a source run that is no longer completed
+            // or waiting is handed over as portable context instead.
+            EffectResult::ForkSourceChanged { attempt } => {
+                let Some((run, transfer)) = self.awaiting_fork(attempt) else {
+                    return Reply::Ignored;
+                };
+                self.fact(FactBody::TransferOpened {
+                    native_source: None,
+                    id: ContextTransferId::new(self.key("portable-fork", transfer.id.as_str()))
+                        .unwrap(),
+                    kind: TransferKind::Fork,
+                    source: transfer.source.clone(),
+                    target: transfer.target.clone(),
+                    boundary: transfer.boundary,
+                    instance: None,
+                    target_run: None,
+                    history: transfer.history.clone(),
+                });
+                self.dispatch_start(&run.id, attempt, true);
+                return Reply::Accepted;
+            }
             // T3 ProviderTurnStartService.ts: a native fork that fails on the
             // last attempt fails the run; the transfer stays pending.
             EffectResult::ForkFailed { attempt, message } => {

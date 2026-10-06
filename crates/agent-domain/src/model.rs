@@ -1411,6 +1411,11 @@ pub enum EffectResult {
         attempt: RunAttemptId,
         message: String,
     },
+    /// The fork's source run no longer has a stable native boundary (T3
+    /// decideForkExecution reads the source run again at the first message).
+    ForkSourceChanged {
+        attempt: RunAttemptId,
+    },
     ProviderFailed {
         attempt: RunAttemptId,
         operation: ProviderOperation,
