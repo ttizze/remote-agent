@@ -73,7 +73,6 @@ impl Writer {
             input_seq: self.head.input_seq + 1,
             receipt: None,
             search: search_changes(&self.state, &facts),
-            attachment_paths: vec![],
             facts,
             effects: vec![],
             settle: None,

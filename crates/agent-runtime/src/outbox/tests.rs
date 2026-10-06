@@ -165,7 +165,6 @@ impl Db {
                 shell: None,
                 needs_recovery: false,
                 search: SearchChanges::default(),
-                attachment_paths: vec![],
                 snapshot: None,
             })
             .await

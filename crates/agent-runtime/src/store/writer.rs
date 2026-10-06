@@ -23,7 +23,6 @@ pub struct CommitBatch {
     pub shell: Option<ShellRow>,
     pub needs_recovery: bool,
     pub search: SearchChanges,
-    pub attachment_paths: Vec<String>,
     /// The projection after this batch, when a snapshot is due.
     pub snapshot: Option<Vec<u8>>,
 }
@@ -343,12 +342,6 @@ fn write_batch(
                 row.text,
                 row.created_at
             ])?;
-        }
-        let mut reference = tx.prepare_cached(
-            "INSERT OR IGNORE INTO attachment_refs (path, thread_id) VALUES (?1, ?2)",
-        )?;
-        for path in &batch.attachment_paths {
-            reference.execute(params![path, thread])?;
         }
     }
     if let Some(blob) = &batch.snapshot {

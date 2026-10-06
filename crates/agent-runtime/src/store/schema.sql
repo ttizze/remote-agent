@@ -106,12 +106,6 @@ CREATE TABLE checkpoint_baselines (
     PRIMARY KEY (scope_id, ordinal)
 ) STRICT;
 
-CREATE TABLE attachment_refs (
-    path TEXT NOT NULL,
-    thread_id TEXT NOT NULL,
-    PRIMARY KEY (path, thread_id)
-) STRICT;
-
 CREATE TABLE imported_sources (
     instance TEXT NOT NULL,
     path TEXT NOT NULL,
