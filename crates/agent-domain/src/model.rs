@@ -1258,6 +1258,12 @@ pub enum Input {
     NativeSessionReset {
         instance: String,
     },
+    /// The native session a pending fork will create, recorded before its
+    /// transcript exists so no import can adopt it.
+    NativeForkReserved {
+        command: CommandId,
+        native_thread: String,
+    },
     Workspace {
         workspace: Option<Workspace>,
     },

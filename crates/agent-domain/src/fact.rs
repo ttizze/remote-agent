@@ -69,6 +69,10 @@ pub enum FactBody {
     ForkResolved {
         command: CommandId,
     },
+    ForkSessionReserved {
+        command: CommandId,
+        native_thread: String,
+    },
     NativeSessionBound {
         instance: String,
         native_thread: String,
@@ -569,6 +573,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
         ForkResolved { command } => {
             state.pending_forks.remove(command);
         }
+        ForkSessionReserved { .. } => {}
         NativeSessionBound {
             instance,
             native_thread,

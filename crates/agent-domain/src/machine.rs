@@ -3656,6 +3656,21 @@ impl Decision {
                 unreachable!("native output is routed before applying its events")
             }
             SessionClosed { error } => {
+                // The process that could answer them is gone (T3 release expiry).
+                let expired = self
+                    .state
+                    .requests
+                    .iter()
+                    .filter(|r| {
+                        &r.attempt == attempt
+                            && r.status == RequestStatus::Pending
+                            && r.capability != ResponseCapability::Message
+                    })
+                    .map(|r| r.id.clone())
+                    .collect::<Vec<_>>();
+                for id in expired {
+                    self.resolve_request(&id, RequestStatus::Expired, None, ItemStatus::Failed);
+                }
                 let background = self
                     .state
                     .background_work
@@ -5630,6 +5645,20 @@ impl ThreadMachine {
                     instance: instance.clone(),
                 });
                 Reply::Accepted
+            }
+            Input::NativeForkReserved {
+                command,
+                native_thread,
+            } => {
+                if decision.state.pending_forks.contains_key(command) {
+                    decision.fact(FactBody::ForkSessionReserved {
+                        command: command.clone(),
+                        native_thread: native_thread.clone(),
+                    });
+                    Reply::Accepted
+                } else {
+                    Reply::Ignored
+                }
             }
             Input::Provider { attempt, event } => decision.provider(attempt, event),
             Input::Effect(result) => decision.effect_result(result),
