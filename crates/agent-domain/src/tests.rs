@@ -520,6 +520,41 @@ fn repeated_command_returns_receipt_without_repeating_effects() {
         }
     );
 }
+// The Host fills another thread's plan in on the first dispatch only; the
+// retry of the client's command still replays its receipt.
+#[test]
+fn a_retry_without_the_hosts_resolved_plan_replays_the_receipt() {
+    let mut s = state();
+    let Command::Send(mut message) = send_message("plan", DispatchMode::StartImmediately) else {
+        unreachable!()
+    };
+    message.source_plan = Some(PlanRef {
+        thread: ThreadId::new("planner").unwrap(),
+        plan: PlanId::new("plan").unwrap(),
+    });
+    let client = Command::Send(message.clone());
+    message.resolved_plan = Some(ResolvedPlan {
+        project: "project".into(),
+        kind: PlanKind::Proposed,
+        implemented: false,
+    });
+    let first = command(&mut s, "plan", Command::Send(message));
+    assert!(matches!(first.reply, Reply::Run(_)));
+    let retry = ThreadMachine::step(
+        &s,
+        &InputEnvelope {
+            at: at(),
+            key: "retry".into(),
+            input: Input::Command {
+                id: CommandId::new("plan").unwrap(),
+                command: Box::new(client),
+                receipt: first.receipt.clone(),
+            },
+        },
+    );
+    assert_eq!(retry.reply, first.reply);
+    assert!(retry.facts.is_empty());
+}
 #[test]
 fn prepared_failure_promotes_queue_and_retry_cannot_overlap_it() {
     let mut s = state();

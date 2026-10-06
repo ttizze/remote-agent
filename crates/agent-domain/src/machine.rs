@@ -6277,6 +6277,17 @@ pub fn latest_stable_run(state: &State) -> Option<&Run> {
 /// the provider of the direct turn that consumes them; handoffs keep their
 /// instance; a delegated result reaches only a turn after its spawning run
 /// failed or was interrupted.
+/// A command's identity for its receipt. Context the Host fills in on the
+/// first dispatch is left out, so a retry of the same command replays it.
+fn command_fingerprint(command: &Command) -> String {
+    let mut command = command.clone();
+    match &mut command {
+        Command::Send(message) => message.resolved_plan = None,
+        Command::UpdateMetadata { project_root, .. } => *project_root = None,
+        _ => {}
+    }
+    serde_json::to_string(&command).expect("domain commands serialize")
+}
 fn consumable(state: &State, transfer: &Transfer, run: &Run, direct: bool) -> bool {
     let instance = transfer.instance.as_deref();
     match transfer.kind {
@@ -6520,8 +6531,7 @@ impl ThreadMachine {
                 command,
                 receipt: existing,
             } => {
-                let fingerprint =
-                    serde_json::to_string(command).expect("domain commands serialize");
+                let fingerprint = command_fingerprint(command);
                 if let Some(existing) = existing {
                     if existing.command == *id && existing.fingerprint == fingerprint {
                         return Step {
