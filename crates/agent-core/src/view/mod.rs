@@ -2,6 +2,7 @@
 //! native clients render without re-deriving them.
 pub mod inbox;
 pub mod models;
+pub mod settings;
 pub mod snooze;
 pub mod thread_sort;
 pub mod thread_summary;

@@ -788,6 +788,65 @@ mod tests {
     }
 
     #[test]
+    fn a_started_thread_without_loaded_state_locks_to_its_driver() {
+        use crate::{
+            provider::ProviderKind, sync::fixtures::*, view::models::fixtures::host_model,
+        };
+        let mut row = agent_domain::shell(&thread_state("Thread")).unwrap();
+        row.latest_run = Some(agent_domain::RunId::new("run").unwrap());
+        row.status = Some(agent_domain::RunStatus::Completed);
+        let mut snapshot = Snapshot {
+            selected_thread: Some(thread_id()),
+            models: vec![
+                host_model(ProviderKind::Codex, "gpt", "gpt"),
+                host_model(ProviderKind::Claude, "claude-opus-5", "Claude · Opus 5"),
+            ],
+            ..Snapshot::default()
+        };
+        let mut shell = crate::sync::ShellCache::default();
+        shell.snapshot = Some(agent_protocol::conversation::ShellSnapshot {
+            snapshot_sequence: 1,
+            projects: vec![],
+            threads: vec![row],
+        });
+        snapshot.shell = std::sync::Arc::new(shell);
+        let draft = snapshot.current_draft();
+        let view = model_picker(
+            &snapshot,
+            &draft,
+            &ModelPickerOptions {
+                rail: Some(PickerRail::instance("claude")),
+                ..Default::default()
+            },
+        );
+        assert_eq!(view.locked_driver, Some(Driver::Codex));
+        assert!(view.rows.is_empty());
+        assert!(view.rail.last().unwrap().disabled);
+        assert_eq!(view.trigger.label, "GPT");
+        let searched = model_picker(
+            &snapshot,
+            &draft,
+            &ModelPickerOptions {
+                query: "gpt".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(searched.rows.len(), 1);
+        assert!(searched.rows[0].selected);
+        snapshot.selected_thread = None;
+        let unlocked = model_picker(
+            &snapshot,
+            &draft,
+            &ModelPickerOptions {
+                rail: Some(PickerRail::instance("claude")),
+                ..Default::default()
+            },
+        );
+        assert_eq!(unlocked.locked_driver, None);
+        assert_eq!(unlocked.rows[0].disabled_reason, None);
+    }
+
+    #[test]
     fn rows_carry_the_disabled_reason() {
         let catalog = two_provider_catalog();
         let view = build_model_picker(
