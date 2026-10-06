@@ -466,15 +466,16 @@ impl Decision {
             .find(|run| &run.id == id)
             .unwrap()
             .clone();
-        if self
-            .state
-            .thread
-            .as_ref()
-            .is_some_and(|thread| thread.selection != run.selection)
-        {
+        let previous = self.state.thread.as_ref().unwrap().selection.clone();
+        if previous != run.selection {
             self.fact(FactBody::ModelSelected {
                 selection: run.selection.clone(),
             });
+            // T3 applies the provider-switch release plan when a queued run
+            // takes another instance.
+            if previous.instance != run.selection.instance {
+                self.release_other_instances(&run.selection.instance);
+            }
         }
         let thread = self.state.thread.as_ref().unwrap().clone();
         let message = self
@@ -1222,6 +1223,24 @@ impl Decision {
                 && !transfer.superseded
                 && transfer.delivery.is_none()
         })
+    }
+    /// Releases the sessions of every instance but `kept` when the thread moves
+    /// to another instance (T3 ProviderSwitchService create_with_handoff).
+    fn release_other_instances(&mut self, kept: &str) {
+        for instance in self
+            .used_instances(None)
+            .into_iter()
+            .filter(|instance| instance != kept)
+        {
+            self.effect(
+                None,
+                EffectBody::DetachSessions {
+                    reason: "Provider or model selection changed.".into(),
+                    revoke_credentials: false,
+                    instance: Some(instance),
+                },
+            );
+        }
     }
     /// The driver of the attempt's run, or of the thread for a native child turn.
     fn attempt_driver(&self, attempt: &RunAttemptId) -> Option<Driver> {
@@ -2474,23 +2493,9 @@ impl Decision {
                     selection: selection.clone(),
                 });
                 // A model applies from the next turn; another instance takes over
-                // with a handoff and the previous instances' sessions are released
-                // (T3 ProviderSwitchService).
+                // with a handoff.
                 if current.instance != selection.instance {
-                    for instance in self
-                        .used_instances(None)
-                        .into_iter()
-                        .filter(|instance| instance != &selection.instance)
-                    {
-                        self.effect(
-                            None,
-                            EffectBody::DetachSessions {
-                                reason: "Provider or model selection changed.".into(),
-                                revoke_credentials: false,
-                                instance: Some(instance),
-                            },
-                        );
-                    }
+                    self.release_other_instances(&selection.instance);
                 }
                 Reply::Accepted
             }

@@ -276,6 +276,44 @@ fn claude_selection() -> ModelSelection {
         options: BTreeMap::new(),
     }
 }
+// T3 Orchestrator start-queued: a queued run that takes another instance
+// applies the provider-switch release plan to the previous instance.
+#[test]
+fn a_queued_run_on_another_instance_releases_the_previous_instance() {
+    let mut s = state();
+    let (_, first) = running(&mut s, "first");
+    let Command::Send(mut message) = send_message("switch", DispatchMode::QueueAfterActive) else {
+        unreachable!()
+    };
+    message.selection = Some(claude_selection());
+    let queued = command(&mut s, "switch", Command::Send(message));
+    assert!(queued.effects.is_empty());
+    let released = provider(
+        &mut s,
+        "finish",
+        &first,
+        ProviderEvent::TurnFinished {
+            status: RunStatus::Completed,
+            native_head: Some("native-head".into()),
+        },
+    );
+    assert_eq!(s.runs[1].status, RunStatus::Starting);
+    assert_eq!(s.thread.as_ref().unwrap().selection, claude_selection());
+    let detached: Vec<_> = released
+        .effects
+        .iter()
+        .filter(|effect| matches!(effect.body, EffectBody::DetachSessions { .. }))
+        .map(|effect| effect.body.clone())
+        .collect();
+    assert_eq!(
+        detached,
+        [EffectBody::DetachSessions {
+            reason: "Provider or model selection changed.".into(),
+            revoke_credentials: false,
+            instance: Some("codex".into()),
+        }]
+    );
+}
 // T3 CommandPolicy.test.ts: providers without interrupt-and-restart reject a required restart.
 #[test]
 fn restart_and_steering_respect_capabilities_and_maintenance_turns() {
