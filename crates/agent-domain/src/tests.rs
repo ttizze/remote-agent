@@ -2292,99 +2292,6 @@ fn native_text_and_plan_streams_append_without_entity_replacements() {
 }
 
 #[test]
-fn rollback_resets_post_boundary_sessions_and_uses_replacement_native_identity() {
-    let mut s = state();
-    let (first, a) = running(&mut s, "first");
-    finish(&mut s, &a);
-    let cp = checkpoint(&mut s, &first, &a, "cp-first");
-    let mut later = selection();
-    later.instance = "later-provider".into();
-    command(
-        &mut s,
-        "switch",
-        Command::SwitchProvider { selection: later },
-    );
-    let Reply::Run(second) = command(
-        &mut s,
-        "second",
-        send_message("second", DispatchMode::StartImmediately),
-    )
-    .reply
-    else {
-        panic!()
-    };
-    let b = s.runs[1].attempt.clone().unwrap();
-    provider(
-        &mut s,
-        "later-session",
-        &b,
-        ProviderEvent::SessionReady {
-            native_thread: "native-later".into(),
-        },
-    );
-    provider(
-        &mut s,
-        "later-started",
-        &b,
-        ProviderEvent::TurnStarted { native_turn: None },
-    );
-    finish(&mut s, &b);
-    checkpoint(&mut s, &second, &b, "cp-second");
-    let step = command(
-        &mut s,
-        "rollback",
-        Command::Rollback {
-            checkpoint: cp,
-            restore_files: false,
-        },
-    );
-    let EffectBody::Rollback { providers, .. } = &step.effects[0].body else {
-        panic!()
-    };
-    assert_eq!(
-        providers,
-        &vec![ProviderRollback {
-            instance: "later-provider".into(),
-            command: ProviderCommand::Rollback {
-                native_thread: "native-later".into(),
-                absolute_head: None,
-            },
-        }]
-    );
-    let binding = NativeBinding {
-        instance: "later-provider".into(),
-        thread: "native-replacement".into(),
-        head: None,
-    };
-    assert_eq!(
-        result(
-            &mut s,
-            "stale",
-            EffectResult::RollbackFinished {
-                command: CommandId::new("stale").unwrap(),
-                bindings: vec![binding.clone()]
-            }
-        )
-        .reply,
-        Reply::Ignored
-    );
-    result(
-        &mut s,
-        "restored",
-        EffectResult::RollbackFinished {
-            command: CommandId::new("rollback").unwrap(),
-            bindings: vec![binding],
-        },
-    );
-    let step = command(
-        &mut s,
-        "continue",
-        send_message("continue", DispatchMode::StartImmediately),
-    );
-    assert!(step.effects.iter().any(|effect| matches!(&effect.body, EffectBody::Provider(ProviderCommand::Start {native_thread:Some(thread),..}) if thread == "native-replacement")));
-}
-
-#[test]
 fn async_question_answer_steers_the_current_turn_and_rejects_blank_answers_atomically() {
     let mut s = state();
     let (_, a) = running(&mut s, "first");
@@ -3904,7 +3811,8 @@ fn archive_cancels_queued_work_and_detaches_without_unarchive_resuming() {
     assert!(archive.effects.iter().any(|effect| effect.body
         == EffectBody::DetachSessions {
             reason: "Thread archived.".into(),
-            revoke_credentials: true
+            revoke_credentials: true,
+            instance: None,
         }));
     assert!(
         archive
@@ -4007,7 +3915,8 @@ fn settle_rejects_blocked_work_and_cancels_automatic_deliveries() {
     assert!(settled.effects.iter().any(|effect| effect.body
         == EffectBody::DetachSessions {
             reason: "Thread settled.".into(),
-            revoke_credentials: false
+            revoke_credentials: false,
+            instance: None,
         }));
     assert_eq!(s.thread.as_ref().unwrap().settled, Some(true));
 }
@@ -4210,6 +4119,7 @@ fn deletion_cancels_pending_requests_and_releases_thread_resources() {
             EffectBody::DetachSessions {
                 reason,
                 revoke_credentials: true,
+                instance: None,
             } => Some(reason.as_str()),
             EffectBody::CleanupTerminals => Some("terminals"),
             EffectBody::DeleteAttachments { .. } => Some("attachments"),
@@ -5710,4 +5620,6 @@ fn a_failed_rollback_resets_only_the_native_sessions_it_may_have_rewound() {
 mod delegation;
 mod preparation;
 mod queue;
+mod rollback;
+mod selection;
 mod thread;

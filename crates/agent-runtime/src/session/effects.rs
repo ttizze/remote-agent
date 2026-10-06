@@ -84,9 +84,18 @@ impl EffectHandler for SessionEffects {
                         .await
                 }
                 EffectBody::DetachSessions {
-                    revoke_credentials, ..
+                    revoke_credentials,
+                    instance,
+                    ..
                 } => {
-                    self.sessions.detach(&job.thread, *revoke_credentials).await;
+                    match instance {
+                        Some(instance) => {
+                            self.sessions
+                                .detach_instance(&job.thread, instance, *revoke_credentials)
+                                .await
+                        }
+                        None => self.sessions.detach(&job.thread, *revoke_credentials).await,
+                    }
                     Ok(None)
                 }
                 other => {

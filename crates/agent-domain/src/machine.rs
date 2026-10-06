@@ -1106,6 +1106,27 @@ impl Decision {
             }
         }
     }
+    /// Provider instances this thread has run or holds a native session for,
+    /// optionally only those of one driver.
+    fn used_instances(&self, driver: Option<Driver>) -> BTreeSet<String> {
+        let driver_of = |instance: &str| {
+            self.state
+                .runs
+                .iter()
+                .rev()
+                .map(|run| &run.selection)
+                .chain(self.state.thread.as_ref().map(|thread| &thread.selection))
+                .find(|selection| selection.instance == instance)
+                .map(|selection| selection.driver)
+        };
+        self.state
+            .runs
+            .iter()
+            .map(|run| run.selection.instance.clone())
+            .chain(self.state.native_sessions.keys().cloned())
+            .filter(|instance| driver.is_none_or(|driver| driver_of(instance) == Some(driver)))
+            .collect()
+    }
     fn preparation_item(&self, run: &RunId) -> Option<Item> {
         self.state
             .items
@@ -1923,6 +1944,7 @@ impl Decision {
                         EffectBody::DetachSessions {
                             reason: "Thread archived.".into(),
                             revoke_credentials: true,
+                            instance: None,
                         },
                     );
                     self.effect(None, EffectBody::CleanupTerminals);
@@ -1995,6 +2017,7 @@ impl Decision {
                     EffectBody::DetachSessions {
                         reason: "Thread deleted.".into(),
                         revoke_credentials: true,
+                        instance: None,
                     },
                 );
                 self.effect(None, EffectBody::CleanupTerminals);
@@ -2073,6 +2096,7 @@ impl Decision {
                     EffectBody::DetachSessions {
                         reason: "Thread settled.".into(),
                         revoke_credentials: false,
+                        instance: None,
                     },
                 );
                 Reply::Accepted
@@ -2193,13 +2217,16 @@ impl Decision {
             }
             RuntimeMode { mode } => {
                 self.fact(FactBody::RuntimeModeChanged { mode: *mode });
-                if let Some(a) = self.state.active_run().and_then(|r| r.attempt.clone()) {
+                // Codex takes the mode on its next turn; a Claude session cannot
+                // switch in place, so T3 detaches it (ProviderSessionTransitionPolicy).
+                for instance in self.used_instances(Some(Driver::Claude)) {
                     self.effect(
-                        Some(a),
-                        EffectBody::Provider(ProviderCommand::SetRuntimeMode {
-                            runtime_mode: *mode,
-                            interaction_mode: self.state.thread.as_ref().unwrap().interaction_mode,
-                        }),
+                        None,
+                        EffectBody::DetachSessions {
+                            reason: "Runtime mode changed.".into(),
+                            revoke_credentials: false,
+                            instance: Some(instance),
+                        },
                     );
                 }
                 Reply::Accepted
@@ -2209,20 +2236,43 @@ impl Decision {
                 Reply::Accepted
             }
             SelectModel { selection } | SwitchProvider { selection } => {
-                if matches!(command, SwitchProvider { .. }) && self.state.active_run().is_some() {
-                    return reject("provider-switch-while-active");
-                }
+                let current = self.state.thread.as_ref().unwrap().selection.clone();
                 self.fact(FactBody::ModelSelected {
                     selection: selection.clone(),
                 });
-                if let Some(a) = self.state.active_run().and_then(|r| r.attempt.clone()) {
-                    self.effect(
-                        Some(a),
-                        EffectBody::Provider(ProviderCommand::SetModel {
-                            selection: selection.clone(),
-                        }),
-                    );
+                // A model applies from the next turn; another instance takes over
+                // with a handoff and the previous instances' sessions are released
+                // (T3 ProviderSwitchService).
+                if current.instance != selection.instance {
+                    for instance in self
+                        .used_instances(None)
+                        .into_iter()
+                        .filter(|instance| instance != &selection.instance)
+                    {
+                        self.effect(
+                            None,
+                            EffectBody::DetachSessions {
+                                reason: "Provider or model selection changed.".into(),
+                                revoke_credentials: false,
+                                instance: Some(instance),
+                            },
+                        );
+                    }
                 }
+                Reply::Accepted
+            }
+            DetachProviderSession { instance, reason } => {
+                if !self.used_instances(None).contains(instance) {
+                    return reject("provider-session-not-found");
+                }
+                self.effect(
+                    None,
+                    EffectBody::DetachSessions {
+                        reason: reason.clone().unwrap_or_default(),
+                        revoke_credentials: false,
+                        instance: Some(instance.clone()),
+                    },
+                );
                 Reply::Accepted
             }
             Send(message) => self.create_run(message),
@@ -2733,6 +2783,13 @@ impl Decision {
                 {
                     return reject("provider-work-active");
                 }
+                // T3 rolls back the active provider thread: the instance of the
+                // latest run that left the queue.
+                let Some(active) =
+                    latest_executed_run(&self.state).map(|run| run.selection.instance.clone())
+                else {
+                    return reject("no-active-provider-thread");
+                };
                 let Some(cp) = self
                     .state
                     .checkpoints
@@ -2745,31 +2802,61 @@ impl Decision {
                 if cp.status != CheckpointStatus::Ready {
                     return reject("checkpoint-not-ready");
                 }
+                if cp.run_ordinal > 0 {
+                    let target = self
+                        .state
+                        .runs
+                        .iter()
+                        .find(|run| run.ordinal == cp.run_ordinal);
+                    let turn = target.and_then(|run| {
+                        self.state.attempts.iter().find(|attempt| {
+                            Some(&attempt.id) == run.attempt.as_ref() && attempt.accepted
+                        })
+                    });
+                    if turn.is_none() {
+                        return reject("rollback-provider-turn-unavailable");
+                    }
+                    if target.is_some_and(|run| run.selection.instance != active) {
+                        return reject("rollback-provider-thread-mismatch");
+                    }
+                }
                 self.fact(FactBody::RollbackRequested {
                     command: id.clone(),
                     checkpoint: checkpoint.clone(),
                     restore_files: *restore_files,
                 });
-                let rewound = |instance: &str| {
-                    self.state.runs.iter().any(|run| {
-                        run.ordinal > cp.run_ordinal
-                            && run.selection.instance == instance
-                            && run.status.terminal()
-                            && run.status != RunStatus::RolledBack
-                    })
-                };
+                // T3 CheckpointRollbackService fails the request when the
+                // selection moved to another instance than the active one.
+                let thread = self.state.thread.as_ref().unwrap();
+                if thread.selection.instance != active {
+                    let message = format!(
+                        "Active provider changed before rollback target {checkpoint} could execute on thread {}.",
+                        thread.id
+                    );
+                    self.fact(FactBody::RollbackFailed {
+                        command: id.clone(),
+                        message,
+                    });
+                    return Reply::Accepted;
+                }
+                let rewinds = self.state.runs.iter().any(|run| {
+                    run.ordinal > cp.run_ordinal
+                        && run.status.terminal()
+                        && run.status != RunStatus::RolledBack
+                });
                 let providers = self
                     .state
                     .native_sessions
-                    .iter()
-                    .filter(|(instance, _)| rewound(instance))
-                    .map(|(instance, native_thread)| ProviderRollback {
-                        instance: instance.clone(),
+                    .get(&active)
+                    .filter(|_| rewinds)
+                    .map(|native_thread| ProviderRollback {
+                        instance: active.clone(),
                         command: ProviderCommand::Rollback {
                             native_thread: native_thread.clone(),
-                            absolute_head: cp.native_heads.get(instance).cloned().flatten(),
+                            absolute_head: cp.native_heads.get(&active).cloned().flatten(),
                         },
                     })
+                    .into_iter()
                     .collect();
                 let stale_file_refs = self
                     .state

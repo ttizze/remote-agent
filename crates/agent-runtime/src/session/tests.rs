@@ -374,6 +374,7 @@ fn registered_kinds_are_the_outbox_kinds_of_the_effects() {
         effect_kind(&EffectBody::DetachSessions {
             reason: String::new(),
             revoke_credentials: false,
+            instance: None,
         })
         .unwrap(),
         DETACH_SESSIONS_KIND
@@ -1037,10 +1038,12 @@ async fn claude_reuses_its_process_after_aligning_model_and_mode() {
     process.emit(json!({"type":"assistant","uuid":"a-1","session_id":session,"message":{"id":"m-1","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"done"}]}}));
     process.emit(json!({"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"done","session_id":session,"uuid":"r-1"}));
     rig.until_status(&id, RunStatus::Completed).await;
+    // A runtime mode change detaches a Claude session (T3); the interaction
+    // mode applies on the next turn.
     rig.command(
         &id,
-        Command::RuntimeMode {
-            mode: RuntimeMode::AutoAcceptEdits,
+        Command::InteractionMode {
+            mode: agent_domain::InteractionMode::Plan,
         },
     )
     .await;
@@ -1070,7 +1073,7 @@ async fn claude_reuses_its_process_after_aligning_model_and_mode() {
         process.written()[2]["request"]["model"],
         "claude-opus-4-6[1m]"
     );
-    assert_eq!(process.written()[3]["request"]["mode"], "acceptEdits");
+    assert_eq!(process.written()[3]["request"]["mode"], "plan");
 }
 
 /// A rejection settles the waiter of its own request id, not another request

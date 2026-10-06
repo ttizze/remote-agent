@@ -789,6 +789,11 @@ pub enum Command {
     SwitchProvider {
         selection: ModelSelection,
     },
+    /// T3 provider-session.detach: stop this thread's session of an instance.
+    DetachProviderSession {
+        instance: String,
+        reason: Option<String>,
+    },
     Send(SendMessage),
     ReleasePrepared {
         run: RunId,
@@ -968,6 +973,7 @@ pub fn host_only_command(command: &Command) -> bool {
         | Command::InteractionMode { .. }
         | Command::SelectModel { .. }
         | Command::SwitchProvider { .. }
+        | Command::DetachProviderSession { .. }
         | Command::Send(_)
         | Command::RetryPrepared { .. }
         | Command::Interrupt { .. }
@@ -1266,10 +1272,12 @@ pub enum EffectBody {
     DeleteAttachments {
         paths: Vec<String>,
     },
-    /// Detach this thread's provider sessions, which stops their background work.
+    /// Detach this thread's provider sessions, or those of one instance, which
+    /// stops their background work.
     DetachSessions {
         reason: String,
         revoke_credentials: bool,
+        instance: Option<String>,
     },
     CleanupTerminals,
     /// Generate a title from the initial message, or from the conversation

@@ -681,6 +681,18 @@ impl SessionManager {
         }
     }
 
+    /// Closes the thread's session of one provider instance.
+    pub async fn detach_instance(
+        &self,
+        thread: &ThreadId,
+        instance: &str,
+        revoke_credentials: bool,
+    ) {
+        for entry in self.entries(|key| &key.thread == thread && key.instance == instance) {
+            self.close_entry(&entry, true, revoke_credentials).await;
+        }
+    }
+
     /// Closes every session of a provider instance, as for sign-out.
     pub async fn close_instance(&self, instance: &str) {
         for entry in self.entries(|key| key.instance == instance) {
