@@ -1,6 +1,9 @@
 //! Native clients use the same GFM parser as GPUI's Markdown renderer.
+pub mod artifact_templates;
+pub mod assistant_citations;
 pub mod citations;
 pub mod directives;
+mod js_text;
 pub mod links;
 use ::markdown::{
     ParseOptions,
