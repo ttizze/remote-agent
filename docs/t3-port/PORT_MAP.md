@@ -1162,6 +1162,41 @@ R3 O6/O8/O9/O13 の再発検証を追加した。control RPC の失敗は run/at
 
 graph replay（fork / rollback / merge back / delegated_task_status）は記録プロセスの複数 native thread を種にする従来の方式のまま、境界の command を検証する。外部 frame の完全一致の比較は単一 session の transcript に限る。
 
+### 段階 3: effect の実行・復旧・launch（2026-10-06）
+
+`agent-runtime` の executor、`Runtime`、`launch` を偽の `HostOperations`（`executor::tests::FakeOps`）と偽の provider プロセスで検証する。期待値は T3 のまま、harness だけを置き換えた。
+
+| T3 の原本 | 新設計の検証 |
+| --- | --- |
+| `CheckpointService.test.ts`（materializes baseline） | `executor::tests::checkpoint::materializes_a_baseline_as_missing_when_its_ref_lookup_fails`（lookup 成功／失敗）。 |
+| `CheckpointCaptureService.test.ts` | `captures_a_finished_turn_after_its_thread_start_baseline`、`a_stopped_run_records_its_checkpoint_and_keeps_its_status`、`does_not_capture_a_stopped_run_that_a_rollback_already_discarded`、`a_workspace_outside_git_records_missing_checkpoints_and_finishes_the_run`、`a_failed_capture_records_an_error_checkpoint_and_finishes_the_run`。 |
+| `CheckpointScopeOwnership.test.ts` | `a_later_run_reuses_the_scope_baselines`。 |
+| `RunFinalizationService.test.ts`（保存後の refresh） | `captures_a_finished_turn_after_its_thread_start_baseline` の `run_finalized` 通知。 |
+| `CheckpointRollbackService.test.ts` | `executor::tests::rollback::rejects_a_non_ready_checkpoint_before_any_provider_or_file_work`、`rewinds_safely`（7 ケース）、`a_provider_that_cannot_rewind_fails_the_rollback_and_puts_the_files_back`、symlink の archived thread は `preserves_overlapping_workspace_files` の aliased worktree。追加で `a_rollback_without_a_native_session_resets_nothing_and_still_finishes`。 |
+| `CheckpointRestoreSafety.test.ts` | `preserves_overlapping_workspace_files`（nested、ancestor、archived-nested、aliased-nested、project、provider、scope、sibling、stopped-provider、conversation）。実ファイルと実パスで確認する。 |
+| `ThreadDeletion.test.ts` | domain の `deletion_cancels_pending_requests_and_releases_thread_resources` と、`executor::tests::cleanup::deletion_cleans_up_terminals_and_attachments_of_the_thread`、`terminals_stay_open_while_another_thread_works_in_the_directory`、`archiving_detaches_and_cleans_up_terminals_but_keeps_attachments`。 |
+| `ThreadTitleRegenerationService.test.ts` | `title::tests`（formatThreadTitleContext の 4 件）と `executor::tests::title::*`（arm と解除、新しい要求による無効化、会話の要約からの再生成、fallback・同じタイトル・失敗、最初の発言がない場合、最初のタイトルの再試行 success / exhausted / stale）。 |
+| `textGeneration/ThreadTitleContext.test.ts`、`TextGenerationPrompts.test.ts`（title と sanitize）、`TextGeneration.test.ts`（リンクの文脈）、`ThreadTitleLinks.test.ts`（純粋な部分）、各 provider の sanitize | `title::tests`。 |
+| `ThreadLaunchService.test.ts` | `launch::tests::returns_a_visible_preparing_message_while_provisioning_is_still_blocked`（setup 前に provider を始めない確認を含む）、`provisions_independent_launches_concurrently`、`queues_follow_up_messages_behind_preparation_in_the_final_workspace`、`a_preparation_failure_keeps_the_thread_and_message_visible`（worktree / setup）、`retries_a_failed_workspace_preparation_on_the_same_run`（fetch の診断文を含む）、`a_retry_reuses_a_recorded_worktree`、`replays_a_server_allocated_launch`、`rejects_a_launch_replay_with_a_mismatching_thread_id`、`rejects_a_launch_replay_from_another_project`、`rejects_a_launch_replay_after_the_thread_is_deleted`、`does_not_treat_an_unrelated_accepted_command_receipt_as_a_launch`、`concurrent_launches_of_one_command_share_one_thread_and_one_preparation`（server 割当てと再送の重複排除）、`schedules_an_accepted_preparing_message_exactly_once`、`arms_durable_title_generation_after_accepting_the_first_message`、`generates_an_initial_title_for_an_attachment_only_message`。 |
+| `ProviderRuntimeRecoveryService.test.ts:29, 67, 126, 183, 581` | `runtime::tests::startup_recovers_unfinished_threads_before_any_client_command`（再起動した Host で、復旧が必要な thread だけを読み、command より先に要求を expired にし、async question と queue の実行状態を保ち、process-bound effect を取り消す）。 |
+| `ProviderRuntimeRecoveryService.test.ts:232`、`RestartContinuation.test.ts`（停止と再起動） | `shutdown_cancels_live_work_and_the_cut_turn_continues_after_restart`、`a_turn_that_finished_before_shutdown_is_neither_cancelled_nor_resumed`、`executor::tests::send::a_continuation_follows_the_setting_when_it_runs`。 |
+| `ProviderRuntimeRecoveryService.test.ts:1276` | domain の `a_delegated_child_reports_recovery_cancellation_or_its_continuation_result` と `recovered_native_children_reject_old_output_and_remain_provider_owned`。 |
+| `EffectWorker.test.ts:162`（turn がない interrupt） | `session::tests::a_stop_without_a_live_session_closes_the_attempt`。 |
+| `EffectWorker.test.ts:761` | `executor::tests::send::settles_a_delegated_child_once_its_restart_continuation_fails_for_good`。継続の設定の置換は `delivers_with_the_effect_command_id_and_the_current_continuation_setting`。 |
+| `CodexAdapterV2` の resume 拒否・compact の resume、`ProviderSessionManager` の応答照合 | `agent-providers` と `session::tests` の追加テスト（rejected resume / start の operation、新しいプロセスでの compact、別の `set_model` の待ちを解決しない拒否、`SetRuntimeMode` の対応）。 |
+
+対象外にしたもの:
+
+- `CheckpointService.test.ts` の interrupt、`ThreadTitleRegenerationService.test.ts` の interrupted: Effect fiber の割込みを確かめる。本設計では実行中の effect は未確定のまま残り、再起動で再実行される。
+- `CheckpointCaptureService.test.ts` の delegatedCompletion の上書きと履歴を読まない確認: T3 の projection store の内部形を確かめる。保存結果は actor の状態から決める。
+- `CheckpointRollbackService.test.ts` の active provider thread / selection の変更による拒否: 境界より後に run がある instance をすべて巻き戻す設計（2026-10-06 の決定）。
+- `CheckpointRestoreSafety.test.ts` の shared-provider: session は thread ごとで、複数 thread が共有しない。errored-provider は provider と同じく生きているプロセスとして扱う。
+- `ThreadTitleRegenerationService.test.ts` の `regenerateTitle: false` による解除: 対応する command がない。rename と新しい要求による無効化は確認する。
+- `ThreadLaunchService.test.ts` の branch 名の生成と rename（M3）、scratch folder、setup の進捗表示と取消、非同期 setup、`reuseExistingThread`、自動化・送信元の属性、import した native session（`Command::Import` で取り込む）、attachment の取り込み（RPC の責務）、記録前に失敗した worktree の削除（部分的な checkout の削除は Host の `create_worktree` が行う。runtime は記録に失敗した worktree を削除する）。
+- `ProviderRuntimeRecoveryService.test.ts:522`（取り消すしかない waiting run）: 保存の失敗は結果として run を確定するので、保存を待ったまま残る run は生じない。
+- `EffectWorker.test.ts:728`（置換 session の restart）: restart は domain が attempt を superseded にし、Start は独立した effect になるため複合 effect がない。
+- `RunFinalizationService.test.ts` の pull request 状態の更新 4 件、`checkpointing/CheckpointStore.test.ts`・`CheckpointDiffQuery.test.ts`・`Diffs.test.ts`: Git の checkpoint 実装、VCS 状態、turn diff は host-daemon の `HostOperations` 実装と RPC で移植する。
+
 ### 段階 1・2 の検証記録（2026-10-06）
 
 実装・テストの最終 revision は `4a52416ab649fa888b80322f7a2884715d270beb`。以後のコミットは検証記録のみ。新しい domain / provider 層の実装と上記の挙動検証を終え、push と PR 更新後にレビューを待つ。

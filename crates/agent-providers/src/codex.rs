@@ -30,8 +30,8 @@ impl WireContext {
 enum Pending {
     Initialize,
     Thread {
-        start: Value,
-        history: Option<InlineHistory>,
+        resume: bool,
+        then: Option<Then>,
     },
     Inject {
         start: Value,
@@ -65,10 +65,20 @@ enum Pending {
     },
     Operation(String),
 }
+/// What runs once the native thread is started or resumed.
+#[derive(Debug, Clone)]
+enum Then {
+    Turn {
+        start: Value,
+        history: Option<InlineHistory>,
+    },
+    Compact,
+}
 impl Pending {
     fn operation(&self) -> String {
         match self {
             Pending::Initialize => "initialize".into(),
+            Pending::Thread { resume: true, .. } => "thread/resume".into(),
             Pending::Thread { .. } => "thread/start".into(),
             Pending::Inject { .. } => "thread/inject_items".into(),
             Pending::RevertRead { .. } => "thread/read".into(),
@@ -221,8 +231,11 @@ impl CodexProtocol {
                         "thread/resume",
                         params,
                         Pending::Thread {
-                            start,
-                            history: handoff,
+                            resume: true,
+                            then: Some(Then::Turn {
+                                start,
+                                history: handoff,
+                            }),
                         },
                     )
                 } else {
@@ -230,8 +243,11 @@ impl CodexProtocol {
                         "thread/start",
                         context.thread_params(Some(&selection.model)),
                         Pending::Thread {
-                            start,
-                            history: handoff,
+                            resume: false,
+                            then: Some(Then::Turn {
+                                start,
+                                history: handoff,
+                            }),
                         },
                     )
                 }
@@ -247,6 +263,7 @@ impl CodexProtocol {
                     .turns
                     .get(thread)
                     .ok_or_else(|| ProtocolError::Remote {
+                        request: None,
                         operation: "turn/steer".into(),
                         message: "No active turn".into(),
                         turn_completed: true,
@@ -376,18 +393,26 @@ impl CodexProtocol {
                     Pending::Operation("thread/fork".into()),
                 )
             }
-            ProviderCommand::Compact { native_thread } => {
-                let thread = native_thread
-                    .as_ref()
-                    .or(self.thread.as_ref())
-                    .ok_or_else(|| {
-                        ProtocolError::Invalid("compact requires native thread".into())
-                    })?;
+            ProviderCommand::Compact {
+                native_thread: Some(thread),
+            } if self.thread.as_ref() != Some(thread) => {
+                let mut params = context.thread_params(context.thread_model.as_deref());
+                params["threadId"] = json!(thread);
+                params["excludeTurns"] = json!(true);
                 self.request(
-                    "thread/compact/start",
-                    json!({"threadId":thread}),
-                    Pending::Operation("thread/compact/start".into()),
+                    "thread/resume",
+                    params,
+                    Pending::Thread {
+                        resume: true,
+                        then: Some(Then::Compact),
+                    },
                 )
+            }
+            ProviderCommand::Compact { .. } => {
+                let thread = self.thread.clone().ok_or_else(|| {
+                    ProtocolError::Invalid("compact requires native thread".into())
+                })?;
+                self.compact(&thread)
             }
             // Codex selection/runtime parameters are authoritative on turn/start.
             ProviderCommand::SetModel { .. } | ProviderCommand::SetRuntimeMode { .. } => {
@@ -484,6 +509,13 @@ impl CodexProtocol {
             self.request("turn/start", start, Pending::Operation("turn/start".into()))
         }
     }
+    fn compact(&mut self, thread: &str) -> Value {
+        self.request(
+            "thread/compact/start",
+            json!({"threadId":thread}),
+            Pending::Operation("thread/compact/start".into()),
+        )
+    }
     fn interrupt(&mut self, thread: &str, turn: Option<&str>) -> Vec<Value> {
         let mut outbound = vec![];
         if let Some(turn) = turn {
@@ -546,6 +578,7 @@ impl CodexProtocol {
                 }
                 let operation = pending.operation();
                 return Err(ProtocolError::Remote {
+                    request: Some(id.to_string()),
                     turn_completed: completed_steer_error(&message),
                     operation,
                     message,
@@ -559,16 +592,21 @@ impl CodexProtocol {
             });
             match pending {
                 Pending::Initialize => output.outbound.push(json!({"method":"initialized"})),
-                Pending::Thread { mut start, history } => {
+                Pending::Thread { then, .. } => {
                     let thread = required(&result["thread"], "id")?;
                     self.thread = Some(thread.clone());
                     output.events.push(ProviderEvent::SessionReady {
                         native_thread: thread.clone(),
                     });
-                    let stopped = std::mem::take(&mut self.stop_before_thread);
-                    if !start.is_null() && !stopped {
-                        start["threadId"] = json!(thread);
-                        output.outbound.push(self.start_or_inject(start, history));
+                    if !std::mem::take(&mut self.stop_before_thread) {
+                        match then {
+                            None => {}
+                            Some(Then::Turn { mut start, history }) => {
+                                start["threadId"] = json!(thread);
+                                output.outbound.push(self.start_or_inject(start, history));
+                            }
+                            Some(Then::Compact) => output.outbound.push(self.compact(&thread)),
+                        }
                     }
                 }
                 Pending::Inject { start, .. } => {
@@ -691,6 +729,7 @@ impl CodexProtocol {
                         .any(|terminal| terminal["processId"].as_str() == Some(process.as_str()));
                     if listed {
                         return Err(ProtocolError::Remote {
+                            request: Some(id.to_string()),
                             operation: "thread/backgroundTerminals/terminate".into(),
                             message: format!(
                                 "Codex background terminal {process} remained active after termination."
@@ -1593,8 +1632,8 @@ impl CodexProtocol {
             let pending = match method.as_str() {
                 "initialize" => Pending::Initialize,
                 "thread/start" | "thread/resume" => Pending::Thread {
-                    start: Value::Null,
-                    history: None,
+                    resume: method == "thread/resume",
+                    then: None,
                 },
                 _ => Pending::Operation(method),
             };

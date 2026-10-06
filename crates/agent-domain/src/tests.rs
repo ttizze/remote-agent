@@ -831,7 +831,8 @@ fn recovery_preserves_distinct_work_ids_and_shutdown_reason() {
     );
     assert!(s.tasks.iter().all(|task| task.result.as_deref()
         == Some("Cancelled because the server shut down before the provider work completed.")));
-    assert!(!recovered.effects.iter().any(|effect| matches!(effect.body, EffectBody::SendToThread { command: ref next, .. } if matches!(**next, Command::ContinueRestart { .. }))));
+    // T3 prepareForShutdown: the cut root turn continues after the next start.
+    assert!(recovered.effects.iter().any(|effect| matches!(effect.body, EffectBody::SendToThread { command: ref next, .. } if matches!(**next, Command::ContinueRestart { .. }))));
     recover(&mut s);
     assert_eq!(s.runs[0].restart_cancelled_work.len(), 2);
 }
@@ -3018,10 +3019,10 @@ fn provider_selection_and_runtime_changes_are_blocked_during_rollback() {
 
 proptest! {
     #[test]
-    fn failed_control_operations_never_release_a_running_native_turn(op in 0usize..4, failures in 1usize..12) {
+    fn failed_control_operations_never_release_a_running_native_turn(op in 0usize..5, failures in 1usize..12) {
         let mut s=state();
         let (_,attempt)=running(&mut s,"run");
-        let operation=[ProviderOperation::Steer,ProviderOperation::Interrupt,ProviderOperation::Respond,ProviderOperation::SetModel][op];
+        let operation=[ProviderOperation::Steer,ProviderOperation::Interrupt,ProviderOperation::Respond,ProviderOperation::SetModel,ProviderOperation::SetRuntimeMode][op];
         for i in 0..failures {
             result(&mut s,&format!("failed-{i}"),EffectResult::ProviderFailed{attempt:attempt.clone(),operation,message:"RPC failed".into(),message_id:None,turn_completed:false,session_lost:false});
             prop_assert_eq!(s.runs[0].status,RunStatus::Running);

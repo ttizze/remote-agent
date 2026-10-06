@@ -141,27 +141,5 @@ pub fn search_changes(state: &State, facts: &[Fact]) -> SearchChanges {
     changes
 }
 
-/// Attachment paths newly referenced by these facts.
-pub fn attachment_paths(facts: &[Fact]) -> Vec<String> {
-    let mut paths = BTreeSet::new();
-    for fact in facts {
-        match &fact.body {
-            FactBody::MessageCreated { attachments, .. }
-            | FactBody::MessageEdited {
-                attachments: Some(attachments),
-                ..
-            } => paths.extend(attachments.iter().map(|a| a.path.clone())),
-            FactBody::RequestResolved { attachments, .. } => paths.extend(
-                attachments
-                    .values()
-                    .flatten()
-                    .map(|attachment| attachment.path.clone()),
-            ),
-            _ => {}
-        }
-    }
-    paths.into_iter().collect()
-}
-
 #[cfg(test)]
 mod tests;

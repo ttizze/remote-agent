@@ -12,7 +12,7 @@ use crate::sync::{
 use crate::{
     Clock, CommitBatch, EffectSettlement, RuntimeError, SNAPSHOT_INTERVAL, Settlement,
     ShellProjector, ShellRow, Store, StoreError, StoredFact, SystemClock, ThreadHead,
-    ThreadShellProjector, attachment_paths, envelope_key, needs_recovery, search_changes,
+    ThreadShellProjector, envelope_key, needs_recovery, search_changes,
 };
 use agent_domain::{
     Command, CommandId, EffectResult, FactBody, Input, InputEnvelope, ModelSelection,
@@ -595,7 +595,6 @@ impl Actor {
             input_seq: base.input_seq + 1,
             receipt,
             search: search_changes(&self.state, &facts),
-            attachment_paths: attachment_paths(&facts),
             facts,
             effects,
             settle,

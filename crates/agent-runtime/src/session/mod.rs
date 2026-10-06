@@ -196,6 +196,7 @@ impl From<ExecError> for Failure {
 struct Entry {
     key: SessionKey,
     generation: u64,
+    cwd: Option<String>,
     mail: mpsc::UnboundedSender<Mail>,
     claude: Option<Arc<Mutex<ClaudeProcess>>>,
 }
@@ -297,6 +298,14 @@ impl SessionManager {
             .collect();
         keys.sort();
         keys
+    }
+
+    /// The working directories of the thread's live provider processes.
+    pub fn session_cwds(&self, thread: &ThreadId) -> Vec<String> {
+        self.entries(|key| &key.thread == thread)
+            .into_iter()
+            .filter_map(|entry| entry.cwd)
+            .collect()
     }
 
     pub fn is_live(&self, key: &SessionKey) -> bool {
@@ -550,12 +559,7 @@ impl SessionManager {
                 }
                 Ok(())
             }
-            sent => unwrap_failure(settle_sent(
-                sent,
-                attempt,
-                Some(ProviderOperation::SetModel),
-                None,
-            )),
+            sent => unwrap_failure(settle_sent(sent, attempt, operation(command), None)),
         }
     }
 
@@ -761,6 +765,10 @@ impl SessionManager {
             let entry = Entry {
                 key: target.key.clone(),
                 generation: table.generation,
+                cwd: target
+                    .workspace
+                    .as_ref()
+                    .map(|workspace| workspace.cwd.clone()),
                 mail,
                 claude: claude.clone(),
             };
@@ -788,7 +796,6 @@ impl SessionManager {
             line: Vec::new(),
             owner: None,
             handshake: false,
-            resuming: false,
             attempts: HashSet::new(),
             replies: Vec::new(),
             completion: None,
@@ -982,9 +989,8 @@ fn operation(command: &ProviderCommand) -> Option<ProviderOperation> {
         ProviderCommand::Interrupt { .. } => ProviderOperation::Interrupt,
         ProviderCommand::Respond { .. } => ProviderOperation::Respond,
         ProviderCommand::Compact { .. } => ProviderOperation::Compact,
-        ProviderCommand::SetModel { .. } | ProviderCommand::SetRuntimeMode { .. } => {
-            ProviderOperation::SetModel
-        }
+        ProviderCommand::SetModel { .. } => ProviderOperation::SetModel,
+        ProviderCommand::SetRuntimeMode { .. } => ProviderOperation::SetRuntimeMode,
         ProviderCommand::Rollback { .. } | ProviderCommand::Fork { .. } => return None,
     })
 }
@@ -1136,4 +1142,4 @@ fn instance_target(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

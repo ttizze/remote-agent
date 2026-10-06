@@ -1,6 +1,6 @@
 //! Ports of T3 ProviderSessionManager, ProviderTurnStartService and
 //! ProviderTurnControlService behavior tests, plus the frame ordering rule.
-mod fake;
+pub(crate) mod fake;
 mod replay;
 
 use super::*;
@@ -103,7 +103,7 @@ pub(crate) fn selection(driver: Driver, model: &str) -> ModelSelection {
     }
 }
 
-fn codex_replies(frame: &Value) -> Vec<Value> {
+pub(crate) fn codex_replies(frame: &Value) -> Vec<Value> {
     let id = frame["id"].clone();
     match frame["method"].as_str() {
         Some("initialize") => vec![json!({"id":id,"result":{}})],
@@ -286,6 +286,30 @@ fn options(idle: u64, pin: u64) -> SessionOptions {
         reply_timeout: Duration::from_secs(5),
         close_grace: Duration::from_millis(200),
     }
+}
+
+#[test]
+fn control_failures_name_their_own_provider_operation() {
+    use task::failed_operation;
+    assert_eq!(
+        failed_operation("set_model"),
+        Some((ProviderOperation::SetModel, false))
+    );
+    assert_eq!(
+        failed_operation("set_permission_mode"),
+        Some((ProviderOperation::SetRuntimeMode, false))
+    );
+    assert_eq!(
+        failed_operation("thread/resume"),
+        Some((ProviderOperation::Start, true))
+    );
+    assert_eq!(
+        operation(&ProviderCommand::SetRuntimeMode {
+            runtime_mode: RuntimeMode::Auto,
+            interaction_mode: InteractionMode::Default,
+        }),
+        Some(ProviderOperation::SetRuntimeMode)
+    );
 }
 
 #[test]
@@ -861,6 +885,45 @@ async fn a_failed_resume_continues_the_run_on_a_fresh_native_session() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_compact_on_a_fresh_process_resumes_the_saved_native_thread() {
+    let rig = rig(SessionOptions::default(), 5);
+    let id = thread("thread-compact-restart");
+    rig.codex_turn(&id).await;
+    rig.finish_codex_turn(0);
+    rig.until_status(&id, RunStatus::Completed).await;
+    rig.host.process(0).exit(true);
+    rig.gone(&id).await;
+    rig.command(&id, Command::Compact).await;
+    rig.until("compact sent", async || {
+        rig.drain().await;
+        rig.host.spawned() > 1
+            && rig
+                .host
+                .process(1)
+                .written()
+                .iter()
+                .any(|frame| frame["method"] == "thread/compact/start")
+    })
+    .await;
+    let written = rig.host.process(1).written();
+    let methods: Vec<_> = written
+        .iter()
+        .map(|frame| frame["method"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            "initialize",
+            "initialized",
+            "thread/resume",
+            "thread/compact/start"
+        ]
+    );
+    assert_eq!(written[2]["params"]["threadId"], "native-thread");
+    assert_eq!(written[3]["params"]["threadId"], "native-thread");
+}
+
 // ProviderTurnControlService.test.ts: "interrupts the historical session only
 // for the exact committed restart replacement" — a stop reaches only the
 // process that ran its attempt.
@@ -1008,6 +1071,67 @@ async fn claude_reuses_its_process_after_aligning_model_and_mode() {
         "claude-opus-4-6[1m]"
     );
     assert_eq!(process.written()[3]["request"]["mode"], "acceptEdits");
+}
+
+/// A rejection settles the waiter of its own request id, not another request
+/// of the same operation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_request_settles_only_the_waiter_of_its_id() {
+    let rig = rig(SessionOptions::default(), 5);
+    rig.host.respond(|frame| {
+        if frame["request"]["subtype"] == "set_model" {
+            return vec![];
+        }
+        claude_replies(frame)
+    });
+    let id = thread("thread-reply-ids");
+    rig.create(
+        &id,
+        selection(Driver::Claude, "claude-sonnet-4-6"),
+        RuntimeMode::FullAccess,
+    )
+    .await;
+    rig.send(&id, "first", DispatchMode::StartImmediately).await;
+    rig.drain().await;
+    let entry = rig.sessions.entry(&rig.sessions.sessions()[0]).unwrap();
+    let set_model = |model: &'static str| {
+        Request::new(move |p| {
+            Ok(frames(vec![
+                p.claude()?
+                    .control
+                    .request("set_model", json!({ "model": model })),
+            ]))
+        })
+    };
+    rig.sessions
+        .send(&entry, set_model("unawaited"))
+        .await
+        .unwrap();
+    let awaited = tokio::spawn({
+        let (sessions, entry) = (rig.sessions.clone(), entry.clone());
+        async move { sessions.request_reply(&entry, set_model("awaited")).await }
+    });
+    let process = rig.host.process(0);
+    let requests = || {
+        process
+            .written()
+            .into_iter()
+            .filter(|frame| frame["request"]["subtype"] == "set_model")
+            .map(|frame| frame["request_id"].clone())
+            .collect::<Vec<_>>()
+    };
+    rig.until("both requests written", async || requests().len() == 2)
+        .await;
+    let ids = requests();
+    process.emit(json!({"type":"control_response","response":{"subtype":"error","request_id":ids[0],"error":"model rejected"}}));
+    process.emit(json!({"type":"control_response","response":{"subtype":"success","request_id":ids[1],"response":{"model":"awaited"}}}));
+    assert_eq!(awaited.await.unwrap(), Ok(json!({"model":"awaited"})));
+    rig.until("rejection recorded on the run", async || {
+        rig.state(&id).await.items.iter().any(|item| {
+            matches!(&item.kind, ItemKind::Error { message, .. } if message == "model rejected")
+        })
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

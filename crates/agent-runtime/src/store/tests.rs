@@ -57,7 +57,6 @@ fn batch(thread: &ThreadId, base: u64, input_seq: u64, facts: Vec<Fact>) -> Comm
         shell: None,
         needs_recovery: false,
         search: SearchChanges::default(),
-        attachment_paths: vec![],
         snapshot: None,
     }
 }

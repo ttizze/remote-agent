@@ -5175,9 +5175,8 @@ impl Decision {
             .then(|| self.state.active_run())
             .flatten()
             .filter(|run| {
-                trigger == RecoveryTrigger::Startup
-                    && (run.status == RunStatus::Running
-                        || run.status == RunStatus::Starting && run.restart_of.is_some())
+                (run.status == RunStatus::Running
+                    || run.status == RunStatus::Starting && run.restart_of.is_some())
                     && self.state.thread.as_ref().is_some_and(|thread| {
                         thread.archived_at.is_none()
                             && thread.deleted_at.is_none()

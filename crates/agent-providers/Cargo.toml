@@ -14,4 +14,7 @@ thiserror.workspace = true
 tokio.workspace = true
 url.workspace = true
 
+[features]
+test-support = []
+
 [dev-dependencies]

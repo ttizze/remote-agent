@@ -43,8 +43,8 @@ impl Protocol {
 
 pub(crate) type Op = Box<dyn FnOnce(&mut Protocol) -> Result<Translation, ProtocolError> + Send>;
 pub(crate) type ReplyWait = oneshot::Receiver<Result<Value, String>>;
-/// Request id, operation and the caller waiting for the reply.
-pub(crate) type ReplyWaiter = (String, String, oneshot::Sender<Result<Value, String>>);
+/// Request id and the caller waiting for its reply.
+pub(crate) type ReplyWaiter = (String, oneshot::Sender<Result<Value, String>>);
 pub(crate) type CompletionWait = oneshot::Receiver<Result<Completion, String>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,9 +116,6 @@ pub(crate) struct Task {
     pub(crate) line: Vec<u8>,
     pub(crate) owner: Option<RunAttemptId>,
     pub(crate) handshake: bool,
-    /// A `thread/resume` of a turn start awaits its reply. The translator
-    /// reports its rejection as a `thread/start` failure.
-    pub(crate) resuming: bool,
     pub(crate) attempts: HashSet<RunAttemptId>,
     pub(crate) replies: Vec<ReplyWaiter>,
     pub(crate) completion: Option<oneshot::Sender<Result<Completion, String>>>,
@@ -232,9 +229,9 @@ impl Task {
             Expect::Written => {}
             Expect::Replies => {
                 for frame in &translation.outbound {
-                    if let Some((id, operation)) = request(frame) {
+                    if let Some(id) = request(frame) {
                         let (sender, receiver) = oneshot::channel();
-                        self.replies.push((id, operation, sender));
+                        self.replies.push((id, sender));
                         ran.replies.push(receiver);
                     }
                 }
@@ -304,28 +301,16 @@ impl Task {
             }
         }
         for frame in &outbound {
-            match frame["method"].as_str() {
-                Some("thread/resume") => self.resuming = self.completion.is_none(),
-                Some("thread/start") => self.resuming = false,
-                _ => {}
-            }
             write_frame(&mut self.input, frame)
                 .await
                 .map_err(|error| SessionError::Io(error.to_string()))?;
         }
         for reply in replies {
-            if reply.operation == "thread/start" {
-                self.resuming = false;
-            }
             if reply.operation == "turn/steer" {
                 self.steers.pop_front();
             }
-            if let Some(index) = self
-                .replies
-                .iter()
-                .position(|(id, ..)| *id == reply.request)
-            {
-                let (.., waiter) = self.replies.remove(index);
+            if let Some(index) = self.replies.iter().position(|(id, _)| *id == reply.request) {
+                let (_, waiter) = self.replies.remove(index);
                 self.handshake = false;
                 let _ = waiter.send(Ok(reply.result.0));
             }
@@ -358,12 +343,17 @@ impl Task {
     async fn protocol_error(&mut self, error: ProtocolError) {
         match error {
             ProtocolError::Remote {
+                request,
                 operation,
                 message,
                 turn_completed,
             } => {
-                if let Some(index) = self.replies.iter().position(|(_, op, _)| *op == operation) {
-                    let (.., waiter) = self.replies.remove(index);
+                if let Some(index) = self
+                    .replies
+                    .iter()
+                    .position(|(id, _)| Some(id) == request.as_ref())
+                {
+                    let (_, waiter) = self.replies.remove(index);
                     let _ = waiter.send(Err(message));
                     return;
                 }
@@ -378,7 +368,6 @@ impl Task {
                 } else {
                     None
                 };
-                let resumed = operation == "thread/start" && std::mem::take(&mut self.resuming);
                 let Some((operation, session_lost)) = failed_operation(&operation) else {
                     tracing::warn!(thread = %self.key.thread, %operation, %message,
                         "provider rejected an operation nobody waits for");
@@ -393,7 +382,7 @@ impl Task {
                     message,
                     message_id,
                     turn_completed,
-                    session_lost: session_lost || resumed,
+                    session_lost,
                 });
                 if let Err(error) = self.input(failed).await {
                     tracing::warn!(thread = %self.key.thread, %error, "could not record a provider failure");
@@ -527,7 +516,7 @@ impl Task {
                 )
             }
         };
-        for (.., waiter) in self.replies.drain(..) {
+        for (_, waiter) in self.replies.drain(..) {
             let _ = waiter.send(Err("The provider session closed.".into()));
         }
         if let Some(waiter) = self.completion.take() {
@@ -561,16 +550,14 @@ async fn read_stderr(
     }
 }
 
-/// The id and operation of an outbound request whose reply can be awaited.
-fn request(frame: &Value) -> Option<(String, String)> {
+/// The id of an outbound request whose reply can be awaited, as the
+/// translators report it.
+fn request(frame: &Value) -> Option<String> {
     if frame["type"] == "control_request" {
-        return Some((
-            frame["request_id"].as_str()?.to_owned(),
-            frame["request"]["subtype"].as_str()?.to_owned(),
-        ));
+        return Some(frame["request_id"].as_str()?.to_owned());
     }
-    let method = frame.get("method")?.as_str()?;
-    Some((frame.get("id")?.to_string(), method.to_owned()))
+    frame.get("method")?;
+    Some(frame.get("id")?.to_string())
 }
 
 fn completion_operation(operation: &str) -> bool {
@@ -594,7 +581,8 @@ pub(crate) fn failed_operation(operation: &str) -> Option<(ProviderOperation, bo
         | "thread/backgroundTerminals/terminate"
         | "thread/backgroundTerminals/list" => (ProviderOperation::Interrupt, false),
         "thread/compact/start" => (ProviderOperation::Compact, false),
-        "set_model" | "set_permission_mode" => (ProviderOperation::SetModel, false),
+        "set_model" => (ProviderOperation::SetModel, false),
+        "set_permission_mode" => (ProviderOperation::SetRuntimeMode, false),
         _ => return None,
     })
 }
