@@ -270,6 +270,7 @@ impl Replay {
         let reply = self.command(
             &root,
             Command::Send(SendMessage {
+                context: None,
                 created_by: MessageAuthor::User,
                 creation_source: "web".into(),
                 id: MessageId::new(format!("message-{}", self.serial)).unwrap(),
@@ -1616,6 +1617,7 @@ fn native_subagent_threads_refuse_messages_with_the_reference_error_and_no_proje
         let reply = replay.command(
             &child,
             Command::Send(SendMessage {
+                context: None,
                 created_by: MessageAuthor::User,
                 creation_source: "web".into(),
                 id: MessageId::new("message-native-child").unwrap(),

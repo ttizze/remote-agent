@@ -239,6 +239,8 @@ pub struct Message {
     pub creation_source: String,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+    /// Inline context records the text links to (T3 message `context`).
+    pub context: Option<MessageContext>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
@@ -783,6 +785,7 @@ pub struct SendMessage {
     pub continuation: Option<Continuation>,
     /// Shown as the title while the first message's title is generated.
     pub title_seed: Option<String>,
+    pub context: Option<MessageContext>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DispatchMode {
@@ -933,6 +936,8 @@ pub enum Command {
         run: RunId,
         text: String,
         attachments: Option<Vec<Attachment>>,
+        /// Replaces the message's context when present.
+        context: Option<MessageContext>,
     },
     PromoteToSteer {
         queued: RunId,

@@ -3,9 +3,9 @@
 use crate::error::{Delivery, RpcFailure};
 use crate::models::Project;
 use agent_domain::{
-    Attachment, Command, CommandId, Driver, Fact, InteractionMode, Item, Message, MessageId,
-    ModelSelection, Plan, Reply, RuntimeMode, State, ThreadId, ThreadShell, Timestamp, TurnItemId,
-    host_only_command,
+    Attachment, Command, CommandId, Driver, Fact, InteractionMode, Item, Message, MessageContext,
+    MessageId, ModelSelection, Plan, Reply, RuntimeMode, State, ThreadId, ThreadShell, Timestamp,
+    TurnItemId, host_only_command,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -70,6 +70,8 @@ pub struct LaunchMessage {
     pub creation_source: String,
     /// Shown as the title while a title is generated from this message.
     pub title_seed: Option<String>,
+    /// Inline context records the text links to (T3 `initialMessage.context`).
+    pub context: Option<MessageContext>,
 }
 
 /// `conversation/launch`: create a thread, prepare its workspace and send the first

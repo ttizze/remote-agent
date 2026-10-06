@@ -51,6 +51,7 @@ fn creation_is_a_pure_replayable_decision() {
 }
 fn send_message(key: &str, mode: DispatchMode) -> Command {
     Command::Send(SendMessage {
+        context: None,
         created_by: MessageAuthor::User,
         creation_source: "client".into(),
         id: MessageId::new(key).unwrap(),
@@ -1339,6 +1340,7 @@ fn plan_followup_preserves_attachments_and_consumes_the_proposal() {
         &mut s,
         "implement",
         Command::Send(SendMessage {
+            context: None,
             created_by: MessageAuthor::User,
             creation_source: "client".into(),
             id: MessageId::new("implement").unwrap(),
@@ -2968,6 +2970,7 @@ fn wire_encodings_round_trip_state_facts_commands_and_effects() {
     let mut s = state();
     let mut steps = vec![];
     let send = Command::Send(SendMessage {
+        context: None,
         created_by: MessageAuthor::User,
         creation_source: "client".into(),
         id: MessageId::new("captured").unwrap(),
@@ -4156,6 +4159,7 @@ fn queued_edits_are_validated_and_automatic_deliveries_are_fixed() {
             s,
             key,
             Command::EditQueued {
+                context: None,
                 run: run.clone(),
                 text: text.into(),
                 attachments: None,
@@ -5345,3 +5349,91 @@ mod recovery;
 mod rollback;
 mod selection;
 mod thread;
+
+// T3 ProviderTurnStartService / ProviderTurnControlService send the message's
+// context projected into its text; Orchestrator queued-run.edit replaces it.
+#[test]
+fn a_message_reaches_the_provider_with_its_context_projected() {
+    let skill = |name: &str| {
+        Json(serde_json::json!({
+            "version": 1, "contextId": "ctx_s", "kind": "skill", "label": "$x", "name": name,
+        }))
+    };
+    let with_context = |key: &str, mode: DispatchMode, records: Vec<Json>| {
+        let Command::Send(mut message) = send_message(key, mode) else {
+            unreachable!()
+        };
+        message.text = "use [$x](t3-context://v1/skill/ctx_s)".into();
+        message.context = Some(MessageContext {
+            version: 1,
+            records,
+        });
+        Command::Send(message)
+    };
+    let mut s = state();
+    let start = command(
+        &mut s,
+        "first",
+        with_context(
+            "first",
+            DispatchMode::StartImmediately,
+            vec![skill("pinchtab")],
+        ),
+    );
+    let expected = project_context_for_provider(
+        "use [$x](t3-context://v1/skill/ctx_s)",
+        s.messages[0].context.as_ref(),
+    );
+    assert!(expected.contains("name: pinchtab"));
+    assert!(start.effects.iter().any(|effect| matches!(&effect.body,
+        EffectBody::Provider(ProviderCommand::Start { text, .. }) if *text == expected)));
+    assert_eq!(s.messages[0].text, "use [$x](t3-context://v1/skill/ctx_s)");
+
+    let duplicate = command(
+        &mut s,
+        "duplicate",
+        with_context(
+            "duplicate",
+            DispatchMode::QueueAfterActive,
+            vec![skill("a"), skill("b")],
+        ),
+    );
+    assert_eq!(
+        duplicate.reply,
+        Reply::Rejected {
+            reason: "invalid-message-context".into()
+        }
+    );
+    command(
+        &mut s,
+        "queued",
+        with_context("queued", DispatchMode::QueueAfterActive, vec![skill("old")]),
+    );
+    let queued = s
+        .runs
+        .iter()
+        .find(|run| run.status == RunStatus::Queued)
+        .unwrap()
+        .id
+        .clone();
+    let edited = command(
+        &mut s,
+        "edit",
+        Command::EditQueued {
+            run: queued,
+            text: "use [$x](t3-context://v1/skill/ctx_s) again".into(),
+            attachments: None,
+            context: Some(MessageContext {
+                version: 1,
+                records: vec![skill("new")],
+            }),
+        },
+    );
+    assert_eq!(edited.reply, Reply::Accepted);
+    let message = s
+        .messages
+        .iter()
+        .find(|m| m.id.as_str() == "queued")
+        .unwrap();
+    assert_eq!(message.context.as_ref().unwrap().records, [skill("new")]);
+}

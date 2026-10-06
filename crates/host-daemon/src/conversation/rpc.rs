@@ -6,7 +6,7 @@ use super::{
 };
 use crate::checkpoints::DiffFormat;
 use crate::host_rpc::connections::{HostReply, HostSubscription};
-use agent_domain::{Attachment, Command, MessageAuthor, Reply, ThreadId};
+use agent_domain::{Attachment, Command, MessageAuthor, MessageContext, Reply, ThreadId};
 use agent_protocol::{
     conversation as wire,
     conversation::{ConversationError, FACTS_FRAME_BUDGET, fact_updates},
@@ -231,13 +231,30 @@ impl Conversation {
         Ok(view)
     }
 
-    fn claim(&self, thread: &ThreadId, attachments: &mut Vec<Attachment>) -> Result<()> {
-        if !attachments.is_empty() {
-            *attachments = self
-                .resources
-                .files
-                .claim(thread.as_str(), attachments)
-                .map_err(|error| ConversationError::AttachmentUnavailable(format!("{error:#}")))?;
+    /// Claims uploads into the thread's storage and rebinds the context records
+    /// that named them (T3 `remapComposerContextAttachments`).
+    fn claim(
+        &self,
+        thread: &ThreadId,
+        attachments: &mut Vec<Attachment>,
+        context: Option<&mut MessageContext>,
+    ) -> Result<()> {
+        if attachments.is_empty() {
+            return Ok(());
+        }
+        let before: Vec<String> = attachments.iter().map(|file| file.id.clone()).collect();
+        *attachments = self
+            .resources
+            .files
+            .claim(thread.as_str(), attachments)
+            .map_err(|error| ConversationError::AttachmentUnavailable(format!("{error:#}")))?;
+        if let Some(context) = context {
+            let claimed = before
+                .into_iter()
+                .zip(attachments.iter())
+                .map(|(before, file)| (before, file.id.clone()))
+                .collect();
+            context.remap_attachments(&claimed);
         }
         Ok(())
     }
@@ -246,14 +263,17 @@ impl Conversation {
     /// sees them.
     fn claim_command(&self, thread: &ThreadId, command: &mut Command) -> Result<()> {
         match command {
-            Command::Send(message) => self.claim(thread, &mut message.attachments),
+            Command::Send(message) => {
+                self.claim(thread, &mut message.attachments, message.context.as_mut())
+            }
             Command::EditQueued {
                 attachments: Some(attachments),
+                context,
                 ..
-            } => self.claim(thread, attachments),
+            } => self.claim(thread, attachments, context.as_mut()),
             Command::Respond { attachments, .. } => attachments
                 .values_mut()
-                .try_for_each(|attachments| self.claim(thread, attachments)),
+                .try_for_each(|attachments| self.claim(thread, attachments, None)),
             _ => Ok(()),
         }
     }
@@ -299,13 +319,15 @@ impl Conversation {
         let initial_message = match &params.message {
             Some(message) => {
                 let mut attachments = message.attachments.clone();
-                self.claim(&thread, &mut attachments)?;
+                let mut context = message.context.clone();
+                self.claim(&thread, &mut attachments, context.as_mut())?;
                 Some(InitialMessage {
                     id: message.id.clone(),
                     text: message.text.clone(),
                     attachments,
                     created_by: MessageAuthor::User,
                     creation_source: message.creation_source.clone(),
+                    context,
                 })
             }
             None => None,

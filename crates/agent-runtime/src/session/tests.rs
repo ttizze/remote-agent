@@ -203,6 +203,7 @@ impl Rig {
         self.command(
             thread,
             Command::Send(SendMessage {
+                context: None,
                 created_by: MessageAuthor::User,
                 creation_source: "web".into(),
                 id,

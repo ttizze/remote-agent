@@ -726,6 +726,7 @@ impl AgentTools {
                     &target_thread.id,
                     id,
                     Command::Send(SendMessage {
+                        context: None,
                         created_by: MessageAuthor::Agent,
                         creation_source: "mcp".into(),
                         id: message.clone(),

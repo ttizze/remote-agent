@@ -219,6 +219,7 @@ pub enum FactBody {
         intent: InputIntent,
         created_by: MessageAuthor,
         creation_source: String,
+        context: Option<MessageContext>,
     },
     MessageNotificationAssigned {
         id: MessageId,
@@ -228,6 +229,7 @@ pub enum FactBody {
         id: MessageId,
         text: String,
         attachments: Option<Vec<Attachment>>,
+        context: Option<MessageContext>,
     },
     MessageAdopted {
         id: MessageId,
@@ -944,6 +946,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             intent,
             created_by,
             creation_source,
+            context,
         } => {
             if state.messages.iter().any(|m| &m.id == id) {
                 return Err(FoldError::Conflict);
@@ -961,6 +964,7 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 streaming: *role == Role::Assistant,
                 created_at: at.clone(),
                 updated_at: at.clone(),
+                context: context.clone(),
             });
         }
         MessageNotificationAssigned { id, notification } => {
@@ -971,11 +975,15 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             id,
             text,
             attachments,
+            context,
         } => {
             let m = find_mut(&mut state.messages, "message", |m| &m.id == id)?;
             m.text = text.clone();
             if let Some(a) = attachments {
                 m.attachments = a.clone();
+            }
+            if context.is_some() {
+                m.context = context.clone();
             }
             m.updated_at = at.clone();
         }

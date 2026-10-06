@@ -5,8 +5,8 @@ use crate::{
     prepare_workspace,
 };
 use agent_domain::{
-    Attachment, Command, CommandId, DispatchMode, InteractionMode, MessageAuthor, MessageId,
-    ModelSelection, Reply, RuntimeMode, SendMessage, ThreadId, Workspace,
+    Attachment, Command, CommandId, DispatchMode, InteractionMode, MessageAuthor, MessageContext,
+    MessageId, ModelSelection, Reply, RuntimeMode, SendMessage, ThreadId, Workspace,
 };
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,7 @@ pub struct InitialMessage {
     pub attachments: Vec<Attachment>,
     pub created_by: MessageAuthor,
     pub creation_source: String,
+    pub context: Option<MessageContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -638,6 +639,7 @@ pub(crate) async fn launch(
             &thread,
             message_command,
             Command::Send(SendMessage {
+                context: message.context.clone(),
                 created_by: message.created_by,
                 creation_source: message.creation_source.clone(),
                 id: message

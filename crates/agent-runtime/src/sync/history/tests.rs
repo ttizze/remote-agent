@@ -69,6 +69,7 @@ pub(crate) fn command_rows(count: usize) -> State {
 }
 fn message(id: &str, run: Option<&str>, role: Role, author: MessageAuthor, text: &str) -> Message {
     Message {
+        context: None,
         notification: None,
         id: MessageId::new(id).unwrap(),
         run: run.map(|run| RunId::new(run).unwrap()),

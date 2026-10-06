@@ -241,6 +241,7 @@ fn launch(host: &Host, command_id: &str, text: &str) -> Call {
         interaction_mode: InteractionMode::Default,
         workspace: wire::WorkspaceStrategy::Root { branch: None },
         message: Some(wire::LaunchMessage {
+            context: None,
             id: None,
             text: text.into(),
             attachments: vec![],
@@ -759,6 +760,7 @@ async fn conversation_calls_answer_with_typed_errors() {
     let missing_upload = host
         .call::<wire::Launched>(Call::Launch(Box::new(wire::Launch {
             message: Some(wire::LaunchMessage {
+                context: None,
                 id: None,
                 text: "with a file".into(),
                 attachments: vec![agent_domain::Attachment {

@@ -25,6 +25,7 @@ fn request(
         interaction_mode: InteractionMode::Default,
         workspace,
         initial_message: message.map(|text| InitialMessage {
+            context: None,
             id: Some(MessageId::new(format!("{text}:id")).unwrap()),
             text: text.into(),
             attachments: vec![],
@@ -752,6 +753,7 @@ async fn generates_an_initial_title_for_an_attachment_only_message() {
     input.title = "Image: screenshot.png".into();
     input.generate_title = true;
     input.initial_message = Some(InitialMessage {
+        context: None,
         id: Some(MessageId::new("message:image-only").unwrap()),
         text: String::new(),
         attachments: vec![Attachment {

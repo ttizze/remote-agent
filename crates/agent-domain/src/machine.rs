@@ -698,7 +698,7 @@ impl Decision {
                 selection: run.selection.clone(),
                 runtime_mode: thread.runtime_mode,
                 interaction_mode: thread.interaction_mode,
-                text: message.text,
+                text: project_context_for_provider(&message.text, message.context.as_ref()),
                 note,
                 attachments: message.attachments,
                 native_thread,
@@ -1438,6 +1438,11 @@ impl Decision {
         if let Err(reason) = validate_attachments(&message.attachments) {
             return reject(reason);
         }
+        let context = match message.context.as_ref().map(MessageContext::normalized) {
+            Some(None) => return reject("invalid-message-context"),
+            context => context.flatten(),
+        };
+        let provider_text = project_context_for_provider(&message.text, context.as_ref());
         if let Some(source) = &message.source_plan {
             // Another thread's plan is read by the Host before dispatch.
             let found = if source.thread == thread.id {
@@ -1623,6 +1628,7 @@ impl Decision {
                 intent: InputIntent::Steer,
                 created_by: message.created_by,
                 creation_source: message.creation_source.clone(),
+                context: context.clone(),
             });
             self.user_item(&message.id, run);
             if restart {
@@ -1652,7 +1658,7 @@ impl Decision {
                     selection: selection.clone(),
                     runtime_mode: t.runtime_mode,
                     interaction_mode: t.interaction_mode,
-                    text: message.text.clone(),
+                    text: provider_text,
                     note: None,
                     attachments: message.attachments.clone(),
                     native_thread: self.state.native_sessions.get(&selection.instance).cloned(),
@@ -1665,7 +1671,7 @@ impl Decision {
                     Some(attempt),
                     EffectBody::Provider(ProviderCommand::Steer {
                         message: message.id.clone(),
-                        text: message.text.clone(),
+                        text: provider_text,
                         attachments: message.attachments.clone(),
                     }),
                 );
@@ -1697,6 +1703,7 @@ impl Decision {
             intent,
             created_by: message.created_by,
             creation_source: message.creation_source.clone(),
+            context,
         });
         self.fact(FactBody::RunRequested {
             id: id.clone(),
@@ -1859,6 +1866,7 @@ impl Decision {
                     intent: InputIntent::TurnStart,
                     created_by: MessageAuthor::Agent,
                     creation_source: "server".into(),
+                    context: None,
                 });
                 self.fact(FactBody::RunRequested {
                     id: run.clone(),
@@ -2061,6 +2069,7 @@ impl Decision {
                                 MessageAuthor::Agent
                             },
                             creation_source: "server".into(),
+                            context: None,
                         },
                     );
                     self.fact_at(
@@ -2501,6 +2510,7 @@ impl Decision {
             }
             Compact => {
                 let message = SendMessage {
+                    context: None,
                     created_by: MessageAuthor::User,
                     creation_source: "client".into(),
                     id: MessageId::new(self.key("message", id.as_str())).unwrap(),
@@ -2974,10 +2984,15 @@ impl Decision {
                 run,
                 text,
                 attachments,
+                context,
             } => {
                 if text.trim().is_empty() {
                     return reject("empty-message");
                 }
+                let context = match context.as_ref().map(MessageContext::normalized) {
+                    Some(None) => return reject("invalid-message-context"),
+                    context => context.flatten(),
+                };
                 let Some(r) = self
                     .state
                     .runs
@@ -2995,6 +3010,7 @@ impl Decision {
                     return reject(reason);
                 }
                 self.fact(FactBody::MessageEdited {
+                    context,
                     id: r.message.clone(),
                     text: text.clone(),
                     attachments: attachments.clone(),
@@ -3065,7 +3081,7 @@ impl Decision {
                     target.attempt,
                     EffectBody::Provider(ProviderCommand::Steer {
                         message: m.id.clone(),
-                        text: m.text,
+                        text: project_context_for_provider(&m.text, m.context.as_ref()),
                         attachments: m.attachments,
                     }),
                 );
@@ -3157,6 +3173,7 @@ impl Decision {
                 self.complete_request_cards(request, card);
                 if r.capability == ResponseCapability::Message {
                     let message = SendMessage {
+                        context: None,
                         created_by: MessageAuthor::User,
                         creation_source: "server".into(),
                         id: MessageId::new(format!("async-answer:{request}")).unwrap(),
@@ -3672,6 +3689,7 @@ impl Decision {
                                 message: message.clone(),
                             },
                             message: Box::new(SendMessage {
+                                context: None,
                                 created_by: MessageAuthor::Agent,
                                 creation_source: "mcp".into(),
                                 id: message,
@@ -3849,6 +3867,7 @@ impl Decision {
                             .unwrap_or_default();
                         ids.extend(eligible.iter().cloned());
                         self.fact(FactBody::MessageEdited {
+                            context: None,
                             id: message.clone(),
                             text: wake_text(&ids),
                             attachments: None,
@@ -3900,6 +3919,7 @@ impl Decision {
                         intent: InputIntent::Steer,
                         created_by: MessageAuthor::Agent,
                         creation_source: "server".into(),
+                        context: None,
                     });
                     self.fact(FactBody::MessageNotificationAssigned {
                         id: message_id.clone(),
@@ -3924,6 +3944,7 @@ impl Decision {
                 }
                 let tasks = task_ids.clone();
                 let message = SendMessage {
+                    context: None,
                     created_by: MessageAuthor::Agent,
                     creation_source: "server".into(),
                     id: message_id,
@@ -4174,6 +4195,7 @@ impl Decision {
                         intent: InputIntent::TurnStart,
                         created_by: MessageAuthor::Agent,
                         creation_source: "provider".into(),
+                        context: None,
                     });
                 }
                 ItemKind::AssistantMessage { message }
@@ -4883,6 +4905,7 @@ impl Decision {
                             intent: InputIntent::TurnStart,
                             created_by: MessageAuthor::Agent,
                             creation_source: "provider".into(),
+                            context: None,
                         });
                         let item = TurnItemId::new(self.native_key("item", attempt, key)).unwrap();
                         self.item_start(
@@ -5299,6 +5322,7 @@ impl Decision {
             }
             Wake { text, detail } => {
                 let message = SendMessage {
+                    context: None,
                     created_by: MessageAuthor::Agent,
                     creation_source: "provider".into(),
                     id: MessageId::new(self.key("wake", &self.facts.len().to_string())).unwrap(),
@@ -5370,6 +5394,7 @@ impl Decision {
             intent: InputIntent::QueuedTurn,
             created_by: MessageAuthor::Agent,
             creation_source: "provider".into(),
+            context: None,
         });
         if let Some(notification) = background_notification(
             &self
@@ -6367,6 +6392,7 @@ fn command_fingerprint(command: &Command) -> String {
             ..
         }
         | Command::Send(SendMessage {
+            context: None,
             resolved_plan: Some(_),
             ..
         })

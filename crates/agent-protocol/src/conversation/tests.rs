@@ -135,6 +135,7 @@ impl Thread {
 
 fn send() -> Command {
     Command::Send(SendMessage {
+        context: None,
         created_by: MessageAuthor::User,
         creation_source: "client".into(),
         id: id("first"),
@@ -267,6 +268,7 @@ fn requests_round_trip_and_join_the_call_table() {
         interaction_mode: InteractionMode::Plan,
         workspace: WorkspaceStrategy::Root { branch: None },
         message: Some(LaunchMessage {
+            context: None,
             id: Some(id("message")),
             text: "Start".into(),
             attachments: vec![attachment()],

@@ -573,6 +573,7 @@ fn launch_request(
         interaction_mode: InteractionMode::Default,
         workspace,
         initial_message: message.then(|| crate::InitialMessage {
+            context: None,
             id: None,
             text: "Start here".into(),
             attachments: vec![],

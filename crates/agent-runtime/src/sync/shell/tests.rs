@@ -182,6 +182,7 @@ fn keeps_transcript_bodies_out_of_shell_rows() {
     fold_into(
         &mut state,
         agent_domain::FactBody::MessageCreated {
+            context: None,
             id: agent_domain::MessageId::new("message-shell-budget").unwrap(),
             run: None,
             role: Role::Assistant,

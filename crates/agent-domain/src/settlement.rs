@@ -153,6 +153,7 @@ pub fn limit_recovery_command(
     Some((
         CommandId::new(format!("limit-resume:{delivery}")).ok()?,
         Command::Send(SendMessage {
+            context: None,
             created_by: MessageAuthor::User,
             creation_source: "server".into(),
             id: MessageId::new(format!("limit-resume:{delivery}")).ok()?,

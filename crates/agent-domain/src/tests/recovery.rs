@@ -251,6 +251,7 @@ fn a_scheduled_usage_limit_continuation_is_guarded() {
         }
         assert!(limit_recovery_command(&armed, true, false, now).is_none());
         let early = Command::Send(SendMessage {
+            context: None,
             continuation: Some(Continuation::UsageLimit {
                 run: run.clone(),
                 recovery: None,

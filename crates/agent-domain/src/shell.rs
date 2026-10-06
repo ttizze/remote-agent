@@ -251,6 +251,7 @@ mod tests {
     }
     fn send(key: &str, mode: DispatchMode) -> Command {
         Command::Send(SendMessage {
+            context: None,
             created_by: MessageAuthor::User,
             creation_source: "client".into(),
             id: MessageId::new(key).unwrap(),
