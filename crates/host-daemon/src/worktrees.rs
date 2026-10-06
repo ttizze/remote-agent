@@ -1,4 +1,6 @@
+use agent_domain::{WorktreeSetupStageId, WorktreeSetupStageStatus};
 use agent_protocol::models::{Worktree, WorktreeSettings};
+use agent_runtime::{SetupEvent, SetupProgress};
 use anyhow::{Context as _, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -180,18 +182,39 @@ impl Worktrees {
         base_ref: &str,
         branch: Option<String>,
         start_from_origin: bool,
+        progress: SetupProgress,
     ) -> Result<(PathBuf, String)> {
         let _guard = self.lock.lock().await;
         let path = self.path.clone();
         let (thread, cwd, base_ref) = (thread.to_owned(), PathBuf::from(cwd), base_ref.to_owned());
         tokio::task::spawn_blocking(move || {
             let mut state = read(&path)?;
+            let stage = |id, status| progress.report(SetupEvent::Stage(id, status));
             let base = || {
-                if start_from_origin {
-                    origin_start(&cwd, &base_ref)
+                // "Start from origin" applies only when the repository has an origin.
+                let from_origin = start_from_origin
+                    && crate::git::output(&cwd, &["remote", "get-url", "origin"]).is_ok();
+                stage(
+                    WorktreeSetupStageId::Fetch,
+                    if from_origin {
+                        WorktreeSetupStageStatus::Running
+                    } else {
+                        WorktreeSetupStageStatus::Skipped
+                    },
+                );
+                let start = if from_origin {
+                    origin_start(&cwd, &base_ref)?
                 } else {
-                    Ok(base_ref.clone())
+                    base_ref.clone()
+                };
+                if from_origin {
+                    stage(WorktreeSetupStageId::Fetch, WorktreeSetupStageStatus::Done);
                 }
+                stage(
+                    WorktreeSetupStageId::Checkout,
+                    WorktreeSetupStageStatus::Running,
+                );
+                Ok(start)
             };
             checkout(&path, &mut state, &thread, &cwd, base, branch)
         })
@@ -200,12 +223,8 @@ impl Worktrees {
 }
 
 /// The commit a worktree "started from origin" begins at (T3 ThreadLaunchService):
-/// the fetched origin branch, or the local `base_ref` when the repository has no
-/// `origin` remote or origin has no such branch.
+/// the fetched origin branch, or the local `base_ref` when origin has no such branch.
 fn origin_start(cwd: &Path, base_ref: &str) -> Result<String> {
-    if crate::git::output(cwd, &["remote", "get-url", "origin"]).is_err() {
-        return Ok(base_ref.to_owned());
-    }
     fetch_origin(cwd, base_ref)?;
     let remote = format!("refs/remotes/origin/{base_ref}");
     if crate::git::output(cwd, &["show-ref", "--verify", "--quiet", &remote]).is_err() {
@@ -1051,7 +1070,14 @@ mod tests {
         let projects = directory.path().join("projects.json");
         let store = Worktrees::new(&projects);
         let create = |thread: &'static str| {
-            store.create(thread, root.to_str().unwrap(), "HEAD", None, false)
+            store.create(
+                thread,
+                root.to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+            )
         };
         let first = create("thread:retried").await.unwrap();
         assert_eq!(create("thread:retried").await.unwrap(), first);
@@ -1117,7 +1143,14 @@ mod tests {
         crate::git::text(&clone, &["branch", "feature"]).unwrap();
         let store = Worktrees::new(&directory.path().join("projects.json"));
         let create = |thread: &'static str, base: &'static str| {
-            store.create(thread, clone.to_str().unwrap(), base, None, true)
+            store.create(
+                thread,
+                clone.to_str().unwrap(),
+                base,
+                None,
+                true,
+                Default::default(),
+            )
         };
 
         let (from_origin, _) = create("thread:origin", "main").await.unwrap();
@@ -1150,7 +1183,14 @@ mod tests {
         let store = Worktrees::new(&projects);
         let branches = crate::git::text(&root, &["branch", "--list"]).unwrap();
         let error = store
-            .create("thread:fetch", root.to_str().unwrap(), "main", None, true)
+            .create(
+                "thread:fetch",
+                root.to_str().unwrap(),
+                "main",
+                None,
+                true,
+                Default::default(),
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -1240,7 +1280,14 @@ mod tests {
                 .await
                 .unwrap();
             let cwd = store
-                .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
+                .create(
+                    &new_thread(),
+                    root.to_str().unwrap(),
+                    "HEAD",
+                    None,
+                    false,
+                    Default::default(),
+                )
                 .await
                 .unwrap()
                 .0;
@@ -1402,7 +1449,14 @@ mod tests {
         };
         store.settings(Some(settings.clone())).await.unwrap();
         let cwd = store
-            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
+            .create(
+                &new_thread(),
+                root.to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+            )
             .await
             .unwrap()
             .0;
@@ -1472,12 +1526,26 @@ mod tests {
             .await
             .unwrap();
         let first = worktrees
-            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
+            .create(
+                &new_thread(),
+                root.to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+            )
             .await
             .unwrap()
             .0;
         let other = worktrees
-            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
+            .create(
+                &new_thread(),
+                root.to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+            )
             .await
             .unwrap()
             .0;
@@ -1579,7 +1647,14 @@ mod tests {
         let loaded = Worktrees::new(&projects);
         assert_eq!(loaded.configure(None).await.unwrap(), settings);
         let first = loaded
-            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
+            .create(
+                &new_thread(),
+                root.to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+            )
             .await
             .unwrap()
             .0;
@@ -1635,7 +1710,14 @@ mod tests {
             .await
             .unwrap();
         let second = store
-            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
+            .create(
+                &new_thread(),
+                root.to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+            )
             .await
             .unwrap()
             .0;
@@ -1677,7 +1759,14 @@ mod tests {
                 .unwrap();
             assert!(
                 store
-                    .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
+                    .create(
+                        &new_thread(),
+                        root.to_str().unwrap(),
+                        "HEAD",
+                        None,
+                        false,
+                        Default::default()
+                    )
                     .await
                     .is_err(),
                 "{path} must be rejected"
@@ -1747,7 +1836,14 @@ mod tests {
         store.configure(Some(settings.clone())).await.unwrap();
         let restarted = Worktrees::new(&projects);
         let first = restarted
-            .create(&new_thread(), root.to_str().unwrap(), "HEAD", None, false)
+            .create(
+                &new_thread(),
+                root.to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+            )
             .await
             .unwrap()
             .0;
@@ -1768,7 +1864,14 @@ mod tests {
         settings["worktreeDirectory"] = json!(real_parent.join("second"));
         store.configure(Some(settings)).await.unwrap();
         let second = restarted
-            .create(&new_thread(), first.to_str().unwrap(), "HEAD", None, false)
+            .create(
+                &new_thread(),
+                first.to_str().unwrap(),
+                "HEAD",
+                None,
+                false,
+                Default::default(),
+            )
             .await
             .unwrap()
             .0;
@@ -1842,6 +1945,7 @@ mod tests {
                     "HEAD",
                     None,
                     false,
+                    Default::default(),
                 )
                 .await
                 .unwrap()
@@ -1866,7 +1970,14 @@ mod tests {
             );
             assert!(!root.join("packages/app/source.txt").exists());
             let second = Worktrees::new(&projects)
-                .create(&new_thread(), first.to_str().unwrap(), "HEAD", None, false)
+                .create(
+                    &new_thread(),
+                    first.to_str().unwrap(),
+                    "HEAD",
+                    None,
+                    false,
+                    Default::default(),
+                )
                 .await
                 .unwrap()
                 .0;
@@ -1919,7 +2030,8 @@ mod tests {
                     directory.path().to_str().unwrap(),
                     "HEAD",
                     None,
-                    false
+                    false,
+                    Default::default(),
                 )
                 .await
                 .is_err()
@@ -1932,7 +2044,8 @@ mod tests {
                     directory.path().to_str().unwrap(),
                     "HEAD",
                     None,
-                    false
+                    false,
+                    Default::default(),
                 )
                 .await
                 .is_err()

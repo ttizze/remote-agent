@@ -30,6 +30,7 @@ pub struct ExecutorContext {
     pub sessions: Arc<SessionManager>,
     pub ops: Arc<dyn HostOperations>,
     pub workspaces: Arc<WorkspaceFence>,
+    pub setups: Arc<crate::SetupTracker>,
 }
 
 /// Keeps a file restore's isolation check true until the restore ends: binding a

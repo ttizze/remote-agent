@@ -336,6 +336,28 @@ pub struct TurnDiff {
     pub diff: String,
 }
 
+/// `conversation/subscribeWorktreeSetup`: the thread's setup card, `None` while no
+/// setup is tracked; sent first, then after every change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscribeSetup {
+    pub thread_id: ThreadId,
+}
+
+/// `conversation/cancelWorktreeSetup`: stops a setup before its turn starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelSetup {
+    pub thread_id: ThreadId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupCancelled {
+    /// False when nothing ran or the setup was past cancellation.
+    pub cancelled: bool,
+}
+
 /// `conversation/agentSessions/scan`: directories with Codex or Claude transcripts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanAgentSessions {}

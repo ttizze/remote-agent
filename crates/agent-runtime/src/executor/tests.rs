@@ -28,6 +28,8 @@ pub(crate) type Hook<I, O> = Arc<dyn Fn(I) -> BoxFuture<'static, O> + Send + Syn
 /// Claims a folder for a thread, by project, thread and text.
 type FolderHook = Hook<(String, ThreadId, String), Result<Option<String>, String>>;
 
+pub(crate) type StartHook = Arc<dyn Fn(SetupRequest) -> crate::StartedSetup + Send + Sync>;
+
 /// Host operations recorded in order, with scriptable outcomes.
 pub(crate) struct FakeOps {
     pub(crate) log: Mutex<Vec<String>>,
@@ -43,6 +45,8 @@ pub(crate) struct FakeOps {
     pub(crate) real_files: AtomicBool,
     pub(crate) worktree: Mutex<Option<Hook<WorktreeRequest, Result<CreatedWorktree, String>>>>,
     pub(crate) setup: Mutex<Option<Hook<SetupRequest, Result<(), String>>>>,
+    /// Starts a setup script instead of reporting none.
+    pub(crate) script: Mutex<Option<StartHook>>,
     pub(crate) folder: Mutex<Option<FolderHook>>,
     pub(crate) on_restore: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     pub(crate) on_real_path: Mutex<Option<Hook<String, ()>>>,
@@ -69,6 +73,7 @@ impl FakeOps {
             real_files: AtomicBool::new(false),
             worktree: Mutex::new(None),
             setup: Mutex::new(None),
+            script: Mutex::new(None),
             folder: Mutex::new(None),
             on_restore: Mutex::new(None),
             on_real_path: Mutex::new(None),
@@ -271,13 +276,15 @@ impl HostOperations for Ops {
             }
         })
     }
-    fn run_setup(&self, request: SetupRequest) -> BoxFuture<'_, Result<(), String>> {
+    fn run_setup(&self, request: SetupRequest) -> BoxFuture<'_, Result<crate::SetupRun, String>> {
         Box::pin(async move {
             self.0.record(format!("setup {}", request.cwd));
             let hook = self.0.setup.lock().unwrap().clone();
-            match hook {
-                Some(hook) => hook(request).await,
-                None => Ok(()),
+            let script = self.0.script.lock().unwrap().clone();
+            match (hook, script) {
+                (_, Some(script)) => Ok(crate::SetupRun::Started(script(request))),
+                (Some(hook), None) => hook(request).await.map(|()| crate::SetupRun::NoScript),
+                (None, None) => Ok(crate::SetupRun::NoScript),
             }
         })
     }
@@ -394,6 +401,7 @@ pub(crate) fn rig_with(options: RigOptions) -> Rig {
         sessions: sessions.clone(),
         ops: Arc::new(Ops(ops.clone())),
         workspaces: Arc::new(WorkspaceFence::default()),
+        setups: crate::SetupTracker::new(Arc::new(crate::SystemClock)),
     };
     let mut handlers = with_runtime_handlers(EffectHandlers::default(), &context);
     if options.stub_start {

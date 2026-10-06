@@ -453,7 +453,7 @@ async fn only_worktree_launches_wait_for_their_setup() {
         recorded
             .lock()
             .unwrap()
-            .push((request.cwd, request.observe_completion));
+            .push((request.cwd, request.observe.tracked()));
         Box::pin(async { Ok(()) })
     }));
     for (index, workspace) in [root(), worktree_strategy()].into_iter().enumerate() {
@@ -1112,7 +1112,8 @@ async fn a_completed_setup_is_not_run_again_by_a_retried_preparation() {
         };
         prepare_workspace(&rig.context, &launched.thread, Some(prepared))
             .await
-            .unwrap();
+            .unwrap()
+            .started();
     }
     assert_eq!(rig.ops.logged_with("setup").len(), 1);
     assert_eq!(rig.ops.logged_with("worktree").len(), 1);
@@ -1184,4 +1185,200 @@ async fn exhausted_preparation_retries_fail_the_run_so_it_can_be_retried() {
         .await,
         Reply::Accepted
     );
+}
+
+fn start_script(
+    ops: &FakeOps,
+    run_async: bool,
+    completion: impl Fn() -> futures_util::future::BoxFuture<'static, Option<i32>>
+    + Send
+    + Sync
+    + 'static,
+) {
+    *ops.script.lock().unwrap() = Some(Arc::new(move |request: crate::SetupRequest| {
+        request
+            .observe
+            .report(crate::SetupEvent::Output("installing".into()));
+        crate::StartedSetup {
+            name: "Install".into(),
+            command: "vp install".into(),
+            run_async,
+            completion: request.observe.tracked().then(&completion),
+        }
+    }));
+}
+
+// ThreadLaunchService.ts with WorktreeSetupTracker: a worktree launch shows its
+// setup on the card until the turn starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn tracks_a_worktree_setup_on_its_card_until_the_turn_starts() {
+    use agent_domain::{WorktreeSetupPhase, WorktreeSetupStageId, WorktreeSetupStageStatus};
+    let rig = rig();
+    start_script(&rig.ops, false, || Box::pin(async { Some(0) }));
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:card",
+            Some("thread:launch:card"),
+            Some("Card"),
+            worktree_strategy(),
+        ),
+    )
+    .await
+    .unwrap();
+    rig.drain().await;
+    assert_eq!(
+        state(&rig, &launched.thread).await.runs[0].status,
+        RunStatus::Starting
+    );
+    let card = rig.context.setups.get(&launched.thread).unwrap();
+    assert_eq!(card.phase, WorktreeSetupPhase::Done);
+    assert_eq!(
+        card.worktree_path.as_deref(),
+        Some("/repo-worktrees/feature")
+    );
+    assert_eq!(card.base_ref.as_deref(), Some("main"));
+    assert_eq!(card.setup_script.as_ref().unwrap().command, "vp install");
+    let stage = |id| {
+        card.stages
+            .iter()
+            .find(|stage| stage.id == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        card.stages.iter().map(|stage| stage.id).collect::<Vec<_>>(),
+        [
+            WorktreeSetupStageId::Fetch,
+            WorktreeSetupStageId::Checkout,
+            WorktreeSetupStageId::SetupScript,
+            WorktreeSetupStageId::Agent
+        ]
+    );
+    let setup = stage(WorktreeSetupStageId::SetupScript);
+    assert_eq!(setup.status, WorktreeSetupStageStatus::Done);
+    assert_eq!(setup.detail.as_deref(), Some("exited with 0"));
+    assert_eq!(setup.tail, ["installing"]);
+    assert_eq!(
+        stage(WorktreeSetupStageId::Checkout).status,
+        WorktreeSetupStageStatus::Done
+    );
+    assert_eq!(
+        stage(WorktreeSetupStageId::Agent).status,
+        WorktreeSetupStageStatus::Done
+    );
+
+    // A root launch is not tracked.
+    let root_launch = launch_on(
+        &rig,
+        request(
+            "command:launch:card-root",
+            Some("thread:launch:card-root"),
+            Some("Root"),
+            root(),
+        ),
+    )
+    .await
+    .unwrap();
+    rig.drain().await;
+    assert!(rig.context.setups.get(&root_launch.thread).is_none());
+}
+
+// A non-zero awaited setup fails the run; an asynchronous one settles the card
+// after the turn started.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_awaited_setup_that_fails_fails_the_run_and_an_asynchronous_one_does_not() {
+    use agent_domain::{WorktreeSetupPhase, WorktreeSetupStageId, WorktreeSetupStageStatus};
+    for (run_async, status) in [(false, RunStatus::Failed), (true, RunStatus::Starting)] {
+        let rig = rig();
+        start_script(&rig.ops, run_async, || Box::pin(async { Some(3) }));
+        let launched = launch_on(
+            &rig,
+            request(
+                &format!("command:launch:exit:{run_async}"),
+                Some(&format!("thread:launch:exit:{run_async}")),
+                Some("Exit"),
+                worktree_strategy(),
+            ),
+        )
+        .await
+        .unwrap();
+        rig.drain().await;
+        let current = state(&rig, &launched.thread).await;
+        assert_eq!(current.runs[0].status, status);
+        until("the card settles", async || {
+            rig.context
+                .setups
+                .get(&launched.thread)
+                .is_some_and(|card| card.phase != WorktreeSetupPhase::Running)
+        })
+        .await;
+        let card = rig.context.setups.get(&launched.thread).unwrap();
+        let setup = card
+            .stages
+            .iter()
+            .find(|stage| stage.id == WorktreeSetupStageId::SetupScript)
+            .unwrap();
+        assert_eq!(setup.status, WorktreeSetupStageStatus::Failed);
+        assert_eq!(setup.detail.as_deref(), Some("exited with 3"));
+        if run_async {
+            assert_eq!(card.phase, WorktreeSetupPhase::Done);
+        } else {
+            assert_eq!(card.phase, WorktreeSetupPhase::Failed);
+            assert_eq!(
+                error_text(&current).unwrap(),
+                "Workspace preparation failed during run setup script: Setup script exited with 3."
+            );
+        }
+    }
+}
+
+// WorktreeSetupTracker cancel: the setup unwinds, its worktree is removed and
+// forgotten, and the run fails as cancelled.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_a_setup_removes_its_worktree_and_fails_the_run() {
+    use agent_domain::{WorktreeSetupPhase, WorktreeSetupStageId, WorktreeSetupStageStatus};
+    let rig = rig();
+    start_script(&rig.ops, false, || Box::pin(std::future::pending()));
+    let launched = launch_on(
+        &rig,
+        request(
+            "command:launch:cancel",
+            Some("thread:launch:cancel"),
+            Some("Cancel"),
+            worktree_strategy(),
+        ),
+    )
+    .await
+    .unwrap();
+    let thread = launched.thread.clone();
+    let cancelled = async {
+        until("the setup runs", async || {
+            rig.context.setups.get(&thread).is_some_and(|card| {
+                card.stages.iter().any(|stage| {
+                    stage.id == WorktreeSetupStageId::SetupScript
+                        && stage.status == WorktreeSetupStageStatus::Running
+                })
+            })
+        })
+        .await;
+        rig.context.setups.cancel(&thread).await
+    };
+    let ((), cancelled) = tokio::join!(rig.drain(), cancelled);
+    assert!(cancelled);
+    assert_eq!(
+        rig.context.setups.get(&thread).unwrap().phase,
+        WorktreeSetupPhase::Cancelled
+    );
+    let current = state(&rig, &thread).await;
+    assert_eq!(current.runs[0].status, RunStatus::Failed);
+    assert_eq!(error_text(&current).unwrap(), "Worktree setup cancelled.");
+    assert_eq!(
+        rig.ops.logged_with("remove-worktree"),
+        ["remove-worktree /repo-worktrees/feature"]
+    );
+    assert_eq!(current.thread.as_ref().unwrap().workspace, None);
+    let record = rig.context.store.thread_launch(&thread).unwrap().unwrap();
+    assert_eq!(record.worktree_path, None);
+    assert!(!rig.context.setups.cancel(&thread).await);
 }

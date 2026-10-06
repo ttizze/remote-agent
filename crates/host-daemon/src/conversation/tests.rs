@@ -620,6 +620,27 @@ async fn a_worktree_launch_runs_the_projects_setup_script() {
         error.as_deref(),
         Some("Workspace preparation failed during run setup script: Setup script exited with 1.")
     );
+    // The setup card keeps the outcome for late subscribers (T3 subscribeWorktreeSetup).
+    let card = host
+        .reply(Call::SetupStream(wire::SubscribeSetup {
+            thread_id: launched.thread_id.clone(),
+        }))
+        .await;
+    let Response::Success { result: Some(card) } =
+        protocol::decode::<Response<Option<agent_domain::WorktreeSetupSnapshot>>>(&card.initial)
+            .unwrap()
+    else {
+        panic!("the failed setup is still on its card");
+    };
+    assert_eq!(card.phase, agent_domain::WorktreeSetupPhase::Failed);
+    assert_eq!(card.setup_script.unwrap().command, "exit 1");
+    let cancelled: wire::SetupCancelled = host
+        .call(Call::CancelSetup(wire::CancelSetup {
+            thread_id: launched.thread_id.clone(),
+        }))
+        .await
+        .unwrap();
+    assert!(!cancelled.cancelled);
     host.conversation.shutdown().await;
 }
 

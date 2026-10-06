@@ -1,8 +1,51 @@
 //! Host I/O the runtime's effect executors, recovery and launch depend on.
-use agent_domain::{Attachment, CheckpointFile, RunId, ThreadId};
+use agent_domain::{
+    Attachment, CheckpointFile, RunId, ThreadId, WorktreeSetupStageId, WorktreeSetupStageStatus,
+};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::io;
+use std::sync::Arc;
+
+/// What the Host reports while it prepares a worktree (T3 WorktreeSetupTracker).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupEvent {
+    Stage(WorktreeSetupStageId, WorktreeSetupStageStatus),
+    /// A cleaned output line of the setup script.
+    Output(String),
+}
+
+/// Where a tracked preparation's progress goes; empty for an untracked one.
+#[derive(Clone, Default)]
+pub struct SetupProgress(Option<Arc<dyn Fn(SetupEvent) + Send + Sync>>);
+impl SetupProgress {
+    pub fn new(report: impl Fn(SetupEvent) + Send + Sync + 'static) -> Self {
+        Self(Some(Arc::new(report)))
+    }
+    pub fn tracked(&self) -> bool {
+        self.0.is_some()
+    }
+    pub fn report(&self, event: SetupEvent) {
+        if let Some(report) = &self.0 {
+            report(event);
+        }
+    }
+}
+impl std::fmt::Debug for SetupProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.tracked() {
+            "tracked"
+        } else {
+            "untracked"
+        })
+    }
+}
+impl PartialEq for SetupProgress {
+    fn eq(&self, other: &Self) -> bool {
+        self.tracked() == other.tracked()
+    }
+}
+impl Eq for SetupProgress {}
 
 /// A registered project, as shell subscribers see it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,6 +65,8 @@ pub struct WorktreeRequest {
     /// `None` lets the Host name the branch.
     pub branch: Option<String>,
     pub start_from_origin: bool,
+    /// Receives the fetch and checkout stages.
+    pub progress: SetupProgress,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,9 +82,25 @@ pub struct SetupRequest {
     pub project: String,
     pub project_root: String,
     pub cwd: String,
-    /// Set for a launch that creates a worktree: a setup that is not asynchronous
-    /// is awaited and fails the preparation with its exit code (T3 `observeCompletion`).
-    pub observe_completion: bool,
+    /// Set for a launch that prepares a worktree: the Host forwards the script's
+    /// output and returns its completion (T3 `observeCompletion`).
+    pub observe: SetupProgress,
+}
+
+/// A setup script the Host started.
+pub struct StartedSetup {
+    pub name: String,
+    pub command: String,
+    /// False when the agent waits for the script (T3 `async: false`).
+    pub run_async: bool,
+    /// Observed runs only: the exit code, `None` when the script was stopped.
+    /// Dropping it before the script exits stops the script.
+    pub completion: Option<BoxFuture<'static, Option<i32>>>,
+}
+
+pub enum SetupRun {
+    NoScript,
+    Started(StartedSetup),
 }
 
 /// Conversation settings for one project, with project overrides applied (T3
@@ -165,8 +226,8 @@ pub trait HostOperations: Send + Sync {
     ) -> BoxFuture<'_, Result<Option<String>, String>> {
         Box::pin(async { Ok(None) })
     }
-    fn run_setup(&self, _request: SetupRequest) -> BoxFuture<'_, Result<(), String>> {
-        Box::pin(async { Ok(()) })
+    fn run_setup(&self, _request: SetupRequest) -> BoxFuture<'_, Result<SetupRun, String>> {
+        Box::pin(async { Ok(SetupRun::NoScript) })
     }
     /// A run's checkpoint was captured; the Host refreshes what it shows of the workspace.
     fn run_finalized(&self, _thread: &ThreadId, _run: &RunId, _cwd: &str) {}

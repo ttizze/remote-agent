@@ -73,6 +73,7 @@ pub(crate) fn runtime_rig(options: SessionOptions, max_attempts: u32) -> Rig {
                     crate::executor::tests::FakeOps::new(),
                 )),
                 workspaces: Arc::default(),
+                setups: crate::SetupTracker::new(Arc::new(crate::SystemClock)),
             },
         )
     })

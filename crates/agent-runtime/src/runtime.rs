@@ -130,6 +130,7 @@ impl Runtime {
             sessions,
             ops: ops.clone(),
             workspaces: Arc::new(WorkspaceFence::default()),
+            setups: crate::SetupTracker::new(config.clock.clone()),
         };
         let handlers = with_runtime_handlers(EffectHandlers::default(), &executors);
         let outbox = SqliteOutbox::new(store.clone(), config.clock.clone());
@@ -177,6 +178,21 @@ impl Runtime {
             background: Mutex::new(Background::default()),
             sweeps,
         })
+    }
+
+    /// The thread's worktree setup card: the current snapshot, then every change
+    /// (T3 subscribeWorktreeSetup).
+    pub fn subscribe_setup(
+        &self,
+        thread: &ThreadId,
+    ) -> tokio::sync::watch::Receiver<Option<agent_domain::WorktreeSetupSnapshot>> {
+        self.executors.setups.subscribe(thread)
+    }
+
+    /// Stops a setup before its turn starts and waits until it rolled back (T3
+    /// worktreeSetupCancel). False when nothing can be cancelled.
+    pub async fn cancel_setup(&self, thread: &ThreadId) -> bool {
+        self.executors.setups.cancel(thread).await
     }
 
     /// Conversation settings changed; automatic settlement runs again now.

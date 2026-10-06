@@ -8,8 +8,8 @@ use crate::{
 use agent_domain::{AttachmentKind, CheckpointFile, ThreadId};
 use agent_protocol::models::{Project, ProjectRoot, ProjectScript};
 use agent_runtime::{
-    CreatedWorktree, HostOperations, HostProject, PreparedRestore, SetupRequest,
-    TextGenerationRequest, WorktreeRequest,
+    CreatedWorktree, HostOperations, HostProject, PreparedRestore, SetupRequest, SetupRun,
+    StartedSetup, TextGenerationRequest, WorktreeRequest,
 };
 use futures_util::future::BoxFuture;
 use serde_json::Value;
@@ -410,6 +410,7 @@ impl HostOperations for HostIo {
                     &request.base_ref,
                     request.branch,
                     request.start_from_origin,
+                    request.progress,
                 )
                 .await
                 .map_err(error)?;
@@ -464,22 +465,26 @@ impl HostOperations for HostIo {
     }
     /// T3 runs the project's setup script in a terminal of the thread; this Host runs
     /// it as a process of the thread that its terminal cleanup stops.
-    fn run_setup(&self, request: SetupRequest) -> BoxFuture<'_, Result<(), String>> {
+    fn run_setup(&self, request: SetupRequest) -> BoxFuture<'_, Result<SetupRun, String>> {
         Box::pin(async move {
             let scripts = self.projects.scripts(&request.project);
             let Some(script) = super::setup::setup_script(&scripts) else {
-                return Ok(());
+                return Ok(SetupRun::NoScript);
             };
-            let wait = request.observe_completion && script.run_async == Some(false);
-            self.setups
-                .run(
-                    &request.thread,
-                    script,
-                    &request.project_root,
-                    &request.cwd,
-                    wait,
-                )
-                .await
+            let observe = request.observe.tracked().then(|| request.observe.clone());
+            let completion = self.setups.start(
+                &request.thread,
+                script,
+                &request.project_root,
+                &request.cwd,
+                observe,
+            )?;
+            Ok(SetupRun::Started(StartedSetup {
+                name: script.name.clone(),
+                command: script.command.clone(),
+                run_async: script.run_async != Some(false),
+                completion,
+            }))
         })
     }
     fn cleanup_terminals(&self, thread: ThreadId) -> BoxFuture<'_, Result<(), String>> {

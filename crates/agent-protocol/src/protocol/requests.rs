@@ -58,6 +58,8 @@ contracts! {
     TurnDiff, "conversation/turnDiff" => (c::GetTurnDiff, c::TurnDiff) [clone],
     ScanAgentSessions, "conversation/agentSessions/scan" => (c::ScanAgentSessions, c::SessionScan) [clone],
     ImportAgentSessions, "conversation/agentSessions/import" => (c::ImportAgentSessions, c::ImportCounts) [clone],
+    SetupStream, "conversation/subscribeWorktreeSetup" => (c::SubscribeSetup, Option<agent_domain::WorktreeSetupSnapshot>),
+    CancelSetup, "conversation/cancelWorktreeSetup" => (c::CancelSetup, c::SetupCancelled) [clone],
     ListProjects, "host/project/list" => (m::Empty, Vec<m::Project>),
     AddProject, "host/project/add" => (op::AddProject, String) [clone],
     UpdateProject, "host/project/update" => (op::UpdateProject, m::Empty) [clone],

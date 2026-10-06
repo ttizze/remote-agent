@@ -3,13 +3,74 @@
 //! are cleaned up.
 use agent_domain::ThreadId;
 use agent_protocol::models::ProjectScript;
+use agent_runtime::{SetupEvent, SetupProgress};
+use futures_util::future::BoxFuture;
+use std::sync::LazyLock;
 use std::{collections::HashMap, path::Path, process::Stdio, sync::Mutex};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+
+const OUTPUT_LINE_MAX_LENGTH: usize = 400;
+/// A partial line longer than this is a byte stream; only its tail is kept.
+const PARTIAL_LINE_MAX_LENGTH: usize = 4_096;
 
 /// T3 `setupProjectScript`: the first script that runs on worktree creation.
 pub(crate) fn setup_script(scripts: &[ProjectScript]) -> Option<&ProjectScript> {
     scripts.iter().find(|script| script.run_on_worktree_create)
+}
+
+static TERMINAL_CONTROL: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]",
+    )
+    .expect("pattern compiles")
+});
+
+/// T3 `stripTerminalControl` and the line filter of `observeTerminalCompletion`.
+fn output_line(raw: &str) -> Option<String> {
+    let cleaned = TERMINAL_CONTROL.replace_all(raw, "");
+    let cleaned = cleaned.trim_end();
+    (!cleaned.is_empty()).then(|| {
+        let mut units = 0;
+        cleaned
+            .chars()
+            .take_while(|c| {
+                units += c.len_utf16();
+                units <= OUTPUT_LINE_MAX_LENGTH
+            })
+            .collect()
+    })
+}
+
+/// Splits output on `\r\n`, `\r` or `\n`; an installer's redrawn progress line
+/// becomes a short line of its own.
+async fn forward_lines(mut output: impl AsyncRead + Unpin, progress: SetupProgress) {
+    let mut pending = String::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = match output.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        pending.push_str(&String::from_utf8_lossy(&buffer[..read]));
+        let mut lines: Vec<String> = pending
+            .split("\r\n")
+            .flat_map(|part| part.split(['\r', '\n']))
+            .map(str::to_owned)
+            .collect();
+        pending = lines.pop().unwrap_or_default();
+        if pending.len() > PARTIAL_LINE_MAX_LENGTH {
+            let mut start = pending.len() - PARTIAL_LINE_MAX_LENGTH;
+            while !pending.is_char_boundary(start) {
+                start += 1;
+            }
+            pending = pending[start..].to_owned();
+        }
+        for line in lines.iter().filter_map(|line| output_line(line)) {
+            progress.report(SetupEvent::Output(line));
+        }
+    }
 }
 
 struct Running {
@@ -47,6 +108,10 @@ impl Drop for SetupScripts {
     }
 }
 
+/// Resolves with the script's exit code, `None` when it was stopped. Dropping it
+/// before the script exits stops the script.
+pub(crate) type Completion = BoxFuture<'static, Option<i32>>;
+
 impl SetupScripts {
     fn with_shell(shell: Vec<String>) -> Self {
         Self {
@@ -55,16 +120,16 @@ impl SetupScripts {
         }
     }
 
-    /// Starts `script` in `cwd`. With `wait` it returns once the script exited and
-    /// fails unless it exited with 0; dropping the wait stops the script.
-    pub(crate) async fn run(
+    /// Starts `script` in `cwd`. An observed run forwards the script's output
+    /// lines and returns its completion (T3 `observeCompletion`).
+    pub(crate) fn start(
         &self,
         thread: &ThreadId,
         script: &ProjectScript,
         project_root: &str,
         cwd: &str,
-        wait: bool,
-    ) -> Result<(), String> {
+        observe: Option<SetupProgress>,
+    ) -> Result<Option<Completion>, String> {
         let failed = |operation: &str| {
             format!(
                 "Project setup script operation '{operation}' failed for thread '{thread}' in '{cwd}'."
@@ -72,6 +137,13 @@ impl SetupScripts {
         };
         let mut command =
             bex_process::command(Path::new(&self.shell[0])).map_err(|_| failed("openTerminal"))?;
+        let output = || {
+            if observe.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            }
+        };
         command
             .args(&self.shell[1..])
             .arg(&script.command)
@@ -83,9 +155,25 @@ impl SetupScripts {
             .env("NO_COLOR", "1")
             .env("FORCE_COLOR", "0")
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdout(output())
+            .stderr(output());
         let mut child = command.spawn().map_err(|_| failed("openTerminal"))?;
+        let readers: Vec<JoinHandle<()>> = match &observe {
+            Some(progress) => [
+                child
+                    .stdout
+                    .take()
+                    .map(|out| tokio::spawn(forward_lines(out, progress.clone()))),
+                child
+                    .stderr
+                    .take()
+                    .map(|err| tokio::spawn(forward_lines(err, progress.clone()))),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            None => vec![],
+        };
         // Closing the supervisor's input stops the script and its descendants.
         let input = child.stdin.take();
         let stop = CancellationToken::new();
@@ -104,6 +192,9 @@ impl SetupScripts {
                     None
                 }
             };
+            for reader in readers {
+                let _ = reader.await;
+            }
             let _ = exited.send(code);
         });
         {
@@ -117,17 +208,14 @@ impl SetupScripts {
                 task,
             });
         }
-        if !wait {
-            return Ok(());
-        }
-        let cancel = stop.drop_guard();
-        let code = exit.await.ok().flatten();
-        cancel.disarm();
-        match code {
-            Some(0) => Ok(()),
-            Some(code) => Err(format!("Setup script exited with {code}.")),
-            None => Err("Setup script exited with no exit code.".into()),
-        }
+        Ok(observe.map(|_| -> Completion {
+            Box::pin(async move {
+                let cancel = stop.drop_guard();
+                let code = exit.await.ok().flatten();
+                cancel.disarm();
+                code
+            })
+        }))
     }
 
     /// Stops the thread's scripts and waits until they exited.
@@ -150,6 +238,8 @@ mod tests {
     use super::*;
     use agent_protocol::models::ProjectScriptIcon;
     #[cfg(unix)]
+    use std::sync::Arc;
+    #[cfg(unix)]
     use std::time::Duration;
 
     fn script(id: &str, command: &str, setup: bool) -> ProjectScript {
@@ -168,6 +258,18 @@ mod tests {
     #[cfg(unix)]
     fn scripts() -> SetupScripts {
         SetupScripts::with_shell(vec!["/bin/sh".into(), "-c".into()])
+    }
+
+    #[cfg(unix)]
+    fn lines() -> (SetupProgress, Arc<Mutex<Vec<String>>>) {
+        let lines = Arc::new(Mutex::new(vec![]));
+        let seen = lines.clone();
+        let progress = SetupProgress::new(move |event| {
+            if let SetupEvent::Output(line) = event {
+                seen.lock().unwrap().push(line);
+            }
+        });
+        (progress, lines)
     }
 
     #[cfg(unix)]
@@ -190,6 +292,17 @@ mod tests {
         assert_eq!(setup_script(&scripts[..1]), None);
     }
 
+    // ProjectSetupScriptRunner.ts stripTerminalControl and the output line filter.
+    #[test]
+    fn output_lines_drop_terminal_control_and_stay_bounded() {
+        assert_eq!(
+            output_line("\x1b[32mok\x1b[0m done \x07  ").as_deref(),
+            Some("ok done")
+        );
+        assert_eq!(output_line("\x1b]0;title\x07"), None);
+        assert_eq!(output_line(&"x".repeat(500)).unwrap().len(), 400);
+    }
+
     // ProjectSetupScriptRunner.test.ts: the script runs in the worktree with the
     // project and worktree paths and without color.
     #[cfg(unix)]
@@ -203,48 +316,60 @@ mod tests {
                        \"$T3CODE_WORKTREE_PATH\" \"${COLORTERM-unset}\" \"$NO_COLOR\" \
                        \"$FORCE_COLOR\" > environment.txt";
         let runner = scripts();
-        runner
-            .run(&thread, &script("setup", command, true), "/repo", cwd, true)
-            .await
+        let (progress, _) = lines();
+        let completion = runner
+            .start(
+                &thread,
+                &script("setup", command, true),
+                "/repo",
+                cwd,
+                Some(progress),
+            )
+            .unwrap()
             .unwrap();
+        assert_eq!(completion.await, Some(0));
         assert_eq!(
             std::fs::read_to_string(worktree.join("environment.txt")).unwrap(),
             format!("{cwd}|/repo|{cwd}||1|0")
         );
     }
 
-    // ThreadLaunchService.ts: an awaited setup fails with its exit code.
+    // ThreadLaunchService.ts: an observed setup reports its exit code and output.
     #[cfg(unix)]
     #[tokio::test]
-    async fn an_awaited_setup_fails_with_its_exit_code() {
+    async fn an_observed_setup_reports_its_exit_code_and_output_lines() {
         let directory = tempfile::tempdir().unwrap();
         let cwd = directory.path().to_str().unwrap();
         let thread = ThreadId::new("thread-1").unwrap();
         let runner = scripts();
-        assert_eq!(
+        let (progress, lines) = lines();
+        let command = "printf 'one\\r\\ntwo\\rthree\\n'; echo four >&2; exit 3";
+        let completion = runner
+            .start(
+                &thread,
+                &script("setup", command, true),
+                "/repo",
+                cwd,
+                Some(progress),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion.await, Some(3));
+        let mut seen = lines.lock().unwrap().clone();
+        seen.sort();
+        assert_eq!(seen, ["four", "one", "three", "two"]);
+        // An unobserved start returns no completion.
+        assert!(
             runner
-                .run(
+                .start(
                     &thread,
                     &script("setup", "exit 3", true),
                     "/repo",
                     cwd,
-                    true
+                    None
                 )
-                .await,
-            Err("Setup script exited with 3.".into())
-        );
-        // Without waiting, only the start counts.
-        assert_eq!(
-            runner
-                .run(
-                    &thread,
-                    &script("setup", "exit 3", true),
-                    "/repo",
-                    cwd,
-                    false
-                )
-                .await,
-            Ok(())
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -261,8 +386,7 @@ mod tests {
         let runner = scripts();
         let long = "touch started; sleep 30; touch finished";
         runner
-            .run(&thread, &script("setup", long, true), "/repo", cwd, false)
-            .await
+            .start(&thread, &script("setup", long, true), "/repo", cwd, None)
             .unwrap();
         until("the script starts", || root.join("started").exists()).await;
         runner.stop(&other).await;
@@ -276,15 +400,24 @@ mod tests {
     // A preparation cancelled while it waits stops the script.
     #[cfg(unix)]
     #[tokio::test]
-    async fn dropping_an_awaited_setup_stops_the_script() {
+    async fn dropping_an_observed_setup_stops_the_script() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().to_path_buf();
         let cwd = root.to_str().unwrap();
         let thread = ThreadId::new("thread-1").unwrap();
         let runner = scripts();
         let long = "touch started; sleep 30; touch finished";
-        let setup = script("setup", long, true);
-        let waiting = runner.run(&thread, &setup, "/repo", cwd, true);
+        let (progress, _) = lines();
+        let waiting = runner
+            .start(
+                &thread,
+                &script("setup", long, true),
+                "/repo",
+                cwd,
+                Some(progress),
+            )
+            .unwrap()
+            .unwrap();
         tokio::select! {
             _ = waiting => panic!("the script does not finish"),
             _ = until("the script starts", || root.join("started").exists()) => {}

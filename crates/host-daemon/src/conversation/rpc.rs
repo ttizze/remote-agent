@@ -211,6 +211,10 @@ impl Conversation {
             Call::TurnDiff(params) => self.turn_diff(params).await.map(reply),
             Call::ScanAgentSessions(_) => self.scan().await.map(reply),
             Call::ImportAgentSessions(params) => self.import(params).await.map(reply),
+            Call::SetupStream(params) => Ok(self.subscribe_setup(params, cancel)),
+            Call::CancelSetup(params) => Ok(reply(wire::SetupCancelled {
+                cancelled: self.runtime.cancel_setup(&params.thread_id).await,
+            })),
             _ => return None,
         };
         Some(reply.unwrap_or_else(|error| Response::from_result::<(), _>(Err(error)).into()))
@@ -469,6 +473,31 @@ impl Conversation {
             },
             cancel,
         ))
+    }
+
+    /// T3 subscribeWorktreeSetup: whole snapshots, so a slow client only holds the
+    /// newest.
+    fn subscribe_setup(
+        &self,
+        params: &wire::SubscribeSetup,
+        cancel: CancellationToken,
+    ) -> HostReply {
+        let mut changes = self.runtime.subscribe_setup(&params.thread_id);
+        let first = changes.borrow_and_update().clone();
+        let changes = std::sync::Arc::new(tokio::sync::Mutex::new(changes));
+        stream(
+            VecDeque::from([first]),
+            None,
+            move || {
+                let changes = changes.clone();
+                Box::pin(async move {
+                    let mut changes = changes.lock().await;
+                    changes.changed().await.ok()?;
+                    Some(vec![changes.borrow_and_update().clone()])
+                })
+            },
+            cancel,
+        )
     }
 
     async fn get_thread(&self, params: &wire::GetThread) -> Result<wire::ThreadSnapshot> {

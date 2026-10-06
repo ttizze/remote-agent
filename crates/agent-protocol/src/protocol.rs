@@ -88,6 +88,7 @@ results! {
     HistoryPage(crate::conversation::HistoryPage), SearchMatches(Vec<crate::conversation::SearchMatch>),
     Diff(crate::conversation::TurnDiff), SessionScan(crate::conversation::SessionScan),
     ImportCounts(crate::conversation::ImportCounts),
+    Setup(Option<agent_domain::WorktreeSetupSnapshot>), SetupCancelled(crate::conversation::SetupCancelled),
     Browser(crate::browser::BrowserFrame),
     PermissionSettings(crate::permissions::PermissionSettings),
     Models(crate::operations::ModelPage), WorktreeSettings(crate::models::WorktreeSettings),

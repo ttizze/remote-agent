@@ -291,6 +291,25 @@ impl Store {
         .await
     }
 
+    /// The launch's worktree was removed; a retry checks out a new one.
+    pub(crate) async fn forget_launch_worktree(
+        &self,
+        command: &CommandId,
+        at: i64,
+    ) -> Result<(), StoreError> {
+        let command = command.to_string();
+        self.write(move |tx| {
+            tx.execute(
+                "UPDATE launches SET worktree_path = NULL, branch = NULL, status = 'accepted',
+                     updated_at = ?2
+                 WHERE command_id = ?1",
+                params![command, at],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     pub(crate) async fn set_launch_status(
         &self,
         command: &CommandId,
@@ -362,7 +381,11 @@ async fn prepare_launch(context: &ExecutorContext, command: &CommandId, thread: 
         true
     } else {
         match prepare_workspace(context, thread, None).await {
-            Ok(()) => false,
+            Ok(done) => {
+                done.starting();
+                done.started();
+                false
+            }
             // Left for the next start.
             Err(PrepareError::Retry(error)) => {
                 tracing::warn!(%thread, %error, "thread workspace preparation stopped");
