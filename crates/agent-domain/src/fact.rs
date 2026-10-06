@@ -180,6 +180,9 @@ pub enum FactBody {
         pinned: bool,
         order: Option<String>,
     },
+    ThreadPinReordered {
+        order: String,
+    },
     ThreadActiveReordered {
         order: String,
     },
@@ -838,8 +841,15 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
         }
         ThreadPinned { pinned, order } => {
             let t = state.thread.as_mut().ok_or(FoldError::Missing("thread"))?;
-            t.pinned_at = pinned.then(|| at.clone());
-            t.pin_order = order.clone();
+            if !pinned {
+                t.pinned_at = None;
+                t.pin_order = None;
+            } else if t.pinned_at.is_none() {
+                t.pinned_at = Some(at.clone());
+                if order.is_some() {
+                    t.pin_order = order.clone();
+                }
+            }
             if *pinned {
                 if t.settled == Some(true) {
                     t.settled = Some(false);
@@ -847,6 +857,13 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
                 }
                 t.snoozed_until = None;
             }
+        }
+        ThreadPinReordered { order } => {
+            state
+                .thread
+                .as_mut()
+                .ok_or(FoldError::Missing("thread"))?
+                .pin_order = Some(order.clone())
         }
         ThreadActiveReordered { order } => {
             state
@@ -1505,8 +1522,11 @@ pub fn apply(state: &mut State, fact: &Fact) -> Result<(), FoldError> {
             state: delivery,
         } => find_mut(&mut state.tasks, "task", |t| &t.id == id)?.delivery = *delivery,
     }
-    if !matches!(fact.body, FactBody::ThreadVisited { .. })
-        && let Some(thread) = &mut state.thread
+    // Visits and arranging the active list are not thread activity (T3).
+    if !matches!(
+        fact.body,
+        FactBody::ThreadVisited { .. } | FactBody::ThreadActiveReordered { .. }
+    ) && let Some(thread) = &mut state.thread
     {
         thread.updated_at = at.clone();
     }

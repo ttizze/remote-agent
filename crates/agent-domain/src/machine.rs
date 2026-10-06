@@ -1288,17 +1288,8 @@ impl Decision {
         if self.state.messages.iter().any(|m| m.id == message.id) {
             return reject("message-id-conflict");
         }
-        if thread.archived_at.is_some() {
-            return reject("thread-archived");
-        }
-        if message.text.encode_utf16().count() > 120_000 {
-            return reject("message-too-long");
-        }
         if let Err(reason) = validate_attachments(&message.attachments) {
             return reject(reason);
-        }
-        if message.text.trim().is_empty() && message.attachments.is_empty() {
-            return reject("empty-message");
         }
         if let Some(plan) = &message.source_plan {
             let Some(plan) = self
@@ -1475,10 +1466,8 @@ impl Decision {
         }
         let held = self.state.queued_runs().iter().any(|r| r.queue_held);
         let queued = active.is_some() || !self.state.captures.is_empty();
-        let deferred = matches!(mode, DispatchMode::DeferStart);
-        if deferred && active.is_some() {
-            return reject("run-already-active");
-        }
+        // T3 queues a deferred start behind an active run without preparation.
+        let deferred = matches!(mode, DispatchMode::DeferStart) && !queued;
         let id = RunId::new(format!("run:{}:{}", message.id.as_str().len(), message.id)).unwrap();
         let ordinal = self.state.runs.iter().map(|r| r.ordinal).max().unwrap_or(0) + 1;
         let intent = if queued {
@@ -1548,7 +1537,7 @@ impl Decision {
             let Some(thread) = &self.state.thread else {
                 return reject("thread-not-found");
             };
-            if thread.deleted_at.is_some() {
+            if thread.deleted_at.is_some() && !matches!(command, Delete) {
                 return reject("thread-deleted");
             }
         }
@@ -1941,6 +1930,24 @@ impl Decision {
                 Reply::Accepted
             }
             Delete => {
+                let paths = self
+                    .state
+                    .messages
+                    .iter()
+                    .flat_map(|m| &m.attachments)
+                    .map(|a| a.path.clone())
+                    .collect::<Vec<_>>();
+                // T3 ThreadDeletion.ts: deleting again repeats only the cleanup.
+                if self
+                    .state
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| thread.deleted_at.is_some())
+                {
+                    self.effect(None, EffectBody::CleanupTerminals);
+                    self.effect(None, EffectBody::DeleteAttachments { paths });
+                    return Reply::Accepted;
+                }
                 let runs = self
                     .state
                     .runs
@@ -1949,15 +1956,15 @@ impl Decision {
                     .cloned()
                     .collect::<Vec<_>>();
                 self.hold_queue();
+                // Detaching the sessions below ends provider work; delegated
+                // children keep running in their own threads.
                 for run in runs {
                     if let Some(a) = &run.attempt {
-                        self.interrupt_provider(a);
                         self.stop_tasks(a, ItemStatus::Cancelled, true);
                     }
                     self.finish(&run.id, RunStatus::Cancelled, false);
                 }
                 if let Some(owner) = self.state.native_owner.clone() {
-                    self.interrupt_provider(&owner);
                     self.provider(
                         &owner,
                         &ProviderEvent::TurnFinished {
@@ -1991,13 +1998,6 @@ impl Decision {
                     },
                 );
                 self.effect(None, EffectBody::CleanupTerminals);
-                let paths = self
-                    .state
-                    .messages
-                    .iter()
-                    .flat_map(|m| &m.attachments)
-                    .map(|a| a.path.clone())
-                    .collect();
                 self.effect(None, EffectBody::DeleteAttachments { paths });
                 Reply::Accepted
             }
@@ -2061,15 +2061,13 @@ impl Decision {
                 for run in wakes {
                     self.cancel_queued_run(&run);
                 }
-                let keep = thread.settled == Some(true) && thread.pinned_at.is_none();
-                self.fact(FactBody::ThreadSettled {
-                    settled: true,
-                    at: if keep {
-                        thread.settled_at.clone().unwrap()
-                    } else {
-                        at.clone().unwrap_or_else(|| self.at.clone())
-                    },
-                });
+                // Settling a settled, unpinned thread again changes nothing (T3).
+                if !(thread.settled == Some(true) && thread.pinned_at.is_none()) {
+                    self.fact(FactBody::ThreadSettled {
+                        settled: true,
+                        at: at.clone().unwrap_or_else(|| self.at.clone()),
+                    });
+                }
                 self.effect(
                     None,
                     EffectBody::DetachSessions {
@@ -2080,6 +2078,10 @@ impl Decision {
                 Reply::Accepted
             }
             Snooze { until } => {
+                let thread = self.state.thread.as_ref().unwrap();
+                if thread.archived_at.is_some() {
+                    return reject("thread-archived");
+                }
                 if until.as_ref().is_some_and(|t| t <= &self.at) {
                     return reject("snooze-must-be-future");
                 }
@@ -2093,19 +2095,57 @@ impl Decision {
                 {
                     return reject("pending-work-cannot-snooze");
                 }
-                self.fact(FactBody::ThreadSnoozed {
-                    until: until.clone(),
-                });
+                if self.state.thread.as_ref().unwrap().snoozed_until != *until {
+                    self.fact(FactBody::ThreadSnoozed {
+                        until: until.clone(),
+                    });
+                }
                 Reply::Accepted
             }
             Pin { pinned, order } => {
-                self.fact(FactBody::ThreadPinned {
-                    pinned: *pinned,
-                    order: order.clone(),
-                });
+                let thread = self.state.thread.as_ref().unwrap();
+                if thread.archived_at.is_some() {
+                    return reject("thread-archived");
+                }
+                // A re-pin keeps its time and slot; it still clears a settle or snooze.
+                let changes = if *pinned {
+                    thread.pinned_at.is_none()
+                        || thread.settled == Some(true)
+                        || thread.snoozed_until.is_some()
+                } else {
+                    thread.pinned_at.is_some() || thread.pin_order.is_some()
+                };
+                if changes {
+                    self.fact(FactBody::ThreadPinned {
+                        pinned: *pinned,
+                        order: order.clone(),
+                    });
+                }
+                Reply::Accepted
+            }
+            ReorderPinned { order } => {
+                let thread = self.state.thread.as_ref().unwrap();
+                if thread.archived_at.is_some() {
+                    return reject("thread-archived");
+                }
+                if thread.pinned_at.is_none() {
+                    return reject("thread-not-pinned");
+                }
+                if thread.pin_order.as_ref() != Some(order) {
+                    self.fact(FactBody::ThreadPinReordered {
+                        order: order.clone(),
+                    });
+                }
                 Reply::Accepted
             }
             ReorderActive { order } => {
+                let thread = self.state.thread.as_ref().unwrap();
+                if thread.archived_at.is_some() {
+                    return reject("thread-archived");
+                }
+                if thread.pinned_at.is_some() || thread.settled == Some(true) {
+                    return reject("thread-not-active");
+                }
                 self.fact(FactBody::ThreadActiveReordered {
                     order: order.clone(),
                 });
@@ -2130,9 +2170,8 @@ impl Decision {
                     .state
                     .runs
                     .iter()
-                    .filter(|r| r.status.terminal() && r.status != RunStatus::RolledBack)
-                    .filter_map(|r| r.completed_at.as_ref())
-                    .max()
+                    .max_by_key(|r| r.ordinal)
+                    .and_then(|r| r.completed_at.as_ref())
                 else {
                     return reject("no-completed-run");
                 };
@@ -2143,7 +2182,13 @@ impl Decision {
                 Reply::Accepted
             }
             AutoSettle { enabled } => {
-                self.fact(FactBody::AutoSettleChanged { enabled: *enabled });
+                let thread = self.state.thread.as_ref().unwrap();
+                if thread.archived_at.is_some() {
+                    return reject("thread-archived");
+                }
+                if thread.auto_settle != *enabled {
+                    self.fact(FactBody::AutoSettleChanged { enabled: *enabled });
+                }
                 Reply::Accepted
             }
             RuntimeMode { mode } => {
@@ -5962,24 +6007,44 @@ impl ThreadMachine {
         }
     }
 }
-/// Fixed T3 chatAttachment.ts budgets, shared by dispatch and question uploads.
+/// T3 chatAttachment.ts schemas and budgets, shared by dispatch and question
+/// uploads. The Host names attachments `chat:…`, so the id character set is
+/// not checked.
 pub fn validate_attachments(files: &[Attachment]) -> Result<(), &'static str> {
     if files.len() > 100 {
         return Err("too-many-attachments");
     }
+    let bounded = |value: &str, max: usize| {
+        let value = value.trim();
+        !value.is_empty() && value.encode_utf16().count() <= max
+    };
     let mut image_bytes = 0u64;
     let mut ids = std::collections::BTreeSet::new();
     for file in files {
         if !ids.insert(&file.id) {
             return Err("duplicate-attachment-id");
         }
-        if file.kind == AttachmentKind::Image {
-            if file.size > 10 * 1024 * 1024 {
+        if !bounded(&file.id, 128) || !bounded(&file.name, 255) || !bounded(&file.mime_type, 100) {
+            return Err("invalid-attachment");
+        }
+        let mime = file.mime_type.trim().to_ascii_lowercase();
+        match file.kind {
+            AttachmentKind::Image if !mime.starts_with("image/") => {
+                return Err("invalid-attachment");
+            }
+            AttachmentKind::Image if file.size > 10 * 1024 * 1024 => {
                 return Err("image-too-large");
             }
+            AttachmentKind::File if file.size == 0 => return Err("invalid-attachment"),
+            AttachmentKind::File if file.size > 50 * 1024 * 1024 => {
+                return Err("file-too-large");
+            }
+            _ => {}
+        }
+        if file.kind == AttachmentKind::Image
+            || ["image/gif", "image/jpeg", "image/png", "image/webp"].contains(&mime.as_str())
+        {
             image_bytes = image_bytes.saturating_add(file.size);
-        } else if file.size > 50 * 1024 * 1024 {
-            return Err("file-too-large");
         }
     }
     if image_bytes > 80 * 1024 * 1024 {

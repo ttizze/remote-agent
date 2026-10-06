@@ -764,6 +764,9 @@ pub enum Command {
         pinned: bool,
         order: Option<String>,
     },
+    ReorderPinned {
+        order: String,
+    },
     ReorderActive {
         order: String,
     },
@@ -956,6 +959,7 @@ pub fn host_only_command(command: &Command) -> bool {
         | Command::Settle { .. }
         | Command::Snooze { .. }
         | Command::Pin { .. }
+        | Command::ReorderPinned { .. }
         | Command::ReorderActive { .. }
         | Command::Visit { .. }
         | Command::MarkUnread

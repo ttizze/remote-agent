@@ -1683,17 +1683,29 @@ fn terminal_updates_keep_usage_and_streaming_appends_have_no_full_entity() {
     assert_eq!(s.attempts[0].usage.as_ref(), Some(&usage));
     assert_eq!(s.messages[1].text, "Hello world");
 }
+// T3 Orchestrator.ts thread.mark-unread reads the last run's completion and
+// runtimeLayer.test.ts rejects it while there is none.
 #[test]
-fn unread_uses_latest_completion_even_with_newer_queued_run() {
+fn unread_uses_the_last_run_and_needs_its_completion() {
     let mut s = state();
+    assert_eq!(
+        command(&mut s, "unread-empty", Command::MarkUnread).reply,
+        Reply::Rejected {
+            reason: "no-completed-run".into()
+        }
+    );
     let (_, a) = running(&mut s, "first");
     finish(&mut s, &a);
     let (run, _) = running(&mut s, "second");
-    command(
+    let Reply::Run(queued) = command(
         &mut s,
         "queue",
         send_message("queue", DispatchMode::QueueAfterActive),
-    );
+    )
+    .reply
+    else {
+        panic!()
+    };
     command(
         &mut s,
         "stop",
@@ -1703,6 +1715,13 @@ fn unread_uses_latest_completion_even_with_newer_queued_run() {
             reason: None,
         },
     );
+    assert_eq!(
+        command(&mut s, "unread-queued", Command::MarkUnread).reply,
+        Reply::Rejected {
+            reason: "no-completed-run".into()
+        }
+    );
+    command(&mut s, "cancel", Command::CancelQueued { run: queued });
     assert_eq!(
         command(&mut s, "unread", Command::MarkUnread).reply,
         Reply::Accepted
@@ -5691,3 +5710,4 @@ fn a_failed_rollback_resets_only_the_native_sessions_it_may_have_rewound() {
 mod delegation;
 mod preparation;
 mod queue;
+mod thread;
