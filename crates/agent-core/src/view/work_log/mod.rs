@@ -2,9 +2,12 @@
 //! thoughts and diagnostics.
 pub mod command_label;
 pub mod entry;
+#[cfg(test)]
+pub(crate) mod fixtures;
 pub mod item_detail;
 pub mod item_support;
 mod js_text;
+pub mod media_source;
 pub mod presentation;
 pub mod scroll_anchor;
 pub mod tool_activity;
