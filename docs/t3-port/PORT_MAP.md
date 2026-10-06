@@ -1195,7 +1195,23 @@ graph replay（fork / rollback / merge back / delegated_task_status）は記録�
 - `ThreadLaunchService.test.ts` の branch 名の生成と rename（M3）、scratch folder、setup の進捗表示と取消、非同期 setup、`reuseExistingThread`、自動化・送信元の属性、import した native session（`Command::Import` で取り込む）、attachment の取り込み（RPC の責務）、記録前に失敗した worktree の削除（部分的な checkout の削除は Host の `create_worktree` が行う。runtime は記録に失敗した worktree を削除する）。
 - `ProviderRuntimeRecoveryService.test.ts:522`（取り消すしかない waiting run）: 保存の失敗は結果として run を確定するので、保存を待ったまま残る run は生じない。
 - `EffectWorker.test.ts:728`（置換 session の restart）: restart は domain が attempt を superseded にし、Start は独立した effect になるため複合 effect がない。
-- `RunFinalizationService.test.ts` の pull request 状態の更新 4 件、`checkpointing/CheckpointStore.test.ts`・`CheckpointDiffQuery.test.ts`・`Diffs.test.ts`: Git の checkpoint 実装、VCS 状態、turn diff は host-daemon の `HostOperations` 実装と RPC で移植する。
+- `RunFinalizationService.test.ts` の pull request 状態の更新 4 件: この Host は pull request の状態を持たない。保存後の通知（`run_finalized`）だけを受け取る。
+
+### 段階 3: Host への接続（2026-10-06）
+
+`host-daemon` の `conversation` が `HostOperations` と `SessionHost` を実装し、会話の RPC をすべて新しい runtime で答える。旧 `orchestration` の store・effect worker・`provider-adapters`・`host_rpc/import.rs`・`agent_tools.rs` は Host から削除した。Host の結合テストは一時ディレクトリの実 SQLite と、固定版の Codex transcript（`simple`）を再生する偽のプロセスで RPC を通す。
+
+| T3 の原本 | 新設計の検証 |
+| --- | --- |
+| `checkpointing/CheckpointStore.test.ts`（全 9 件） | `checkpoints::tests` の `detects_git_repositories_including_nested_workspaces`、`returns_full_oversized_checkpoint_diffs_without_truncation`、`keeps_patch_prefixes_when_the_repository_disables_them`、`can_hide_indentation_churn_when_changes_wrap_existing_lines`、`counts_changes_whose_full_patch_exceeds_the_output_limit`、`preserves_file_paths_and_turn_ranges_without_changing_the_user_index`、`uses_head_for_a_missing_baseline_only_when_requested`。ref は T3 の `checkpointRefForThreadTurn` の代わりに固定の hidden ref を使う。 |
+| `checkpointing/Diffs.test.ts`（全 5 件） | `numstat_summaries_follow_the_reference_parser`。Host の既存の `parse_numstat` を T3 と同じ並び順で比較する。 |
+| `checkpointing/CheckpointDiffQuery.test.ts`（全 5 件） | `conversation::diff::tests`（scope の baseline からの diff、範囲外、rollback 済み run の除外、baseline ref の欠落）と、`conversation::tests::conversation_calls_answer_with_typed_errors` の存在しない thread（`ThreadNotFound`）。 |
+| `ThreadStream.test.ts`・`ShellStream.test.ts` の RPC 境界、ws.ts の購読 | `a_launched_thread_streams_its_turn_and_reads_back_through_every_query`、`a_stream_resumed_at_its_head_answers_without_replaying`、`the_shell_stream_lists_projects_and_threads_then_follows_changes`。 |
+| `ThreadLaunchService.test.ts` の再送（RPC 経由） | 同じ launch の再送が `resumed` になり、別 thread への再送は `CommandIdConflict` になる。 |
+| `ProviderRuntimeRecoveryService.test.ts:232`（Host の停止と起動） | `a_turn_cut_by_shutdown_is_settled_when_the_host_starts_again`。 |
+| `mcp/OrchestratorMcpToolkit` の読み取りと委任の前提 | `agent_tools_read_a_thread_of_their_own_project`、`conversation::tools::tests`。 |
+
+従来の Host のテストのうち旧 store を前提にしたもの（旧 service の subscription・launch・restore・terminal cleanup）は、同じ挙動を runtime の executor テストと上の結合テストで確かめるため削除した。
 
 ### 段階 1・2 の検証記録（2026-10-06）
 
