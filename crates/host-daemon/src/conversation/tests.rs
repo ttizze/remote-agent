@@ -271,6 +271,7 @@ impl Folded {
                 }
             }
             wire::ThreadUpdate::Synchronized => self.synchronized = true,
+            wire::ThreadUpdate::Failed(error) => panic!("{error:?}"),
         }
     }
 }
@@ -422,7 +423,7 @@ async fn a_launched_thread_streams_its_turn_and_reads_back_through_every_query()
                     thread_id: thread.clone(),
                     from_run_ordinal: 0,
                     to_run_ordinal: 1,
-                    ignore_whitespace: false,
+                    ignore_whitespace: Some(false),
                 }))
                 .await
             {
@@ -706,7 +707,7 @@ async fn conversation_calls_answer_with_typed_errors() {
             thread_id: missing.clone(),
             from_run_ordinal: 0,
             to_run_ordinal: 1,
-            ignore_whitespace: true,
+            ignore_whitespace: None,
         }),
     ] {
         let Response::Failure { error } =
@@ -722,7 +723,7 @@ async fn conversation_calls_answer_with_typed_errors() {
             thread_id: first.clone(),
             from_run_ordinal: 0,
             to_run_ordinal: 1,
-            ignore_whitespace: true,
+            ignore_whitespace: None,
         }))
         .await
         .unwrap_err();
@@ -732,7 +733,7 @@ async fn conversation_calls_answer_with_typed_errors() {
             thread_id: missing,
             from_run_ordinal: 2,
             to_run_ordinal: 2,
-            ignore_whitespace: true,
+            ignore_whitespace: None,
         }))
         .await
         .unwrap();

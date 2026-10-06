@@ -2,14 +2,15 @@
 //! live changes batched (50 ms / 512) and coalesced per thread. Ported from T3
 //! `ShellStream.ts` and ws.ts.
 use super::history::json_len;
-use super::live::{LIVE_STREAM_MAX_BYTES, LiveReceiver, LiveSender, live_channel};
+use super::live::{
+    LIVE_STREAM_MAX_BYTES, LIVE_STREAM_MAX_ITEMS, LiveReceiver, LiveSender, live_channel,
+};
 use crate::{CommitListener, CommitNotice, HostProject, RuntimeError, ShellRow, Store, StoreError};
 use agent_domain::{FactBody, ThreadId};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::broadcast;
 
@@ -51,7 +52,7 @@ impl Default for ShellSubscribe {
             after_global_seq: None,
             request_completion_marker: false,
             location: ShellLocation::Active,
-            capacity: 1024,
+            capacity: LIVE_STREAM_MAX_ITEMS,
             max_bytes: LIVE_STREAM_MAX_BYTES,
         }
     }
@@ -226,12 +227,9 @@ fn update_for(location: ShellLocation, change: ShellChange) -> Option<ShellUpdat
 /// Runs on the store writer after each commit and fans changes out to subscribers.
 struct ShellFeed {
     changes: broadcast::Sender<ShellChange>,
-    latest: Arc<AtomicU64>,
 }
 impl CommitListener for ShellFeed {
     fn committed(&self, notice: &CommitNotice) {
-        self.latest
-            .fetch_max(notice.head.global_seq, Ordering::SeqCst);
         let Some(row) = &notice.shell else {
             return;
         };
@@ -258,7 +256,6 @@ pub struct ShellHub {
     store: Store,
     projects: Arc<dyn ProjectDirectory>,
     changes: broadcast::Sender<ShellChange>,
-    latest: Arc<AtomicU64>,
 }
 
 enum Initial {
@@ -272,24 +269,26 @@ enum Initial {
 impl ShellHub {
     pub fn new(store: Store, projects: Arc<dyn ProjectDirectory>) -> Result<Arc<Self>, StoreError> {
         let (changes, _) = broadcast::channel(SHELL_HUB_BUFFER);
-        let latest = Arc::new(AtomicU64::new(store.latest_global_seq()?));
         store.add_listener(Arc::new(ShellFeed {
             changes: changes.clone(),
-            latest: latest.clone(),
         }));
         Ok(Arc::new(Self {
             store,
             projects,
             changes,
-            latest,
         }))
     }
 
-    pub fn project_changed(&self, project: &str) {
-        let _ = self.changes.send(ShellChange::Project {
-            sequence: self.latest.load(Ordering::SeqCst),
-            project: project.to_owned(),
-        });
+    /// A project change takes its own global sequence, so a client that applies
+    /// only changes after its snapshot (T3 `applyShellStreamEvent`) keeps it.
+    pub async fn project_changed(&self, project: &str) -> Result<(), StoreError> {
+        let (changes, project) = (self.changes.clone(), project.to_owned());
+        self.store
+            .reserve_sequence(move |sequence| {
+                let _ = changes.send(ShellChange::Project { sequence, project });
+            })
+            .await?;
+        Ok(())
     }
 
     /// Registers for live changes before reading, so nothing committed in between is lost.
@@ -370,7 +369,11 @@ async fn forward(
             () = sender.closed() => return,
             change = live.recv() => match change {
                 Ok(change) => change,
-                Err(_) => return,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    sender.fail();
+                    return;
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
             },
         };
         let mut batch = vec![change];
@@ -378,7 +381,10 @@ async fn forward(
         while batch.len() < SHELL_BATCH_MAX {
             match tokio::time::timeout_at(deadline, live.recv()).await {
                 Ok(Ok(change)) => batch.push(change),
-                Ok(Err(broadcast::error::RecvError::Lagged(_))) => return,
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+                    sender.fail();
+                    return;
+                }
                 Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => break,
             }
         }
@@ -400,14 +406,6 @@ async fn forward(
             }
         }
     }
-}
-
-fn high_water(c: &Connection) -> Result<u64, StoreError> {
-    Ok(c.query_row(
-        "SELECT COALESCE(MAX(global_seq), 0) FROM facts",
-        [],
-        |row| row.get::<_, i64>(0),
-    )? as u64)
 }
 
 type RawShell = (String, i64, String, bool, bool, bool, String);
@@ -463,7 +461,7 @@ impl Store {
 /// One read transaction: the changed rows after `after` when the replay is small
 /// enough, otherwise every live row.
 fn initial(c: &Connection, after: Option<u64>) -> Result<Initial, StoreError> {
-    let high = high_water(c)?;
+    let high = crate::store::latest_sequence(c)?;
     if let Some(after) = after.filter(|after| *after <= high) {
         let mut statement = c.prepare_cached(&format!(
             "SELECT {SHELL_COLUMNS}, octet_length(payload) FROM thread_shells
@@ -487,7 +485,8 @@ fn initial(c: &Connection, after: Option<u64>) -> Result<Initial, StoreError> {
         }
     }
     let mut statement = c.prepare_cached(&format!(
-        "SELECT {SHELL_COLUMNS} FROM thread_shells WHERE deleted = 0 ORDER BY global_seq"
+        "SELECT {SHELL_COLUMNS} FROM thread_shells WHERE deleted = 0
+         ORDER BY json_extract(payload, '$.updated_at'), thread_id"
     ))?;
     let threads = statement
         .query_map([], raw_shell)?

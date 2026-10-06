@@ -32,7 +32,7 @@ const FILE_BODY_KEYS: [&str; 6] = [
 ];
 
 /// JavaScript `\s`, which `trim` and T3's summaries use.
-fn js_space(c: char) -> bool {
+pub fn js_space(c: char) -> bool {
     matches!(
         c,
         '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'

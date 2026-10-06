@@ -755,6 +755,8 @@ async fn closes_a_subscriber_that_falls_behind() {
         received += 1;
     }
     assert_eq!(received, 4);
+    // T3 LiveStreamBudget ends the stream with LiveStreamBufferError.
+    assert!(slow.updates.overflowed());
 }
 
 // T3 LiveStreamBudget.ts: retained serialized bytes close a stream regardless of count.

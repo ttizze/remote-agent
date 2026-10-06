@@ -1,7 +1,7 @@
 //! `subscribeThread`: a snapshot or a bounded replay, an optional completion marker,
 //! then the facts of every later commit. Ported from T3 `ThreadStream.ts` and ws.ts.
 use super::history::{PagePolicy, bounded_state};
-use super::live::{LIVE_STREAM_MAX_BYTES, LiveReceiver};
+use super::live::{LIVE_STREAM_MAX_BYTES, LIVE_STREAM_MAX_ITEMS, LiveReceiver};
 use super::wire::client_state;
 use crate::{StoredFact, ThreadHead};
 use agent_domain::State;
@@ -34,7 +34,7 @@ impl Default for ThreadSubscribe {
             after_global_seq: None,
             request_completion_marker: false,
             accept_bounded_snapshot: false,
-            capacity: 1024,
+            capacity: LIVE_STREAM_MAX_ITEMS,
             max_bytes: LIVE_STREAM_MAX_BYTES,
         }
     }

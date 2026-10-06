@@ -1,7 +1,7 @@
 //! Reads outside the subscription streams: history pages, one turn item, and search.
 use crate::sync::{
     HistoryPage, HistoryRow, InvalidCursor, PagePolicy, ProjectDirectory, client_state,
-    detail_item, history_before, recent_history, timeline,
+    detail_item, history_before, js_space, recent_history, timeline,
 };
 use crate::{ActorHandle, RuntimeError, Store, StoreError};
 use agent_domain::{State, ThreadId, Timestamp, TurnItemId};
@@ -78,7 +78,8 @@ pub struct SearchMatch {
     pub project: String,
     pub source: SearchSource,
     pub snippet: String,
-    pub message_created_at: Timestamp,
+    /// T3 allows a message without a creation time.
+    pub message_created_at: Option<Timestamp>,
 }
 
 fn like_pattern(query: &str) -> String {
@@ -89,41 +90,47 @@ fn like_pattern(query: &str) -> String {
     format!("%{escaped}%")
 }
 
-/// At most 240 characters, centred near the first match.
-pub fn search_snippet(text: &str, query: &str) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let chars: Vec<char> = normalized.chars().collect();
-    if chars.len() <= SEARCH_SNIPPET_CHARS {
-        return normalized;
-    }
-    let needle: Vec<char> = query
-        .split_whitespace()
+/// JavaScript `text.replace(/\s+/g, " ").trim()`.
+fn collapse_space(text: &str) -> String {
+    text.split(js_space)
+        .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
-        .to_ascii_lowercase()
-        .chars()
-        .collect();
-    let folded: Vec<char> = chars.iter().map(char::to_ascii_lowercase).collect();
-    let found = (!needle.is_empty())
-        .then(|| {
-            folded
-                .windows(needle.len())
-                .position(|window| window == needle)
-        })
-        .flatten();
+}
+
+/// T3 `buildSearchSnippet`: at most 240 UTF-16 units, centred near the first match.
+pub fn search_snippet(text: &str, query: &str) -> String {
+    let normalized = collapse_space(text);
+    let units: Vec<u16> = normalized.encode_utf16().collect();
+    if units.len() <= SEARCH_SNIPPET_CHARS {
+        return normalized;
+    }
+    let fold = |unit: u16| match unit {
+        0x41..=0x5A => unit + 0x20,
+        unit => unit,
+    };
+    let needle: Vec<u16> = collapse_space(query).encode_utf16().map(fold).collect();
+    let folded: Vec<u16> = units.iter().copied().map(fold).collect();
+    let found = if needle.is_empty() {
+        Some(0)
+    } else {
+        folded
+            .windows(needle.len())
+            .position(|window| window == needle)
+    };
     let body = SEARCH_SNIPPET_CHARS - 4;
     let ideal = found.map_or(0, |index| index.saturating_sub(72));
-    let start = ideal.min(chars.len() - body);
-    let end = chars.len().min(start + body);
+    let start = ideal.min(units.len() - body);
+    let end = units.len().min(start + body);
     format!(
         "{}{}{}",
         if start > 0 { "…" } else { "" },
-        chars[start..end].iter().collect::<String>(),
-        if end < chars.len() { "…" } else { "" }
+        String::from_utf16_lossy(&units[start..end]),
+        if end < units.len() { "…" } else { "" }
     )
 }
 
-type SearchRowData = (String, String, String, String, String);
+type SearchRowData = (String, String, String, String, Option<String>);
 
 /// The best match per thread, ordered and limited in SQL like T3 `ThreadSearch.ts`:
 /// user messages outrank assistant ones, then the newest wins; threads order by
@@ -167,7 +174,7 @@ pub(crate) fn search_rows(
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         },
     )?;
@@ -183,9 +190,10 @@ impl Store {
         limit: Option<usize>,
         projects: &dyn ProjectDirectory,
     ) -> Result<Vec<SearchMatch>, QueryError> {
-        let query = query.trim();
+        let query = query.trim_matches(js_space);
         let limit = limit.unwrap_or(SEARCH_MAX_LIMIT);
-        if !(SEARCH_MIN_QUERY_CHARS..=SEARCH_MAX_QUERY_CHARS).contains(&query.chars().count())
+        if !(SEARCH_MIN_QUERY_CHARS..=SEARCH_MAX_QUERY_CHARS)
+            .contains(&query.encode_utf16().count())
             || !(1..=SEARCH_MAX_LIMIT).contains(&limit)
         {
             return Err(QueryError::InvalidSearch);
@@ -211,7 +219,9 @@ impl Store {
                         _ => SearchSource::Assistant,
                     },
                     snippet: search_snippet(&text, query),
-                    message_created_at: Timestamp::parse(&created_at)
+                    message_created_at: created_at
+                        .map(|created_at| Timestamp::parse(&created_at))
+                        .transpose()
                         .map_err(|_| decode.clone())?,
                 })
             })

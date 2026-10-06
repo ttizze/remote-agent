@@ -352,7 +352,7 @@ fn requests_round_trip_and_join_the_call_table() {
         thread_id: id("thread"),
         from_run_ordinal: 0,
         to_run_ordinal: 2,
-        ignore_whitespace: true,
+        ignore_whitespace: Some(true),
     };
     round_trip(&diff);
     call_round_trip(Call::TurnDiff(diff), "conversation/turnDiff");
@@ -433,7 +433,7 @@ fn replies_round_trip_inside_responses() {
             project_id: "project".into(),
             source,
             snippet: "…the notes…".into(),
-            message_created_at: at(),
+            message_created_at: Some(at()),
         }]);
     }
     response_round_trip(TurnDiff {
@@ -496,6 +496,7 @@ fn stream_items_round_trip() {
         ThreadUpdate::Snapshot(snapshot),
         ThreadUpdate::Facts(thread.facts.concat()),
         ThreadUpdate::Synchronized,
+        ThreadUpdate::Failed(ConversationError::LiveBufferFull.into()),
     ] {
         response_round_trip(update);
     }
@@ -530,6 +531,7 @@ fn stream_items_round_trip() {
             project_id: "other".into(),
         },
         ShellUpdate::Synchronized,
+        ShellUpdate::Failed(ConversationError::LiveBufferFull.into()),
     ] {
         response_round_trip(update);
     }
@@ -549,6 +551,8 @@ fn errors_keep_a_stable_code_and_delivery_through_the_wire() {
         ConversationError::CheckpointUnavailable(2),
         ConversationError::AttachmentUnavailable("missing upload".into()),
         ConversationError::Unavailable("database is locked".into()),
+        ConversationError::LiveBufferFull,
+        ConversationError::DiffFailed("fatal: bad revision".into()),
     ];
     assert_eq!(
         errors

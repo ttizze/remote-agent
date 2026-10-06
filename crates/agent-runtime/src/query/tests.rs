@@ -209,7 +209,7 @@ async fn returns_one_finished_user_or_assistant_match_per_active_thread() {
             ),
         ]
     );
-    assert_eq!(result[0].message_created_at, at(2));
+    assert_eq!(result[0].message_created_at, Some(at(2)));
     assert_eq!(store.search("needle", Some(1), &projects).unwrap().len(), 1);
     // LIKE wildcards in the query match literally.
     assert_eq!(store.search("ne%le", None, &projects).unwrap(), []);
@@ -326,6 +326,20 @@ fn validates_the_query_and_limit() {
     let long = "x".repeat(SEARCH_MAX_QUERY_CHARS + 1);
     assert!(store.search(&long, None, &projects).is_err());
     assert_eq!(store.search(" ok ", Some(50), &projects).unwrap(), []);
+    // T3 measures the query in UTF-16 units.
+    assert_eq!(store.search("😀", None, &projects).unwrap(), []);
+    let astral = "😀".repeat(SEARCH_MAX_QUERY_CHARS / 2 + 1);
+    assert!(matches!(
+        store.search(&astral, None, &projects),
+        Err(QueryError::InvalidSearch)
+    ));
+}
+
+#[test]
+fn bounds_snippets_in_utf16_units() {
+    let snippet = search_snippet(&"😀".repeat(200), "missing");
+    assert_eq!(snippet, format!("{}…", "😀".repeat(118)));
+    assert_eq!(snippet.encode_utf16().count(), SEARCH_SNIPPET_CHARS - 3);
 }
 
 #[test]

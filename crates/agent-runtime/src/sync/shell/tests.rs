@@ -282,6 +282,7 @@ async fn closes_a_subscriber_that_falls_behind_the_hub() {
     )
     .await;
     assert!(updates.recv().await.is_none());
+    assert!(updates.overflowed());
 }
 
 fn changes_for(changes: &broadcast::Sender<ShellChange>, threads: usize, payload: &str) {
@@ -323,6 +324,7 @@ async fn closes_a_slow_subscriber_instead_of_waiting_for_it() {
         .expect("forwarding ends without the subscriber reading")
         .unwrap();
     assert_eq!(drained(&mut updates).await, 2);
+    assert!(updates.overflowed());
 }
 
 #[tokio::test(start_paused = true)]
@@ -598,7 +600,8 @@ async fn measures_the_replay_budget_in_utf8_bytes() {
 }
 
 // T3 ws.ts replays durable project events on resume; projects here live outside the
-// fact log, so a resumed stream starts from the complete live project list.
+// fact log, so a resumed stream starts from the complete live project list. Each
+// project change still takes a global sequence.
 #[tokio::test]
 async fn resumes_with_project_changes_made_while_disconnected() {
     let (_dir, store) = temp_store();
@@ -619,9 +622,10 @@ async fn resumes_with_project_changes_made_while_disconnected() {
     renamed.name = "Renamed".into();
     *projects.0.lock().unwrap() = vec![renamed.clone(), project("project-c")];
     for id in ["project-a", "project-b", "project-c"] {
-        hub.project_changed(id);
+        hub.project_changed(id).await.unwrap();
     }
-    assert_eq!(store.latest_global_seq().unwrap(), snapshot.snapshot_seq);
+    let high_water = store.latest_global_seq().unwrap();
+    assert_eq!(high_water, snapshot.snapshot_seq + 3);
 
     let mut resumed = hub
         .subscribe(ShellSubscribe {
@@ -634,7 +638,7 @@ async fn resumes_with_project_changes_made_while_disconnected() {
     assert_eq!(
         next(&mut resumed).await,
         ShellUpdate::Projects {
-            sequence: snapshot.snapshot_seq,
+            sequence: high_water,
             projects: vec![renamed, project("project-c")]
         }
     );
@@ -652,13 +656,89 @@ async fn reports_project_changes_from_the_directory() {
     };
     assert_eq!(snapshot.projects, [project("project-a")]);
     projects.0.lock().unwrap().clear();
-    hub.project_changed("project-a");
+    hub.project_changed("project-a").await.unwrap();
+    // T3 shellReducer drops a change at or below the snapshot sequence.
     assert_eq!(
         next(&mut subscription).await,
         ShellUpdate::ProjectRemoved {
-            sequence: 0,
+            sequence: snapshot.snapshot_seq + 1,
             project: "project-a".into()
         }
     );
     drop(dir);
+}
+
+#[tokio::test]
+async fn orders_project_changes_between_thread_commits() {
+    let (_dir, store) = temp_store();
+    let projects = Arc::new(Projects(Mutex::new(vec![project("project-a")])));
+    let hub = ShellHub::new(store.clone(), projects.clone()).unwrap();
+    let context = ActorContext::new(store.clone());
+    let mut subscription = hub.subscribe(ShellSubscribe::default()).await.unwrap();
+    let ShellUpdate::Snapshot(snapshot) = next(&mut subscription).await else {
+        panic!()
+    };
+    hub.project_changed("project-a").await.unwrap();
+    let ShellUpdate::ProjectUpdated {
+        sequence: changed, ..
+    } = next(&mut subscription).await
+    else {
+        panic!()
+    };
+    let _thread = thread(&context, "thread-a").await;
+    let ShellUpdate::ThreadUpdated {
+        sequence: created, ..
+    } = next(&mut subscription).await
+    else {
+        panic!()
+    };
+    assert!(snapshot.snapshot_seq < changed && changed < created);
+
+    let mut resumed = hub
+        .subscribe(ShellSubscribe {
+            after_global_seq: Some(changed),
+            ..ShellSubscribe::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        matches!(next(&mut resumed).await, ShellUpdate::Projects { sequence, .. } if sequence == created)
+    );
+    assert!(
+        matches!(next(&mut resumed).await, ShellUpdate::ThreadUpdated { sequence, .. } if sequence == created)
+    );
+}
+
+// T3 ProjectionStore lists shell rows by `updated_at`, then thread id.
+#[tokio::test]
+async fn lists_snapshot_rows_by_update_time_then_thread_id() {
+    let (_dir, store) = temp_store();
+    let hub = ShellHub::new(store.clone(), Arc::new(Projects::default())).unwrap();
+    let clock = Arc::new(crate::ManualClock::new(
+        &agent_domain::Timestamp::from_millis(1_000).unwrap(),
+    ));
+    let mut context = ActorContext::new(store);
+    context.clock = clock.clone();
+    let late = thread(&context, "thread-0").await;
+    thread(&context, "thread-b").await;
+    thread(&context, "thread-a").await;
+    clock.advance(1_000);
+    dispatch(
+        &late,
+        "rename",
+        Command::Rename {
+            title: "Later".into(),
+        },
+    )
+    .await;
+    let mut subscription = hub.subscribe(ShellSubscribe::default()).await.unwrap();
+    let ShellUpdate::Snapshot(snapshot) = next(&mut subscription).await else {
+        panic!()
+    };
+    let ids: Vec<_> = snapshot
+        .threads
+        .iter()
+        .map(|thread| thread.thread.as_str())
+        .collect();
+    assert_eq!(ids, ["thread-a", "thread-b", "thread-0"]);
 }

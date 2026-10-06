@@ -510,8 +510,8 @@ impl Runtime {
     }
 
     /// A project was added, renamed or removed.
-    pub fn project_changed(&self, project: &str) {
-        self.shell.project_changed(project);
+    pub async fn project_changed(&self, project: &str) -> Result<(), RuntimeError> {
+        Ok(self.shell.project_changed(project).await?)
     }
 
     /// Stops admitting client operations and waits for the admitted ones, stops

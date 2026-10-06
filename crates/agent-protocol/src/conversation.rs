@@ -154,6 +154,9 @@ pub enum ThreadUpdate {
     /// Facts in sequence order: one committed step, a replayed gap, or part of either.
     Facts(Vec<SequencedFact>),
     Synchronized,
+    /// The last item: the stream ended, e.g. `live_buffer_full` when the client fell
+    /// behind. Resubscribe from the last applied sequence.
+    Failed(RpcFailure),
 }
 
 /// Groups facts in order into stream items that each fit `budget` encoded bytes.
@@ -231,6 +234,9 @@ pub enum ShellUpdate {
         project_id: String,
     },
     Synchronized,
+    /// The last item: the stream ended, e.g. `live_buffer_full` when the client fell
+    /// behind. Resubscribe from the last applied sequence.
+    Failed(RpcFailure),
 }
 
 /// `conversation/getThread`: the projection a subscription would start from.
@@ -280,7 +286,7 @@ pub struct HistoryPage {
     pub has_more: bool,
 }
 
-/// `conversation/search`: 2 to 200 characters, at most 50 matches (default 50).
+/// `conversation/search`: 2 to 200 UTF-16 units, at most 50 matches (default 50).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Search {
@@ -302,9 +308,9 @@ pub struct SearchMatch {
     pub thread_id: ThreadId,
     pub project_id: String,
     pub source: SearchSource,
-    /// At most 240 characters around the first match.
+    /// At most 240 UTF-16 units around the first match.
     pub snippet: String,
-    pub message_created_at: Timestamp,
+    pub message_created_at: Option<Timestamp>,
 }
 
 /// `conversation/turnDiff`: changes between the checkpoints after two runs. Ordinal
@@ -315,7 +321,8 @@ pub struct GetTurnDiff {
     pub thread_id: ThreadId,
     pub from_run_ordinal: u64,
     pub to_run_ordinal: u64,
-    pub ignore_whitespace: bool,
+    /// Defaults to true (T3 `CheckpointDiffQuery`).
+    pub ignore_whitespace: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,9 +400,11 @@ pub enum ErrorCode {
     CheckpointUnavailable,
     AttachmentUnavailable,
     Unavailable,
+    LiveBufferFull,
+    DiffFailed,
 }
 impl ErrorCode {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::ResponseTooLarge,
         Self::ThreadNotFound,
         Self::CommandIdConflict,
@@ -407,6 +416,8 @@ impl ErrorCode {
         Self::CheckpointUnavailable,
         Self::AttachmentUnavailable,
         Self::Unavailable,
+        Self::LiveBufferFull,
+        Self::DiffFailed,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -421,6 +432,8 @@ impl ErrorCode {
             Self::CheckpointUnavailable => "checkpoint_unavailable",
             Self::AttachmentUnavailable => "attachment_unavailable",
             Self::Unavailable => "conversation_unavailable",
+            Self::LiveBufferFull => "live_buffer_full",
+            Self::DiffFailed => "diff_failed",
         }
     }
     pub fn of(failure: &RpcFailure) -> Option<Self> {
@@ -456,6 +469,12 @@ pub enum ConversationError {
     /// Storage or runtime failure; the request may or may not have taken effect.
     #[error("{0}")]
     Unavailable(String),
+    /// T3 `LiveStreamBufferError`.
+    #[error("The live event buffer is full. Resume from the last received sequence.")]
+    LiveBufferFull,
+    /// The checkpoints could not be diffed; carries the diff tool's detail.
+    #[error("{0}")]
+    DiffFailed(String),
 }
 impl ConversationError {
     pub fn code(&self) -> ErrorCode {
@@ -471,6 +490,8 @@ impl ConversationError {
             Self::CheckpointUnavailable(_) => ErrorCode::CheckpointUnavailable,
             Self::AttachmentUnavailable(_) => ErrorCode::AttachmentUnavailable,
             Self::Unavailable(_) => ErrorCode::Unavailable,
+            Self::LiveBufferFull => ErrorCode::LiveBufferFull,
+            Self::DiffFailed(_) => ErrorCode::DiffFailed,
         }
     }
     /// Whether a commit may have happened before the failure.

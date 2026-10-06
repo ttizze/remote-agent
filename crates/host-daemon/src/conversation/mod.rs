@@ -133,7 +133,9 @@ impl Conversation {
         if let Err(error) = self.resources.projects.refresh().await {
             tracing::warn!(operation = "conversation.projects", message = %format_args!("{error:#}"));
         }
-        self.runtime.project_changed(project);
+        if let Err(error) = self.runtime.project_changed(project).await {
+            tracing::warn!(operation = "conversation.projects", message = %error);
+        }
         let (runtime, project) = (self.runtime.clone(), project.to_owned());
         tokio::spawn(async move {
             if let Err(error) = runtime.import(&project, None).await {

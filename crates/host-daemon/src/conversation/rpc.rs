@@ -130,6 +130,14 @@ fn history_row(row: agent_runtime::HistoryRow) -> wire::HistoryRow {
     }
 }
 
+fn overflowed<T>(receiver: agent_runtime::LiveReceiver<T>) -> bool {
+    receiver.overflowed()
+}
+
+fn live_buffer_full() -> agent_protocol::error::RpcFailure {
+    ConversationError::LiveBufferFull.into()
+}
+
 fn query_error(error: QueryError) -> ConversationError {
     match error {
         QueryError::Cursor(_) => ConversationError::InvalidCursor,
@@ -381,13 +389,21 @@ impl Conversation {
         while let Ok(update) = subscription.updates.try_recv() {
             first.extend(thread_updates(update));
         }
-        let updates = std::sync::Arc::new(tokio::sync::Mutex::new(subscription.updates));
+        let updates = std::sync::Arc::new(tokio::sync::Mutex::new(Some(subscription.updates)));
         Ok(stream(
             first,
             wire::ThreadUpdate::Facts(vec![]),
             move || {
                 let updates = updates.clone();
-                Box::pin(async move { updates.lock().await.recv().await.map(thread_updates) })
+                Box::pin(async move {
+                    let mut updates = updates.lock().await;
+                    let receiver = updates.as_mut()?;
+                    match receiver.recv().await {
+                        Some(update) => Some(thread_updates(update)),
+                        None => overflowed(updates.take()?)
+                            .then(|| vec![wire::ThreadUpdate::Failed(live_buffer_full())]),
+                    }
+                })
             },
             cancel,
         ))
@@ -418,19 +434,20 @@ impl Conversation {
             .await
             .map(shell_update)
             .ok_or_else(|| unavailable("the shell stream closed"))?;
-        let updates = std::sync::Arc::new(tokio::sync::Mutex::new(subscription.updates));
+        let updates = std::sync::Arc::new(tokio::sync::Mutex::new(Some(subscription.updates)));
         Ok(stream(
             VecDeque::from([first]),
             wire::ShellUpdate::Synchronized,
             move || {
                 let updates = updates.clone();
                 Box::pin(async move {
-                    updates
-                        .lock()
-                        .await
-                        .recv()
-                        .await
-                        .map(|update| vec![shell_update(update)])
+                    let mut updates = updates.lock().await;
+                    let receiver = updates.as_mut()?;
+                    match receiver.recv().await {
+                        Some(update) => Some(vec![shell_update(update)]),
+                        None => overflowed(updates.take()?)
+                            .then(|| vec![wire::ShellUpdate::Failed(live_buffer_full())]),
+                    }
                 })
             },
             cancel,
@@ -513,12 +530,12 @@ impl Conversation {
                 Path::new(&refs.cwd),
                 &refs.from,
                 &refs.to,
-                params.ignore_whitespace,
+                params.ignore_whitespace.unwrap_or(true),
                 DiffFormat::Patch,
                 false,
             )
             .await
-            .map_err(|_| ConversationError::CheckpointUnavailable(params.to_run_ordinal))?;
+            .map_err(|error| ConversationError::DiffFailed(format!("{error:#}")))?;
         Ok(result(diff))
     }
 
