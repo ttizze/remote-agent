@@ -196,6 +196,7 @@ impl From<ExecError> for Failure {
 struct Entry {
     key: SessionKey,
     generation: u64,
+    cwd: Option<String>,
     mail: mpsc::UnboundedSender<Mail>,
     claude: Option<Arc<Mutex<ClaudeProcess>>>,
 }
@@ -297,6 +298,14 @@ impl SessionManager {
             .collect();
         keys.sort();
         keys
+    }
+
+    /// The working directories of the thread's live provider processes.
+    pub fn session_cwds(&self, thread: &ThreadId) -> Vec<String> {
+        self.entries(|key| &key.thread == thread)
+            .into_iter()
+            .filter_map(|entry| entry.cwd)
+            .collect()
     }
 
     pub fn is_live(&self, key: &SessionKey) -> bool {
@@ -756,6 +765,10 @@ impl SessionManager {
             let entry = Entry {
                 key: target.key.clone(),
                 generation: table.generation,
+                cwd: target
+                    .workspace
+                    .as_ref()
+                    .map(|workspace| workspace.cwd.clone()),
                 mail,
                 claude: claude.clone(),
             };
@@ -1129,4 +1142,4 @@ fn instance_target(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

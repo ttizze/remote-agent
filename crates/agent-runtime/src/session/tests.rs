@@ -1,6 +1,6 @@
 //! Ports of T3 ProviderSessionManager, ProviderTurnStartService and
 //! ProviderTurnControlService behavior tests, plus the frame ordering rule.
-mod fake;
+pub(crate) mod fake;
 mod replay;
 
 use super::*;
@@ -103,7 +103,7 @@ pub(crate) fn selection(driver: Driver, model: &str) -> ModelSelection {
     }
 }
 
-fn codex_replies(frame: &Value) -> Vec<Value> {
+pub(crate) fn codex_replies(frame: &Value) -> Vec<Value> {
     let id = frame["id"].clone();
     match frame["method"].as_str() {
         Some("initialize") => vec![json!({"id":id,"result":{}})],

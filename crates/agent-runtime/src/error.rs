@@ -33,6 +33,8 @@ pub enum RuntimeError {
     Fold(#[from] FoldError),
     #[error("the thread actor has stopped")]
     ActorStopped,
+    #[error("the runtime is shut down")]
+    Closed,
     #[error("{0} is not accepted through this entry point")]
     InvalidInput(&'static str),
 }

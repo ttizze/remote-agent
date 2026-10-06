@@ -213,6 +213,7 @@ dependencies = [
  "base64 0.23.1",
  "futures-util",
  "proptest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

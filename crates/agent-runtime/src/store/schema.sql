@@ -23,6 +23,7 @@ CREATE TABLE facts (
 ) STRICT;
 CREATE INDEX facts_thread_global ON facts (thread_id, global_seq);
 CREATE INDEX facts_thread_created ON facts (thread_id) WHERE kind = 'ThreadCreated';
+CREATE INDEX facts_scope_bound ON facts (thread_id) WHERE kind = 'CheckpointScopeBound';
 
 CREATE TABLE receipts (
     command_id TEXT PRIMARY KEY,
@@ -95,13 +96,6 @@ CREATE TABLE launches (
     updated_at INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX launches_thread ON launches (thread_id);
-
-CREATE TABLE thread_workspaces (
-    thread_id TEXT PRIMARY KEY,
-    cwd TEXT NOT NULL,
-    worktree_path TEXT,
-    branch TEXT
-) STRICT;
 
 CREATE TABLE checkpoint_baselines (
     scope_id TEXT NOT NULL,
