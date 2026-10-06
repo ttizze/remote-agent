@@ -139,6 +139,14 @@ fn git(cwd: &std::path::Path, args: &[&str]) {
 }
 
 async fn host() -> Host {
+    let spawner = Arc::new(ReplaySpawner {
+        transcript: SIMPLE,
+        spawned: Mutex::new(vec![]),
+    });
+    host_with(spawner.clone(), spawner).await
+}
+
+async fn host_with(codex: Arc<dyn Spawner>, spawner: Arc<ReplaySpawner>) -> Host {
     let directory = tempfile::tempdir().unwrap();
     let root = dunce::canonicalize(directory.path()).unwrap();
     let project_root = root.join("project");
@@ -164,10 +172,6 @@ async fn host() -> Host {
     let projects = ProjectStore::new(state.join("worktrees.json"));
     let project = projects.register(&project_root).await.unwrap();
     let service = HostRpcService::new(Err("fixture".into()), projects).unwrap();
-    let spawner = Arc::new(ReplaySpawner {
-        transcript: SIMPLE,
-        spawned: Mutex::new(vec![]),
-    });
     let mut runtime = agent_runtime::RuntimeConfig::new(state.join("conversation.sqlite"));
     runtime.eviction = None;
     let conversation = Conversation::open(
@@ -179,7 +183,7 @@ async fn host() -> Host {
                 codex_accounts: None,
                 claude: None,
             },
-            spawner: spawner.clone(),
+            spawner: codex,
             browser: Arc::new(|_| None),
             models: Arc::new(NoModels),
         },
@@ -796,6 +800,16 @@ async fn conversation_calls_answer_with_typed_errors() {
     assert_eq!(error.code(), ErrorCode::ProjectNotFound);
 }
 
+async fn tool(host: &Host, thread: &ThreadId, name: &str, arguments: Value) -> Value {
+    let result = host
+        .conversation
+        .tools
+        .call(thread, "codex", "invocation", name, arguments)
+        .await;
+    assert_eq!(result["isError"], false, "{result}");
+    result["structuredContent"].clone()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_tools_read_a_thread_of_their_own_project() {
     let host = host().await;
@@ -810,59 +824,369 @@ async fn agent_tools_read_a_thread_of_their_own_project() {
     let thread = launched.thread_id;
     let (mut folded, mut updates) = subscribe(&host, &thread, None).await;
     until(&mut folded, &mut updates, answered).await;
-    let read = host
-        .conversation
-        .tools
-        .call(
-            &thread,
-            "codex",
-            "read",
-            "t3_thread_read",
-            json!({"threadId": thread, "limit": 1}),
-        )
-        .await
-        .unwrap();
+    let read = tool(
+        &host,
+        &thread,
+        "t3_thread_read",
+        json!({"threadId": thread, "limit": 1}),
+    )
+    .await;
     assert_eq!(read["thread"]["status"], json!(RunStatus::Completed));
+    assert_eq!(read["thread"]["createdBy"], "user");
+    assert_eq!(read["thread"]["creationSource"], "desktop");
     assert_eq!(read["items"].as_array().unwrap().len(), 1);
-    assert_eq!(read["items"][0]["type"], "UserMessage");
-    let next = host
-        .conversation
-        .tools
-        .call(
-            &thread,
-            "codex",
-            "read",
-            "t3_thread_read",
-            json!({"threadId": thread, "afterPosition": read["nextPosition"]}),
-        )
+    assert_eq!(read["items"][0]["type"], "user_message");
+    let next = tool(
+        &host,
+        &thread,
+        "t3_thread_read",
+        json!({"threadId": thread, "afterPosition": read["nextPosition"]}),
+    )
+    .await;
+    assert_eq!(next["items"][0]["text"], "fixture simple ok");
+    assert_eq!(next["items"][0]["type"], "assistant_message");
+    let elsewhere = tool(
+        &host,
+        &thread,
+        "t3_thread_read",
+        json!({"threadId": "thread:elsewhere"}),
+    )
+    .await;
+    assert_eq!(elsewhere["code"], "thread_not_found");
+    // Without an active turn there is nothing to delegate from.
+    let delegated = tool(&host, &thread, "delegate_task", json!({"task": "help"})).await;
+    assert_eq!(
+        delegated,
+        json!({"_tag":"OrchestratorMcpFailure","code":"parent_not_active","message":"Delegated tasks require an active run owned by this MCP provider session."})
+    );
+    host.conversation.shutdown().await;
+}
+
+/// A Codex app-server that holds turns whose input contains `[hold]` until they
+/// are interrupted, and answers every other turn at once.
+struct HeldCodex;
+impl Spawner for HeldCodex {
+    fn spawn(&self, spec: ProcessSpec) -> std::io::Result<ProviderProcess> {
+        assert_eq!(spec.driver, Driver::Codex);
+        let (input, provider_input) = tokio::io::duplex(1 << 20);
+        let (provider_output, output) = tokio::io::duplex(1 << 20);
+        let (exited, exit) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(provider_input).lines();
+            let mut output = provider_output;
+            let mut next = 0u64;
+            let mut active: BTreeMap<String, String> = BTreeMap::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let (Some(id), Some(method)) = (request.get("id"), request["method"].as_str())
+                else {
+                    continue;
+                };
+                let params = &request["params"];
+                let thread = params["threadId"].as_str().unwrap_or_default().to_owned();
+                let mut frames = vec![];
+                match method {
+                    "thread/start" => {
+                        next += 1;
+                        frames.push(json!({"id": id, "result": {"thread": {"id": format!("native-{next}")}}}));
+                    }
+                    "thread/resume" => {
+                        frames.push(json!({"id": id, "result": {"thread": {"id": thread}}}))
+                    }
+                    "turn/start" => {
+                        next += 1;
+                        let turn = format!("turn-{next}");
+                        let text = params["input"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|part| part["text"].as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let started =
+                            json!({"id": turn, "items": [], "status": "inProgress", "error": null});
+                        frames.push(json!({"id": id, "result": {"turn": started}}));
+                        frames.push(json!({"method": "turn/started", "params": {"threadId": thread, "turn": started}}));
+                        if text.contains("[hold]") {
+                            active.insert(thread.clone(), turn);
+                        } else {
+                            let message = format!("msg-{turn}");
+                            let answer = json!({"type": "agentMessage", "id": message, "text": "", "phase": "final_answer"});
+                            frames.push(json!({"method": "item/started", "params": {"item": answer, "threadId": thread, "turnId": turn}}));
+                            let mut done = answer.clone();
+                            done["text"] = json!("done");
+                            frames.push(json!({"method": "item/completed", "params": {"item": done, "threadId": thread, "turnId": turn}}));
+                            frames.push(json!({"method": "turn/completed", "params": {"threadId": thread, "turn": {"id": turn, "items": [], "status": "completed", "error": null}}}));
+                        }
+                    }
+                    "turn/interrupt" => {
+                        frames.push(json!({"id": id, "result": {}}));
+                        if let Some(turn) = active.remove(&thread) {
+                            frames.push(json!({"method": "turn/completed", "params": {"threadId": thread, "turn": {"id": turn, "items": [], "status": "interrupted", "error": null}}}));
+                        }
+                    }
+                    "turn/steer" => {
+                        frames.push(json!({"id": id, "result": {"turnId": active.get(&thread)}}))
+                    }
+                    _ => frames.push(json!({"id": id, "result": {}})),
+                }
+                for frame in frames {
+                    let mut bytes = serde_json::to_vec(&frame).unwrap();
+                    bytes.push(b'\n');
+                    if output.write_all(&bytes).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            let _ = exited.send(true);
+        });
+        Ok(ProviderProcess {
+            input: Box::new(input),
+            output: Box::new(output),
+            stderr: Box::new(tokio::io::empty()),
+            control: Box::new(Exit(exit)),
+        })
+    }
+}
+
+async fn eventually(host: &Host, thread: &ThreadId, done: impl Fn(&State) -> bool) -> Arc<State> {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let state = host.conversation.runtime.state(thread).await.unwrap().state;
+            if done(&state) {
+                return state;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the thread reaches the expected state")
+}
+fn running(state: &State) -> bool {
+    state.runs.iter().any(|run| {
+        run.status == RunStatus::Running
+            && run.attempt.as_ref().is_some_and(|attempt| {
+                state.attempts.iter().any(|candidate| {
+                    &candidate.id == attempt
+                        && candidate.status == agent_domain::AttemptStatus::Running
+                })
+            })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_tools_delegate_create_queue_and_interrupt_through_the_runtime() {
+    let replay = Arc::new(ReplaySpawner {
+        transcript: SIMPLE,
+        spawned: Mutex::new(vec![]),
+    });
+    let host = host_with(Arc::new(HeldCodex), replay).await;
+    let launched: wire::Launched = host
+        .call(launch(&host, "parent", "[hold] parent work"))
         .await
         .unwrap();
-    assert_eq!(next["items"][0]["text"], "fixture simple ok");
-    assert!(
-        host.conversation
-            .tools
-            .call(
-                &thread,
-                "codex",
-                "read",
-                "t3_thread_read",
-                json!({"threadId": "thread:elsewhere"}),
-            )
-            .await
-            .is_err()
-    );
-    // Without an active turn there is nothing to delegate from.
+    let parent = launched.thread_id;
+    eventually(&host, &parent, running).await;
+
+    let pinned = tool(
+        &host,
+        &parent,
+        "t3_thread_organize",
+        json!({"action": "pin"}),
+    )
+    .await;
+    assert!(pinned["sequence"].is_u64(), "{pinned}");
+    tool(
+        &host,
+        &parent,
+        "t3_thread_organize",
+        json!({"action": "unpin"}),
+    )
+    .await;
+    let listed = tool(&host, &parent, "t3_thread_list", json!({})).await;
+    assert_eq!(listed["currentThreadId"], json!(parent));
+    assert_eq!(listed["threads"][0]["status"], "running");
+
+    // A delegated child runs until it is cancelled; its result reaches the parent.
+    let delegated = tool(
+        &host,
+        &parent,
+        "delegate_task",
+        json!({"task": "[hold] child work", "title": "Child review", "clientRequestId": "round-1"}),
+    )
+    .await;
+    assert_eq!(delegated["status"], "running", "{delegated}");
+    assert_eq!(delegated["waitTimedOut"], false);
+    let child = ThreadId::new(delegated["childThreadId"].as_str().unwrap()).unwrap();
+    eventually(&host, &child, running).await;
+    let child_state = host.conversation.runtime.state(&child).await.unwrap().state;
+    let child_thread = child_state.thread.as_ref().unwrap();
+    assert_eq!(child_thread.title, "Child review");
     assert_eq!(
-        host.conversation
-            .tools
-            .call(
-                &thread,
-                "codex",
-                "delegate",
-                "delegate_task",
-                json!({"task": "help"})
-            )
-            .await,
-        Err("Delegation requires an active parent run".into())
+        (
+            child_thread.created_by,
+            child_thread.creation_source.as_str()
+        ),
+        (agent_domain::MessageAuthor::Agent, "mcp")
     );
+    let child_read = tool(&host, &parent, "t3_thread_read", json!({"threadId": child})).await;
+    assert_eq!(child_read["thread"]["relationshipToParent"], "subagent");
+    assert_eq!(child_read["items"][0]["text"], "[hold] child work");
+    let timed_out = tool(
+        &host,
+        &parent,
+        "t3_thread_wait",
+        json!({"threadId": child, "timeoutMs": 300}),
+    )
+    .await;
+    assert_eq!(timed_out["timedOut"], true);
+    assert_eq!(timed_out["status"], "running");
+    let task = delegated["taskId"].clone();
+    let cancelled = tool(
+        &host,
+        &parent,
+        "task_cancel",
+        json!({"taskId": task, "reason": "enough"}),
+    )
+    .await;
+    assert_eq!(cancelled["status"], "cancel_requested");
+    let finished = tool(&host, &parent, "t3_thread_wait", json!({"threadId": child})).await;
+    assert_eq!(finished["status"], "interrupted");
+    eventually(&host, &parent, |state| {
+        state.tasks.iter().any(|t| t.status.terminal())
+    })
+    .await;
+    let status = tool(&host, &parent, "task_status", json!({"taskId": task})).await;
+    assert_eq!(status["status"], "interrupted");
+    assert_eq!(status["workState"], "result_available");
+
+    // Top-level threads share the caller's checkout and are recorded in its timeline.
+    let created = tool(
+        &host,
+        &parent,
+        "create_threads",
+        json!({"threads": [{"prompt": "quick task"}], "clientRequestId": "batch-1"}),
+    )
+    .await;
+    let entry = &created["threads"][0];
+    assert_eq!(entry["title"], "quick task", "{created}");
+    assert_eq!(entry["createdBy"], "agent");
+    assert_eq!(entry["creationSource"], "mcp");
+    let created_thread = ThreadId::new(entry["threadId"].as_str().unwrap()).unwrap();
+    let done = tool(
+        &host,
+        &parent,
+        "t3_thread_wait",
+        json!({"threadId": created_thread}),
+    )
+    .await;
+    assert_eq!(done["status"], "completed");
+    let activity = tool(
+        &host,
+        &parent,
+        "t3_thread_read",
+        json!({"threadId": parent, "view": "activity"}),
+    )
+    .await;
+    let record = activity["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "thread_created")
+        .cloned()
+        .expect("the parent timeline records the created thread");
+    assert_eq!(record["title"], "quick task");
+    assert_eq!(
+        record["text"],
+        json!(format!(
+            "Created thread {created_thread} with codex (gpt-6-luna)."
+        ))
+    );
+    let again = tool(
+        &host,
+        &parent,
+        "create_threads",
+        json!({"threads": [{"prompt": "quick task"}], "clientRequestId": "batch-1"}),
+    )
+    .await;
+    assert_eq!(again["threads"][0]["threadId"], json!(created_thread));
+    let followup = tool(
+        &host,
+        &parent,
+        "t3_thread_send",
+        json!({"threadId": created_thread, "message": "follow up"}),
+    )
+    .await;
+    assert_eq!(followup["delivery"], "started", "{followup}");
+    let renamed = tool(
+        &host,
+        &parent,
+        "t3_thread_update",
+        json!({"threadId": created_thread, "action": "rename", "title": "Renamed"}),
+    )
+    .await;
+    assert_eq!(renamed["title"], "Renamed");
+
+    // A queued follow-up of the caller can be read, edited and cancelled.
+    let queued = tool(
+        &host,
+        &parent,
+        "t3_thread_send",
+        json!({"threadId": parent, "message": "[hold] later", "mode": "queue"}),
+    )
+    .await;
+    assert_eq!(queued["delivery"], "queued", "{queued}");
+    let queue = tool(&host, &parent, "t3_queue_list", json!({})).await;
+    assert_eq!(queue["items"][0]["text"], "[hold] later");
+    let run = queue["items"][0]["queuedRunId"].clone();
+    tool(
+        &host,
+        &parent,
+        "t3_queue_edit",
+        json!({"queuedRunId": run, "text": "[hold] edited"}),
+    )
+    .await;
+    let edited = tool(&host, &parent, "t3_queue_read", json!({"queuedRunId": run})).await;
+    assert_eq!(edited["text"], "[hold] edited");
+    tool(
+        &host,
+        &parent,
+        "t3_queue_cancel",
+        json!({"queuedRunId": run}),
+    )
+    .await;
+    let empty = tool(&host, &parent, "t3_queue_list", json!({})).await;
+    assert_eq!(empty["items"], json!([]));
+
+    let interrupted = tool(
+        &host,
+        &parent,
+        "t3_thread_interrupt",
+        json!({"threadId": parent}),
+    )
+    .await;
+    assert_eq!(
+        interrupted["status"], "interrupt_requested",
+        "{interrupted}"
+    );
+    let stopped = tool(
+        &host,
+        &parent,
+        "t3_thread_wait",
+        json!({"threadId": parent, "runId": interrupted["runId"]}),
+    )
+    .await;
+    assert_eq!(stopped["status"], "interrupted");
+    let idle = tool(
+        &host,
+        &parent,
+        "t3_thread_interrupt",
+        json!({"threadId": parent}),
+    )
+    .await;
+    assert_eq!(
+        idle,
+        json!({"threadId": parent, "runId": null, "status": "no_active_run"})
+    );
+    host.conversation.shutdown().await;
 }

@@ -1,6 +1,6 @@
 //! Provider processes for the runtime's sessions: Codex app-server and Claude CLI
 //! launches under the process supervisor, their MCP tools, images and transcripts.
-use super::{ClaudeCredentials, CodexCredentials, ProjectCatalog, tools::ToolBridge};
+use super::{ClaudeCredentials, CodexCredentials, ProjectCatalog, tools, tools::ToolBridge};
 use crate::claude::control::ClaudeProgram;
 use crate::claude::skills::user_invocable_skills;
 use crate::{workspace_files::WorkspaceFiles, worktrees::Worktrees};
@@ -118,7 +118,7 @@ impl ProviderHost {
 
     fn mcp_servers(&self, key: &SessionKey) -> Result<BTreeMap<String, Value>, String> {
         let mut servers = BTreeMap::from([(
-            "orchestration".to_owned(),
+            tools::SERVER_NAME.to_owned(),
             self.tools.provider_config(&key.thread, &key.instance)?,
         )]);
         if let Some(browser) = (self.browser)(&key.thread) {

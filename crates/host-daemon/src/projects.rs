@@ -6,6 +6,13 @@ use std::{
     sync::Arc,
 };
 
+/// Whether a registration added the workspace or found it registered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Registration {
+    Created(String),
+    Existing(String),
+}
+
 /// The Host owns project registration independently of native provider catalogs.
 #[derive(Debug, Clone)]
 pub struct ProjectStore {
@@ -34,6 +41,16 @@ impl ProjectStore {
         }
     }
     pub(crate) async fn register(&self, root: &Path) -> anyhow::Result<String> {
+        match self.add(root, None).await? {
+            Registration::Created(id) | Registration::Existing(id) => Ok(id),
+        }
+    }
+    /// Registers a directory under `name`, or under its directory name.
+    pub(crate) async fn add(
+        &self,
+        root: &Path,
+        name: Option<&str>,
+    ) -> anyhow::Result<Registration> {
         anyhow::ensure!(root.is_absolute(), "project directory must be absolute");
         let root = tokio::fs::canonicalize(root).await?;
         let root = dunce::simplified(&root);
@@ -52,17 +69,18 @@ impl ProjectStore {
                         .ok()
                         .is_some_and(|path| dunce::simplified(&path) == root)
                 {
-                    return Ok(project.id.clone());
+                    return Ok(Registration::Existing(project.id.clone()));
                 }
             }
         }
         let id = uuid::Uuid::new_v4().to_string();
         projects.push(Project {
             id: id.clone(),
-            name: root
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.into()),
+            name: name.map(str::to_owned).unwrap_or_else(|| {
+                root.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.into())
+            }),
             roots: vec![agent_protocol::models::ProjectRoot { path: path.into() }],
         });
         let file = self.path.with_file_name("projects.json");
@@ -78,7 +96,7 @@ impl ProjectStore {
             Ok(())
         })
         .await??;
-        Ok(id)
+        Ok(Registration::Created(id))
     }
 }
 
@@ -101,5 +119,24 @@ mod tests {
         assert_eq!(projects[0].name, "project");
         assert_eq!(projects[0].roots[0].path, project.to_str().unwrap());
         assert!(store.register(Path::new("relative")).await.is_err());
+        assert_eq!(
+            store.add(&project, Some("Renamed")).await.unwrap(),
+            Registration::Existing(registered)
+        );
+        let titled = root.join("titled");
+        std::fs::create_dir(&titled).unwrap();
+        let Registration::Created(id) = store.add(&titled, Some("Pinball Stats")).await.unwrap()
+        else {
+            panic!("a new workspace is created");
+        };
+        let projects = store.load().await.unwrap();
+        assert_eq!(
+            projects
+                .iter()
+                .find(|project| project.id == id)
+                .unwrap()
+                .name,
+            "Pinball Stats"
+        );
     }
 }
