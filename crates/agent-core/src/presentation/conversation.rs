@@ -1360,7 +1360,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        crate::sync::thread(
+        crate::state_sync::thread(
             &mut snapshot,
             &id,
             ThreadStreamItem::Snapshot {
@@ -1415,7 +1415,7 @@ mod tests {
             selected_thread: Some(id.clone()),
             ..Default::default()
         };
-        crate::sync::thread(
+        crate::state_sync::thread(
             &mut state,
             &id,
             ThreadStreamItem::Snapshot {
@@ -1430,7 +1430,7 @@ mod tests {
         assert_eq!(view.requests.len(), 1);
         assert!(view.rows.is_empty());
         p.runtime_requests[0].status = RequestStatus::Resolved;
-        crate::sync::thread(
+        crate::state_sync::thread(
             &mut state,
             &id,
             ThreadStreamItem::Snapshot {

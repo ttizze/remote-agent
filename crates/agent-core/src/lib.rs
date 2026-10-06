@@ -11,9 +11,10 @@ pub mod persistence;
 pub mod presentation;
 pub mod privacy;
 pub mod state;
-pub mod store;
 #[path = "state/sync.rs"]
-mod sync;
+mod state_sync;
+pub mod store;
+pub mod sync;
 #[cfg(test)]
 mod test_support;
 

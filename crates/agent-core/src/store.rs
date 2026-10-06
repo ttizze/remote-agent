@@ -866,14 +866,14 @@ impl Owner {
             }
             OwnerEvent::Shell(epoch, item) if epoch == self.epoch => {
                 let selected = self.state.selected_thread.clone();
-                crate::sync::shell(&mut self.state, item, &now());
+                crate::state_sync::shell(&mut self.state, item, &now());
                 if selected != self.state.selected_thread {
                     self.subscribe_thread();
                 }
                 self.visit_selected();
             }
             OwnerEvent::Thread(epoch, id, item) if epoch == self.epoch => {
-                crate::sync::thread(&mut self.state, &id, item);
+                crate::state_sync::thread(&mut self.state, &id, item);
                 self.reconcile_rollbacks();
                 self.visit_selected();
             }
@@ -2344,7 +2344,7 @@ impl Owner {
                         if let Some(cache) = self.state.threads.get_mut(&id)
                             && matches!(&call, Call::ReadThreadHistory(params) if params.cursor == cache.history_cursor)
                         {
-                            *cache = crate::sync::history(cache, page);
+                            *cache = crate::state_sync::history(cache, page);
                         }
                     }
                     Reply::Item(id, item) => {
@@ -2942,7 +2942,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        crate::sync::thread(
+        crate::state_sync::thread(
             &mut state,
             &id,
             ThreadStreamItem::Snapshot {
@@ -3976,7 +3976,7 @@ mod tests {
         let mut started = run;
         started.status = RunStatus::Starting;
         let id = owner.state.selected_thread.clone().unwrap();
-        crate::sync::thread(
+        crate::state_sync::thread(
             &mut owner.state,
             &id,
             ThreadStreamItem::Event(Box::new(StoredEvent {

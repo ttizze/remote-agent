@@ -13,6 +13,7 @@ bindings = ["dep:uniffi", "dep:zeroize"]
 
 [dependencies]
 agent-protocol = { path = "../agent-protocol" }
+agent-domain = { path = "../agent-domain" }
 orchestration = { path = "../orchestration" }
 agent-transport = { path = "../agent-transport" }
 uniffi = { version = "=0.32.0", features = ["tokio"], optional = true }

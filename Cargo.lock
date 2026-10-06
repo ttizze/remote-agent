@@ -137,6 +137,7 @@ dependencies = [
 name = "agent-core"
 version = "0.1.0"
 dependencies = [
+ "agent-domain",
  "agent-protocol",
  "agent-transport",
  "insta",
