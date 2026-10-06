@@ -311,17 +311,7 @@ fn codex_thread_configuration_is_shared_by_start_resume_fork_and_rollback_resume
         .outbound;
     assert_eq!(fork[0]["params"]["config"], expected);
     assert_eq!(fork[0]["params"]["model"], "gpt-5.4");
-    let revert = protocol
-        .command(
-            &ProviderCommand::Rollback {
-                native_thread: "resumed".into(),
-                absolute_head: Some("head".into()),
-            },
-            &context,
-            &[],
-        )
-        .unwrap()
-        .outbound;
+    let revert = protocol.rollback("resumed", 1, &context).outbound;
     let resume = protocol.receive(&json!({"id":revert[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"notLoaded"}}}})).unwrap();
     assert_eq!(resume.outbound[0]["params"]["config"], expected);
     assert_eq!(resume.outbound[0]["params"]["model"], "gpt-5.4");
@@ -987,99 +977,110 @@ fn mcp_metadata_trims_names_limits_utf16_and_accepts_only_web_icons() {
 }
 
 #[test]
-fn rollback_resolves_an_absolute_boundary_across_pages_and_is_safe_to_repeat() {
+fn rollback_finds_the_revert_boundary_across_pages_of_newest_first_turns() {
+    // T3 CodexThreadRevert.test.ts "finds the revert boundary across pages".
     let mut protocol = CodexProtocol::default();
-    let command = ProviderCommand::Rollback {
-        native_thread: "thread".into(),
-        absolute_head: Some("kept".into()),
-    };
     let read = protocol
-        .command(&command, &wire_context(), &[])
-        .unwrap()
+        .rollback("thread", 3, &wire_context())
         .outbound
         .remove(0);
+    assert_eq!(read["method"], "thread/read");
     assert_eq!(
         read["params"],
         json!({"threadId":"thread","includeTurns":false})
     );
-    let page = protocol.receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"notLoaded"}}}})).unwrap().outbound.remove(0);
-    assert_eq!(page["method"], "thread/resume");
+    let resume = protocol.receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"notLoaded"}}}})).unwrap().outbound.remove(0);
+    assert_eq!(resume["method"], "thread/resume");
     assert_eq!(
-        page["params"],
+        resume["params"],
         json!({"threadId":"thread","excludeTurns":true,"cwd":"/workspace","config":{"tools.update_plan.enabled":true}})
     );
     let page = protocol
-        .receive(&json!({"id":page["id"],"result":{"thread":{"id":"thread"}}}))
+        .receive(&json!({"id":resume["id"],"result":{"thread":{"id":"thread"}}}))
         .unwrap()
         .outbound
         .remove(0);
     assert_eq!(
         page["params"],
-        json!({"threadId":"thread","cursor":null,"limit":100,"sortDirection":"desc","itemsView":"summary"})
+        json!({"threadId":"thread","cursor":null,"limit":3,"sortDirection":"desc","itemsView":"summary"})
     );
     let next = protocol.receive(&json!({"id":page["id"],"result":{"data":[{"id":"newest"},{"id":"middle"}],"nextCursor":"older"}})).unwrap().outbound.remove(0);
-    assert_eq!(next["params"]["cursor"], "older");
-    let revert = protocol.receive(&json!({"id":next["id"],"result":{"data":[{"id":"boundary"},{"id":"kept"}],"nextCursor":null}})).unwrap().outbound.remove(0);
+    assert_eq!(
+        next["params"],
+        json!({"threadId":"thread","cursor":"older","limit":1,"sortDirection":"desc","itemsView":"summary"})
+    );
+    let revert = protocol
+        .receive(&json!({"id":next["id"],"result":{"data":[{"id":"boundary"}],"nextCursor":null}}))
+        .unwrap()
+        .outbound
+        .remove(0);
+    assert_eq!(revert["method"], "thread/revert");
     assert_eq!(
         revert["params"],
         json!({"threadId":"thread","beforeTurnId":"boundary"})
     );
-    protocol
-        .receive(&json!({"id":revert["id"],"result":{"thread":{"id":"thread"}}}))
-        .unwrap();
+    assert_eq!(
+        protocol
+            .receive(
+                &json!({"id":revert["id"],"error":{"code":-32603,"message":"boundary reached"}})
+            )
+            .unwrap_err(),
+        ProtocolError::Remote {
+            request: Some(revert["id"].to_string()),
+            operation: "thread/revert".into(),
+            message: "boundary reached".into(),
+            turn_completed: false,
+        }
+    );
+    // An empty history reads the thread instead of reverting.
     let read = protocol
-        .command(&command, &wire_context(), &[])
-        .unwrap()
+        .rollback("empty", 2, &wire_context())
         .outbound
         .remove(0);
     let page = protocol.receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}})).unwrap().outbound.remove(0);
-    assert!(
+    let reread = protocol
+        .receive(&json!({"id":page["id"],"result":{"data":[],"nextCursor":null}}))
+        .unwrap()
+        .outbound
+        .remove(0);
+    assert_eq!(reread["method"], "thread/read");
+    assert_eq!(
         protocol
-            .receive(&json!({"id":page["id"],"result":{"data":[{"id":"kept"}],"nextCursor":null}}))
+            .receive(&json!({"id":reread["id"],"result":{"thread":{"id":"empty"}}}))
             .unwrap()
-            .outbound
-            .is_empty()
+            .completion,
+        Some(Completion::RolledBack {
+            native_thread: "empty".into()
+        })
     );
 }
 
 #[test]
-fn rollback_rejects_repeated_cursors_and_missing_heads_without_reverting_partial_history() {
-    for missing in [false, true] {
-        let mut protocol = CodexProtocol::default();
-        let read = protocol
-            .command(
-                &ProviderCommand::Rollback {
-                    native_thread: "thread".into(),
-                    absolute_head: Some("kept".into()),
-                },
-                &wire_context(),
-                &[],
-            )
-            .unwrap()
-            .outbound
-            .remove(0);
-        let page = protocol
-            .receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated"}}}))
-            .unwrap()
-            .outbound
-            .remove(0);
-        let next = protocol
-            .receive(
-                &json!({"id":page["id"],"result":{"data":[{"id":"newest"}],"nextCursor":"again"}}),
-            )
-            .unwrap()
-            .outbound
-            .remove(0);
-        let error = protocol.receive(&json!({"id":next["id"],"result":{"data":[],"nextCursor":if missing {Value::Null} else {json!("again")}}})).unwrap_err();
-        assert_eq!(
-            error,
-            if missing {
-                ProtocolError::MissingBoundary("kept".into())
-            } else {
-                ProtocolError::Invalid("Thread history pagination repeated a cursor.".into())
-            }
-        );
-    }
+fn rollback_rejects_repeated_cursors_instead_of_reverting_incomplete_history() {
+    // T3 CodexThreadRevert.test.ts "rejects repeated cursors".
+    let mut protocol = CodexProtocol::default();
+    let read = protocol
+        .rollback("thread", 3, &wire_context())
+        .outbound
+        .remove(0);
+    let page = protocol
+        .receive(&json!({"id":read["id"],"result":{"thread":{"historyMode":"paginated"}}}))
+        .unwrap()
+        .outbound
+        .remove(0);
+    let next = protocol
+        .receive(&json!({"id":page["id"],"result":{"data":[{"id":"newest"}],"nextCursor":"again"}}))
+        .unwrap()
+        .outbound
+        .remove(0);
+    assert_eq!(next["params"]["limit"], 2);
+    let error = protocol
+        .receive(&json!({"id":next["id"],"result":{"data":[],"nextCursor":"again"}}))
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ProtocolError::Invalid("Thread history pagination repeated a cursor.".into())
+    );
 }
 
 #[test]
@@ -1628,27 +1629,33 @@ fn native_rollback_and_fork_report_completion() {
             native_thread: "forked".into()
         })
     );
-    let read = codex
-        .command(
-            &ProviderCommand::Rollback {
-                native_thread: "root".into(),
-                absolute_head: Some("t1".into()),
-            },
-            &wire_context(),
-            &[],
-        )
-        .unwrap();
-    let page = codex
-        .receive(&json!({"id":read.outbound[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}}))
-        .unwrap();
-    let reached = codex
-        .receive(
-            &json!({"id":page.outbound[0]["id"],"result":{"data":[{"id":"t1"}],"nextCursor":null}}),
-        )
-        .unwrap();
+    // T3 rollbackThread: no turn to discard sends nothing.
+    let reached = codex.rollback("root", 0, &wire_context());
     assert!(reached.outbound.is_empty());
     assert_eq!(
         reached.completion,
+        Some(Completion::RolledBack {
+            native_thread: "root".into()
+        })
+    );
+    let read = codex.rollback("root", 1, &wire_context());
+    let page = codex
+        .receive(&json!({"id":read.outbound[0]["id"],"result":{"thread":{"historyMode":"paginated","status":{"type":"idle"}}}}))
+        .unwrap();
+    let revert = codex
+        .receive(
+            &json!({"id":page.outbound[0]["id"],"result":{"data":[{"id":"t2"}],"nextCursor":"older"}}),
+        )
+        .unwrap();
+    assert_eq!(
+        revert.outbound[0]["params"],
+        json!({"threadId":"root","beforeTurnId":"t2"})
+    );
+    assert_eq!(
+        codex
+            .receive(&json!({"id":revert.outbound[0]["id"],"result":{"thread":{"id":"root"}}}))
+            .unwrap()
+            .completion,
         Some(Completion::RolledBack {
             native_thread: "root".into()
         })

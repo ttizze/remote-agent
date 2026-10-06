@@ -784,12 +784,13 @@ impl SessionManager {
                         return Err(ExecError::Retry("The provider session closed.".into()));
                     }
                 };
-                let forwarded = command.clone();
+                let turns = turns_after(&state, native_thread, absolute_head.as_deref());
+                let native = native_thread.clone();
                 let completed = self
                     .request_completion(
                         &entry,
                         Request::new(thread, move |p| {
-                            p.codex()?.command(&forwarded, &context, &[])
+                            Ok(p.codex()?.rollback(&native, turns, &context))
                         }),
                     )
                     .await
@@ -1442,6 +1443,45 @@ fn unwrap_failure(result: Result<Ran, Failure>) -> Result<(), ExecError> {
         Ok(_) | Err(Failure::Gone) => Ok(()),
         Err(Failure::Exec(error)) => Err(error),
     }
+}
+
+/// T3 countTerminalTurnsAfterBoundary: the native thread's terminal turns after
+/// the one that ended at `head`. A head the thread's own turns do not hold (a
+/// fork's inherited boundary) or no head discards every turn of the thread.
+fn turns_after(state: &State, native_thread: &str, head: Option<&str>) -> u64 {
+    let turns: Vec<_> = state
+        .attempts
+        .iter()
+        .filter(|attempt| {
+            attempt.native_thread.as_deref() == Some(native_thread)
+                && attempt.native_turn.is_some()
+                && state
+                    .runs
+                    .iter()
+                    .find(|run| run.id == attempt.run)
+                    .is_some_and(|run| run.status != RunStatus::RolledBack)
+        })
+        .collect();
+    let after = head
+        .and_then(|head| {
+            turns
+                .iter()
+                .position(|attempt| attempt.native_head.as_deref() == Some(head))
+        })
+        .map_or(0, |boundary| boundary + 1);
+    turns[after..]
+        .iter()
+        .filter(|attempt| {
+            matches!(
+                attempt.status,
+                AttemptStatus::Completed
+                    | AttemptStatus::Interrupted
+                    | AttemptStatus::Failed
+                    | AttemptStatus::Cancelled
+                    | AttemptStatus::Superseded
+            )
+        })
+        .count() as u64
 }
 
 pub(crate) fn attempt_finished(state: &State, attempt: &RunAttemptId) -> bool {

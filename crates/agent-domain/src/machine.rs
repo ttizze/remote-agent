@@ -2694,12 +2694,16 @@ impl Decision {
                             .map(|thread| (thread, a.native_head.clone()))
                     });
                 if let Some((native_thread, head)) = native {
+                    // A Claude fork's transcript ends at the head, so its first
+                    // query resumes without a head (T3 forkThread).
                     self.fact(FactBody::ForkPrepared {
                         command: id.clone(),
                         target: target.clone(),
                         child_command,
                         instance: run.selection.instance,
-                        head: head.clone(),
+                        head: head
+                            .clone()
+                            .filter(|_| run.selection.driver != Driver::Claude),
                     });
                     self.effect(
                         run.attempt,
